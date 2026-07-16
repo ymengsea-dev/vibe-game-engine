@@ -1,0 +1,13 @@
+[package]
+name = "engine_platform"
+description = "Platform layer: window creation, keyboard/mouse input, monitors, and OS integration via winit."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

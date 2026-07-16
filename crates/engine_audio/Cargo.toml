@@ -1,0 +1,13 @@
+[package]
+name = "engine_audio"
+description = "Audio subsystem via kira: music, sound effects, spatial audio, and mixing."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

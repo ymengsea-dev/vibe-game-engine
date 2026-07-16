@@ -1,0 +1,95 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "game"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Meng Sea <mrmengsea@gmail.com>"]
+repository = ""
+
+# ---------------------------------------------------------------------------
+# Internal crates
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+engine = { path = "crates/engine", version = "0.1.0" }
+engine_core = { path = "crates/engine_core", version = "0.1.0" }
+engine_platform = { path = "crates/engine_platform", version = "0.1.0" }
+engine_renderer = { path = "crates/engine_renderer", version = "0.1.0" }
+engine_ecs = { path = "crates/engine_ecs", version = "0.1.0" }
+engine_scene = { path = "crates/engine_scene", version = "0.1.0" }
+engine_asset = { path = "crates/engine_asset", version = "0.1.0" }
+engine_physics = { path = "crates/engine_physics", version = "0.1.0" }
+engine_animation = { path = "crates/engine_animation", version = "0.1.0" }
+engine_audio = { path = "crates/engine_audio", version = "0.1.0" }
+engine_ui = { path = "crates/engine_ui", version = "0.1.0" }
+engine_editor = { path = "crates/engine_editor", version = "0.1.0" }
+engine_scripting = { path = "crates/engine_scripting", version = "0.1.0" }
+engine_network = { path = "crates/engine_network", version = "0.1.0" }
+engine_ai = { path = "crates/engine_ai", version = "0.1.0" }
+engine_utils = { path = "crates/engine_utils", version = "0.1.0" }
+
+# ---------------------------------------------------------------------------
+# External dependencies (technology stack — see docs/ARCHITECTURE.md).
+# Declared here for single-point version management; each is wired into a
+# crate only when a milestone needs it, and its version is verified against
+# the latest release at that point.
+# ---------------------------------------------------------------------------
+# Platform / rendering
+winit = "0.30"
+wgpu = "25"
+# ECS / math
+bevy_ecs = "0.16"
+glam = "0.30"
+# Physics
+rapier2d = "0.26"
+rapier3d = "0.26"
+# Audio
+kira = "0.10"
+# Editor UI
+egui = "0.31"
+# Serialization
+serde = { version = "1", features = ["derive"] }
+ron = "0.10"
+# Assets
+gltf = "1"
+# Concurrency / async
+rayon = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Diagnostics
+tracing = "0.1"
+tracing-subscriber = "0.3"
+thiserror = "2"
+# Tooling
+notify = "8"
+uuid = { version = "1", features = ["v4"] }
+
+# ---------------------------------------------------------------------------
+# Lints — enforce docs/ENGINEERING.md at compile time.
+# Tests are exempted from unwrap/expect/panic via clippy.toml.
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"
+
+[profile.dev]
+opt-level = 1
+
+# Fast iteration: fully optimize dependencies even in dev builds so wgpu,
+# physics, and asset decoding stay usable while the engine itself compiles
+# quickly.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,28 @@
+[package]
+name = "engine"
+description = "Vibe Game Engine (VGE) facade crate: re-exports every engine subsystem behind one dependency."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_platform.workspace = true
+engine_renderer.workspace = true
+engine_ecs.workspace = true
+engine_scene.workspace = true
+engine_asset.workspace = true
+engine_physics.workspace = true
+engine_animation.workspace = true
+engine_audio.workspace = true
+engine_ui.workspace = true
+engine_editor.workspace = true
+engine_scripting.workspace = true
+engine_network.workspace = true
+engine_ai.workspace = true
+engine_utils.workspace = true
+
+[lints]
+workspace = true
