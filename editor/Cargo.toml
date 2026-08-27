@@ -1,0 +1,15 @@
+[package]
+name = "editor"
+description = "VGE editor shell — egui-based editor UI, built on the engine's own renderer/platform layers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+engine.workspace = true
+
+[lints]
+workspace = true

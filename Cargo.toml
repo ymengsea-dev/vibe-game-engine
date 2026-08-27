@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "game"]
+members = ["crates/*", "game", "editor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -38,25 +38,33 @@ engine_utils = { path = "crates/engine_utils", version = "0.1.0" }
 # ---------------------------------------------------------------------------
 # Platform / rendering
 winit = "0.30"
-wgpu = "25"
+wgpu = "30"
 # ECS / math
-bevy_ecs = "0.16"
-glam = "0.30"
+bevy_ecs = "0.19"
+glam = "0.33"
+# GPU-safe byte casting for uniform/vertex buffer uploads
+bytemuck = { version = "1", features = ["derive"] }
 # Physics
-rapier2d = "0.26"
-rapier3d = "0.26"
+rapier2d = "0.35"
+rapier3d = "0.35"
 # Audio
-kira = "0.10"
+kira = "0.12"
 # Editor UI
-egui = "0.31"
+egui = "0.36"
+egui-winit = "0.36"
+egui-wgpu = "0.36"
 # Serialization
 serde = { version = "1", features = ["derive"] }
-ron = "0.10"
+ron = "0.12"
 # Assets
 gltf = "1"
+image = "0.25"
 # Concurrency / async
 rayon = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# One-shot blocking on wgpu's async init calls (adapter/device request) at
+# startup; tokio is reserved for background tasks (asset loading, network).
+pollster = "1"
 # Diagnostics
 tracing = "0.1"
 tracing-subscriber = "0.3"

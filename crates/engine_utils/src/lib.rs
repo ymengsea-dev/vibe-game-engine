@@ -4,7 +4,9 @@
 //!
 //! ## Status
 //!
-//! Stub crate — implementation begins in **All milestones**.
-//! See `docs/ARCHITECTURE.md` for the module's responsibilities and
-//! `docs/ENGINEERING.md` for the engineering standards every feature
-//! in this crate must satisfy.
+//! Milestone 2 in progress. Implemented so far: [`Transform`], the
+//! engine-wide position/rotation/scale representation.
+
+mod transform;
+
+pub use transform::Transform;

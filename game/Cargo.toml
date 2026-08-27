@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 engine.workspace = true
+bevy_ecs.workspace = true
 
 [lints]
 workspace = true

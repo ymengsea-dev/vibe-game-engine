@@ -8,6 +8,15 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+uuid.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+gltf.workspace = true
+glam.workspace = true
+image.workspace = true
+notify.workspace = true
+engine_renderer.workspace = true
+engine_utils.workspace = true
 
 [lints]
 workspace = true

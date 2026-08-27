@@ -8,6 +8,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+thiserror.workspace = true
+kira.workspace = true
+glam = { workspace = true, features = ["mint"] }
 
 [lints]
 workspace = true

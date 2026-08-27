@@ -4,7 +4,15 @@
 //!
 //! ## Status
 //!
-//! Stub crate — implementation begins in **Milestone 1**.
-//! See `docs/ARCHITECTURE.md` for the module's responsibilities and
-//! `docs/ENGINEERING.md` for the engineering standards every feature
-//! in this crate must satisfy.
+//! Milestone 1 in progress. Implemented so far: [`App`] lifecycle skeleton
+//! (config, error types, run/shutdown). Timing, logging, and global
+//! services land in later Milestone 1 iterations.
+
+mod app;
+mod config;
+mod error;
+pub mod logging;
+
+pub use app::{App, AppState};
+pub use config::EngineConfig;
+pub use error::EngineError;

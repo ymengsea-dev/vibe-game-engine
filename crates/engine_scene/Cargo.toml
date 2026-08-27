@@ -8,6 +8,15 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+serde.workspace = true
+ron.workspace = true
+thiserror.workspace = true
+glam.workspace = true
+uuid.workspace = true
+bevy_ecs.workspace = true
+engine_utils.workspace = true
+engine_renderer.workspace = true
+engine_ecs.workspace = true
 
 [lints]
 workspace = true

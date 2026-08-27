@@ -1,6 +1,6 @@
 [package]
 name = "engine_physics"
-description = "Physics simulation via rapier: collision detection, rigid bodies, character controller, and ray casting."
+description = "Physics simulation via rapier: collision detection, rigid bodies, character controller, ray casting, and debug rendering."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+thiserror.workspace = true
+glam.workspace = true
+rapier3d = { workspace = true, features = ["debug-render"] }
 
 [lints]
 workspace = true

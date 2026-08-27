@@ -8,6 +8,15 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+image.workspace = true
+engine_platform.workspace = true
+engine_utils.workspace = true
 
 [lints]
 workspace = true

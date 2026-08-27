@@ -10,8 +10,7 @@ exists to improve productivity, not to replace code.
 ## Status
 
 **Pre-milestone scaffold.** The workspace structure is in place; engine
-implementation begins with Milestone 1 (window + GPU clear color). See the
-[development roadmap](docs/ARCHITECTURE.md#development-roadmap).
+implementation begins with Milestone 1 (window + GPU clear color).
 
 ## Architecture
 
@@ -38,8 +37,6 @@ Engine Runtime
 | Audio | [kira](https://crates.io/crates/kira) |
 | Editor UI | [egui](https://crates.io/crates/egui) |
 | Assets | glTF 2.0, serde + RON |
-
-Full details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 ## Workspace Layout
 
@@ -79,11 +76,10 @@ cargo fmt --check
 
 ## Engineering Standards
 
-Every feature follows the workflow and quality bar in
-[docs/ENGINEERING.md](docs/ENGINEERING.md): no `unwrap`/`expect`/`panic!` in
-production code (enforced by workspace lints), full error handling with
-`Result` + `thiserror`, tests for every feature, and clippy/rustfmt clean
-builds.
+No `unwrap`/`expect`/`panic!` in production code (enforced by workspace
+lints), full error handling with `Result` + `thiserror`, tests for every
+feature, and clippy/rustfmt clean builds. `docs/` is reserved for generated
+API documentation.
 
 ## License
 
