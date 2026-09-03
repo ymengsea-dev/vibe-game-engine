@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::error::AssetError;
-use crate::id::AssetId;
+use engine_utils::AssetId;
 
 #[derive(Debug, Default)]
 struct Entry {

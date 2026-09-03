@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>RustyEngine Studio — Code</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #1e1e1e;
+      font-family: -apple-system, "Segoe UI", system-ui, sans-serif; color: #ccc; }
+
+    #tabs { position: absolute; top: 0; left: 0; right: 0; height: 30px;
+      display: flex; align-items: stretch; background: #252526;
+      border-bottom: 1px solid #333; font-size: 12px; overflow-x: auto; }
+    .tab { display: flex; align-items: center; gap: 6px; padding: 0 8px 0 12px;
+      border-right: 1px solid #333; white-space: nowrap; cursor: pointer; color: #bbb; }
+    .tab.active { background: #1e1e1e; color: #fff; }
+    .tab.drop-before { box-shadow: inset 2px 0 0 #4a9eff; }
+    .tab .dot { width: 7px; height: 7px; border-radius: 50%; background: #e6b45a; visibility: hidden; }
+    .tab.dirty .dot { visibility: visible; }
+    .tab .close { width: 16px; height: 16px; line-height: 16px; text-align: center;
+      border-radius: 3px; color: #888; visibility: hidden; font-size: 14px; }
+    .tab:hover .close, .tab.active .close { visibility: visible; }
+    .tab.dirty .close { visibility: visible; color: #e6b45a; }
+    .tab .close:hover { background: #444; color: #fff; }
+
+    #body { position: absolute; top: 30px; left: 0; right: 0; bottom: 0; display: flex; }
+
+    #files { width: 190px; flex: 0 0 190px; background: #202020;
+      border-right: 1px solid #333; overflow: auto; font-size: 12px;
+      padding: 6px 0; user-select: none; }
+    #files .title { padding: 2px 10px 6px; color: #888; text-transform: uppercase;
+      letter-spacing: .04em; font-size: 10px; }
+    #files .row { padding: 2px 10px; white-space: nowrap; cursor: default; }
+    #files .row.dir { color: #9aa; }
+    #files .row.file { color: #cfcfcf; cursor: pointer; }
+    #files .row.file:hover { background: #2a2d2e; }
+    #files .row.file.active { background: #37373d; color: #fff; }
+
+    #editor { flex: 1 1 auto; min-width: 0; }
+  </style>
+</head>
+<body>
+  <div id="tabs"></div>
+  <div id="body">
+    <div id="files"><div class="title">Files</div></div>
+    <div id="editor"></div>
+  </div>
+
+  <script src="monaco://localhost/vs/loader.js"></script>
+  <script>
+    // No web workers — single-threaded is fine for highlighting + editing.
+    self.MonacoEnvironment = {
+      getWorker: function () {
+        return {
+          postMessage: function () {}, addEventListener: function () {},
+          removeEventListener: function () {}, terminate: function () {}
+        };
+      }
+    };
+
+    function post(message) {
+      if (window.ipc && window.ipc.postMessage) {
+        window.ipc.postMessage(JSON.stringify(message));
+      }
+    }
+    window.addEventListener('error', function (e) {
+      console.error('code editor error:', e.message, e.filename);
+    });
+
+    require.config({ paths: { vs: 'monaco://localhost/vs' } });
+    require(['vs/editor/editor.main'], function () {
+      var editor = monaco.editor.create(document.getElementById('editor'), {
+        value: [
+          '// RustyEngine Studio',
+          '//',
+          '// Pick a file from the Files list on the left.',
+          '// Ctrl/Cmd+S saves the active file.',
+          ''
+        ].join('\n'),
+        language: 'rust', theme: 'vs-dark',
+        automaticLayout: true, fontSize: 13, minimap: { enabled: true },
+        readOnly: true, scrollBeyondLastLine: false
+      });
+      var showingWelcome = true;
+      var welcomeModel = editor.getModel();
+
+      var models = {};     // absolute path -> { model, dirty }
+      var tabOrder = [];   // absolute paths, left-to-right tab order
+      var current = null;  // absolute path of the active model
+      var dragPath = null; // tab being dragged, during a reorder
+      var tree = { label: 'src', root: '', files: [] };
+
+      // Absolute path for a tree-relative entry, and the reverse.
+      function absOf(rel) { return tree.root ? (tree.root + '/' + rel) : rel; }
+      function relOf(abs) {
+        if (tree.root && abs && abs.indexOf(tree.root + '/') === 0) {
+          return abs.slice(tree.root.length + 1);
+        }
+        return abs;
+      }
+
+      function renderTabs() {
+        var bar = document.getElementById('tabs');
+        bar.textContent = '';
+        tabOrder.forEach(function (path) {
+          var entry = models[path];
+          if (!entry) return;
+          var tab = document.createElement('div');
+          tab.className = 'tab' + (path === current ? ' active' : '') + (entry.dirty ? ' dirty' : '');
+          tab.draggable = true;
+
+          var dot = document.createElement('span'); dot.className = 'dot';
+          var label = document.createElement('span');
+          label.textContent = path.split('/').pop();
+          var close = document.createElement('span');
+          close.className = 'close'; close.textContent = '×';
+          close.title = 'Close';
+          tab.appendChild(dot); tab.appendChild(label); tab.appendChild(close);
+
+          tab.onclick = function () { activate(path); };
+          close.onclick = function (e) { e.stopPropagation(); closeTab(path); };
+          // Middle-click anywhere on the tab closes it.
+          tab.onauxclick = function (e) { if (e.button === 1) { e.preventDefault(); closeTab(path); } };
+
+          tab.ondragstart = function (e) {
+            dragPath = path;
+            e.dataTransfer.effectAllowed = 'move';
+          };
+          tab.ondragover = function (e) {
+            if (dragPath && dragPath !== path) { e.preventDefault(); tab.classList.add('drop-before'); }
+          };
+          tab.ondragleave = function () { tab.classList.remove('drop-before'); };
+          tab.ondrop = function (e) {
+            e.preventDefault();
+            tab.classList.remove('drop-before');
+            reorderTab(dragPath, path);
+            dragPath = null;
+          };
+          bar.appendChild(tab);
+        });
+      }
+
+      // Move `moved` to just before `target` in the tab strip.
+      function reorderTab(moved, target) {
+        if (!moved || moved === target) return;
+        var from = tabOrder.indexOf(moved);
+        if (from === -1) return;
+        tabOrder.splice(from, 1);
+        var to = tabOrder.indexOf(target);
+        tabOrder.splice(to === -1 ? tabOrder.length : to, 0, moved);
+        renderTabs();
+      }
+
+      // Close one tab: dispose its model, drop it from the strip, pick a
+      // neighbour to activate (or fall back to the welcome buffer), and
+      // tell the host so it can untrack the document.
+      function closeTab(path) {
+        var entry = models[path];
+        if (!entry) return;
+        var index = tabOrder.indexOf(path);
+        entry.model.dispose();
+        delete models[path];
+        if (index !== -1) tabOrder.splice(index, 1);
+        post({ type: 'closed', path: path });
+
+        if (current === path) {
+          current = null;
+          var next = tabOrder[index] || tabOrder[index - 1] || null;
+          if (next) {
+            activate(next);
+          } else {
+            editor.setModel(welcomeModel);
+            editor.updateOptions({ readOnly: true });
+            showingWelcome = true;
+          }
+        }
+        renderTabs();
+        renderFiles();
+      }
+
+      // Render the flat relative-path list as an indented folder tree.
+      function renderFiles() {
+        var box = document.getElementById('files');
+        box.textContent = '';
+        var title = document.createElement('div');
+        title.className = 'title';
+        title.textContent = tree.label || 'Files';
+        box.appendChild(title);
+
+        var seenDirs = {};
+        tree.files.slice().sort().forEach(function (rel) {
+          var parts = rel.split('/');
+          for (var i = 0; i < parts.length - 1; i++) {
+            var dirPath = parts.slice(0, i + 1).join('/');
+            if (!seenDirs[dirPath]) {
+              seenDirs[dirPath] = true;
+              var d = document.createElement('div');
+              d.className = 'row dir';
+              d.style.paddingLeft = (10 + i * 12) + 'px';
+              d.textContent = parts[i] + '/';
+              box.appendChild(d);
+            }
+          }
+          var activeRel = current ? relOf(current) : null;
+          var f = document.createElement('div');
+          f.className = 'row file' + (rel === activeRel ? ' active' : '');
+          f.style.paddingLeft = (10 + (parts.length - 1) * 12) + 'px';
+          f.textContent = parts[parts.length - 1];
+          f.onclick = function () { open(rel); };
+          box.appendChild(f);
+        });
+      }
+
+      // Open a tree-relative file: focus its tab if already loaded, else
+      // ask the host to read it and call back through `studio.openFile`.
+      function open(rel) {
+        var abs = absOf(rel);
+        if (models[abs]) { activate(abs); }
+        else { post({ type: 'open', path: rel }); }
+      }
+
+      function activate(path) {
+        current = path;
+        if (showingWelcome) {
+          editor.updateOptions({ readOnly: false });
+          showingWelcome = false;
+        }
+        editor.setModel(models[path].model);
+        renderTabs();
+        renderFiles();
+      }
+
+      // Force a re-measure. The host calls this on every panel-bounds
+      // change because Monaco's own `automaticLayout` observer is flaky
+      // inside a WKWebView that started hidden/zero-sized.
+      function relayout() {
+        var host = document.getElementById('editor');
+        var w = host.clientWidth || (window.innerWidth - 190);
+        var h = host.clientHeight || (window.innerHeight - 30);
+        editor.layout({ width: w, height: h });
+      }
+      setTimeout(relayout, 0);
+      setTimeout(relayout, 300);
+      window.addEventListener('resize', relayout);
+
+      window.studio = {
+        relayout: relayout,
+        setFiles: function (payload) {
+          tree = { label: (payload && payload.label) || 'src',
+                   root: (payload && payload.root) || '',
+                   files: (payload && payload.files) || [] };
+          renderFiles();
+          relayout();
+        },
+        openFile: function (path, language, contents) {
+          if (!models[path]) {
+            var model = monaco.editor.createModel(contents, language || 'plaintext', monaco.Uri.file(path));
+            models[path] = { model: model, dirty: false };
+            tabOrder.push(path);
+            model.onDidChangeContent(function () {
+              if (!models[path].dirty) { models[path].dirty = true; renderTabs(); }
+              post({ type: 'edited', path: path, text: model.getValue() });
+            });
+          } else {
+            models[path].model.setValue(contents);
+            models[path].dirty = false;
+          }
+          activate(path);
+        },
+        markSaved: function (path) {
+          if (models[path]) { models[path].dirty = false; renderTabs(); renderFiles(); }
+        },
+        // Save the active file — same as the in-editor Ctrl/Cmd+S, but
+        // callable by the host when egui (not Monaco) holds keyboard focus.
+        saveActive: function () {
+          if (current && models[current]) {
+            post({ type: 'save', path: current, contents: models[current].model.getValue() });
+          }
+        },
+        setDiagnostics: function (path, list) {
+          // `list` items are already Monaco `IMarkerData` (1-based
+          // positions + numeric severity), built by the LSP bridge.
+          if (!models[path]) return;
+          monaco.editor.setModelMarkers(models[path].model, 'rust-analyzer', list || []);
+        },
+        // Answer a pending language-provider request (see lspRequest).
+        // `payload` is neutral JSON from the host; the provider closures
+        // below turn it into Monaco shapes.
+        resolveLsp: function (nonce, payload) {
+          var entry = lspPending[nonce];
+          if (!entry) return;
+          clearTimeout(entry.timer);
+          delete lspPending[nonce];
+          entry.resolve(payload);
+        },
+        // Move the caret to a location (1-based), for go-to-definition
+        // into a file the host just opened.
+        reveal: function (path, line, col) {
+          if (!models[path]) return;
+          activate(path);
+          editor.setPosition({ lineNumber: line, column: col });
+          editor.revealPositionInCenter({ lineNumber: line, column: col });
+          editor.focus();
+        }
+      };
+
+      // --- Language features via the host / rust-analyzer -----------------
+      // Monaco providers can't talk to the LSP directly; each one posts an
+      // `lsp` message with a nonce and returns a Promise the host settles
+      // through `studio.resolveLsp`. A timeout resolves to null so the UI
+      // never hangs on a slow or dead server.
+      var LSP_TIMEOUT_MS = 3000;
+      var lspPending = {};
+      var lspNonce = 1;
+
+      function pathOf(model) {
+        for (var p in models) { if (models[p].model === model) return p; }
+        return null;
+      }
+
+      function lspRequest(kind, model, position, newName) {
+        var abs = pathOf(model);
+        if (!abs) return Promise.resolve(null);
+        var nonce = lspNonce++;
+        return new Promise(function (resolve) {
+          var timer = setTimeout(function () {
+            delete lspPending[nonce];
+            resolve(null);
+          }, LSP_TIMEOUT_MS);
+          lspPending[nonce] = { resolve: resolve, timer: timer };
+          var msg = { type: 'lsp', nonce: nonce, kind: kind, path: relOf(abs),
+                      line: position.lineNumber - 1, col: position.column - 1 };
+          if (newName != null) msg.new_name = newName;
+          post(msg);
+        });
+      }
+
+      function completionKind(lspKind) {
+        var K = monaco.languages.CompletionItemKind;
+        var map = {
+          1: K.Text, 2: K.Method, 3: K.Function, 4: K.Constructor, 5: K.Field,
+          6: K.Variable, 7: K.Class, 8: K.Interface, 9: K.Module, 10: K.Property,
+          11: K.Unit, 12: K.Value, 13: K.Enum, 14: K.Keyword, 15: K.Snippet,
+          16: K.Color, 17: K.File, 18: K.Reference, 19: K.Folder, 20: K.EnumMember,
+          21: K.Constant, 22: K.Struct, 23: K.Event, 24: K.Operator, 25: K.TypeParameter
+        };
+        return map[lspKind] != null ? map[lspKind] : K.Text;
+      }
+
+      monaco.languages.registerCompletionItemProvider('rust', {
+        triggerCharacters: ['.', ':'],
+        provideCompletionItems: function (model, position) {
+          return lspRequest('completion', model, position).then(function (payload) {
+            if (!payload || !payload.items) return { suggestions: [] };
+            var word = model.getWordUntilPosition(position);
+            var range = {
+              startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
+              startColumn: word.startColumn, endColumn: word.endColumn
+            };
+            var snippetRule = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+            return {
+              suggestions: payload.items.map(function (it) {
+                return {
+                  label: it.label,
+                  kind: completionKind(it.kind),
+                  detail: it.detail || undefined,
+                  documentation: it.documentation ? { value: it.documentation } : undefined,
+                  insertText: it.insertText || it.label,
+                  insertTextRules: it.isSnippet ? snippetRule : undefined,
+                  sortText: it.sortText || undefined,
+                  range: range
+                };
+              })
+            };
+          });
+        }
+      });
+
+      monaco.languages.registerHoverProvider('rust', {
+        provideHover: function (model, position) {
+          return lspRequest('hover', model, position).then(function (payload) {
+            if (!payload || !payload.markdown) return null;
+            var res = { contents: [{ value: payload.markdown }] };
+            var r = payload.range;
+            if (r) {
+              res.range = new monaco.Range(
+                r.startLineNumber, r.startColumn, r.endLineNumber, r.endColumn);
+            }
+            return res;
+          });
+        }
+      });
+
+      monaco.languages.registerDefinitionProvider('rust', {
+        provideDefinition: function (model, position) {
+          return lspRequest('definition', model, position).then(function (payload) {
+            if (!payload || !payload.targets || !payload.targets.length) return null;
+            return payload.targets.map(function (t) {
+              // The host opens the target file before resolving, so its
+              // model normally exists here.
+              var uri = models[t.path] ? models[t.path].model.uri : monaco.Uri.file(t.path);
+              return {
+                uri: uri,
+                range: new monaco.Range(
+                  t.startLineNumber, t.startColumn, t.endLineNumber, t.endColumn)
+              };
+            });
+          });
+        }
+      });
+
+      monaco.languages.registerReferenceProvider('rust', {
+        provideReferences: function (model, position, context) {
+          return lspRequest('references', model, position).then(function (payload) {
+            if (!payload || !payload.locations || !payload.locations.length) return [];
+            // The host pre-opens referenced files (capped) so the peek
+            // view can render them.
+            return payload.locations.map(function (l) {
+              var uri = models[l.path] ? models[l.path].model.uri : monaco.Uri.file(l.path);
+              return {
+                uri: uri,
+                range: new monaco.Range(
+                  l.startLineNumber, l.startColumn, l.endLineNumber, l.endColumn)
+              };
+            });
+          });
+        }
+      });
+
+      monaco.languages.registerSignatureHelpProvider('rust', {
+        signatureHelpTriggerCharacters: ['(', ','],
+        signatureHelpRetriggerCharacters: [')'],
+        provideSignatureHelp: function (model, position) {
+          return lspRequest('signatureHelp', model, position).then(function (payload) {
+            if (!payload || !payload.signatures || !payload.signatures.length) return null;
+            return {
+              value: {
+                signatures: payload.signatures.map(function (s) {
+                  return {
+                    label: s.label,
+                    documentation: s.documentation ? { value: s.documentation } : undefined,
+                    parameters: (s.parameters || []).map(function (p) {
+                      return {
+                        label: p.label,
+                        documentation: p.documentation ? { value: p.documentation } : undefined
+                      };
+                    })
+                  };
+                }),
+                activeSignature: payload.activeSignature || 0,
+                activeParameter: payload.activeParameter == null ? 0 : payload.activeParameter
+              },
+              dispose: function () {}
+            };
+          });
+        }
+      });
+
+      monaco.languages.registerRenameProvider('rust', {
+        provideRenameEdits: function (model, position, newName) {
+          return lspRequest('rename', model, position, newName).then(function (payload) {
+            // The host has already written every unopened file's edits to
+            // disk; `payload.fileEdits` carries only the files Monaco has
+            // an open model for, which Monaco applies in-buffer.
+            var edits = [];
+            var files = (payload && payload.fileEdits) || [];
+            files.forEach(function (f) {
+              if (!models[f.path]) return;
+              var uri = models[f.path].model.uri;
+              (f.edits || []).forEach(function (e) {
+                edits.push({
+                  resource: uri,
+                  textEdit: {
+                    range: new monaco.Range(
+                      e.startLineNumber, e.startColumn, e.endLineNumber, e.endColumn),
+                    text: e.text
+                  }
+                });
+              });
+            });
+            return { edits: edits };
+          });
+        }
+      });
+
+      editor.onDidChangeCursorPosition(function (e) {
+        if (current) {
+          post({ type: 'cursor', path: current, line: e.position.lineNumber, column: e.position.column });
+        }
+      });
+
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, function () {
+        if (current) {
+          post({ type: 'save', path: current, contents: models[current].model.getValue() });
+        }
+      });
+
+      // Tell the host the bridge is live so it can push the file list
+      // and open a starting file.
+      post({ type: 'ready' });
+    });
+  </script>
+</body>
+</html>

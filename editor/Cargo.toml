@@ -10,6 +10,13 @@ publish = false
 
 [dependencies]
 engine.workspace = true
+editor_code.workspace = true
+editor_lsp.workspace = true
+serde_json.workspace = true
+# Turn on the integrated terminal for the editor build only. `engine`
+# pulls `engine_editor` without this feature, so runtime builds
+# (game -> engine) stay free of the PTY stack (NFR-004).
+engine_editor = { workspace = true, features = ["terminal"] }
 
 [lints]
 workspace = true

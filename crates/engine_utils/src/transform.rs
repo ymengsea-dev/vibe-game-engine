@@ -90,6 +90,30 @@ impl Transform {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
     }
 
+    /// Decomposes an affine matrix back into a TRS transform.
+    ///
+    /// Exact for any matrix produced by [`Transform::to_matrix`]. For a
+    /// matrix carrying shear (e.g. the inverse of a transform with
+    /// non-uniform scale, or a product of such), the scale/rotation are
+    /// glam's best-fit decomposition — lossy, the same trade-off the
+    /// Euler-angle rotation editor makes.
+    pub fn from_matrix(matrix: Mat4) -> Self {
+        let (scale, rotation, translation) = matrix.to_scale_rotation_translation();
+        Self {
+            translation,
+            rotation,
+            scale,
+        }
+    }
+
+    /// The transform that undoes `self`: `self.inverse().mul_transform(&self)`
+    /// is the identity (up to floating-point error, and up to the
+    /// decomposition caveat on [`Transform::from_matrix`] for
+    /// non-uniform scale).
+    pub fn inverse(&self) -> Self {
+        Self::from_matrix(self.to_matrix().inverse())
+    }
+
     /// The direction this transform faces: rotation applied to `-Z`.
     pub fn forward(&self) -> Vec3 {
         self.rotation * Vec3::NEG_Z
@@ -255,5 +279,38 @@ mod tests {
         let parent = Transform::from_scale(Vec3::splat(2.0));
         let child = Transform::from_scale(Vec3::splat(3.0));
         assert_eq!(parent.mul_transform(&child).scale, Vec3::splat(6.0));
+    }
+
+    fn approx_eq(a: &Transform, b: &Transform) -> bool {
+        (a.translation - b.translation).length() < 1e-4
+            && a.rotation.dot(b.rotation).abs() > 1.0 - 1e-4
+            && (a.scale - b.scale).length() < 1e-4
+    }
+
+    #[test]
+    fn from_matrix_then_to_matrix_round_trips_a_trs() {
+        let t = Transform {
+            translation: Vec3::new(1.0, -2.0, 3.5),
+            rotation: Quat::from_rotation_y(0.6) * Quat::from_rotation_x(-0.3),
+            scale: Vec3::new(2.0, 2.0, 2.0),
+        };
+        assert!(approx_eq(&Transform::from_matrix(t.to_matrix()), &t));
+    }
+
+    #[test]
+    fn inverse_composes_to_identity() {
+        let t = Transform {
+            translation: Vec3::new(4.0, 0.0, -1.0),
+            rotation: Quat::from_rotation_z(1.1),
+            scale: Vec3::splat(3.0),
+        };
+        assert!(approx_eq(
+            &t.inverse().mul_transform(&t),
+            &Transform::IDENTITY
+        ));
+        assert!(approx_eq(
+            &t.mul_transform(&t.inverse()),
+            &Transform::IDENTITY
+        ));
     }
 }

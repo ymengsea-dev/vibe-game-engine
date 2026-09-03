@@ -1,0 +1,19 @@
+[package]
+name = "engine_project"
+description = "Project format: the on-disk layout, versioned manifest, and create/open API for a RustyEngine Studio project."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+ron.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+engine_scene.workspace = true
+engine_asset.workspace = true
+
+[lints]
+workspace = true

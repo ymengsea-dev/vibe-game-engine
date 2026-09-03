@@ -1,0 +1,19 @@
+[package]
+name = "engine_editor_derive"
+description = "Derive macros for the VGE editor: #[derive(Inspectable)] generates an egui property editor for a struct's fields."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
+
+[lints]
+workspace = true

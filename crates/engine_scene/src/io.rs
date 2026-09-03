@@ -5,6 +5,35 @@ use std::path::Path;
 use crate::error::SceneError;
 use crate::format::Scene;
 
+/// Writes `contents` to `path` atomically: write a sibling temp file,
+/// then rename it over `path`. A crash mid-write leaves the previous
+/// file intact rather than a half-written one. The parent directory is
+/// created if missing.
+///
+/// # Errors
+///
+/// Any underlying [`std::io`] failure (create dir, write temp, rename).
+pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "scene".to_string());
+    let tmp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, contents)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(err)
+        }
+    }
+}
+
 impl Scene {
     /// Validates every entity in this scene, and the parent/child
     /// hierarchy formed by their [`crate::SceneEntity::parent`] indices
@@ -96,7 +125,7 @@ impl Scene {
     pub fn save_to_file(&self, path: &Path) -> Result<(), SceneError> {
         self.validate()?;
         let text = self.to_ron_string()?;
-        std::fs::write(path, text).map_err(|err| SceneError::Io(err.to_string()))
+        write_atomic(path, text.as_bytes()).map_err(|err| SceneError::Io(err.to_string()))
     }
 
     /// Reads, parses, and validates a scene from `path`.

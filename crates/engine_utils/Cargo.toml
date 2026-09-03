@@ -9,6 +9,9 @@ repository.workspace = true
 
 [dependencies]
 glam.workspace = true
+uuid.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

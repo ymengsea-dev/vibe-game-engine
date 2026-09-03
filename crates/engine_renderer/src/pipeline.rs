@@ -6,7 +6,6 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::CameraUniform;
 use crate::gpu::GpuContext;
-use crate::hdr::TonemapUniform;
 use crate::light::LightsUniform;
 use crate::material::MaterialUniform;
 use crate::mesh::{Mesh, Vertex};
@@ -15,16 +14,20 @@ use crate::shadow::{SHADOW_MAP_SIZE, ShadowUniform};
 use crate::skybox::SkyboxUniform;
 use crate::texture::Texture;
 
-const SHADER_SOURCE: &str = include_str!("shaders/pbr.wgsl");
+/// Shared PBR bindings, lighting, and fragment stage. One vertex-stage
+/// file ([`PBR_VS_SOURCE`] here, or the skinned one in [`crate::skinning`])
+/// is concatenated onto it at pipeline creation — WGSL has no `#include`,
+/// and duplicating ~200 lines of BRDF per variant is worse.
+pub(crate) const PBR_COMMON_SOURCE: &str = include_str!("shaders/pbr_common.wgsl");
+const PBR_VS_SOURCE: &str = include_str!("shaders/pbr_vs.wgsl");
 const SHADOW_SHADER_SOURCE: &str = include_str!("shaders/shadow.wgsl");
 const SKYBOX_SHADER_SOURCE: &str = include_str!("shaders/skybox.wgsl");
-const TONEMAP_SHADER_SOURCE: &str = include_str!("shaders/tonemap.wgsl");
 const DEBUG_LINE_SHADER_SOURCE: &str = include_str!("shaders/debug_line.wgsl");
 const SHADOW_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// The main color pass's off-screen render target format — 16-bit float
 /// per channel, enough headroom for lighting math above `1.0` without the
 /// `float32-filterable` device feature `Rgba32Float` sampling would need.
-const HDR_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+pub(crate) const HDR_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// A compiled render pipeline plus the bind group layouts its shader
 /// expects the camera uniform (`@group(0)`), material (`@group(1)`:
@@ -40,6 +43,26 @@ pub struct Pipeline {
     material_bind_group_layout: wgpu::BindGroupLayout,
     model_bind_group_layout: wgpu::BindGroupLayout,
     lights_bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl Pipeline {
+    /// The camera (`@group(0)`) bind group layout — reused unchanged by
+    /// [`crate::SkinnedPipeline`].
+    pub(crate) fn camera_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.camera_bind_group_layout
+    }
+
+    /// The material (`@group(1)`) bind group layout — reused unchanged by
+    /// [`crate::SkinnedPipeline`], so one [`MaterialBinding`] serves both.
+    pub(crate) fn material_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.material_bind_group_layout
+    }
+
+    /// The lights (`@group(3)`) bind group layout — reused unchanged by
+    /// [`crate::SkinnedPipeline`].
+    pub(crate) fn lights_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.lights_bind_group_layout
+    }
 }
 
 /// A camera's uniform buffer plus the bind group that exposes it to a
@@ -136,35 +159,31 @@ pub struct SkyboxBinding {
 
 /// The main color pass's off-screen HDR render target: a floating-point
 /// texture the scene renders into instead of the LDR swapchain directly,
-/// so radiance above `1.0` survives to the tonemap pass instead of
-/// clipping on write.
+/// so radiance above `1.0` survives to the post-processing stack instead
+/// of clipping on write.
 ///
 /// Sized to match the window — [`GpuContext::create_hdr_target`] must be
-/// called again (and its [`TonemapBinding`] rebuilt, since a bind group
-/// can't be repointed at a new texture view in place) whenever the window
-/// resizes.
+/// called again (and the [`crate::PostProcessStack`] rebuilt, since a bind
+/// group can't be repointed at a new texture view in place) whenever the
+/// window resizes.
+///
+/// When [`GpuContext::msaa_sample_count`] is above `1`, `msaa_view` is a
+/// multisampled color texture the scene pass renders into and resolves
+/// down into `view` (single-sample, the one the post-processing stack
+/// samples). With no MSAA, `msaa_view` is `None` and the scene pass
+/// renders straight into `view`.
 pub struct HdrTarget {
     view: wgpu::TextureView,
-    sampler: wgpu::Sampler,
+    msaa_view: Option<wgpu::TextureView>,
 }
 
-/// A pipeline that reads a [`HdrTarget`] and tonemaps it into the
-/// swapchain's displayable range as a full-screen triangle, no
-/// vertex/index buffer needed (same technique as [`SkyboxPipeline`]).
-pub struct TonemapPipeline {
-    render_pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-}
-
-/// A [`HdrTarget`] (texture view + sampler) and [`TonemapUniform`] buffer,
-/// bundled into the bind group [`TonemapPipeline`]'s shader expects at
-/// `@group(0)`.
-pub struct TonemapBinding {
-    /// The GPU buffer backing the exposure uniform. Kept around so
-    /// callers can update it (e.g. to change exposure) via
-    /// [`GpuContext::write_uniform_buffer`].
-    pub buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+impl HdrTarget {
+    /// The single-sample, already-resolved color view — what the
+    /// post-processing stack samples. (The multisampled `msaa_view`, when
+    /// present, is render-only and never sampled directly.)
+    pub(crate) fn color_view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
 }
 
 /// One point of a physics debug-visualization line segment: world-space
@@ -220,14 +239,28 @@ pub struct Drawable<'a> {
 }
 
 impl GpuContext {
-    /// Compiles `pbr.wgsl` into a [`Pipeline`] targeting this context's
-    /// surface format.
+    /// The multisample state for pipelines that draw into the main color
+    /// pass's [`HdrTarget`] — its `count` is [`GpuContext::msaa_sample_count`].
+    /// The shadow (depth-only) and tonemap (into the single-sample
+    /// swapchain) pipelines keep the default 1-sample state instead.
+    pub(crate) fn scene_multisample_state(&self) -> wgpu::MultisampleState {
+        wgpu::MultisampleState {
+            count: self.msaa_sample_count(),
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        }
+    }
+
+    /// Compiles the PBR shader (`pbr_common.wgsl` + `pbr_vs.wgsl`) into a
+    /// [`Pipeline`] targeting this context's surface format.
     pub fn create_pbr_pipeline(&self, label: &str) -> Pipeline {
         let device = self.device();
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&format!("{label} shader")),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{PBR_COMMON_SOURCE}\n{PBR_VS_SOURCE}").into(),
+            ),
         });
 
         let camera_bind_group_layout =
@@ -380,7 +413,7 @@ impl GpuContext {
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: self.scene_multisample_state(),
             multiview_mask: None,
             cache: None,
         });
@@ -688,7 +721,7 @@ impl GpuContext {
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: self.scene_multisample_state(),
             multiview_mask: None,
             cache: None,
         });
@@ -721,16 +754,24 @@ impl GpuContext {
     /// Creates a [`HdrTarget`] sized `width` by `height` (the window's
     /// current size) — a floating-point offscreen texture the main color
     /// pass renders into.
+    ///
+    /// If [`GpuContext::msaa_sample_count`] is above `1`, this also
+    /// allocates a multisampled companion texture; the scene pass renders
+    /// into it and resolves into the single-sample one the tonemap pass
+    /// samples.
     pub fn create_hdr_target(&self, width: u32, height: u32) -> HdrTarget {
         let device = self.device();
 
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("hdr target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        // Single-sample: the resolved image the tonemap pass reads.
+        let resolve_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hdr target (resolve)"),
+            size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -738,131 +779,29 @@ impl GpuContext {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("hdr target sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
+        let view = resolve_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let msaa_view = (self.msaa_sample_count() > 1).then(|| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("hdr target (msaa)"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: self.msaa_sample_count(),
+                    dimension: wgpu::TextureDimension::D2,
+                    format: HDR_TEXTURE_FORMAT,
+                    // No TEXTURE_BINDING: a multisampled texture is never
+                    // sampled directly, only resolved.
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
         });
 
-        HdrTarget { view, sampler }
-    }
-
-    /// Compiles `tonemap.wgsl` into a [`TonemapPipeline`] targeting this
-    /// context's surface format.
-    pub fn create_tonemap_pipeline(&self, label: &str) -> TonemapPipeline {
-        let device = self.device();
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(&format!("{label} shader")),
-            source: wgpu::ShaderSource::Wgsl(TONEMAP_SHADER_SOURCE.into()),
-        });
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("tonemap bind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(&format!("{label} layout")),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(self.config().format.into())],
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        TonemapPipeline {
-            render_pipeline,
-            bind_group_layout,
-        }
-    }
-
-    /// Creates a [`TonemapBinding`]: an exposure uniform buffer plus the
-    /// bind group exposing it and `hdr_target`'s view/sampler to
-    /// `pipeline`'s shader.
-    ///
-    /// Must be recreated (along with `hdr_target` itself) whenever the
-    /// window resizes — a bind group can't be repointed at a new texture
-    /// view in place.
-    pub fn create_tonemap_binding(
-        &self,
-        pipeline: &TonemapPipeline,
-        hdr_target: &HdrTarget,
-        exposure: f32,
-    ) -> TonemapBinding {
-        let buffer = self.create_uniform_buffer("tonemap uniform", &TonemapUniform::from(exposure));
-        let bind_group = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("tonemap bind group"),
-            layout: &pipeline.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&hdr_target.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&hdr_target.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer.as_entire_binding(),
-                },
-            ],
-        });
-        TonemapBinding { buffer, bind_group }
+        // The post-processing stack that samples this target owns its own
+        // sampler ([`GpuContext::create_post_process_stack`]), so none is
+        // stored here.
+        HdrTarget { view, msaa_view }
     }
 
     /// Compiles `debug_line.wgsl` into a [`DebugLinePipeline`], reusing
@@ -907,7 +846,7 @@ impl GpuContext {
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: self.scene_multisample_state(),
             multiview_mask: None,
             cache: None,
         });
@@ -917,17 +856,23 @@ impl GpuContext {
 
     /// Renders one frame through a [`crate::RenderGraph`] of three
     /// declared passes — `"shadow"` (writes `"shadow_map"`), `"scene"`
-    /// (reads `"shadow_map"`, writes `"hdr_target"`), `"tonemap"` (reads
-    /// `"hdr_target"`, writes `"swapchain"`) — resolved to that exact
-    /// shadow-then-scene-then-tonemap order (each pass depends on the
-    /// previous one's output), the same sequence this function hardcoded
-    /// before the render graph existed. Behavior is unchanged; only how
-    /// the sequence is expressed is: future passes (e.g. Stage 5's
-    /// post-processing) slot in by declaring what they read/write, not by
-    /// another rewrite of this function.
+    /// (reads `"shadow_map"`, writes `"hdr_target"`), `"post_process"`
+    /// (reads `"hdr_target"`, writes `"swapchain"`) — resolved to that
+    /// exact shadow-then-scene-then-post order (each pass depends on the
+    /// previous one's output). The `"post_process"` node was the plain
+    /// tonemap pass before Stage 5; it now runs the whole
+    /// [`crate::PostProcessStack`] (bloom, color grade, toon outline, then
+    /// the same ACES tonemap) — slotted in by declaring the same
+    /// read/write as the old tonemap pass, no rewrite of this function,
+    /// exactly as the render graph was built to allow.
     ///
     /// The `"shadow"` pass (`shadow_pipeline`/`shadow_map`, from the
-    /// shadow-casting light's point of view) runs first. The `"scene"`
+    /// shadow-casting light's point of view) runs first, over
+    /// `shadow_casters` — kept a separate slice from `drawables` so a mesh
+    /// culled from the camera's view still casts its shadow into it (the
+    /// caller passes the frustum-culled subset as `drawables` and the full
+    /// set as `shadow_casters`; passing the same slice for both is fine
+    /// when no culling is wanted). The `"scene"`
     /// pass draws the procedural sky (`skybox_pipeline`/`skybox`) across
     /// the whole viewport first, then every [`Drawable`] in `drawables`
     /// on top of it with `pipeline`, `camera`, and `lights` (which
@@ -936,11 +881,25 @@ impl GpuContext {
     /// `debug_lines` (`Some((pipeline, vertices))` — e.g. from
     /// `engine_physics::debug_render_lines`, converted to
     /// [`DebugLineVertex`] pairs; `None` or an empty slice draws nothing
-    /// extra) drawn on top of everything else — into `hdr_target` rather
-    /// than the swapchain directly. The `"tonemap"` pass
-    /// (`tonemap_pipeline`/`tonemap_binding`) compresses `hdr_target`
-    /// into the swapchain's displayable range. All three share one
-    /// command buffer and submit together.
+    /// extra) drawn on top of everything else, and finally `particles`
+    /// (`Some(`[`crate::ParticleFrame`]`)` — the alpha-blended then the
+    /// additive billboards, each uploaded to a transient instance buffer;
+    /// `None` or empty slices draw nothing) — all into `hdr_target` rather
+    /// than the swapchain directly. The `"post_process"` pass runs `post`
+    /// (a [`crate::PostProcessStack`]): the bloom chain, then a composite
+    /// that grades, outlines, and tonemaps `hdr_target` into the
+    /// swapchain's displayable range. All passes share one command buffer
+    /// and submit together.
+    ///
+    /// After the unskinned `drawables`, every [`crate::SkinnedDrawable`]
+    /// in `skinned_drawables` is drawn with `skinned_pipeline` (same
+    /// camera and lights, GPU vertex skinning in its vertex stage), then
+    /// every [`crate::InstancedDrawable`] in `instanced_drawables` with
+    /// `instanced_pipeline` (one `draw_indexed(.., 0..N)` per group, model
+    /// matrix from an instance buffer), then — when `vegetation` is
+    /// `Some((pipeline, wind, drawables))` — those `drawables` again
+    /// through the wind-animated [`crate::VegetationPipeline`] with `wind`
+    /// bound at `@group(2)`. Empty slices draw nothing extra.
     ///
     /// An empty `drawables` still renders every pass and presents — this
     /// is the "nothing to draw yet" case, not an error.
@@ -960,12 +919,22 @@ impl GpuContext {
         skybox_pipeline: &SkyboxPipeline,
         skybox: &SkyboxBinding,
         hdr_target: &HdrTarget,
-        tonemap_pipeline: &TonemapPipeline,
-        tonemap_binding: &TonemapBinding,
+        post: &crate::PostProcessStack,
         camera: &CameraBinding,
         lights: &LightsBinding,
         drawables: &[Drawable<'_>],
+        shadow_casters: &[Drawable<'_>],
+        skinned_pipeline: &crate::SkinnedPipeline,
+        skinned_drawables: &[crate::SkinnedDrawable<'_>],
+        instanced_pipeline: &crate::InstancedPipeline,
+        instanced_drawables: &[crate::InstancedDrawable<'_>],
         debug_lines: Option<(&DebugLinePipeline, &[DebugLineVertex])>,
+        particles: Option<crate::ParticleFrame<'_>>,
+        vegetation: Option<(
+            &crate::VegetationPipeline,
+            &crate::WindBinding,
+            &[crate::InstancedDrawable<'_>],
+        )>,
     ) -> Result<(), crate::error::RendererError> {
         let Some(surface_texture) = self.acquire_frame() else {
             return Ok(());
@@ -998,6 +967,16 @@ impl GpuContext {
                         })
                 });
 
+        // Same story for the particle instance buffers — built out here so
+        // they outlive the "scene" pass closure that draws them. `None`
+        // for an empty blend-mode slice.
+        let particle_alpha_buffer = particles.and_then(|frame| {
+            self.create_particle_instance_buffer("particle instances (alpha)", frame.alpha)
+        });
+        let particle_additive_buffer = particles.and_then(|frame| {
+            self.create_particle_instance_buffer("particle instances (additive)", frame.additive)
+        });
+
         let mut graph = crate::RenderGraph::new();
 
         graph.add_pass("shadow", &[], &["shadow_map"], |encoder| {
@@ -1019,7 +998,7 @@ impl GpuContext {
 
             shadow_pass.set_pipeline(&shadow_pipeline.render_pipeline);
             shadow_pass.set_bind_group(0, &shadow_map.light_bind_group, &[]);
-            for drawable in drawables {
+            for drawable in shadow_casters {
                 shadow_pass.set_bind_group(1, &drawable.model.bind_group, &[]);
                 shadow_pass.set_vertex_buffer(0, drawable.mesh.vertex_buffer.slice(..));
                 shadow_pass.set_index_buffer(
@@ -1031,17 +1010,26 @@ impl GpuContext {
         });
 
         graph.add_pass("scene", &["shadow_map"], &["hdr_target"], |encoder| {
+            // With MSAA, render into the multisampled texture and resolve
+            // into the single-sample one the tonemap pass samples; the
+            // multisampled contents themselves are transient (Discard).
+            // Without MSAA, render straight into that single-sample view.
+            let (scene_view, resolve_target, color_store) = match &hdr_target.msaa_view {
+                Some(msaa_view) => (msaa_view, Some(&hdr_target.view), wgpu::StoreOp::Discard),
+                None => (&hdr_target.view, None, wgpu::StoreOp::Store),
+            };
+
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("VGE scene pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     // Into the HDR offscreen target, not the swapchain —
                     // the "tonemap" pass writes the swapchain.
-                    view: &hdr_target.view,
+                    view: scene_view,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(self.clear_color()),
-                        store: wgpu::StoreOp::Store,
+                        store: color_store,
                     },
                 })],
                 depth_stencil_attachment: None,
@@ -1074,6 +1062,79 @@ impl GpuContext {
                 render_pass.draw_indexed(0..drawable.mesh.index_count, 0, 0..1);
             }
 
+            // Skinned geometry: same camera/lights, a different pipeline
+            // and `@group(2)` (model matrix + joint matrices). Drawn after
+            // the unskinned meshes; no shadow-map contribution yet (the
+            // shadow pass has no skinning shader).
+            if !skinned_drawables.is_empty() {
+                render_pass.set_pipeline(&skinned_pipeline.render_pipeline);
+                render_pass.set_bind_group(0, &camera.bind_group, &[]);
+                render_pass.set_bind_group(3, &lights.bind_group, &[]);
+                for skinned in skinned_drawables {
+                    render_pass.set_bind_group(1, &skinned.material.bind_group, &[]);
+                    render_pass.set_bind_group(2, &skinned.skin.bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, skinned.mesh.vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(
+                        skinned.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    render_pass.draw_indexed(0..skinned.mesh.index_count, 0, 0..1);
+                }
+            }
+
+            // Instanced geometry: one draw call per mesh/material group,
+            // the model matrix coming from the instance-step buffer at
+            // vertex slot 1. Same camera/lights; no `@group(2)`. Also no
+            // shadow-map contribution yet.
+            if !instanced_drawables.is_empty() {
+                render_pass.set_pipeline(&instanced_pipeline.render_pipeline);
+                render_pass.set_bind_group(0, &camera.bind_group, &[]);
+                render_pass.set_bind_group(3, &lights.bind_group, &[]);
+                for instanced in instanced_drawables {
+                    render_pass.set_bind_group(1, &instanced.material.bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, instanced.mesh.vertex_buffer.slice(..));
+                    render_pass.set_vertex_buffer(1, instanced.instance_buffer.buffer.slice(..));
+                    render_pass.set_index_buffer(
+                        instanced.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    render_pass.draw_indexed(
+                        0..instanced.mesh.index_count,
+                        0,
+                        0..instanced.instance_count,
+                    );
+                }
+            }
+
+            // Wind-animated vegetation: the instanced path again, but with
+            // the vegetation pipeline and a wind uniform bound at
+            // `@group(2)` (which the plain instanced pipeline leaves
+            // unbound). Same `InstancedDrawable`s, same instance buffers.
+            if let Some((vegetation_pipeline, wind, vegetation_drawables)) = vegetation
+                && !vegetation_drawables.is_empty()
+            {
+                render_pass.set_pipeline(&vegetation_pipeline.render_pipeline);
+                render_pass.set_bind_group(0, &camera.bind_group, &[]);
+                render_pass.set_bind_group(2, &wind.bind_group, &[]);
+                render_pass.set_bind_group(3, &lights.bind_group, &[]);
+                for vegetation_drawable in vegetation_drawables {
+                    render_pass.set_bind_group(1, &vegetation_drawable.material.bind_group, &[]);
+                    render_pass
+                        .set_vertex_buffer(0, vegetation_drawable.mesh.vertex_buffer.slice(..));
+                    render_pass
+                        .set_vertex_buffer(1, vegetation_drawable.instance_buffer.buffer.slice(..));
+                    render_pass.set_index_buffer(
+                        vegetation_drawable.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    render_pass.draw_indexed(
+                        0..vegetation_drawable.mesh.index_count,
+                        0,
+                        0..vegetation_drawable.instance_count,
+                    );
+                }
+            }
+
             // Debug lines last: always drawn on top of everything else in
             // the pass (there's no depth buffer to test against — see
             // `Pipeline`'s docs — so draw order alone decides visibility,
@@ -1086,31 +1147,33 @@ impl GpuContext {
                 render_pass.set_vertex_buffer(0, buffer.slice(..));
                 render_pass.draw(0..lines.len() as u32, 0..1);
             }
+
+            // Particles after everything else: transparent billboards, so
+            // they must composite over the opaque scene (and the debug
+            // overlay). Alpha-blended set first, then additive. Six
+            // vertices per instance, generated in the shader. Drawn into
+            // this HDR pass so post-processing bloom/tonemap picks them up.
+            if let Some(frame) = particles {
+                render_pass.set_bind_group(0, &frame.camera.bind_group, &[]);
+                if let Some(buffer) = &particle_alpha_buffer {
+                    render_pass.set_pipeline(&frame.pipelines.alpha.render_pipeline);
+                    render_pass.set_vertex_buffer(0, buffer.buffer.slice(..));
+                    render_pass.draw(0..6, 0..buffer.count);
+                }
+                if let Some(buffer) = &particle_additive_buffer {
+                    render_pass.set_pipeline(&frame.pipelines.additive.render_pipeline);
+                    render_pass.set_vertex_buffer(0, buffer.buffer.slice(..));
+                    render_pass.draw(0..6, 0..buffer.count);
+                }
+            }
         });
 
-        graph.add_pass("tonemap", &["hdr_target"], &["swapchain"], |encoder| {
-            let mut tonemap_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("VGE tonemap pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        // Fully overwritten by the full-screen triangle
-                        // below; `Clear` is just a defined starting state.
-                        load: wgpu::LoadOp::Clear(self.clear_color()),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            tonemap_pass.set_pipeline(&tonemap_pipeline.render_pipeline);
-            tonemap_pass.set_bind_group(0, &tonemap_binding.bind_group, &[]);
-            tonemap_pass.draw(0..3, 0..1);
+        graph.add_pass("post_process", &["hdr_target"], &["swapchain"], |encoder| {
+            // The whole post stack — bloom chain then the grade/outline/
+            // tonemap composite — recorded into this node. Internal
+            // ping-pong ordering is plain sequential encoder work, the
+            // same way the "scene" pass sequences its own sub-draws.
+            post.record(encoder, &view);
         });
 
         graph.execute(&mut encoder)?;

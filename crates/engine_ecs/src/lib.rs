@@ -21,7 +21,16 @@
 //! [`components::Sprite`]/[`render::extract_and_render_sprites`] are the
 //! 2D counterpart: every `(GlobalTransform, Sprite)` entity batched into
 //! one instanced draw call per frame, not one `MeshRenderer`-style GPU
-//! binding per entity. `bevy_ecs` types
+//! binding per entity. [`components::MeshRenderer`] itself holds asset
+//! handles, not GPU resources directly — [`render::extract_and_render`]
+//! resolves them against a caller-owned `engine_renderer::RenderAssets`
+//! each frame, culls the meshes outside the caller-supplied
+//! `engine_renderer::Frustum` from the scene draw list (returning
+//! [`render::RenderStats`] with the total/drawn counts), and
+//! [`render::despawn_mesh_renderer`] is the paired cleanup
+//! (release the handles, then despawn), the same "caller's explicit job"
+//! shape [`physics::sync_rigid_bodies`] already has for `RigidBody`/
+//! `Collider`. `bevy_ecs` types
 //! ([`World`], [`Schedule`], `Component`, `Resource`, `ChildOf`,
 //! `Children`, ...) are re-exported wholesale via [`prelude`] rather than
 //! wrapped, since ECS internals (queries, systems, bundles) are meant to
@@ -37,15 +46,23 @@ use bevy_ecs::world::World;
 
 pub mod components;
 mod error;
+pub mod particles;
 pub mod physics;
 pub mod propagate;
 pub mod render;
 pub mod stages;
 
 pub use error::EcsError;
+pub use particles::{
+    BlendMode, ParticleEmitter, ParticleEmitterConfig, Rng, extract_particles, update_particles,
+};
 pub use physics::sync_rigid_bodies;
 pub use propagate::propagate_transforms;
-pub use render::{extract_and_render, extract_and_render_sprites};
+pub use render::{
+    RenderStats, despawn_instanced_mesh_renderer, despawn_mesh_renderer,
+    despawn_skinned_mesh_renderer, despawn_vegetation_renderer, extract_and_render,
+    extract_and_render_sprites,
+};
 
 /// Re-exports the `bevy_ecs` prelude, plus [`Ecs`], the core components,
 /// and the frame stage labels.
@@ -54,9 +71,16 @@ pub mod prelude {
 
     pub use crate::Ecs;
     pub use crate::components::{
-        Camera, Collider, GlobalTransform, MeshRenderer, Name, RigidBody, Sprite, Transform,
+        AssetSource, Camera, Collider, Disabled, GlobalTransform, InstancedMeshRenderer, Lock,
+        MeshRenderer, Name, RigidBody, SkinnedMeshRenderer, Sprite, Static, Transform,
+        VegetationRenderer,
     };
+    pub use crate::despawn_instanced_mesh_renderer;
+    pub use crate::despawn_mesh_renderer;
+    pub use crate::despawn_skinned_mesh_renderer;
+    pub use crate::despawn_vegetation_renderer;
     pub use crate::extract_and_render_sprites;
+    pub use crate::particles::ParticleEmitter;
     pub use crate::propagate_transforms;
     pub use crate::stages::{RenderExtract, Update};
     pub use crate::sync_rigid_bodies;

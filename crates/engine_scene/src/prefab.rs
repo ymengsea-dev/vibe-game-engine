@@ -6,14 +6,21 @@
 //! a scene is "these entities, once"; a prefab is "this entity template,
 //! stamp out as many copies as needed."
 
+use std::path::Path;
+
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::{EntityWorldMut, World};
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 
+use crate::error::SceneError;
 use crate::format::SceneEntity;
 
 /// A reusable entity template.
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// Serialized form is a `.prefab` RON file — the same shape as one
+/// [`SceneEntity`] in a scene, wrapped so the file is self-describing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Prefab {
     entity: SceneEntity,
 }
@@ -27,6 +34,56 @@ impl Prefab {
     /// The template data this prefab instantiates from.
     pub fn entity(&self) -> &SceneEntity {
         &self.entity
+    }
+
+    /// Serializes this prefab to pretty-printed RON text.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Serialize`] if RON encoding fails.
+    pub fn to_ron_string(&self) -> Result<String, SceneError> {
+        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
+            .map_err(|err| SceneError::Serialize(err.to_string()))
+    }
+
+    /// Parses a prefab from RON text.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Deserialize`] if `text` isn't valid RON matching a
+    /// [`Prefab`].
+    pub fn from_ron_str(text: &str) -> Result<Self, SceneError> {
+        ron::from_str(text).map_err(|err| SceneError::Deserialize(err.to_string()))
+    }
+
+    /// Validates the template, then writes it to `path` as RON,
+    /// overwriting any existing file.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Validation`] if the template has invalid component
+    /// data (a non-finite transform, a degenerate camera, ...);
+    /// [`SceneError::Serialize`] if RON encoding fails;
+    /// [`SceneError::Io`] if the write fails.
+    pub fn save_to_file(&self, path: &Path) -> Result<(), SceneError> {
+        self.entity
+            .validate()
+            .map_err(|reason| SceneError::Validation(format!("prefab entity: {reason}")))?;
+        let text = self.to_ron_string()?;
+        std::fs::write(path, text).map_err(|err| SceneError::Io(err.to_string()))
+    }
+
+    /// Reads and parses a prefab from `path`. The file is untrusted
+    /// input — malformed RON is rejected rather than propagated.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Io`] if the file can't be read;
+    /// [`SceneError::Deserialize`] if its contents aren't a valid
+    /// [`Prefab`].
+    pub fn load_from_file(path: &Path) -> Result<Self, SceneError> {
+        let text = std::fs::read_to_string(path).map_err(|err| SceneError::Io(err.to_string()))?;
+        Self::from_ron_str(&text)
     }
 
     /// Spawns a new entity in `world` with this prefab's components,
@@ -82,6 +139,18 @@ impl Prefab {
             entity_mut.insert(engine_ecs::components::Camera::from(
                 engine_renderer::Camera::from(camera),
             ));
+        }
+        if let Some(path) = &self.entity.asset_source {
+            entity_mut.insert(engine_ecs::components::AssetSource {
+                path: path.clone(),
+                id: self.entity.asset_id.clone(),
+            });
+        }
+        if self.entity.disabled {
+            entity_mut.insert(engine_ecs::components::Disabled);
+        }
+        if self.entity.is_static {
+            entity_mut.insert(engine_ecs::components::Static);
         }
         // `parent` and `mesh_renderer` aren't wired up here: `parent` is
         // only meaningful with the full sibling list a lone `Prefab`
@@ -257,5 +326,99 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(Prefab::from(data.clone()), Prefab::new(data));
+    }
+
+    fn temp_prefab_path(name: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "vge-engine_scene-prefab-{name}-{}-{n}.prefab",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn prefab_ron_round_trips() {
+        let prefab = Prefab::new(SceneEntity {
+            name: Some("Crate".to_string()),
+            transform: Some(transform_data_at(2.0)),
+            asset_source: Some("props/crate.gltf".to_string()),
+            asset_id: Some("3fa00000-0000-0000-0000-000000000000".to_string()),
+            is_static: true,
+            ..Default::default()
+        });
+        let text = prefab.to_ron_string().unwrap();
+        assert_eq!(Prefab::from_ron_str(&text).unwrap(), prefab);
+    }
+
+    #[test]
+    fn save_then_load_round_trips_on_disk() {
+        let path = temp_prefab_path("round-trip");
+        let prefab = Prefab::new(SceneEntity {
+            name: Some("Barrel".to_string()),
+            transform: Some(transform_data_at(1.0)),
+            ..Default::default()
+        });
+        prefab.save_to_file(&path).unwrap();
+        let loaded = Prefab::load_from_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(loaded, prefab);
+    }
+
+    #[test]
+    fn save_to_file_rejects_a_nan_transform_without_touching_disk() {
+        let path = temp_prefab_path("nan");
+        let prefab = Prefab::new(SceneEntity {
+            transform: Some(TransformData {
+                translation: [f32::NAN, 0.0, 0.0],
+                rotation: glam::Quat::IDENTITY.to_array(),
+                scale: [1.0, 1.0, 1.0],
+            }),
+            ..Default::default()
+        });
+        let err = prefab.save_to_file(&path).unwrap_err();
+        assert!(matches!(err, SceneError::Validation(_)));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn load_from_file_rejects_malformed_ron() {
+        let path = temp_prefab_path("malformed");
+        std::fs::write(&path, "not a prefab {{{").unwrap();
+        let err = Prefab::load_from_file(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+        assert!(matches!(err, SceneError::Deserialize(_)));
+    }
+
+    #[test]
+    fn load_from_file_missing_returns_io_error() {
+        let err = Prefab::load_from_file(&temp_prefab_path("missing")).unwrap_err();
+        assert!(matches!(err, SceneError::Io(_)));
+    }
+
+    #[test]
+    fn instantiate_inserts_asset_source_and_markers() {
+        use engine_ecs::components::{AssetSource, Disabled, Static};
+
+        let prefab = Prefab::new(SceneEntity {
+            name: Some("Rock".to_string()),
+            asset_source: Some("props/rock.gltf".to_string()),
+            asset_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+            disabled: true,
+            is_static: true,
+            ..Default::default()
+        });
+        let mut world = World::new();
+        let entity = prefab.instantiate(&mut world);
+
+        let source = world.get::<AssetSource>(entity).unwrap();
+        assert_eq!(source.path, "props/rock.gltf");
+        assert_eq!(
+            source.id.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert!(world.get::<Disabled>(entity).is_some());
+        assert!(world.get::<Static>(entity).is_some());
     }
 }

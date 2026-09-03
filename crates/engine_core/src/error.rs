@@ -27,4 +27,9 @@ pub enum EngineError {
     /// `tracing` subscriber (most commonly: one was already installed).
     #[error("failed to initialize logging: {0}")]
     LoggingInit(String),
+
+    /// A [`crate::FixedTimestep`] constructor was given a step rate or
+    /// step length that is not finite and positive.
+    #[error("invalid fixed timestep: {0} (must be finite and positive)")]
+    InvalidTimestep(f32),
 }

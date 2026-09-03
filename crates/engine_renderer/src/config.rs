@@ -74,6 +74,27 @@ pub fn build_surface_config(
     })
 }
 
+/// Picks the MSAA sample count to use for the main color pass: the
+/// largest of 8/4/2 that is both `<= requested` and reported supported for
+/// the HDR target format by `features`, or `1` (no MSAA) if none qualify.
+///
+/// `1` is always a valid fallback — a single-sample target needs no
+/// format feature flag.
+pub fn choose_msaa_sample_count(features: wgpu::TextureFormatFeatureFlags, requested: u32) -> u32 {
+    [8, 4, 2]
+        .into_iter()
+        .find(|&count| {
+            count <= requested
+                && match count {
+                    2 => features.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X2),
+                    4 => features.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4),
+                    8 => features.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X8),
+                    _ => false,
+                }
+        })
+        .unwrap_or(1)
+}
+
 /// Decides whether a resize actually needs a surface reconfigure.
 ///
 /// `wgpu::Surface::configure` is not free (it can stall the GPU pipeline
@@ -170,6 +191,44 @@ mod tests {
                 height: 0
             }
         ));
+    }
+
+    #[test]
+    fn choose_msaa_picks_requested_when_supported() {
+        let features = wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X2
+            | wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4;
+        assert_eq!(choose_msaa_sample_count(features, 4), 4);
+    }
+
+    #[test]
+    fn choose_msaa_falls_back_to_lower_supported_count() {
+        // Requested 4, but only x2 is supported.
+        let features = wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X2;
+        assert_eq!(choose_msaa_sample_count(features, 4), 2);
+    }
+
+    #[test]
+    fn choose_msaa_returns_one_when_nothing_supported() {
+        assert_eq!(
+            choose_msaa_sample_count(wgpu::TextureFormatFeatureFlags::empty(), 4),
+            1
+        );
+    }
+
+    #[test]
+    fn choose_msaa_is_capped_by_the_requested_count() {
+        let features = wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X2
+            | wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4
+            | wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X8;
+        assert_eq!(choose_msaa_sample_count(features, 4), 4);
+        assert_eq!(choose_msaa_sample_count(features, 8), 8);
+        assert_eq!(choose_msaa_sample_count(features, 3), 2);
+    }
+
+    #[test]
+    fn choose_msaa_of_one_is_one() {
+        let features = wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4;
+        assert_eq!(choose_msaa_sample_count(features, 1), 1);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::id::AssetId;
+use engine_utils::AssetId;
 
 /// Errors that can occur while working with the [`crate::AssetDatabase`].
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -59,4 +59,30 @@ pub enum AssetError {
     /// (e.g. the path doesn't exist).
     #[error("failed to start watching for asset changes: {0}")]
     WatchInit(String),
+
+    /// Reading or writing an [`crate::AssetMeta`] sidecar (or the source
+    /// file it describes) failed.
+    #[error("asset metadata I/O failed for {path}: {message}")]
+    MetaIo {
+        /// The path the I/O was attempted on.
+        path: String,
+        /// The underlying OS error message.
+        message: String,
+    },
+
+    /// An [`crate::AssetMeta`] sidecar file exists but isn't valid RON /
+    /// doesn't match the expected shape.
+    #[error("asset metadata at {path} is malformed: {reason}")]
+    MetaParse {
+        /// The `.meta` file path.
+        path: String,
+        /// What was wrong with it.
+        reason: String,
+    },
+
+    /// Reading, writing, or parsing an asset [`crate::Bundle`] (`.pak`)
+    /// failed — bad magic, a truncated index, an out-of-range entry, or
+    /// an I/O error.
+    #[error("asset bundle error: {0}")]
+    Bundle(String),
 }

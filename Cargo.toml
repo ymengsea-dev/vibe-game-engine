@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "game", "editor"]
+members = ["crates/*", "apps/*", "game", "editor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -25,6 +25,10 @@ engine_animation = { path = "crates/engine_animation", version = "0.1.0" }
 engine_audio = { path = "crates/engine_audio", version = "0.1.0" }
 engine_ui = { path = "crates/engine_ui", version = "0.1.0" }
 engine_editor = { path = "crates/engine_editor", version = "0.1.0" }
+engine_editor_derive = { path = "crates/engine_editor_derive", version = "0.1.0" }
+engine_project = { path = "crates/engine_project", version = "0.1.0" }
+editor_code = { path = "crates/editor_code", version = "0.1.0" }
+editor_lsp = { path = "crates/editor_lsp", version = "0.1.0" }
 engine_scripting = { path = "crates/engine_scripting", version = "0.1.0" }
 engine_network = { path = "crates/engine_network", version = "0.1.0" }
 engine_ai = { path = "crates/engine_ai", version = "0.1.0" }
@@ -53,8 +57,20 @@ kira = "0.12"
 egui = "0.36"
 egui-winit = "0.36"
 egui-wgpu = "0.36"
+# Font-file validation before handing bytes to egui (same parser epaint uses).
+ab_glyph = "0.2.32"
+# Integrated terminal (editor-only, feature-gated): PTY process + VT model.
+portable-pty = "0.9"
+alacritty_terminal = "0.26"
+# rust-analyzer LSP bridge (editor-only): protocol types.
+lsp-types = "0.97"
+# Proc-macro tooling (for engine_editor_derive)
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ron = "0.12"
 # Assets
 gltf = "1"
@@ -71,7 +87,9 @@ tracing-subscriber = "0.3"
 thiserror = "2"
 # Tooling
 notify = "8"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+# Integrated code editor: Monaco in a native webview (editor_code crate only).
+wry = "0.52"
 
 # ---------------------------------------------------------------------------
 # Lints — enforce docs/ENGINEERING.md at compile time.

@@ -20,7 +20,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::error::EditorError;
-use crate::gizmo::{self, Axis};
+use crate::gizmo::{self, Axis, GizmoMode};
 use crate::shell::EditorShell;
 
 const SHADER_SOURCE: &str = include_str!("shaders/viewport.wgsl");
@@ -72,11 +72,17 @@ pub struct Viewport {
     texture_id: egui::TextureId,
     render_pipeline: wgpu::RenderPipeline,
     camera_bind_group: wgpu::BindGroup,
+    /// The camera uniform buffer behind `camera_bind_group`, kept so
+    /// [`Viewport::set_dimension`] can re-upload a swapped camera.
+    camera_buffer: wgpu::Buffer,
     /// One (buffer, bind group) pair per potential entity slot — see
     /// [`MAX_VIEWPORT_ENTITIES`].
     model_bindings: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
     mesh: Mesh,
     camera: Camera,
+    /// `true` while the 2D authoring camera / gizmo conventions are
+    /// active — see [`Viewport::set_dimension`].
+    two_d: bool,
     gizmo_pipeline: wgpu::RenderPipeline,
     gizmo_vertex_buffer: wgpu::Buffer,
 }
@@ -185,11 +191,7 @@ impl Viewport {
             cache: None,
         });
 
-        let camera = Camera::new(
-            Vec3::new(1.5, 1.5, 2.5),
-            Vec3::ZERO,
-            width as f32 / height.max(1) as f32,
-        );
+        let camera = Self::perspective_camera(width, height);
         let camera_buffer =
             gpu.create_uniform_buffer("viewport camera uniform", &camera.to_uniform());
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -283,12 +285,53 @@ impl Viewport {
             texture_id,
             render_pipeline,
             camera_bind_group,
+            camera_buffer,
             model_bindings,
             mesh,
             camera,
+            two_d: false,
             gizmo_pipeline,
             gizmo_vertex_buffer,
         })
+    }
+
+    /// The perspective camera used in 3D authoring mode.
+    fn perspective_camera(width: u32, height: u32) -> Camera {
+        Camera::new(
+            Vec3::new(1.5, 1.5, 2.5),
+            Vec3::ZERO,
+            width as f32 / height.max(1) as f32,
+        )
+    }
+
+    /// The orthographic front-view camera used in 2D authoring mode:
+    /// looking down `-Z` from `+Z`, `+Y` up, so world X runs right and
+    /// world Y runs up on screen.
+    fn orthographic_camera(width: u32, height: u32) -> Camera {
+        Camera::new_orthographic(
+            Vec3::new(0.0, 0.0, 10.0),
+            Vec3::ZERO,
+            width as f32 / height.max(1) as f32,
+            6.0,
+        )
+    }
+
+    /// Switches the viewport between 3D (perspective) and 2D
+    /// (orthographic front view) authoring. Re-uploads the camera
+    /// uniform only when the mode actually changes; also flips which
+    /// gizmo axes [`Viewport::render`] draws (see
+    /// [`crate::gizmo::axes_for`]).
+    pub fn set_dimension(&mut self, gpu: &GpuContext, two_d: bool) {
+        if self.two_d == two_d {
+            return;
+        }
+        self.two_d = two_d;
+        self.camera = if two_d {
+            Self::orthographic_camera(self.width, self.height)
+        } else {
+            Self::perspective_camera(self.width, self.height)
+        };
+        gpu.write_uniform_buffer(&self.camera_buffer, &self.camera.to_uniform());
     }
 
     /// This viewport's size, in pixels — matches the texture
@@ -314,12 +357,20 @@ impl Viewport {
     /// Renders `entities` (each drawn as this viewport's placeholder
     /// cube, at its own transform — see `MAX_VIEWPORT_ENTITIES`'s docs
     /// for the cap on how many) and, if `gizmo_origin` is `Some`, the
-    /// translate gizmo's three axis handles at that world position, into
-    /// this viewport's off-screen texture. Self-contained (its own
-    /// command encoder and submit) — unlike the main game pipeline, this
-    /// never touches a swapchain, so there's no acquire/present step to
-    /// share with anything else.
-    pub fn render(&self, gpu: &GpuContext, entities: &[Transform], gizmo_origin: Option<Vec3>) {
+    /// gizmo's axis handles at that world position, into this viewport's
+    /// off-screen texture. Which handles are drawn follows
+    /// [`gizmo::axes_for`]`(gizmo_mode, two_d)` — all three in 3D, the
+    /// screen-plane subset in 2D. Self-contained (its own command
+    /// encoder and submit) — unlike the main game pipeline, this never
+    /// touches a swapchain, so there's no acquire/present step to share
+    /// with anything else.
+    pub fn render(
+        &self,
+        gpu: &GpuContext,
+        entities: &[Transform],
+        gizmo_mode: GizmoMode,
+        gizmo_origin: Option<Vec3>,
+    ) {
         let mut encoder = gpu
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -365,11 +416,12 @@ impl Viewport {
             }
 
             if let Some(origin) = gizmo_origin {
+                let axes = gizmo::axes_for(gizmo_mode, self.two_d);
                 let mut vertices = [DebugLineVertex {
                     position: [0.0; 3],
                     color: [0.0; 4],
                 }; GIZMO_VERTEX_COUNT];
-                for (i, axis) in Axis::ALL.into_iter().enumerate() {
+                for (i, &axis) in axes.iter().enumerate() {
                     let (start, end) = gizmo::axis_endpoints(origin, axis);
                     let color = axis.color();
                     vertices[i * 2] = DebugLineVertex {
@@ -390,7 +442,7 @@ impl Viewport {
                 render_pass.set_pipeline(&self.gizmo_pipeline);
                 render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.gizmo_vertex_buffer.slice(..));
-                render_pass.draw(0..GIZMO_VERTEX_COUNT as u32, 0..1);
+                render_pass.draw(0..(axes.len() * 2) as u32, 0..1);
             }
         }
 

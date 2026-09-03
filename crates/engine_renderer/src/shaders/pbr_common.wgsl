@@ -1,6 +1,11 @@
-// Vertex + fragment shader: transforms vertices by the camera's
-// view-projection matrix, samples a base color texture, and shades with
-// a physically-based (Cook-Torrance GGX) BRDF driven by the material's
+// Shared PBR bindings, lighting math, and fragment stage — everything the
+// unskinned (`pbr_vs.wgsl`) and GPU-skinned (`skinned_pbr_vs.wgsl`)
+// vertex stages have in common. The renderer concatenates one vertex-stage
+// file onto this one at pipeline creation; this file is never compiled
+// alone (it declares no `vs_main`).
+//
+// Fragment stage: samples a base color texture and shades with a
+// physically-based (Cook-Torrance GGX) BRDF driven by the material's
 // metallic-roughness factors and the scene's directional/point lights.
 
 struct CameraUniform {
@@ -26,12 +31,11 @@ struct MaterialUniform {
 @group(1) @binding(2)
 var<uniform> material: MaterialUniform;
 
-struct ModelUniform {
-    model: mat4x4<f32>,
-};
-
-@group(2) @binding(0)
-var<uniform> object: ModelUniform;
+// `@group(2)` is owned by the vertex stage: the unskinned and skinned
+// paths put a per-object model matrix there (`pbr_vs.wgsl` /
+// `skinned_pbr_vs.wgsl`), the instanced path (`instanced_pbr_vs.wgsl`)
+// uses none. Declaring it here would force every pipeline layout to bind
+// it, so each vertex file declares only what it uses.
 
 struct DirectionalLight {
     direction: vec3<f32>,
@@ -74,31 +78,12 @@ struct ShadowUniform {
 @group(3) @binding(3)
 var<uniform> shadow: ShadowUniform;
 
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) uv: vec2<f32>,
-};
-
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) world_position: vec3<f32>,
 };
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    let world_position = object.model * vec4<f32>(in.position, 1.0);
-    out.clip_position = camera.view_proj * world_position;
-    out.world_position = world_position.xyz;
-    // Normals ignore translation/scale by design here (no normal matrix
-    // yet — a concern once non-uniform scale matters).
-    out.world_normal = (object.model * vec4<f32>(in.normal, 0.0)).xyz;
-    out.uv = in.uv;
-    return out;
-}
 
 const PI: f32 = 3.14159265359;
 

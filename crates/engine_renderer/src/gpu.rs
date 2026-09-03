@@ -5,8 +5,16 @@ use std::sync::Arc;
 use engine_platform::Window;
 use wgpu::util::DeviceExt;
 
-use crate::config::{build_surface_config, choose_surface_format, should_reconfigure};
+use crate::config::{
+    build_surface_config, choose_msaa_sample_count, choose_surface_format, should_reconfigure,
+};
 use crate::error::RendererError;
+
+/// The MSAA sample count requested for the main color pass. The actual
+/// count is this clamped to what the adapter reports for the HDR target
+/// format ([`choose_msaa_sample_count`]) — `1` (no MSAA) if 4x isn't
+/// available. Making this configurable per project is future work.
+pub const REQUESTED_MSAA_SAMPLE_COUNT: u32 = 4;
 
 /// Owns the wgpu handles needed to render into a window: the device/queue
 /// pair and the window's presentable surface.
@@ -21,6 +29,7 @@ pub struct GpuContext {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     clear_color: wgpu::Color,
+    msaa_sample_count: u32,
 }
 
 /// Default clear color: a muted blue-grey, distinguishable from both a
@@ -71,11 +80,19 @@ impl GpuContext {
         let config = build_surface_config(&capabilities, format, size.width, size.height)?;
         surface.configure(&device, &config);
 
+        let msaa_sample_count = choose_msaa_sample_count(
+            adapter
+                .get_texture_format_features(crate::pipeline::HDR_TEXTURE_FORMAT)
+                .flags,
+            REQUESTED_MSAA_SAMPLE_COUNT,
+        );
+
         tracing::info!(
             adapter = %adapter.get_info().name,
             format = ?format,
             width = size.width,
             height = size.height,
+            msaa = msaa_sample_count,
             "GPU context initialized"
         );
 
@@ -85,6 +102,7 @@ impl GpuContext {
             queue,
             config,
             clear_color: DEFAULT_CLEAR_COLOR,
+            msaa_sample_count,
         })
     }
 
@@ -107,6 +125,14 @@ impl GpuContext {
     /// The surface's current configuration.
     pub fn config(&self) -> &wgpu::SurfaceConfiguration {
         &self.config
+    }
+
+    /// The MSAA sample count the main color pass and its pipelines use —
+    /// `4` where the adapter supports it for the HDR target format, `1`
+    /// (no MSAA) otherwise. Stable for this context's lifetime, so
+    /// pipelines built against it once at startup stay valid.
+    pub fn msaa_sample_count(&self) -> u32 {
+        self.msaa_sample_count
     }
 
     /// Reconfigures the surface at a new size (e.g. after a window resize).

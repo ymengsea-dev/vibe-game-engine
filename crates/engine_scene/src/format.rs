@@ -226,9 +226,41 @@ pub struct SceneEntity {
     /// This entity's mesh/material, as asset references, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_renderer: Option<MeshRendererData>,
+    /// A project-relative path to the asset file this entity was created
+    /// from, if any — set by the editor's drag-an-asset-into-the-scene
+    /// action, before a real import/GPU resolution exists. Additive and
+    /// optional, so pre-existing scene files parse unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_source: Option<String>,
+    /// The stable id (canonical UUID text, from the asset's `.meta`
+    /// sidecar) of the file `asset_source` points at, if known. The
+    /// editor re-resolves this to a current path on load, so the
+    /// reference survives a rename or move of the source file. Additive
+    /// and optional, like `asset_source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
     /// This entity's 2D sprite, as an atlas reference, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sprite: Option<SpriteData>,
+    /// Whether the editor has disabled this entity (hidden from the
+    /// Scene view, greyed in the hierarchy). Additive and optional, so
+    /// pre-existing scene files parse unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub disabled: bool,
+    /// Whether the editor has marked this entity static. Additive and
+    /// optional, like `disabled`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_static: bool,
+    /// Whether the editor has locked this entity (gizmo / batch move /
+    /// reparent-drag skip it). Additive and optional, like `disabled`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
+}
+
+/// `#[serde(skip_serializing_if)]` predicate for a `bool` that defaults
+/// to `false` — keeps the field out of the file unless it's `true`.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A serializable scene: a flat list of entities, with parent/child

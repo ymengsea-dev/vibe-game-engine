@@ -38,6 +38,26 @@ pub enum RendererError {
     #[error("mesh must have at least one vertex and one index")]
     EmptyMesh,
 
+    /// [`crate::GpuContext::write_mesh_vertices`] was given a vertex slice
+    /// whose length differs from the mesh's original vertex count — an
+    /// in-place buffer write can't resize the buffer.
+    #[error("mesh vertex count mismatch: buffer holds {expected}, got {got}")]
+    MeshVertexCountMismatch {
+        /// The mesh's original vertex count (what its buffer holds).
+        expected: u32,
+        /// The length of the slice passed to `write_mesh_vertices`.
+        got: u32,
+    },
+
+    /// A [`crate::Heightmap`] constructor was given invalid parameters
+    /// (resolution below 2, non-positive/non-finite size, or a `heights`
+    /// slice whose length isn't `resolution * resolution`).
+    #[error("invalid heightmap: {reason}")]
+    InvalidHeightmap {
+        /// Which constraint was violated.
+        reason: &'static str,
+    },
+
     /// [`crate::decode_rgba8`] (and [`crate::GpuContext::create_texture_from_bytes`])
     /// failed to decode image bytes — malformed or unsupported format.
     #[error("failed to decode image: {0}")]

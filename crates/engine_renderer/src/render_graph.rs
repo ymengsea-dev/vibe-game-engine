@@ -9,11 +9,12 @@
 //! are plain string labels (`"shadow_map"`, `"hdr_target"`,
 //! `"swapchain"`), enough to order passes correctly without a virtual
 //! resource-lifetime system. [`GpuContext::render_scene`] is the first
-//! (and so far only) consumer: its existing shadow/scene/tonemap
-//! sequence, expressed as three declared passes instead of hardcoded
-//! order — same passes, same output, now composable for whatever Stage 5
-//! adds next (post-processing, bloom, ...) without another rewrite of
-//! that function.
+//! (and so far only) consumer: a shadow/scene/post-process sequence,
+//! expressed as three declared passes instead of hardcoded order — the
+//! third node was a plain tonemap pass until Stage 5 dropped the whole
+//! post-processing stack (bloom, color grade, toon outline) into it,
+//! declaring the same read/write, no rewrite of that function — exactly
+//! the composability this graph was added for.
 //!
 //! The ordering logic ([`resolve_execution_order`]) is pure — plain
 //! `{name, reads, writes}` data, no closures, no `wgpu` — so it's
@@ -318,6 +319,25 @@ mod tests {
     fn reorder_of_empty_items_is_empty() {
         let items: Vec<&str> = Vec::new();
         assert_eq!(reorder(items, &[]), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn render_scene_pass_shape_resolves_shadow_then_scene_then_post() {
+        // The exact three passes `GpuContext::render_scene` declares, in a
+        // deliberately scrambled order — the resolver must still produce
+        // shadow -> scene -> post_process, since each reads the previous
+        // one's output. Locks the Stage 5 post-processing node into place
+        // behind the scene pass without needing a GPU.
+        let passes = [
+            deps("post_process", &["hdr_target"], &["swapchain"]),
+            deps("scene", &["shadow_map"], &["hdr_target"]),
+            deps("shadow", &[], &["shadow_map"]),
+        ];
+        let order = resolve_execution_order(&passes).unwrap();
+        assert_eq!(
+            names(&order, &passes),
+            vec!["shadow", "scene", "post_process"]
+        );
     }
 
     #[test]

@@ -79,32 +79,51 @@ impl From<engine_renderer::Camera> for Camera {
     }
 }
 
-/// An entity that renders as a mesh: its geometry, texture, and the
-/// per-object GPU binding that lets its sibling [`Transform`] component
-/// actually move it (updated each frame by [`crate::render::extract_and_render`]).
+/// An entity that renders as a mesh: a handle to its geometry, a handle to
+/// its material binding, and the per-object GPU binding that lets its
+/// sibling [`Transform`] component actually move it (updated each frame by
+/// [`crate::render::extract_and_render`]).
 ///
-/// Holds GPU resources directly rather than through an asset handle —
-/// there's no asset system yet (Milestone 5). Expect `mesh`/`material` to
-/// become handles once one exists; storing them directly works for now
-/// since nothing needs to share mesh/texture data across entities yet.
+/// Holds asset handles rather than the GPU resources themselves —
+/// [`engine_renderer::RenderAssets`] is where the actual [`engine_renderer::Mesh`]/
+/// [`engine_renderer::MaterialBinding`] live, resolved from `mesh`/`material`
+/// each frame. This is what lets multiple entities share one mesh/material
+/// for the cost of one GPU upload instead of one per entity — see
+/// [`MeshRenderer::with_mesh`]/[`MeshRenderer::from_handles`]. `model` stays
+/// a direct, unshared [`engine_renderer::ModelBinding`] — a model matrix is
+/// inherently per-entity data, never shareable the way geometry or a
+/// material binding can be.
+///
+/// Despawn a `MeshRenderer` entity through
+/// [`crate::render::despawn_mesh_renderer`], not a bare `World::despawn` —
+/// that's what releases `mesh`/`material`'s ref counts in whatever
+/// [`engine_renderer::RenderAssets`] they were registered in.
 #[derive(Component)]
 pub struct MeshRenderer {
-    /// This entity's geometry.
-    pub mesh: engine_renderer::Mesh,
-    /// This entity's material binding (base color texture + PBR
-    /// metallic-roughness factors).
-    pub material: engine_renderer::MaterialBinding,
+    /// A handle to this entity's geometry, resolved through a
+    /// [`engine_renderer::RenderAssets`].
+    pub mesh: engine_utils::AssetHandle<engine_renderer::Mesh>,
+    /// A handle to this entity's material binding (base color texture +
+    /// PBR metallic-roughness factors), resolved through a
+    /// [`engine_renderer::RenderAssets`].
+    pub material: engine_utils::AssetHandle<engine_renderer::MaterialBinding>,
     /// This entity's model-matrix binding, rewritten from the sibling
     /// [`GlobalTransform`] component each frame.
     pub model: engine_renderer::ModelBinding,
 }
 
 impl MeshRenderer {
-    /// Builds a [`MeshRenderer`], creating the material and (identity)
-    /// model bindings `mesh`/`texture`/`material` need to actually draw.
+    /// Builds a [`MeshRenderer`], uploading `mesh` and building a material
+    /// binding from `texture`/`material`, then registering both as freshly
+    /// owned entries (ref count `1` each) in `assets`.
+    ///
+    /// Use this for an entity whose geometry and appearance are both new —
+    /// [`MeshRenderer::with_mesh`]/[`MeshRenderer::from_handles`] instead
+    /// reuse an existing entry when another entity already registered one.
     pub fn new(
         gpu: &engine_renderer::GpuContext,
         pipeline: &engine_renderer::Pipeline,
+        assets: &mut engine_renderer::RenderAssets,
         mesh: engine_renderer::Mesh,
         texture: &engine_renderer::Texture,
         material: engine_renderer::Material,
@@ -113,9 +132,295 @@ impl MeshRenderer {
         let model_binding =
             gpu.create_model_binding(pipeline, &engine_renderer::ModelUniform::IDENTITY);
         Self {
-            mesh,
-            material: material_binding,
+            mesh: assets.meshes.insert(mesh),
+            material: assets.materials.insert(material_binding),
             model: model_binding,
+        }
+    }
+
+    /// Builds a [`MeshRenderer`] that reuses an already-registered `mesh`
+    /// (bumping its ref count) while still uploading a fresh material
+    /// binding from `texture`/`material` — for an entity that shares
+    /// geometry with an existing one but not its appearance.
+    ///
+    /// Logs a warning (via `tracing`) and proceeds anyway if `mesh` isn't
+    /// registered in `assets` — the resulting `MeshRenderer` simply won't
+    /// draw anything until a valid handle replaces it (see
+    /// [`crate::render::extract_and_render`]'s missing-asset handling),
+    /// rather than panicking on what's likely a caller bug.
+    pub fn with_mesh(
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        assets: &mut engine_renderer::RenderAssets,
+        mesh: engine_utils::AssetHandle<engine_renderer::Mesh>,
+        texture: &engine_renderer::Texture,
+        material: engine_renderer::Material,
+    ) -> Self {
+        if !assets.meshes.retain(mesh) {
+            tracing::warn!(
+                ?mesh,
+                "MeshRenderer::with_mesh given an unregistered mesh handle"
+            );
+        }
+        let material_binding = gpu.create_material_binding(pipeline, texture, &material.into());
+        let model_binding =
+            gpu.create_model_binding(pipeline, &engine_renderer::ModelUniform::IDENTITY);
+        Self {
+            mesh,
+            material: assets.materials.insert(material_binding),
+            model: model_binding,
+        }
+    }
+
+    /// Builds a [`MeshRenderer`] that reuses both an already-registered
+    /// `mesh` and `material` (bumping both ref counts) — for an entity
+    /// that's visually identical to an existing one, differing only by its
+    /// sibling [`Transform`].
+    ///
+    /// Logs a warning and proceeds for each handle not found in `assets`,
+    /// same as [`MeshRenderer::with_mesh`].
+    pub fn from_handles(
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        assets: &mut engine_renderer::RenderAssets,
+        mesh: engine_utils::AssetHandle<engine_renderer::Mesh>,
+        material: engine_utils::AssetHandle<engine_renderer::MaterialBinding>,
+    ) -> Self {
+        if !assets.meshes.retain(mesh) {
+            tracing::warn!(
+                ?mesh,
+                "MeshRenderer::from_handles given an unregistered mesh handle"
+            );
+        }
+        if !assets.materials.retain(material) {
+            tracing::warn!(
+                ?material,
+                "MeshRenderer::from_handles given an unregistered material handle"
+            );
+        }
+        let model_binding =
+            gpu.create_model_binding(pipeline, &engine_renderer::ModelUniform::IDENTITY);
+        Self {
+            mesh,
+            material,
+            model: model_binding,
+        }
+    }
+}
+
+/// An entity that renders as a GPU-skinned mesh: a handle to its skinned
+/// geometry, a handle to its material binding, and the per-object
+/// `@group(2)` binding (model matrix + joint matrices) that lets its
+/// sibling [`Transform`] move it and a caller-supplied pose deform it.
+///
+/// The skinned counterpart to [`MeshRenderer`]. `mesh`/`material` resolve
+/// against a caller-owned [`engine_renderer::RenderAssets`] each frame the
+/// same way; `skin` stays a direct, unshared
+/// [`engine_renderer::SkinnedBinding`] because both a model matrix and a
+/// joint-matrix set are inherently per-entity.
+///
+/// [`crate::render::extract_and_render`] rewrites `skin`'s model buffer
+/// from [`GlobalTransform`] each frame. The joint matrices are the
+/// *caller's* job to upload (via
+/// [`engine_renderer::GpuContext::write_uniform_buffer`] into
+/// `skin.joints_buffer`) — this crate has no dependency on
+/// `engine_animation`, so it neither samples poses nor computes skinning
+/// matrices.
+///
+/// Despawn through [`crate::render::despawn_skinned_mesh_renderer`], not a
+/// bare `World::despawn`, to release `mesh`/`material`'s ref counts.
+#[derive(Component)]
+pub struct SkinnedMeshRenderer {
+    /// A handle to this entity's skinned geometry, resolved through a
+    /// [`engine_renderer::RenderAssets`].
+    pub mesh: engine_utils::AssetHandle<engine_renderer::SkinnedMesh>,
+    /// A handle to this entity's material binding, resolved through a
+    /// [`engine_renderer::RenderAssets`].
+    pub material: engine_utils::AssetHandle<engine_renderer::MaterialBinding>,
+    /// This entity's `@group(2)` binding: model-matrix uniform (rewritten
+    /// from [`GlobalTransform`] each frame by
+    /// [`crate::render::extract_and_render`]) plus joint-matrices uniform
+    /// (uploaded by the caller from a sampled pose).
+    pub skin: engine_renderer::SkinnedBinding,
+}
+
+impl SkinnedMeshRenderer {
+    /// Builds a [`SkinnedMeshRenderer`], uploading `mesh` and building a
+    /// material binding from `texture`/`material`, then registering both
+    /// as freshly owned entries (ref count `1` each) in `assets`.
+    ///
+    /// The joint matrices start at identity ([`engine_renderer::JointMatricesUniform::IDENTITY`])
+    /// — the mesh renders in its bind pose until the caller uploads a real
+    /// pose.
+    pub fn new(
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        skinned_pipeline: &engine_renderer::SkinnedPipeline,
+        assets: &mut engine_renderer::RenderAssets,
+        mesh: engine_renderer::SkinnedMesh,
+        texture: &engine_renderer::Texture,
+        material: engine_renderer::Material,
+    ) -> Self {
+        let material_binding = gpu.create_material_binding(pipeline, texture, &material.into());
+        let skin = gpu.create_skinned_binding(
+            skinned_pipeline,
+            &engine_renderer::ModelUniform::IDENTITY,
+            &engine_renderer::JointMatricesUniform::IDENTITY,
+        );
+        Self {
+            mesh: assets.skinned_meshes.insert(mesh),
+            material: assets.materials.insert(material_binding),
+            skin,
+        }
+    }
+}
+
+/// An entity that renders many copies of one mesh in a single instanced
+/// draw call: a handle to the shared geometry, a handle to the shared
+/// material, and one world-space [`engine_utils::Transform`] per copy.
+///
+/// Unlike [`MeshRenderer`], there is no per-object GPU binding — the model
+/// matrices come from an instance buffer
+/// ([`engine_renderer::GpuContext::create_instance_buffer`]) that
+/// [`crate::render::extract_and_render`] rebuilds each frame from the
+/// frustum-visible subset of `instances`. The entity's own `Transform` is
+/// not applied; `instances` are already world-space.
+///
+/// Despawn through [`crate::render::despawn_instanced_mesh_renderer`] to
+/// release the `mesh`/`material` ref counts.
+#[derive(Component)]
+pub struct InstancedMeshRenderer {
+    /// A handle to the geometry every instance shares.
+    pub mesh: engine_utils::AssetHandle<engine_renderer::Mesh>,
+    /// A handle to the material binding every instance shares.
+    pub material: engine_utils::AssetHandle<engine_renderer::MaterialBinding>,
+    /// One world-space transform per instance.
+    pub instances: Vec<engine_utils::Transform>,
+}
+
+impl InstancedMeshRenderer {
+    /// Builds an [`InstancedMeshRenderer`], uploading `mesh` and building a
+    /// material binding from `texture`/`material`, then registering both as
+    /// freshly owned entries (ref count `1` each) in `assets`.
+    pub fn new(
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        assets: &mut engine_renderer::RenderAssets,
+        mesh: engine_renderer::Mesh,
+        texture: &engine_renderer::Texture,
+        material: engine_renderer::Material,
+        instances: Vec<engine_utils::Transform>,
+    ) -> Self {
+        let material_binding = gpu.create_material_binding(pipeline, texture, &material.into());
+        Self {
+            mesh: assets.meshes.insert(mesh),
+            material: assets.materials.insert(material_binding),
+            instances,
+        }
+    }
+
+    /// Builds an [`InstancedMeshRenderer`] that reuses an
+    /// already-registered `mesh` (bumping its ref count) while uploading a
+    /// fresh material binding — for instancing geometry another entity
+    /// already owns (e.g. the same `cube` mesh a [`MeshRenderer`] uses).
+    ///
+    /// Logs a warning and proceeds if `mesh` isn't registered in `assets`,
+    /// same as [`MeshRenderer::with_mesh`].
+    pub fn with_mesh(
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        assets: &mut engine_renderer::RenderAssets,
+        mesh: engine_utils::AssetHandle<engine_renderer::Mesh>,
+        texture: &engine_renderer::Texture,
+        material: engine_renderer::Material,
+        instances: Vec<engine_utils::Transform>,
+    ) -> Self {
+        if !assets.meshes.retain(mesh) {
+            tracing::warn!(
+                ?mesh,
+                "InstancedMeshRenderer::with_mesh given an unregistered mesh handle"
+            );
+        }
+        let material_binding = gpu.create_material_binding(pipeline, texture, &material.into());
+        Self {
+            mesh,
+            material: assets.materials.insert(material_binding),
+            instances,
+        }
+    }
+}
+
+/// An entity that renders many wind-animated plants in one instanced draw:
+/// a handle to the shared blade/frond geometry, a handle to the shared
+/// material, and one world-space [`engine_utils::Transform`] per plant.
+///
+/// The vegetation counterpart to [`InstancedMeshRenderer`] — same
+/// per-instance frustum culling and per-frame instance buffer, but
+/// [`crate::render::extract_and_render`] draws it through
+/// `engine_renderer::VegetationPipeline` (whose vertex stage bends each
+/// vertex along a global wind, pivoting at object-space `y = 0`). The mesh
+/// should therefore be authored with its base at the origin. The entity's
+/// own `Transform` is not applied; `instances` are already world-space.
+///
+/// Despawn through [`crate::render::despawn_vegetation_renderer`] to
+/// release the `mesh`/`material` ref counts.
+#[derive(Component)]
+pub struct VegetationRenderer {
+    /// A handle to the geometry every plant shares.
+    pub mesh: engine_utils::AssetHandle<engine_renderer::Mesh>,
+    /// A handle to the material binding every plant shares.
+    pub material: engine_utils::AssetHandle<engine_renderer::MaterialBinding>,
+    /// One world-space transform per plant.
+    pub instances: Vec<engine_utils::Transform>,
+}
+
+impl VegetationRenderer {
+    /// Builds a [`VegetationRenderer`], uploading `mesh` and building a
+    /// material binding from `texture`/`material`, then registering both as
+    /// freshly owned entries (ref count `1` each) in `assets`.
+    pub fn new(
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        assets: &mut engine_renderer::RenderAssets,
+        mesh: engine_renderer::Mesh,
+        texture: &engine_renderer::Texture,
+        material: engine_renderer::Material,
+        instances: Vec<engine_utils::Transform>,
+    ) -> Self {
+        let material_binding = gpu.create_material_binding(pipeline, texture, &material.into());
+        Self {
+            mesh: assets.meshes.insert(mesh),
+            material: assets.materials.insert(material_binding),
+            instances,
+        }
+    }
+
+    /// Builds a [`VegetationRenderer`] that reuses an already-registered
+    /// `mesh` (bumping its ref count) while uploading a fresh material
+    /// binding.
+    ///
+    /// Logs a warning and proceeds if `mesh` isn't registered in `assets`,
+    /// same as [`MeshRenderer::with_mesh`].
+    pub fn with_mesh(
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        assets: &mut engine_renderer::RenderAssets,
+        mesh: engine_utils::AssetHandle<engine_renderer::Mesh>,
+        texture: &engine_renderer::Texture,
+        material: engine_renderer::Material,
+        instances: Vec<engine_utils::Transform>,
+    ) -> Self {
+        if !assets.meshes.retain(mesh) {
+            tracing::warn!(
+                ?mesh,
+                "VegetationRenderer::with_mesh given an unregistered mesh handle"
+            );
+        }
+        let material_binding = gpu.create_material_binding(pipeline, texture, &material.into());
+        Self {
+            mesh,
+            material: assets.materials.insert(material_binding),
+            instances,
         }
     }
 }
@@ -184,6 +489,67 @@ impl From<String> for Name {
         Self(name)
     }
 }
+
+/// A reference to the asset file an entity was created from (e.g.
+/// dragged into the scene from the editor's asset browser).
+///
+/// Carries both a project-relative `path` (human-readable, and the
+/// fallback when nothing else resolves) and an optional stable `id` —
+/// the UUID from the asset's `.meta` sidecar
+/// (`engine_asset::AssetMeta`), stored as its canonical text. The `id`
+/// is what lets the reference survive a rename or move of the source
+/// file: the editor re-resolves `id` to the current path on scene load.
+///
+/// Display / bookkeeping only for now — nothing loads or renders from
+/// it yet. Round-trips through `engine_scene::SceneEntity`'s
+/// `asset_source` (path) and `asset_id` fields.
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct AssetSource {
+    /// Project-relative path to the source file.
+    pub path: String,
+    /// Canonical UUID text of the asset's `.meta` id, once known.
+    pub id: Option<String>,
+}
+
+impl AssetSource {
+    /// Builds an [`AssetSource`] from a path, with no id yet.
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            id: None,
+        }
+    }
+
+    /// Builds an [`AssetSource`] from a path and a known id (canonical
+    /// UUID text).
+    pub fn with_id(path: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            id: Some(id.into()),
+        }
+    }
+}
+
+/// Marks an entity as disabled in the editor: the Scene view skips it and
+/// the hierarchy panel greys it out. A view-only marker for now — it
+/// does not stop simulation or scripts. Round-trips through
+/// `engine_scene::SceneEntity::disabled`.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Disabled;
+
+/// Marks an entity as static — the editor treats it as non-moving. A
+/// view-only marker for now (a hook for later culling / batching); it
+/// has no runtime effect yet. Round-trips through
+/// `engine_scene::SceneEntity::is_static`.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Static;
+
+/// Marks an entity as locked in the editor: the Scene-view gizmo, batch
+/// transform, and hierarchy reparent-drag all skip it, so it can't be
+/// moved or re-parented by accident. View-only — no runtime effect.
+/// Round-trips through `engine_scene::SceneEntity::locked`.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Lock;
 
 /// An entity with a simulated rigid body in a
 /// [`engine_physics::PhysicsWorld`] — a handle into that world's
@@ -380,5 +746,27 @@ mod tests {
         let mut query = world.query::<&Sprite>();
         let sprite = query.single(&world).unwrap();
         assert_eq!(sprite.uv, uv);
+    }
+
+    #[test]
+    fn asset_source_carries_a_path_and_optional_id() {
+        let bare = AssetSource::new("props/barrel.gltf");
+        assert_eq!(bare.path, "props/barrel.gltf");
+        assert_eq!(bare.id, None);
+
+        let identified =
+            AssetSource::with_id("props/barrel.gltf", "3fa00000-0000-0000-0000-000000000000");
+        assert_eq!(identified.path, "props/barrel.gltf");
+        assert_eq!(
+            identified.id.as_deref(),
+            Some("3fa00000-0000-0000-0000-000000000000")
+        );
+        assert_eq!(
+            AssetSource::default(),
+            AssetSource {
+                path: String::new(),
+                id: None
+            }
+        );
     }
 }

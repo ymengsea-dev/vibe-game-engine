@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 tracing.workspace = true
 glam.workspace = true
+thiserror.workspace = true
 engine_core.workspace = true
 engine_platform.workspace = true
 engine_renderer.workspace = true
@@ -20,11 +21,21 @@ engine_physics.workspace = true
 engine_animation.workspace = true
 engine_audio.workspace = true
 engine_ui.workspace = true
-engine_editor.workspace = true
+engine_project.workspace = true
 engine_scripting.workspace = true
 engine_network.workspace = true
-engine_ai.workspace = true
 engine_utils.workspace = true
+
+# Editor-only subsystems. Off with `default-features = false` so a
+# shipped runtime (e.g. `apps/player`) never compiles egui / wry / an AI
+# provider stack (NFR-004).
+engine_editor = { workspace = true, optional = true }
+engine_ai = { workspace = true, optional = true }
+
+[features]
+default = ["studio"]
+# The editor-facing surface: the `editor` and `ai` re-exports.
+studio = ["dep:engine_editor", "dep:engine_ai"]
 
 [lints]
 workspace = true

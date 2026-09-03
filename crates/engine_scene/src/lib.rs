@@ -29,11 +29,13 @@ mod io;
 mod migration;
 mod prefab;
 mod validate;
+mod world;
 
 pub use error::SceneError;
 pub use format::{
     AssetRef, CameraData, MeshRendererData, ProjectionData, Scene, SceneEntity, SpriteData,
     TransformData,
 };
+pub use io::write_atomic;
 pub use migration::CURRENT_SCENE_VERSION;
 pub use prefab::Prefab;

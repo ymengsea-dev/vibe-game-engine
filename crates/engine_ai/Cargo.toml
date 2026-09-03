@@ -1,6 +1,6 @@
 [package]
 name = "engine_ai"
-description = "AI integration layer: MCP server, editor commands, scene generation, and automated workflows."
+description = "Gameplay AI: navigation grid, A* pathfinding, path smoothing, and path following."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,8 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+glam.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

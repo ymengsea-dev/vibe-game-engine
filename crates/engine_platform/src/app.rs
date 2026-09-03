@@ -45,6 +45,26 @@ pub trait PlatformHandler {
     /// handling needs directly rather than through any intermediate
     /// representation.
     fn on_raw_window_event(&mut self, _window: &Window, _event: &WindowEvent) {}
+
+    /// Polled once per event-loop iteration (in `about_to_wait`, right
+    /// before the next redraw is requested). Returning `true` exits the
+    /// loop and closes the window — the only programmatic way out, since
+    /// [`PlatformHandler`]'s other methods never see the event loop
+    /// itself. Default: never exit (wait for the OS close request).
+    fn should_exit(&self) -> bool {
+        false
+    }
+
+    /// Called when the OS asks the window to close (title-bar close
+    /// button, `Cmd`/`Alt`+`F4`, ...). Return `true` to let the event
+    /// loop exit now, `false` to keep running — e.g. to show an "unsaved
+    /// changes" prompt first and exit later via
+    /// [`PlatformHandler::should_exit`]. [`PlatformHandler::on_event`]
+    /// still receives the [`crate::event::PlatformEvent::CloseRequested`]
+    /// beforehand either way. Default: `true` (close immediately).
+    fn on_close_requested(&mut self) -> bool {
+        true
+    }
 }
 
 /// Internal [`ApplicationHandler`] implementation that owns the window and
@@ -97,12 +117,24 @@ impl<H: PlatformHandler> ApplicationHandler for Runner<H> {
             return;
         };
         if mapped == crate::event::PlatformEvent::CloseRequested {
-            event_loop.exit();
+            self.handler.on_event(mapped);
+            // The handler may veto the close (e.g. to prompt about unsaved
+            // work); it can then exit later via `should_exit`.
+            if self.handler.on_close_requested() {
+                event_loop.exit();
+            }
+            return;
         }
         self.handler.on_event(mapped);
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // A handler that has decided it's done (e.g. a game calling
+        // `request_exit`) — the only programmatic way out of the loop.
+        if self.handler.should_exit() {
+            event_loop.exit();
+            return;
+        }
         // Drives a continuous render loop: ask for another redraw as soon
         // as the event queue is drained. Presentation pacing (vsync) comes
         // from the surface's present mode, not from throttling here.
@@ -164,5 +196,26 @@ pub fn run_windowed(
     match runner.pending_error {
         Some(err) => Err(err),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StubHandler;
+    impl PlatformHandler for StubHandler {
+        fn on_window_ready(&mut self, _window: Arc<Window>) {}
+        fn on_event(&mut self, _event: crate::event::PlatformEvent) {}
+    }
+
+    #[test]
+    fn default_handler_never_exits_and_allows_close() {
+        let mut handler = StubHandler;
+        assert!(!handler.should_exit());
+        assert!(
+            handler.on_close_requested(),
+            "the default must let the OS close the window"
+        );
     }
 }

@@ -1,6 +1,9 @@
 //! Vertex format, GPU mesh buffers, and built-in reference geometry
 //! ([`cube`] for 3D, [`quad`] for 2D sprites).
 
+use glam::Vec3;
+
+use crate::bounds::Aabb;
 use crate::error::RendererError;
 use crate::gpu::GpuContext;
 
@@ -36,20 +39,42 @@ impl Vertex {
     }
 }
 
-/// A GPU-resident mesh: a vertex buffer, an index buffer, and how many
-/// indices to draw.
+/// A GPU-resident mesh: a vertex buffer, an index buffer, how many
+/// vertices/indices it holds, and the object-space bounds of its geometry.
 pub struct Mesh {
     /// Packed [`Vertex`] data.
     pub vertex_buffer: wgpu::Buffer,
     /// `u32` triangle-list indices into `vertex_buffer`.
     pub index_buffer: wgpu::Buffer,
+    /// Number of vertices in `vertex_buffer`. Fixed for the mesh's
+    /// lifetime — [`GpuContext::write_mesh_vertices`] rewrites the buffer
+    /// contents but can't resize it.
+    pub vertex_count: u32,
     /// Number of indices to draw (`index_buffer` holds exactly this many
     /// `u32`s).
     pub index_count: u32,
+    /// The tightest [`Aabb`] around this mesh's vertex positions, in
+    /// object space. Computed at upload from the same `vertices` slice the
+    /// buffers are built from (and recomputed by
+    /// [`GpuContext::write_mesh_vertices`]); transformed by an entity's
+    /// model matrix each frame ([`Aabb::transformed`]) to get its
+    /// world-space extent for frustum culling.
+    pub local_bounds: Aabb,
+}
+
+/// The tightest [`Aabb`] around `vertices`' positions, or a zero-size box
+/// at the origin if `vertices` is empty (callers reject empty meshes
+/// before this).
+fn bounds_of(vertices: &[Vertex]) -> Aabb {
+    Aabb::from_points(vertices.iter().map(|v| Vec3::from(v.position))).unwrap_or(Aabb {
+        min: Vec3::ZERO,
+        max: Vec3::ZERO,
+    })
 }
 
 impl GpuContext {
-    /// Uploads `vertices`/`indices` as a new GPU-resident [`Mesh`].
+    /// Uploads `vertices`/`indices` as a new GPU-resident [`Mesh`] whose
+    /// vertex buffer is immutable after creation.
     ///
     /// # Errors
     ///
@@ -63,18 +88,97 @@ impl GpuContext {
         vertices: &[Vertex],
         indices: &[u32],
     ) -> Result<Mesh, RendererError> {
+        self.create_mesh_impl(label, vertices, indices, wgpu::BufferUsages::VERTEX)
+    }
+
+    /// Like [`GpuContext::create_mesh`], but the vertex buffer also gets
+    /// `COPY_DST` so its contents can be rewritten in place later with
+    /// [`GpuContext::write_mesh_vertices`] — for meshes that change every
+    /// few frames without changing vertex count, e.g. a sculpted
+    /// [`crate::Heightmap`]'s terrain mesh.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RendererError::EmptyMesh`] if either slice is empty.
+    pub fn create_mesh_dynamic(
+        &self,
+        label: &str,
+        vertices: &[Vertex],
+        indices: &[u32],
+    ) -> Result<Mesh, RendererError> {
+        self.create_mesh_impl(
+            label,
+            vertices,
+            indices,
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        )
+    }
+
+    fn create_mesh_impl(
+        &self,
+        label: &str,
+        vertices: &[Vertex],
+        indices: &[u32],
+        vertex_usage: wgpu::BufferUsages,
+    ) -> Result<Mesh, RendererError> {
+        use wgpu::util::DeviceExt;
+
         if vertices.is_empty() || indices.is_empty() {
             return Err(RendererError::EmptyMesh);
         }
 
-        let vertex_buffer = self.create_vertex_buffer(&format!("{label} vertices"), vertices);
+        let local_bounds = bounds_of(vertices);
+
+        let vertex_buffer = self
+            .device()
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{label} vertices")),
+                contents: bytemuck::cast_slice(vertices),
+                usage: vertex_usage,
+            });
         let index_buffer = self.create_index_buffer(&format!("{label} indices"), indices);
 
         Ok(Mesh {
             vertex_buffer,
             index_buffer,
+            vertex_count: vertices.len() as u32,
             index_count: indices.len() as u32,
+            local_bounds,
         })
+    }
+
+    /// Rewrites `mesh`'s vertex buffer in place with `vertices` and
+    /// recomputes its [`Mesh::local_bounds`]. `mesh` must have been created
+    /// with [`GpuContext::create_mesh_dynamic`].
+    ///
+    /// The index buffer is untouched — this is for meshes whose topology
+    /// is fixed and only vertex positions/normals move (terrain sculpting).
+    ///
+    /// # Errors
+    ///
+    /// - [`RendererError::EmptyMesh`] if `vertices` is empty.
+    /// - [`RendererError::MeshVertexCountMismatch`] if `vertices.len()`
+    ///   differs from `mesh.vertex_count` — an in-place write can't resize
+    ///   the buffer.
+    pub fn write_mesh_vertices(
+        &self,
+        mesh: &mut Mesh,
+        vertices: &[Vertex],
+    ) -> Result<(), RendererError> {
+        if vertices.is_empty() {
+            return Err(RendererError::EmptyMesh);
+        }
+        if vertices.len() as u32 != mesh.vertex_count {
+            return Err(RendererError::MeshVertexCountMismatch {
+                expected: mesh.vertex_count,
+                got: vertices.len() as u32,
+            });
+        }
+
+        self.queue()
+            .write_buffer(&mesh.vertex_buffer, 0, bytemuck::cast_slice(vertices));
+        mesh.local_bounds = bounds_of(vertices);
+        Ok(())
     }
 }
 
@@ -202,16 +306,6 @@ pub fn quad() -> (Vec<Vertex>, Vec<u32>) {
 }
 
 impl GpuContext {
-    fn create_vertex_buffer(&self, label: &str, vertices: &[Vertex]) -> wgpu::Buffer {
-        use wgpu::util::DeviceExt;
-        self.device()
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytemuck::cast_slice(vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-    }
-
     fn create_index_buffer(&self, label: &str, indices: &[u32]) -> wgpu::Buffer {
         use wgpu::util::DeviceExt;
         self.device()
@@ -302,5 +396,25 @@ mod tests {
         let vs: Vec<f32> = vertices.iter().map(|v| v.uv[1]).collect();
         assert!(us.contains(&0.0) && us.contains(&1.0));
         assert!(vs.contains(&0.0) && vs.contains(&1.0));
+    }
+
+    // `create_mesh` needs a live GPU device, but the `local_bounds` it
+    // stores is exactly `super::bounds_of` over the vertex positions —
+    // exercise that computation directly on the built-in geometry.
+
+    #[test]
+    fn cube_local_bounds_are_the_unit_extents() {
+        let (vertices, _) = cube();
+        let bounds = bounds_of(&vertices);
+        assert_eq!(bounds.min, Vec3::splat(-0.5));
+        assert_eq!(bounds.max, Vec3::splat(0.5));
+    }
+
+    #[test]
+    fn quad_local_bounds_are_flat_on_z() {
+        let (vertices, _) = quad();
+        let bounds = bounds_of(&vertices);
+        assert_eq!(bounds.min, Vec3::new(-0.5, -0.5, 0.0));
+        assert_eq!(bounds.max, Vec3::new(0.5, 0.5, 0.0));
     }
 }

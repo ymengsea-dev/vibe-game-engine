@@ -1,0 +1,19 @@
+[package]
+name = "editor_lsp"
+description = "rust-analyzer LSP bridge for RustyEngine Studio: spawns the server, syncs open documents, and surfaces diagnostics."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+lsp-types = { workspace = true }
+
+[lints]
+workspace = true

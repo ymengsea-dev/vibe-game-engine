@@ -2,6 +2,8 @@
 
 use glam::{Mat4, Vec3};
 
+use crate::bounds::Frustum;
+
 /// A camera's projection: perspective (3D, with foreshortening) or
 /// orthographic (2D/isometric, none — object size on screen is
 /// independent of depth).
@@ -136,6 +138,28 @@ impl Camera {
     /// into clip space.
     pub fn view_projection_matrix(&self) -> Mat4 {
         self.projection_matrix() * self.view_matrix()
+    }
+
+    /// This camera's world-space view [`Frustum`], for culling geometry
+    /// that lies outside what the camera can see.
+    ///
+    /// Derived from [`Camera::view_projection_matrix`], so it reflects the
+    /// current `eye`/`target`/`projection`/`near`/`far` — rebuild it any
+    /// frame the camera moves.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use engine_renderer::{Aabb, Camera};
+    /// use glam::Vec3;
+    ///
+    /// let camera = Camera::new(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO, 1.0);
+    /// let frustum = camera.frustum();
+    /// let at_target = Aabb { min: Vec3::splat(-0.5), max: Vec3::splat(0.5) };
+    /// assert!(frustum.intersects_aabb(&at_target));
+    /// ```
+    pub fn frustum(&self) -> Frustum {
+        Frustum::from_view_projection(&self.view_projection_matrix())
     }
 
     /// This camera's view-projection matrix and world-space position,
