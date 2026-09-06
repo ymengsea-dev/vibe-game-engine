@@ -17,6 +17,8 @@ serde_json.workspace = true
 # pulls `engine_editor` without this feature, so runtime builds
 # (game -> engine) stay free of the PTY stack (NFR-004).
 engine_editor = { workspace = true, features = ["terminal"] }
+# Native file dialog for Assets > Import.
+rfd.workspace = true
 
 [lints]
 workspace = true

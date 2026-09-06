@@ -157,7 +157,8 @@ impl GpuContext {
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: None,
+            // Opaque instanced geometry — same depth rules as static meshes.
+            depth_stencil: Some(crate::pipeline::opaque_depth_state()),
             // Matches the other scene-pass pipelines — see
             // `GpuContext::scene_multisample_state`.
             multisample: self.scene_multisample_state(),

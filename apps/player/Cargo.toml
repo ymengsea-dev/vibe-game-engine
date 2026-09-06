@@ -14,10 +14,11 @@ path = "src/main.rs"
 
 [dependencies]
 # Declared directly (not inherited) so `default-features = false` is
-# allowed — that drops the `studio` feature, keeping the editor and AI
-# subsystems out of a shipped runtime (NFR-004).
+# allowed — that drops the `studio` feature, keeping the editor out of a
+# shipped runtime (NFR-004). Navigation (`engine_ai`) is unconditional:
+# it is gameplay, and a shipped game needs to pathfind.
 engine = { path = "../../crates/engine", default-features = false }
-wgpu.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 

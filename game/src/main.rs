@@ -474,6 +474,7 @@ impl GameHandler {
             base_color_factor: [0.6, 1.0, 0.6, 1.0],
             metallic_factor: 0.0,
             roughness_factor: 0.8,
+            ..Material::DEFAULT
         };
         let parent_renderer = ecs_components::MeshRenderer::new(
             &gpu,
@@ -499,6 +500,7 @@ impl GameHandler {
             base_color_factor: [1.0, 0.5, 0.5, 1.0],
             metallic_factor: 1.0,
             roughness_factor: 0.3,
+            ..Material::DEFAULT
         };
         let child_renderer = ecs_components::MeshRenderer::with_mesh(
             &gpu,
@@ -535,6 +537,7 @@ impl GameHandler {
             base_color_factor: [0.7, 0.7, 0.75, 1.0],
             metallic_factor: 0.0,
             roughness_factor: 0.9,
+            ..Material::DEFAULT
         };
         let ground_renderer = ecs_components::MeshRenderer::with_mesh(
             &gpu,
@@ -575,6 +578,7 @@ impl GameHandler {
             base_color_factor: [0.4, 0.6, 1.0, 1.0],
             metallic_factor: 0.2,
             roughness_factor: 0.5,
+            ..Material::DEFAULT
         };
         let falling_renderer = ecs_components::MeshRenderer::with_mesh(
             &gpu,
@@ -622,6 +626,7 @@ impl GameHandler {
             base_color_factor: [0.9, 0.9, 0.3, 1.0],
             metallic_factor: 0.0,
             roughness_factor: 0.6,
+            ..Material::DEFAULT
         };
         let player_renderer = ecs_components::MeshRenderer::with_mesh(
             &gpu,
@@ -677,6 +682,7 @@ impl GameHandler {
             base_color_factor: [0.8, 0.7, 1.0, 1.0],
             metallic_factor: 0.1,
             roughness_factor: 0.5,
+            ..Material::DEFAULT
         };
         let bar_renderer = ecs_components::SkinnedMeshRenderer::new(
             &gpu,
@@ -715,6 +721,7 @@ impl GameHandler {
             base_color_factor: [0.5, 0.85, 1.0, 1.0],
             metallic_factor: 0.0,
             roughness_factor: 0.7,
+            ..Material::DEFAULT
         };
         let mut grid_instances = Vec::with_capacity(64);
         for gx in 0..8 {
@@ -781,6 +788,7 @@ impl GameHandler {
                 base_color_factor: [0.42, 0.58, 0.33, 1.0],
                 metallic_factor: 0.0,
                 roughness_factor: 0.95,
+                ..Material::DEFAULT
             }
             .into(),
         );
@@ -862,6 +870,7 @@ impl GameHandler {
                 base_color_factor: [0.35, 0.7, 0.28, 1.0],
                 metallic_factor: 0.0,
                 roughness_factor: 1.0,
+                ..Material::DEFAULT
             },
             blades,
         );
@@ -905,6 +914,7 @@ impl GameHandler {
                 base_color_factor: [0.5, 0.5, 0.52, 1.0],
                 metallic_factor: 0.0,
                 roughness_factor: 0.9,
+                ..Material::DEFAULT
             },
             rocks,
         );
@@ -935,6 +945,7 @@ impl GameHandler {
                 base_color_factor: [0.55, 0.4, 0.35, 1.0],
                 metallic_factor: 0.0,
                 roughness_factor: 0.85,
+                ..Material::DEFAULT
             }
             .into(),
         );
@@ -974,6 +985,7 @@ impl GameHandler {
                 base_color_factor: [0.2, 0.85, 0.95, 1.0],
                 metallic_factor: 0.1,
                 roughness_factor: 0.4,
+                ..Material::DEFAULT
             },
         );
         let walker = ecs
@@ -1032,6 +1044,7 @@ impl GameHandler {
                 base_color_factor: [1.0, 0.8, 0.4, 1.0],
                 metallic_factor: 0.1,
                 roughness_factor: 0.6,
+                ..Material::DEFAULT
             }
             .into(),
         );
@@ -1557,8 +1570,13 @@ impl PlatformHandler for GameHandler {
                     &scene.skinned_pipeline,
                     &scene.instanced_pipeline,
                     debug_lines,
+                    // A 3D demo: no sprites, so no atlas to bind.
+                    None,
                     particles,
                     Some((&scene.vegetation_pipeline, &scene.wind_binding)),
+                    // This demo hand-wires its own loop and has no UI
+                    // tree; the runtime UI pass belongs to `run_game`.
+                    None,
                 ) {
                     Ok(stats) => tracing::trace!(
                         total = stats.meshes_total,
@@ -1578,7 +1596,9 @@ impl PlatformHandler for GameHandler {
             PlatformEvent::KeyboardInput { .. }
             | PlatformEvent::MouseButtonInput { .. }
             | PlatformEvent::CursorMoved { .. }
-            | PlatformEvent::MouseWheel { .. } => {}
+            | PlatformEvent::MouseWheel { .. }
+            // Accepting dropped files is the editor's job, not a game's.
+            | PlatformEvent::FileDropped { .. } => {}
         }
     }
 }

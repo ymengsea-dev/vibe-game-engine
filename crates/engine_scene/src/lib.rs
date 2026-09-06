@@ -23,14 +23,18 @@
 //! [`SceneEntity`] shape as a reusable entity template, instantiable into
 //! a live `World` any number of times.
 
+mod capture;
 mod error;
 mod format;
 mod io;
 mod migration;
 mod prefab;
+mod resolve;
+mod save;
 mod validate;
 mod world;
 
+pub use capture::capture_renderables;
 pub use error::SceneError;
 pub use format::{
     AssetRef, CameraData, MeshRendererData, ProjectionData, Scene, SceneEntity, SpriteData,
@@ -39,3 +43,5 @@ pub use format::{
 pub use io::write_atomic;
 pub use migration::CURRENT_SCENE_VERSION;
 pub use prefab::Prefab;
+pub use resolve::{InstantiateReport, NullResolver, SceneResolver};
+pub use save::{CURRENT_SAVE_VERSION, SaveGame, SavedEntity, WorldSnapshot};

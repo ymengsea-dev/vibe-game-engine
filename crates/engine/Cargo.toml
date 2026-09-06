@@ -25,17 +25,19 @@ engine_project.workspace = true
 engine_scripting.workspace = true
 engine_network.workspace = true
 engine_utils.workspace = true
+# Unconditional: navigation is gameplay, not tooling. It is grid A* with
+# no editor dependency, and a shipped game needs to pathfind (T-10).
+engine_ai.workspace = true
 
 # Editor-only subsystems. Off with `default-features = false` so a
-# shipped runtime (e.g. `apps/player`) never compiles egui / wry / an AI
-# provider stack (NFR-004).
+# shipped runtime (e.g. `apps/player`) never compiles egui / wry
+# (NFR-004).
 engine_editor = { workspace = true, optional = true }
-engine_ai = { workspace = true, optional = true }
 
 [features]
 default = ["studio"]
-# The editor-facing surface: the `editor` and `ai` re-exports.
-studio = ["dep:engine_editor", "dep:engine_ai"]
+# The editor-facing surface: the `editor` re-export.
+studio = ["dep:engine_editor"]
 
 [lints]
 workspace = true

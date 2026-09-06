@@ -403,6 +403,7 @@ mod tests {
             region: "0_0".to_string(),
             size: [1.0, 1.0],
             color: [1.0, 1.0, 1.0, 1.0],
+            z_order: 0.0,
         }
     }
 

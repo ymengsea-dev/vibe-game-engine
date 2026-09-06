@@ -36,4 +36,25 @@ pub use kira::Tween;
 pub use kira::listener::ListenerHandle;
 pub use kira::track::SpatialTrackHandle;
 pub use mixer::Bus;
+
+/// Moves and re-aims a listener.
+///
+/// Thin wrappers over the kira handle so callers that only need to keep a
+/// listener in sync with a transform (the ECS audio pass, chiefly) don't
+/// have to reach into kira directly.
+pub fn set_listener_pose(
+    listener: &mut ListenerHandle,
+    position: glam::Vec3,
+    orientation: glam::Quat,
+    tween: Tween,
+) {
+    listener.set_position(position, tween);
+    listener.set_orientation(orientation, tween);
+}
+
+/// Moves a spatial track's emitter point.
+pub fn set_track_position(track: &mut SpatialTrackHandle, position: glam::Vec3, tween: Tween) {
+    track.set_position(position, tween);
+}
+
 pub use sound::{StaticSound, StreamingSound};

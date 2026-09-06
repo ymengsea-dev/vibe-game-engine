@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 
 use engine_ecs::components::{AssetSource, Camera, Disabled, Name, Static, Transform};
 use engine_ecs::prelude::{Entity, World};
-use engine_scene::{CameraData, Prefab, SceneEntity, SceneError, TransformData};
+use engine_scene::{
+    CameraData, Prefab, SceneEntity, SceneError, TransformData, capture_renderables,
+};
 
 use crate::error::EditorError;
 
@@ -47,6 +49,9 @@ pub fn capture(world: &World, entity: Entity) -> Result<Prefab, EditorError> {
         return Err(EditorError::PrefabEntityMissing);
     }
     let asset_source = world.get::<AssetSource>(entity);
+    // Shared with `Scene::from_world` so a prefab and a scene capture the
+    // same entity identically — these were divergent copies before T-02.
+    let (mesh_renderer, sprite) = capture_renderables(world, entity);
     let scene_entity = SceneEntity {
         name: world.get::<Name>(entity).map(|name| name.0.clone()),
         transform: world
@@ -59,6 +64,8 @@ pub fn capture(world: &World, entity: Entity) -> Result<Prefab, EditorError> {
         asset_id: asset_source.and_then(|source| source.id.clone()),
         disabled: world.get::<Disabled>(entity).is_some(),
         is_static: world.get::<Static>(entity).is_some(),
+        mesh_renderer,
+        sprite,
         ..Default::default()
     };
     Ok(Prefab::new(scene_entity))
@@ -149,6 +156,39 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn capture_includes_renderable_references() {
+        // Same carrier components `Scene::from_world` reads, via the
+        // shared `capture_renderables` helper — a prefab and a scene must
+        // capture the same entity identically.
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                Name::new("Crate"),
+                engine_ecs::components::MeshSource::new(
+                    "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                    "9c858901-8a57-4791-81fe-4c455b099bc9",
+                ),
+            ))
+            .id();
+
+        let prefab = capture(&world, entity).expect("capture should succeed");
+
+        let mesh_renderer = prefab
+            .entity()
+            .mesh_renderer
+            .as_ref()
+            .expect("prefabs must carry their mesh reference");
+        assert_eq!(
+            mesh_renderer.mesh.id,
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        );
+        assert_eq!(
+            mesh_renderer.material.id,
+            "9c858901-8a57-4791-81fe-4c455b099bc9"
+        );
     }
 
     #[test]

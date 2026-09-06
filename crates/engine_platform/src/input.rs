@@ -9,6 +9,10 @@
 use std::collections::HashSet;
 
 use crate::event::{KeyCode, MouseButton, PlatformEvent};
+use crate::gamepad::{
+    DEFAULT_DEADZONE, GamepadAxes, GamepadAxis, GamepadButton, GamepadUpdate, Stick,
+    apply_axis_deadzone, apply_radial_deadzone,
+};
 
 /// Accumulated keyboard/mouse input state for one frame.
 #[derive(Debug, Clone, Default)]
@@ -21,12 +25,105 @@ pub struct InputState {
     released_buttons: HashSet<MouseButton>,
     cursor_position: Option<(f64, f64)>,
     scroll_delta: (f32, f32),
+
+    held_gamepad: HashSet<GamepadButton>,
+    pressed_gamepad: HashSet<GamepadButton>,
+    released_gamepad: HashSet<GamepadButton>,
+    gamepad_axes: GamepadAxes,
+    connected_gamepads: usize,
+    deadzone: f32,
 }
 
 impl InputState {
-    /// An empty input state (nothing held, no cursor position yet).
+    /// An empty input state (nothing held, no cursor position yet), with
+    /// the default stick deadzone.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            deadzone: DEFAULT_DEADZONE,
+            ..Self::default()
+        }
+    }
+
+    /// Merges one frame's gamepad poll into this state.
+    ///
+    /// Call once per frame alongside [`InputState::apply_event`], before
+    /// querying. Every connected pad merges into one state — see the
+    /// `gamepad` module docs.
+    pub fn apply_gamepad(&mut self, update: &GamepadUpdate) {
+        for &button in &update.pressed {
+            self.pressed_gamepad.insert(button);
+            self.held_gamepad.insert(button);
+        }
+        for &button in &update.released {
+            self.held_gamepad.remove(&button);
+            self.released_gamepad.insert(button);
+        }
+        self.gamepad_axes = update.axes;
+        self.connected_gamepads = update.connected;
+
+        // Nothing plugged in means nothing held. Without this, unplugging
+        // a pad mid-press leaves the button stuck down forever.
+        if update.connected == 0 {
+            for button in self.held_gamepad.drain() {
+                self.released_gamepad.insert(button);
+            }
+        }
+    }
+
+    /// How many gamepads are currently connected.
+    pub fn connected_gamepads(&self) -> usize {
+        self.connected_gamepads
+    }
+
+    /// The stick deadzone, as a fraction of full deflection.
+    pub fn deadzone(&self) -> f32 {
+        self.deadzone
+    }
+
+    /// Sets the stick deadzone. Clamped to a sane range — a deadzone of
+    /// `1.0` would make the stick unusable.
+    pub fn set_deadzone(&mut self, deadzone: f32) {
+        self.deadzone = if deadzone.is_finite() {
+            deadzone.clamp(0.0, 0.9)
+        } else {
+            DEFAULT_DEADZONE
+        };
+    }
+
+    /// Whether `button` is currently down on any connected pad.
+    pub fn is_button_held(&self, button: GamepadButton) -> bool {
+        self.held_gamepad.contains(&button)
+    }
+
+    /// Whether `button` went down this frame. True for exactly one frame
+    /// per press.
+    pub fn is_button_pressed(&self, button: GamepadButton) -> bool {
+        self.pressed_gamepad.contains(&button)
+    }
+
+    /// Whether `button` came up this frame.
+    pub fn is_button_released(&self, button: GamepadButton) -> bool {
+        self.released_gamepad.contains(&button)
+    }
+
+    /// One axis's value with the deadzone applied.
+    ///
+    /// For a thumbstick prefer [`InputState::stick`], which deadzones the
+    /// pair together — see `apply_radial_deadzone` for why that matters.
+    pub fn axis(&self, axis: GamepadAxis) -> f32 {
+        apply_axis_deadzone(self.gamepad_axes.get(axis), self.deadzone)
+    }
+
+    /// A thumbstick as an `(x, y)` pair, radially deadzoned.
+    ///
+    /// `(0.0, 0.0)` when the stick is at rest or nothing is connected.
+    pub fn stick(&self, stick: Stick) -> (f32, f32) {
+        let (x_axis, y_axis) = stick.axes();
+        apply_radial_deadzone(
+            self.gamepad_axes.get(x_axis),
+            self.gamepad_axes.get(y_axis),
+            self.deadzone,
+        )
     }
 
     /// Feeds one platform event into the accumulated state.
@@ -67,9 +164,11 @@ impl InputState {
                 self.scroll_delta.0 += delta_x;
                 self.scroll_delta.1 += delta_y;
             }
+            // Nothing here tracks window lifecycle or file drops.
             PlatformEvent::Resized { .. }
             | PlatformEvent::RedrawRequested
-            | PlatformEvent::CloseRequested => {}
+            | PlatformEvent::CloseRequested
+            | PlatformEvent::FileDropped { .. } => {}
         }
     }
 
@@ -84,6 +183,8 @@ impl InputState {
         self.released_keys.clear();
         self.pressed_buttons.clear();
         self.released_buttons.clear();
+        self.pressed_gamepad.clear();
+        self.released_gamepad.clear();
         self.scroll_delta = (0.0, 0.0);
     }
 
@@ -250,5 +351,127 @@ mod tests {
         input.apply_event(&PlatformEvent::CloseRequested);
         assert_eq!(input.cursor_position(), None);
         assert_eq!(input.scroll_delta(), (0.0, 0.0));
+    }
+
+    // --- T-09: gamepad state ----------------------------------------
+
+    fn update_with(pressed: &[GamepadButton], released: &[GamepadButton]) -> GamepadUpdate {
+        GamepadUpdate {
+            pressed: pressed.iter().copied().collect(),
+            released: released.iter().copied().collect(),
+            axes: GamepadAxes::default(),
+            connected: 1,
+            topology_changed: false,
+        }
+    }
+
+    #[test]
+    fn button_pressed_is_edge_triggered_for_one_frame() {
+        let mut input = InputState::new();
+        input.apply_gamepad(&update_with(&[GamepadButton::South], &[]));
+
+        assert!(input.is_button_pressed(GamepadButton::South));
+        assert!(input.is_button_held(GamepadButton::South));
+
+        input.end_frame();
+        assert!(
+            !input.is_button_pressed(GamepadButton::South),
+            "pressed must be true for exactly one frame",
+        );
+        assert!(
+            input.is_button_held(GamepadButton::South),
+            "but it is still held until released",
+        );
+    }
+
+    #[test]
+    fn releasing_clears_held_and_reports_the_edge() {
+        let mut input = InputState::new();
+        input.apply_gamepad(&update_with(&[GamepadButton::South], &[]));
+        input.end_frame();
+        input.apply_gamepad(&update_with(&[], &[GamepadButton::South]));
+
+        assert!(input.is_button_released(GamepadButton::South));
+        assert!(!input.is_button_held(GamepadButton::South));
+    }
+
+    #[test]
+    fn disconnect_releases_everything_that_was_held() {
+        let mut input = InputState::new();
+        input.apply_gamepad(&update_with(&[GamepadButton::South], &[]));
+        input.end_frame();
+
+        // The pad goes away mid-press.
+        input.apply_gamepad(&GamepadUpdate {
+            connected: 0,
+            ..GamepadUpdate::default()
+        });
+
+        assert!(
+            !input.is_button_held(GamepadButton::South),
+            "an unplugged pad must not leave a button stuck down",
+        );
+        assert!(input.is_button_released(GamepadButton::South));
+        assert_eq!(input.connected_gamepads(), 0);
+    }
+
+    #[test]
+    fn disconnect_zeroes_axes() {
+        let mut axes = GamepadAxes::default();
+        axes.set(GamepadAxis::LeftStickX, 0.9);
+        let mut input = InputState::new();
+        input.apply_gamepad(&GamepadUpdate {
+            axes,
+            connected: 1,
+            ..GamepadUpdate::default()
+        });
+        assert!(input.axis(GamepadAxis::LeftStickX) > 0.0);
+
+        input.apply_gamepad(&GamepadUpdate {
+            connected: 0,
+            ..GamepadUpdate::default()
+        });
+        assert_eq!(
+            input.stick(Stick::Left),
+            (0.0, 0.0),
+            "a disconnected pad must not keep pushing the player",
+        );
+    }
+
+    #[test]
+    fn stick_drift_below_the_deadzone_reads_exactly_zero() {
+        let mut axes = GamepadAxes::default();
+        axes.set(GamepadAxis::LeftStickX, 0.04);
+        axes.set(GamepadAxis::LeftStickY, -0.06);
+        let mut input = InputState::new();
+        input.apply_gamepad(&GamepadUpdate {
+            axes,
+            connected: 1,
+            ..GamepadUpdate::default()
+        });
+        assert_eq!(input.stick(Stick::Left), (0.0, 0.0));
+    }
+
+    #[test]
+    fn deadzone_is_clamped_to_something_usable() {
+        let mut input = InputState::new();
+        input.set_deadzone(5.0);
+        assert!(
+            input.deadzone() <= 0.9,
+            "a deadzone of 1 would kill the stick"
+        );
+        input.set_deadzone(-1.0);
+        assert_eq!(input.deadzone(), 0.0);
+        input.set_deadzone(f32::NAN);
+        assert_eq!(input.deadzone(), DEFAULT_DEADZONE);
+    }
+
+    #[test]
+    fn no_gamepad_connected_is_silent_and_empty() {
+        let input = InputState::new();
+        assert_eq!(input.connected_gamepads(), 0);
+        assert!(!input.is_button_held(GamepadButton::South));
+        assert_eq!(input.stick(Stick::Left), (0.0, 0.0));
+        assert_eq!(input.axis(GamepadAxis::RightTrigger), 0.0);
     }
 }

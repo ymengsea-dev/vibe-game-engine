@@ -48,6 +48,68 @@ pub struct PointLight {
     pub range: f32,
 }
 
+/// Indirect light approximated as two hemispheres: one colour arriving
+/// from the sky above, another bounced up off the ground below, mixed by
+/// how much a surface faces up.
+///
+/// Not physically-based global illumination — it is the cheapest model
+/// that still separates "in shade outdoors" from "in a cave". Before
+/// this, the shader used a flat `albedo * 0.03`, which made every
+/// surface not hit by the sun read as near-black and was the single
+/// biggest reason scenes looked lifeless.
+///
+/// The blend is mirrored in `pbr_common.wgsl`; see
+/// [`AmbientLight::color_for_normal`], which is the CPU-side copy the
+/// tests exercise. **The two must be kept in step** — there is no
+/// compiler check tying them together.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AmbientLight {
+    /// Linear RGB arriving from straight up.
+    pub sky_color: Vec3,
+    /// Linear RGB bounced from straight down.
+    pub ground_color: Vec3,
+    /// Overall multiplier. `0.0` disables ambient entirely (every
+    /// unlit surface goes black).
+    pub intensity: f32,
+}
+
+impl AmbientLight {
+    /// Outdoor daylight: a cool sky above, a warm earth bounce below.
+    pub const DAYLIGHT: Self = Self {
+        sky_color: Vec3::new(0.45, 0.58, 0.75),
+        ground_color: Vec3::new(0.30, 0.26, 0.20),
+        intensity: 1.0,
+    };
+
+    /// No indirect light at all — everything outside a direct light's
+    /// reach renders black.
+    pub const NONE: Self = Self {
+        sky_color: Vec3::ZERO,
+        ground_color: Vec3::ZERO,
+        intensity: 0.0,
+    };
+
+    /// The ambient colour reaching a surface whose normal is `normal`.
+    ///
+    /// `normal.y` of `+1` (facing straight up) returns the full sky
+    /// colour, `-1` the full ground colour, `0` an even mix — scaled by
+    /// [`AmbientLight::intensity`].
+    ///
+    /// This is the CPU mirror of the WGSL in `pbr_common.wgsl`. Keep both
+    /// in step.
+    pub fn color_for_normal(&self, normal: Vec3) -> Vec3 {
+        let up_factor = (normal.normalize_or_zero().y * 0.5 + 0.5).clamp(0.0, 1.0);
+        self.ground_color.lerp(self.sky_color, up_factor) * self.intensity.max(0.0)
+    }
+}
+
+impl Default for AmbientLight {
+    /// [`AmbientLight::DAYLIGHT`].
+    fn default() -> Self {
+        Self::DAYLIGHT
+    }
+}
+
 /// The lights in a scene, ready to pack into a [`LightsUniform`].
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LightSet {
@@ -55,11 +117,19 @@ pub struct LightSet {
     pub directional: Vec<DirectionalLight>,
     /// Point lights.
     pub point: Vec<PointLight>,
+    /// Indirect light. Defaults to [`AmbientLight::DAYLIGHT`].
+    pub ambient: AmbientLight,
 }
 
 impl LightSet {
-    /// An empty light set (a scene with no lights — everything renders
-    /// black except emissive surfaces, once those exist).
+    /// A light set with no direct lights, lit only by
+    /// [`AmbientLight::DAYLIGHT`].
+    ///
+    /// Not fully black: a scene whose lights haven't been authored yet
+    /// reads as "outdoors in shade" rather than a void, which is almost
+    /// always what someone wants while building one. Set
+    /// [`LightSet::ambient`] to [`AmbientLight::NONE`] for genuine
+    /// darkness.
     pub fn new() -> Self {
         Self::default()
     }
@@ -88,6 +158,10 @@ impl LightSet {
             _padding: [0; 2],
             directional_lights,
             point_lights,
+            ambient_sky: self.ambient.sky_color.to_array(),
+            ambient_intensity: self.ambient.intensity.max(0.0),
+            ambient_ground: self.ambient.ground_color.to_array(),
+            _padding1: 0.0,
         }
     }
 }
@@ -188,6 +262,15 @@ pub struct LightsUniform {
     /// Point lights, `point_count` real entries followed by zeroed
     /// filler.
     pub point_lights: [PointLightUniform; MAX_POINT_LIGHTS],
+    /// See [`AmbientLight::sky_color`].
+    pub ambient_sky: [f32; 3],
+    /// See [`AmbientLight::intensity`]. Packed here to fill the `vec4`
+    /// `ambient_sky` would otherwise leave three-quarters used.
+    pub ambient_intensity: f32,
+    /// See [`AmbientLight::ground_color`].
+    pub ambient_ground: [f32; 3],
+    /// Padding only — keeps the struct a multiple of 16 bytes.
+    pub _padding1: f32,
 }
 
 impl LightsUniform {
@@ -198,6 +281,10 @@ impl LightsUniform {
         _padding: [0; 2],
         directional_lights: [DirectionalLightUniform::ZERO; MAX_DIRECTIONAL_LIGHTS],
         point_lights: [PointLightUniform::ZERO; MAX_POINT_LIGHTS],
+        ambient_sky: [0.0; 3],
+        ambient_intensity: 0.0,
+        ambient_ground: [0.0; 3],
+        _padding1: 0.0,
     };
 }
 
@@ -213,11 +300,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_light_set_uploads_zero_counts() {
+    fn empty_light_set_uploads_zero_counts_but_keeps_ambient() {
         let uniform = LightSet::new().to_uniform();
         assert_eq!(uniform.directional_count, 0);
         assert_eq!(uniform.point_count, 0);
-        assert_eq!(uniform, LightsUniform::NONE);
+        // Deliberately *not* `LightsUniform::NONE`: since T-20 an empty
+        // light set still carries daylight ambient, so a scene with no
+        // lights authored yet reads as "outdoors in shade" rather than
+        // pure black. `LightsUniform::NONE` remains the genuinely
+        // lightless value.
+        assert_eq!(uniform.ambient_intensity, AmbientLight::DAYLIGHT.intensity);
+        assert_eq!(
+            LightSet {
+                ambient: AmbientLight::NONE,
+                ..LightSet::new()
+            }
+            .to_uniform(),
+            LightsUniform::NONE,
+        );
     }
 
     #[test]
@@ -296,5 +396,106 @@ mod tests {
     #[test]
     fn lights_uniform_size_is_a_multiple_of_16_bytes() {
         assert_eq!(size_of::<LightsUniform>() % 16, 0);
+    }
+
+    // --- T-20: hemisphere ambient ----------------------------------
+
+    #[test]
+    fn hemisphere_ambient_blends_sky_to_ground_by_normal() {
+        let ambient = AmbientLight::DAYLIGHT;
+
+        let up = ambient.color_for_normal(Vec3::Y);
+        let down = ambient.color_for_normal(Vec3::NEG_Y);
+        let side = ambient.color_for_normal(Vec3::X);
+
+        assert!(
+            (up - AmbientLight::DAYLIGHT.sky_color).length() < 1e-5,
+            "straight up should be the pure sky colour",
+        );
+        assert!(
+            (down - AmbientLight::DAYLIGHT.ground_color).length() < 1e-5,
+            "straight down should be the pure ground colour",
+        );
+        let midpoint =
+            (AmbientLight::DAYLIGHT.sky_color + AmbientLight::DAYLIGHT.ground_color) / 2.0;
+        assert!(
+            (side - midpoint).length() < 1e-5,
+            "a horizontal normal should sit halfway between the two",
+        );
+    }
+
+    #[test]
+    fn zero_intensity_ambient_is_fully_dark() {
+        let ambient = AmbientLight {
+            intensity: 0.0,
+            ..AmbientLight::DAYLIGHT
+        };
+        for normal in [Vec3::Y, Vec3::NEG_Y, Vec3::X, Vec3::Z] {
+            assert_eq!(
+                ambient.color_for_normal(normal),
+                Vec3::ZERO,
+                "intensity 0 must remove indirect light entirely",
+            );
+        }
+        assert_eq!(AmbientLight::NONE.color_for_normal(Vec3::Y), Vec3::ZERO);
+    }
+
+    #[test]
+    fn negative_intensity_is_clamped_rather_than_inverting_light() {
+        let ambient = AmbientLight {
+            intensity: -5.0,
+            ..AmbientLight::DAYLIGHT
+        };
+        assert_eq!(ambient.color_for_normal(Vec3::Y), Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_zero_normal_does_not_produce_nan() {
+        let color = AmbientLight::DAYLIGHT.color_for_normal(Vec3::ZERO);
+        assert!(color.is_finite(), "a degenerate normal must stay finite");
+    }
+
+    #[test]
+    fn ambient_round_trips_through_the_lights_uniform() {
+        let mut lights = LightSet::new();
+        lights.ambient = AmbientLight {
+            sky_color: Vec3::new(0.1, 0.2, 0.3),
+            ground_color: Vec3::new(0.4, 0.5, 0.6),
+            intensity: 0.75,
+        };
+
+        let uniform = lights.to_uniform();
+
+        assert_eq!(uniform.ambient_sky, [0.1, 0.2, 0.3]);
+        assert_eq!(uniform.ambient_ground, [0.4, 0.5, 0.6]);
+        assert!((uniform.ambient_intensity - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn uniform_negative_intensity_is_clamped_on_upload() {
+        let mut lights = LightSet::new();
+        lights.ambient = AmbientLight {
+            intensity: -1.0,
+            ..AmbientLight::DAYLIGHT
+        };
+        assert_eq!(lights.to_uniform().ambient_intensity, 0.0);
+    }
+
+    #[test]
+    fn default_light_set_is_lit_by_daylight_ambient() {
+        assert_eq!(LightSet::new().ambient, AmbientLight::DAYLIGHT);
+        assert!(
+            AmbientLight::DAYLIGHT.color_for_normal(Vec3::Y).length() > 0.03,
+            "the default must be meaningfully brighter than the flat 0.03 it replaced",
+        );
+    }
+
+    #[test]
+    fn lights_uniform_is_16_byte_aligned() {
+        assert_eq!(
+            std::mem::size_of::<LightsUniform>() % 16,
+            0,
+            "a WGSL uniform struct must be a multiple of 16 bytes",
+        );
     }
 }

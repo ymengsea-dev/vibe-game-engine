@@ -164,9 +164,10 @@ pub struct ImportedAnimation {
 
 /// A glTF PBR metallic-roughness material's data.
 ///
-/// Data only: nothing in the current renderer pipeline consumes this yet
-/// (Milestone 6 adds a real material system) — extracted now so the
-/// importer doesn't need revisiting when that lands.
+/// Mirrors glTF 2.0's material fields one-for-one, so a converting
+/// caller never has to interpret. Emissive, alpha and the extra map
+/// indices were added in spec task T-15 alongside renderer support for
+/// them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportedMaterial {
     /// This material's name, if any.
@@ -180,6 +181,30 @@ pub struct ImportedMaterial {
     /// Index into [`ImportedGltf::images`] for the base color texture, if
     /// this material has one.
     pub base_color_image: Option<usize>,
+    /// Emissive colour factor (linear RGB).
+    pub emissive_factor: [f32; 3],
+    /// Index into [`ImportedGltf::images`] for the emissive map.
+    pub emissive_image: Option<usize>,
+    /// Index into [`ImportedGltf::images`] for the tangent-space normal
+    /// map.
+    pub normal_image: Option<usize>,
+    /// Normal-map strength, glTF's `normalTexture.scale`. `1.0` when the
+    /// material has no normal map.
+    pub normal_scale: f32,
+    /// Index into [`ImportedGltf::images`] for the occlusion map.
+    pub occlusion_image: Option<usize>,
+    /// Occlusion strength, glTF's `occlusionTexture.strength`. `1.0` when
+    /// the material has no occlusion map.
+    pub occlusion_strength: f32,
+    /// How this material's alpha should be interpreted: `"OPAQUE"`,
+    /// `"MASK"`, or `"BLEND"`, matching glTF's own spelling.
+    ///
+    /// A string rather than a typed enum because `engine_asset` has no
+    /// dependency on `engine_renderer` — the converting caller maps it to
+    /// `engine_renderer::AlphaMode`.
+    pub alpha_mode: &'static str,
+    /// Cutoff for `"MASK"`, glTF's `alphaCutoff`. Defaults to `0.5`.
+    pub alpha_cutoff: f32,
 }
 
 /// An embedded image, decoded to tightly-packed RGBA8 (ready for
@@ -346,6 +371,8 @@ pub fn import_gltf_slice(bytes: &[u8]) -> Result<ImportedGltf, AssetError> {
         .materials()
         .map(|material| {
             let pbr = material.pbr_metallic_roughness();
+            let normal = material.normal_texture();
+            let occlusion = material.occlusion_texture();
             ImportedMaterial {
                 name: material.name().map(String::from),
                 base_color_factor: pbr.base_color_factor(),
@@ -354,6 +381,20 @@ pub fn import_gltf_slice(bytes: &[u8]) -> Result<ImportedGltf, AssetError> {
                 base_color_image: pbr
                     .base_color_texture()
                     .map(|info| info.texture().source().index()),
+                emissive_factor: material.emissive_factor(),
+                emissive_image: material
+                    .emissive_texture()
+                    .map(|info| info.texture().source().index()),
+                normal_image: normal.as_ref().map(|n| n.texture().source().index()),
+                normal_scale: normal.as_ref().map_or(1.0, |n| n.scale()),
+                occlusion_image: occlusion.as_ref().map(|o| o.texture().source().index()),
+                occlusion_strength: occlusion.as_ref().map_or(1.0, |o| o.strength()),
+                alpha_mode: match material.alpha_mode() {
+                    gltf::material::AlphaMode::Opaque => "OPAQUE",
+                    gltf::material::AlphaMode::Mask => "MASK",
+                    gltf::material::AlphaMode::Blend => "BLEND",
+                },
+                alpha_cutoff: material.alpha_cutoff().unwrap_or(0.5),
             }
         })
         .collect();

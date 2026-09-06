@@ -18,7 +18,7 @@
 //! the caller steps separately) into [`components::Transform`], the same
 //! "plain function called explicitly by the app loop" shape
 //! [`render::extract_and_render`] uses for rendering.
-//! [`components::Sprite`]/[`render::extract_and_render_sprites`] are the
+//! [`components::Sprite`]/[`render::extract_sprites`] are the
 //! 2D counterpart: every `(GlobalTransform, Sprite)` entity batched into
 //! one instanced draw call per frame, not one `MeshRenderer`-style GPU
 //! binding per entity. [`components::MeshRenderer`] itself holds asset
@@ -44,6 +44,8 @@ use bevy_ecs::schedule::{IntoScheduleConfigs, Schedule, ScheduleLabel};
 use bevy_ecs::system::ScheduleSystem;
 use bevy_ecs::world::World;
 
+pub mod animation;
+pub mod audio;
 pub mod components;
 mod error;
 pub mod particles;
@@ -52,6 +54,8 @@ pub mod propagate;
 pub mod render;
 pub mod stages;
 
+pub use animation::{AnimationEvent, AnimationEvents, AnimationPlayer, update_animations};
+pub use audio::{AudioEmitter, AudioListener, update_audio};
 pub use error::EcsError;
 pub use particles::{
     BlendMode, ParticleEmitter, ParticleEmitterConfig, Rng, extract_particles, update_particles,
@@ -59,9 +63,9 @@ pub use particles::{
 pub use physics::sync_rigid_bodies;
 pub use propagate::propagate_transforms;
 pub use render::{
-    RenderStats, despawn_instanced_mesh_renderer, despawn_mesh_renderer,
+    RenderStats, SpriteTarget, despawn_instanced_mesh_renderer, despawn_mesh_renderer,
     despawn_skinned_mesh_renderer, despawn_vegetation_renderer, extract_and_render,
-    extract_and_render_sprites,
+    extract_and_render_to, extract_sprites,
 };
 
 /// Re-exports the `bevy_ecs` prelude, plus [`Ecs`], the core components,
@@ -79,7 +83,7 @@ pub mod prelude {
     pub use crate::despawn_mesh_renderer;
     pub use crate::despawn_skinned_mesh_renderer;
     pub use crate::despawn_vegetation_renderer;
-    pub use crate::extract_and_render_sprites;
+    pub use crate::extract_sprites;
     pub use crate::particles::ParticleEmitter;
     pub use crate::propagate_transforms;
     pub use crate::stages::{RenderExtract, Update};

@@ -15,6 +15,9 @@ glam.workspace = true
 engine_utils.workspace = true
 engine_renderer.workspace = true
 engine_physics.workspace = true
+engine_audio.workspace = true
+engine_animation.workspace = true
+engine_asset.workspace = true
 
 [lints]
 workspace = true

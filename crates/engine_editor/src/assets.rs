@@ -53,6 +53,14 @@ pub enum AssetKind {
 }
 
 impl AssetKind {
+    /// The kind implied by `path`'s extension, or [`AssetKind::Other`]
+    /// if it has none this editor recognizes.
+    pub fn from_path(path: &std::path::Path) -> Self {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map_or(Self::Other, Self::from_extension)
+    }
+
     fn from_extension(extension: &str) -> Self {
         match extension.to_ascii_lowercase().as_str() {
             "gltf" | "glb" => Self::Mesh,

@@ -10,15 +10,17 @@
 //! than duplicating it. No caller-visible per-frame bookkeeping to keep in
 //! sync.
 //!
-//! Keyboard and mouse buttons only — [`crate::PlatformEvent`] doesn't
-//! surface gamepad input yet, so there's nothing else to bind to. No
-//! analog axes either: every query here is a boolean, matching
-//! [`InputState`]'s own held/pressed/released queries.
+//! Covers keyboard, mouse and gamepad buttons, plus **analog axes**:
+//! [`AxisBinding`] lets one action read a thumbstick *or* a pair of keys
+//! and return the same number either way. That is what makes a game
+//! playable on both a keyboard and a pad without branching in gameplay
+//! code — `map.axis(MoveX, input)` does not care which is plugged in.
 
 use std::collections::HashMap;
 use std::hash::Hash;
 
 use crate::event::{KeyCode, MouseButton};
+use crate::gamepad::{GamepadAxis, GamepadButton, Stick};
 use crate::input::InputState;
 
 /// One raw input that can trigger an action.
@@ -28,6 +30,8 @@ pub enum Binding {
     Key(KeyCode),
     /// A mouse button.
     MouseButton(MouseButton),
+    /// A gamepad button on any connected pad.
+    GamepadButton(GamepadButton),
 }
 
 impl Binding {
@@ -35,6 +39,7 @@ impl Binding {
         match self {
             Self::Key(key) => input.is_key_held(key),
             Self::MouseButton(button) => input.is_mouse_button_held(button),
+            Self::GamepadButton(button) => input.is_button_held(button),
         }
     }
 
@@ -42,6 +47,7 @@ impl Binding {
         match self {
             Self::Key(key) => input.is_key_pressed(key),
             Self::MouseButton(button) => input.is_mouse_button_pressed(button),
+            Self::GamepadButton(button) => input.is_button_pressed(button),
         }
     }
 
@@ -49,6 +55,52 @@ impl Binding {
         match self {
             Self::Key(key) => input.is_key_released(key),
             Self::MouseButton(button) => input.is_mouse_button_released(button),
+            Self::GamepadButton(button) => input.is_button_released(button),
+        }
+    }
+}
+
+/// One analog source that can drive an action's axis.
+///
+/// A game asks for `map.axis(MoveX, input)` and gets a number in
+/// `[-1, 1]`, whether it came from a thumbstick or from two keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AxisBinding {
+    /// One gamepad axis, deadzoned individually.
+    Axis(GamepadAxis),
+    /// A thumbstick's horizontal component, radially deadzoned with its
+    /// vertical partner. Prefer this over [`AxisBinding::Axis`] for
+    /// sticks — see `apply_radial_deadzone`.
+    StickX(Stick),
+    /// A thumbstick's vertical component, radially deadzoned.
+    StickY(Stick),
+    /// Two keys standing in for an axis: `positive` reads `+1`,
+    /// `negative` reads `-1`, both or neither reads `0`.
+    Keys {
+        /// Key producing `+1`.
+        positive: KeyCode,
+        /// Key producing `-1`.
+        negative: KeyCode,
+    },
+}
+
+impl AxisBinding {
+    /// This binding's current value in `[-1, 1]`.
+    fn value(self, input: &InputState) -> f32 {
+        match self {
+            Self::Axis(axis) => input.axis(axis),
+            Self::StickX(stick) => input.stick(stick).0,
+            Self::StickY(stick) => input.stick(stick).1,
+            Self::Keys { positive, negative } => {
+                let mut value = 0.0;
+                if input.is_key_held(positive) {
+                    value += 1.0;
+                }
+                if input.is_key_held(negative) {
+                    value -= 1.0;
+                }
+                value
+            }
         }
     }
 }
@@ -63,6 +115,7 @@ impl Binding {
 #[derive(Debug, Clone)]
 pub struct ActionMap<A> {
     bindings: HashMap<A, Vec<Binding>>,
+    axis_bindings: HashMap<A, Vec<AxisBinding>>,
 }
 
 impl<A> Default for ActionMap<A> {
@@ -73,6 +126,7 @@ impl<A> Default for ActionMap<A> {
     fn default() -> Self {
         Self {
             bindings: HashMap::new(),
+            axis_bindings: HashMap::new(),
         }
     }
 }
@@ -141,6 +195,37 @@ impl<A: Copy + Eq + Hash> ActionMap<A> {
     /// additionally check `!self.is_held(action, input)`.
     pub fn is_released(&self, action: A, input: &InputState) -> bool {
         self.bindings(action).iter().any(|b| b.is_released(input))
+    }
+
+    /// Binds an analog source to `action`. Additive, like
+    /// [`ActionMap::bind`].
+    pub fn bind_axis(&mut self, action: A, binding: AxisBinding) -> &mut Self {
+        self.axis_bindings.entry(action).or_default().push(binding);
+        self
+    }
+
+    /// `action`'s bound analog sources, in bind order.
+    pub fn axis_bindings(&self, action: A) -> &[AxisBinding] {
+        self.axis_bindings.get(&action).map_or(&[], Vec::as_slice)
+    }
+
+    /// `action`'s current analog value, in `[-1, 1]`.
+    ///
+    /// With several sources bound, the one furthest from rest wins rather
+    /// than them summing — so holding a key while nudging a stick gives
+    /// full deflection, not double. Unbound actions read `0.0`.
+    pub fn axis(&self, action: A, input: &InputState) -> f32 {
+        self.axis_bindings(action)
+            .iter()
+            .map(|binding| binding.value(input))
+            .fold(0.0_f32, |strongest, value| {
+                if value.abs() > strongest.abs() {
+                    value
+                } else {
+                    strongest
+                }
+            })
+            .clamp(-1.0, 1.0)
     }
 }
 
@@ -372,5 +457,124 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(map.bindings(TestAction::Jump).len(), 1);
+    }
+
+    // --- T-09: gamepad + axis bindings ------------------------------
+
+    use crate::gamepad::{GamepadAxes, GamepadAxis, GamepadUpdate};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    enum Move {
+        X,
+    }
+
+    fn input_with_stick(x: f32, y: f32) -> InputState {
+        let mut axes = GamepadAxes::default();
+        axes.set(GamepadAxis::LeftStickX, x);
+        axes.set(GamepadAxis::LeftStickY, y);
+        let mut input = InputState::new();
+        input.apply_gamepad(&GamepadUpdate {
+            axes,
+            connected: 1,
+            ..GamepadUpdate::default()
+        });
+        input
+    }
+
+    fn key_or_stick_map() -> ActionMap<Move> {
+        let mut map = ActionMap::new();
+        map.bind_axis(Move::X, AxisBinding::StickX(Stick::Left));
+        map.bind_axis(
+            Move::X,
+            AxisBinding::Keys {
+                positive: KeyCode::KeyD,
+                negative: KeyCode::KeyA,
+            },
+        );
+        map
+    }
+
+    #[test]
+    fn one_action_reads_the_same_from_a_stick_or_a_key_pair() {
+        let map = key_or_stick_map();
+
+        let from_stick = map.axis(Move::X, &input_with_stick(1.0, 0.0));
+        assert!((from_stick - 1.0).abs() < 1e-5, "got {from_stick}");
+
+        let mut keyboard = InputState::new();
+        keyboard.apply_event(&PlatformEvent::KeyboardInput {
+            key: KeyCode::KeyD,
+            pressed: true,
+            repeat: false,
+        });
+        let from_keys = map.axis(Move::X, &keyboard);
+        assert!((from_keys - 1.0).abs() < 1e-5, "got {from_keys}");
+    }
+
+    #[test]
+    fn axis_binding_falls_back_to_key_pair_with_no_pad() {
+        let map = key_or_stick_map();
+        let mut input = InputState::new();
+        input.apply_event(&PlatformEvent::KeyboardInput {
+            key: KeyCode::KeyA,
+            pressed: true,
+            repeat: false,
+        });
+        assert!(
+            map.axis(Move::X, &input) < 0.0,
+            "with no gamepad the keys must still drive the axis",
+        );
+    }
+
+    #[test]
+    fn opposing_keys_cancel() {
+        let map = key_or_stick_map();
+        let mut input = InputState::new();
+        for key in [KeyCode::KeyA, KeyCode::KeyD] {
+            input.apply_event(&PlatformEvent::KeyboardInput {
+                key,
+                pressed: true,
+                repeat: false,
+            });
+        }
+        assert_eq!(map.axis(Move::X, &input), 0.0);
+    }
+
+    #[test]
+    fn the_strongest_source_wins_rather_than_summing() {
+        let map = key_or_stick_map();
+        let mut input = input_with_stick(1.0, 0.0);
+        input.apply_event(&PlatformEvent::KeyboardInput {
+            key: KeyCode::KeyD,
+            pressed: true,
+            repeat: false,
+        });
+        let value = map.axis(Move::X, &input);
+        assert!(
+            (value - 1.0).abs() < 1e-5,
+            "stick plus key must stay at full deflection, got {value}",
+        );
+    }
+
+    #[test]
+    fn an_unbound_axis_reads_zero() {
+        let map: ActionMap<Move> = ActionMap::new();
+        assert_eq!(map.axis(Move::X, &InputState::new()), 0.0);
+    }
+
+    #[test]
+    fn a_gamepad_button_can_drive_the_same_action_as_a_key() {
+        let mut map = ActionMap::new();
+        map.bind(Move::X, Binding::Key(KeyCode::Space));
+        map.bind(Move::X, Binding::GamepadButton(GamepadButton::South));
+
+        let mut input = InputState::new();
+        input.apply_gamepad(&GamepadUpdate {
+            pressed: [GamepadButton::South].into_iter().collect(),
+            connected: 1,
+            ..GamepadUpdate::default()
+        });
+        assert!(map.is_pressed(Move::X, &input));
+        assert!(map.is_held(Move::X, &input));
     }
 }

@@ -24,6 +24,53 @@ const SHADOW_SHADER_SOURCE: &str = include_str!("shaders/shadow.wgsl");
 const SKYBOX_SHADER_SOURCE: &str = include_str!("shaders/skybox.wgsl");
 const DEBUG_LINE_SHADER_SOURCE: &str = include_str!("shaders/debug_line.wgsl");
 const SHADOW_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Depth format for the main scene pass.
+///
+/// Separate constant from the shadow map's own depth format despite
+/// matching it
+/// today: the shadow map's is driven by what a comparison sampler
+/// accepts, this one by precision needs, and the two are free to
+/// diverge.
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Depth state for opaque geometry: test against what's already there,
+/// and write, so nearer fragments win regardless of draw order.
+pub(crate) fn opaque_depth_state() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(true),
+        depth_compare: Some(wgpu::CompareFunction::Less),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// Depth state for transparent geometry: occluded by opaque surfaces in
+/// front of it, but never occluding anything itself (writing depth from a
+/// see-through fragment would hide whatever is behind it).
+pub(crate) fn transparent_depth_state() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Less),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// Depth state for passes that must ignore depth entirely — the skybox
+/// (drawn first, must lose to all geometry) and editor overlays like the
+/// gizmo (drawn last, must stay grabbable through geometry).
+pub(crate) fn overlay_depth_state() -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format: DEPTH_FORMAT,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Always),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
 /// The main color pass's off-screen render target format — 16-bit float
 /// per channel, enough headroom for lighting math above `1.0` without the
 /// `float32-filterable` device feature `Rgba32Float` sampling would need.
@@ -39,10 +86,41 @@ pub(crate) const HDR_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::
 /// reason for more than one shader.
 pub struct Pipeline {
     render_pipeline: wgpu::RenderPipeline,
+    /// The same pipeline with alpha blending on and depth writes off,
+    /// used for the sorted transparent pass. Built alongside the opaque
+    /// one so both always agree on layouts and shader.
+    transparent_pipeline: wgpu::RenderPipeline,
     camera_bind_group_layout: wgpu::BindGroupLayout,
     material_bind_group_layout: wgpu::BindGroupLayout,
     model_bind_group_layout: wgpu::BindGroupLayout,
     lights_bind_group_layout: wgpu::BindGroupLayout,
+    /// 1x1 stand-ins for the optional material maps, created once here
+    /// rather than per material — a scene with hundreds of props would
+    /// otherwise allocate hundreds of identical 1x1 textures.
+    neutral: NeutralMaps,
+}
+
+/// The optional maps a material can carry beyond its base colour.
+///
+/// Every field is optional; a `None` samples `Pipeline`'s neutral 1x1
+/// instead, which leaves the corresponding term unchanged.
+#[derive(Default, Clone, Copy)]
+pub struct MaterialMaps<'a> {
+    /// Tangent-space normal map.
+    pub normal: Option<&'a Texture>,
+    /// Emissive colour map, multiplied by `Material::emissive_factor`.
+    pub emissive: Option<&'a Texture>,
+    /// Ambient occlusion, read from the red channel.
+    pub occlusion: Option<&'a Texture>,
+}
+
+/// The "this material has no such map" textures: a flat normal, black
+/// emissive, and full-white occlusion. Sampling these leaves the
+/// corresponding material factor untouched.
+struct NeutralMaps {
+    normal: Texture,
+    emissive: Texture,
+    occlusion: Texture,
 }
 
 impl Pipeline {
@@ -63,6 +141,12 @@ impl Pipeline {
     pub(crate) fn lights_layout(&self) -> &wgpu::BindGroupLayout {
         &self.lights_bind_group_layout
     }
+
+    /// The alpha-blended, depth-write-off variant used by the sorted
+    /// transparent pass.
+    pub(crate) fn transparent(&self) -> &wgpu::RenderPipeline {
+        &self.transparent_pipeline
+    }
 }
 
 /// A camera's uniform buffer plus the bind group that exposes it to a
@@ -82,6 +166,12 @@ pub struct CameraBinding {
 /// A material's factors uniform buffer, base color texture, and the bind
 /// group exposing both to a [`Pipeline`]'s shader at `@group(1)`.
 pub struct MaterialBinding {
+    /// Whether this material belongs in the sorted transparent pass.
+    ///
+    /// Cached CPU-side because the mode itself lives in a GPU buffer the
+    /// render path cannot read back, and the split has to happen during
+    /// extraction.
+    pub transparent: bool,
     /// The GPU buffer backing the factors uniform. Kept around so callers
     /// can update it (e.g. after editing a material) via
     /// [`GpuContext::write_uniform_buffer`].
@@ -175,6 +265,7 @@ pub struct SkyboxBinding {
 pub struct HdrTarget {
     view: wgpu::TextureView,
     msaa_view: Option<wgpu::TextureView>,
+    depth_view: wgpu::TextureView,
 }
 
 impl HdrTarget {
@@ -183,6 +274,39 @@ impl HdrTarget {
     /// present, is render-only and never sampled directly.)
     pub(crate) fn color_view(&self) -> &wgpu::TextureView {
         &self.view
+    }
+
+    /// The scene pass's depth attachment. Created at the same sample
+    /// count as whichever color attachment the pass uses (the MSAA view
+    /// when present, otherwise the resolve view) — wgpu requires every
+    /// attachment in a pass to agree on sample count.
+    pub(crate) fn depth_view(&self) -> &wgpu::TextureView {
+        &self.depth_view
+    }
+}
+
+/// Where a frame composites to: an off-screen texture view.
+///
+/// A thin borrow wrapper so crates that merely *forward* a render target
+/// — `engine_ecs`, which has no `wgpu` dependency of its own — can pass
+/// one through without taking on `wgpu` as a public dependency.
+///
+/// Build one from the view you want written, and make sure its format
+/// matches the one the [`crate::PostProcessStack`] was created for (see
+/// [`GpuContext::create_post_process_stack_for_format`]).
+#[derive(Clone, Copy)]
+pub struct RenderTarget<'a> {
+    view: &'a wgpu::TextureView,
+}
+
+impl<'a> RenderTarget<'a> {
+    /// Wraps `view` as a render target.
+    pub fn new(view: &'a wgpu::TextureView) -> Self {
+        Self { view }
+    }
+
+    pub(crate) fn view(&self) -> &wgpu::TextureView {
+        self.view
     }
 }
 
@@ -311,6 +435,40 @@ impl GpuContext {
                         },
                         count: None,
                     },
+                    // Normal, emissive and occlusion maps. All three
+                    // share binding 1's sampler — they are sampled with
+                    // the same UVs and filtering, so four samplers would
+                    // be four times the state for identical behaviour.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -412,7 +570,42 @@ impl GpuContext {
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: None,
+            // Opaque geometry: this is what makes draw order stop mattering.
+            depth_stencil: Some(opaque_depth_state()),
+            multisample: self.scene_multisample_state(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Same shader, same layouts; only the blend state and depth
+        // write differ. Transparent surfaces must not write depth or
+        // they would hide each other.
+        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(&format!("{label} (transparent)")),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Some(Vertex::layout())],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_TEXTURE_FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                // No back-face culling: you can see through a
+                // transparent surface to its own far side.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(transparent_depth_state()),
             multisample: self.scene_multisample_state(),
             multiview_mask: None,
             cache: None,
@@ -420,10 +613,28 @@ impl GpuContext {
 
         Pipeline {
             render_pipeline,
+            transparent_pipeline,
             camera_bind_group_layout,
             material_bind_group_layout,
             model_bind_group_layout,
             lights_bind_group_layout,
+            neutral: NeutralMaps {
+                // Tangent-space "no perturbation": (0, 0, 1) encoded into
+                // the 0..1 texture range.
+                normal: self.create_texture_from_rgba(
+                    "neutral normal",
+                    1,
+                    1,
+                    &[128, 128, 255, 255],
+                ),
+                emissive: self.create_texture_from_rgba("neutral emissive", 1, 1, &[0, 0, 0, 255]),
+                occlusion: self.create_texture_from_rgba(
+                    "neutral occlusion",
+                    1,
+                    1,
+                    &[255, 255, 255, 255],
+                ),
+            },
         }
     }
 
@@ -454,7 +665,26 @@ impl GpuContext {
         texture: &Texture,
         material: &MaterialUniform,
     ) -> MaterialBinding {
+        self.create_material_binding_with(pipeline, texture, material, MaterialMaps::default())
+    }
+
+    /// [`GpuContext::create_material_binding`], plus the optional normal,
+    /// emissive and occlusion maps.
+    ///
+    /// Any map left `None` falls back to a neutral 1x1 owned by
+    /// `pipeline`, so an absent map has no effect rather than needing a
+    /// separate shader path.
+    pub fn create_material_binding_with(
+        &self,
+        pipeline: &Pipeline,
+        texture: &Texture,
+        material: &MaterialUniform,
+        maps: MaterialMaps<'_>,
+    ) -> MaterialBinding {
         let buffer = self.create_uniform_buffer("material uniform", material);
+        let normal = maps.normal.unwrap_or(&pipeline.neutral.normal);
+        let emissive = maps.emissive.unwrap_or(&pipeline.neutral.emissive);
+        let occlusion = maps.occlusion.unwrap_or(&pipeline.neutral.occlusion);
         let bind_group = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material bind group"),
             layout: &pipeline.material_bind_group_layout,
@@ -463,6 +693,8 @@ impl GpuContext {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(&texture.view),
                 },
+                // One sampler for all four maps — see the layout's own
+                // comment for why.
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&texture.sampler),
@@ -471,9 +703,26 @@ impl GpuContext {
                     binding: 2,
                     resource: buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&normal.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&emissive.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&occlusion.view),
+                },
             ],
         });
-        MaterialBinding { buffer, bind_group }
+        MaterialBinding {
+            buffer,
+            bind_group,
+            // `2` is `AlphaMode::Blend`; see `MaterialUniform::alpha_mode`.
+            transparent: material.alpha_mode == 2,
+        }
     }
 
     /// Creates a uniform buffer + bind group exposing `uniform` (a model
@@ -720,7 +969,9 @@ impl GpuContext {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: None,
+            // Sky is a full-screen triangle drawn before geometry; it must
+            // never win a depth test and never write depth.
+            depth_stencil: Some(overlay_depth_state()),
             multisample: self.scene_multisample_state(),
             multiview_mask: None,
             cache: None,
@@ -798,10 +1049,33 @@ impl GpuContext {
                 .create_view(&wgpu::TextureViewDescriptor::default())
         });
 
+        // Sample count follows the color attachment the scene pass will
+        // actually render into: the MSAA texture when multisampling is
+        // on, the resolve texture otherwise.
+        let depth_view = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("hdr target (depth)"),
+                size,
+                mip_level_count: 1,
+                sample_count: self.msaa_sample_count(),
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                // No TEXTURE_BINDING: nothing samples scene depth yet. A
+                // depth-based outline (see the `post` module docs) would
+                // need it, and would also need MSAA depth resolved first.
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
         // The post-processing stack that samples this target owns its own
         // sampler ([`GpuContext::create_post_process_stack`]), so none is
         // stored here.
-        HdrTarget { view, msaa_view }
+        HdrTarget {
+            view,
+            msaa_view,
+            depth_view,
+        }
     }
 
     /// Compiles `debug_line.wgsl` into a [`DebugLinePipeline`], reusing
@@ -845,7 +1119,8 @@ impl GpuContext {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: None,
+            // Editor overlays (gizmo handles) stay visible through geometry.
+            depth_stencil: Some(overlay_depth_state()),
             multisample: self.scene_multisample_state(),
             multiview_mask: None,
             cache: None,
@@ -924,17 +1199,20 @@ impl GpuContext {
         lights: &LightsBinding,
         drawables: &[Drawable<'_>],
         shadow_casters: &[Drawable<'_>],
+        transparent: &[Drawable<'_>],
         skinned_pipeline: &crate::SkinnedPipeline,
         skinned_drawables: &[crate::SkinnedDrawable<'_>],
         instanced_pipeline: &crate::InstancedPipeline,
         instanced_drawables: &[crate::InstancedDrawable<'_>],
         debug_lines: Option<(&DebugLinePipeline, &[DebugLineVertex])>,
+        sprites: Option<crate::SpriteFrame<'_>>,
         particles: Option<crate::ParticleFrame<'_>>,
         vegetation: Option<(
             &crate::VegetationPipeline,
             &crate::WindBinding,
             &[crate::InstancedDrawable<'_>],
         )>,
+        ui: Option<(&crate::UiPipeline, &[crate::UiQuad])>,
     ) -> Result<(), crate::error::RendererError> {
         let Some(surface_texture) = self.acquire_frame() else {
             return Ok(());
@@ -944,6 +1222,84 @@ impl GpuContext {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        self.render_scene_to(
+            RenderTarget::new(&view),
+            pipeline,
+            shadow_pipeline,
+            shadow_map,
+            skybox_pipeline,
+            skybox,
+            hdr_target,
+            post,
+            camera,
+            lights,
+            drawables,
+            shadow_casters,
+            transparent,
+            skinned_pipeline,
+            skinned_drawables,
+            instanced_pipeline,
+            instanced_drawables,
+            debug_lines,
+            sprites,
+            particles,
+            vegetation,
+            ui,
+        )?;
+
+        self.present(surface_texture);
+        Ok(())
+    }
+
+    /// [`GpuContext::render_scene`], but compositing into `target_view`
+    /// instead of acquiring and presenting a swapchain frame.
+    ///
+    /// Same passes, same order, same everything — this is where the work
+    /// actually happens, and `render_scene` is the acquire/present
+    /// wrapper around it. Split out for callers that render somewhere
+    /// other than the window: the editor's Scene view draws into an
+    /// off-screen texture it then displays inside an egui panel.
+    ///
+    /// `target_view`'s format must match the one the `post` stack was
+    /// built for — see
+    /// [`GpuContext::create_post_process_stack_for_format`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`crate::RenderGraph`] execution error.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors `render_scene`'s parameter list exactly; diverging would defeat the point of the split"
+    )]
+    pub fn render_scene_to(
+        &self,
+        target: RenderTarget<'_>,
+        pipeline: &Pipeline,
+        shadow_pipeline: &ShadowPipeline,
+        shadow_map: &ShadowMap,
+        skybox_pipeline: &SkyboxPipeline,
+        skybox: &SkyboxBinding,
+        hdr_target: &HdrTarget,
+        post: &crate::PostProcessStack,
+        camera: &CameraBinding,
+        lights: &LightsBinding,
+        drawables: &[Drawable<'_>],
+        shadow_casters: &[Drawable<'_>],
+        transparent: &[Drawable<'_>],
+        skinned_pipeline: &crate::SkinnedPipeline,
+        skinned_drawables: &[crate::SkinnedDrawable<'_>],
+        instanced_pipeline: &crate::InstancedPipeline,
+        instanced_drawables: &[crate::InstancedDrawable<'_>],
+        debug_lines: Option<(&DebugLinePipeline, &[DebugLineVertex])>,
+        sprites: Option<crate::SpriteFrame<'_>>,
+        particles: Option<crate::ParticleFrame<'_>>,
+        vegetation: Option<(
+            &crate::VegetationPipeline,
+            &crate::WindBinding,
+            &[crate::InstancedDrawable<'_>],
+        )>,
+        ui: Option<(&crate::UiPipeline, &[crate::UiQuad])>,
+    ) -> Result<(), crate::error::RendererError> {
         let mut encoder = self
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -966,6 +1322,18 @@ impl GpuContext {
                             usage: wgpu::BufferUsages::VERTEX,
                         })
                 });
+
+        // The sprite instance buffer, built out here so it outlives the
+        // "scene" pass closure that draws it. `None` for an empty frame:
+        // no buffer, no draw, no pipeline switch.
+        let sprite_buffer = sprites.filter(|frame| !frame.is_empty()).map(|frame| {
+            self.device()
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("sprite instances"),
+                    contents: bytemuck::cast_slice(frame.instances),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
 
         // Same story for the particle instance buffers — built out here so
         // they outlive the "scene" pass closure that draws them. `None`
@@ -1032,7 +1400,14 @@ impl GpuContext {
                         store: color_store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: hdr_target.depth_view(),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
@@ -1148,6 +1523,49 @@ impl GpuContext {
                 render_pass.draw(0..lines.len() as u32, 0..1);
             }
 
+            // Transparent surfaces, after every opaque draw and before
+            // particles. The caller has already sorted them back-to-front
+            // (see `engine_ecs::extract_and_render`); this pass tests
+            // depth but does not write it, so they blend over opaque
+            // geometry without occluding each other.
+            if !transparent.is_empty() {
+                render_pass.set_pipeline(pipeline.transparent());
+                render_pass.set_bind_group(0, &camera.bind_group, &[]);
+                render_pass.set_bind_group(3, &lights.bind_group, &[]);
+                for drawable in transparent {
+                    render_pass.set_bind_group(1, &drawable.material.bind_group, &[]);
+                    render_pass.set_bind_group(2, &drawable.model.bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, drawable.mesh.vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(
+                        drawable.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    render_pass.draw_indexed(0..drawable.mesh.index_count, 0, 0..1);
+                }
+            }
+
+            // Sprites after the transparent meshes and before particles:
+            // alpha-blended quads that test the scene's depth (so a
+            // sprite behind a mesh is occluded) without writing it (so
+            // they blend over each other in the order the caller sorted
+            // them). Inside this pass, so post-processing sees them.
+            if let Some(frame) = sprites
+                && let Some(buffer) = &sprite_buffer
+            {
+                render_pass.set_pipeline(&frame.pipeline.render_pipeline);
+                render_pass.set_bind_group(0, &camera.bind_group, &[]);
+                render_pass.set_bind_group(1, &frame.atlas.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, frame.quad.vertex_buffer.slice(..));
+                render_pass.set_vertex_buffer(1, buffer.slice(..));
+                render_pass
+                    .set_index_buffer(frame.quad.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(
+                    0..frame.quad.index_count,
+                    0,
+                    0..frame.instances.len() as u32,
+                );
+            }
+
             // Particles after everything else: transparent billboards, so
             // they must composite over the opaque scene (and the debug
             // overlay). Alpha-blended set first, then additive. Six
@@ -1173,13 +1591,19 @@ impl GpuContext {
             // tonemap composite — recorded into this node. Internal
             // ping-pong ordering is plain sequential encoder work, the
             // same way the "scene" pass sequences its own sub-draws.
-            post.record(encoder, &view);
+            post.record(encoder, target.view());
         });
 
         graph.execute(&mut encoder)?;
 
+        // UI last, straight onto the target after post-processing has
+        // written it. Inside this encoder so it lands before the caller
+        // presents.
+        if let Some((ui_pipeline, quads)) = ui {
+            self.render_ui(&mut encoder, target.view(), ui_pipeline, quads);
+        }
+
         self.queue().submit(std::iter::once(encoder.finish()));
-        self.present(surface_texture);
         Ok(())
     }
 }

@@ -113,6 +113,43 @@ pub struct MeshRenderer {
 }
 
 impl MeshRenderer {
+    /// Builds a [`MeshRenderer`] straight from decoded geometry and an
+    /// optional base-color image.
+    ///
+    /// The shared "an imported asset just became a renderable entity"
+    /// path: the editor resolves references against its import cache, the
+    /// standalone player against an asset bundle, and both end up here so
+    /// the upload rules (and the no-texture fallback) are defined once.
+    ///
+    /// `base_color` is `(width, height, rgba8)`. `None` uploads a 1x1
+    /// opaque white pixel instead, so a model whose source carried no
+    /// image still renders lit rather than vanishing — sampling white
+    /// leaves `material`'s own `base_color_factor` untouched.
+    ///
+    /// # Errors
+    ///
+    /// [`engine_renderer::RendererError`] if the geometry is empty or the
+    /// mesh upload fails.
+    pub fn from_geometry(
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        assets: &mut engine_renderer::RenderAssets,
+        vertices: &[engine_renderer::Vertex],
+        indices: &[u32],
+        base_color: Option<(u32, u32, &[u8])>,
+        material: engine_renderer::Material,
+    ) -> Result<Self, engine_renderer::RendererError> {
+        const LABEL: &str = "scene mesh";
+        let mesh = gpu.create_mesh(LABEL, vertices, indices)?;
+        let texture = match base_color {
+            Some((width, height, rgba8)) => {
+                gpu.create_texture_from_rgba(LABEL, width, height, rgba8)
+            }
+            None => gpu.create_texture_from_rgba(LABEL, 1, 1, &[255, 255, 255, 255]),
+        };
+        Ok(Self::new(gpu, pipeline, assets, mesh, &texture, material))
+    }
+
     /// Builds a [`MeshRenderer`], uploading `mesh` and building a material
     /// binding from `texture`/`material`, then registering both as freshly
     /// owned entries (ref count `1` each) in `assets`.
@@ -430,10 +467,10 @@ impl VegetationRenderer {
 ///
 /// Unlike [`MeshRenderer`], this holds no GPU resources of its own — a
 /// sprite's whole point is sharing one atlas texture and one draw call
-/// across every sprite entity ([`crate::render::extract_and_render_sprites`]
-/// builds one `SpriteBatch` from every `Sprite` each frame), so there's
-/// nothing per-entity to upload. No future "becomes an asset handle"
-/// rework debt the way `MeshRenderer` has.
+/// across every sprite entity ([`crate::render::extract_sprites`] builds
+/// one `SpriteBatch` from every `Sprite` each frame), so there's nothing
+/// per-entity to upload. No future "becomes an asset handle" rework debt
+/// the way `MeshRenderer` has.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct Sprite {
     /// World-space width/height.
@@ -442,17 +479,32 @@ pub struct Sprite {
     pub uv: engine_renderer::UvRect,
     /// Linear RGBA tint, multiplied into the sampled texture color.
     pub color: [f32; 4],
+    /// Explicit 2D layer. Higher draws on top; the primary sort key, so
+    /// layering is a property of the sprite rather than of spawn order.
+    ///
+    /// Sprites sharing a `z_order` fall back to back-to-front view depth,
+    /// which is what a 3D scene's billboards want — leave this at `0.0`
+    /// and depth alone decides. A 2D game sets it and it decides.
+    pub z_order: f32,
 }
 
 impl Sprite {
     /// A sprite `size` world units across, sampling `uv`, with no tint
-    /// (white).
+    /// (white) on layer `0.0`.
     pub fn new(size: glam::Vec2, uv: engine_renderer::UvRect) -> Self {
         Self {
             size,
             uv,
             color: [1.0, 1.0, 1.0, 1.0],
+            z_order: 0.0,
         }
+    }
+
+    /// This sprite moved to layer `z_order`. Chainable after
+    /// [`Sprite::new`].
+    pub fn with_z_order(mut self, z_order: f32) -> Self {
+        self.z_order = z_order;
+        self
     }
 }
 
@@ -528,6 +580,64 @@ impl AssetSource {
             id: Some(id.into()),
         }
     }
+}
+
+/// The asset references a sibling [`MeshRenderer`] was built from.
+///
+/// A live `MeshRenderer` holds GPU handles, not asset ids, so it cannot
+/// be serialized back out on its own — the ids have to be carried
+/// alongside it. This component is that carrier: it round-trips through
+/// `engine_scene::SceneEntity::mesh_renderer`, and is what lets a saved
+/// scene reproduce its geometry on the next load.
+///
+/// Held as canonical UUID *text* rather than a typed reference because
+/// `engine_scene` already depends on this crate — the reverse dependency
+/// needed to name its `AssetRef` here would be a cycle.
+///
+/// Present whether or not the reference actually resolved: an entity
+/// whose mesh file is missing still carries its ids, so opening and
+/// re-saving a scene never silently deletes the reference.
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct MeshSource {
+    /// Canonical UUID text of the mesh asset.
+    pub mesh: String,
+    /// Canonical UUID text of the material asset.
+    pub material: String,
+}
+
+impl MeshSource {
+    /// Builds a [`MeshSource`] from a mesh and material id.
+    pub fn new(mesh: impl Into<String>, material: impl Into<String>) -> Self {
+        Self {
+            mesh: mesh.into(),
+            material: material.into(),
+        }
+    }
+}
+
+/// The atlas reference a sibling [`Sprite`] was built from, plus the
+/// on-disk size and tint.
+///
+/// The same carrier role [`MeshSource`] plays for meshes. `size`/`color`
+/// are duplicated here rather than read back off the live [`Sprite`]
+/// because a sprite whose atlas failed to resolve has no live `Sprite`
+/// component at all — without these, an unresolved sprite would lose its
+/// dimensions on the next save.
+///
+/// When a live [`Sprite`] *is* present it takes precedence on capture, so
+/// Inspector edits are never overwritten by the values stored here.
+#[derive(Component, Debug, Clone, PartialEq, Default)]
+pub struct SpriteSource {
+    /// Canonical UUID text of the atlas texture asset.
+    pub atlas: String,
+    /// The named (or gridded, e.g. `"0_0"`) region within the atlas.
+    pub region: String,
+    /// World-space width/height as stored on disk.
+    pub size: [f32; 2],
+    /// Linear RGBA tint as stored on disk.
+    pub color: [f32; 4],
+    /// Layer as stored on disk. See [`Sprite::z_order`].
+    pub z_order: f32,
 }
 
 /// Marks an entity as disabled in the editor: the Scene view skips it and
@@ -732,6 +842,17 @@ mod tests {
         assert_eq!(sprite.size, glam::Vec2::new(2.0, 3.0));
         assert_eq!(sprite.uv, uv);
         assert_eq!(sprite.color, [1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn with_z_order_sets_the_layer() {
+        let uv = engine_renderer::UvRect {
+            min: [0.0, 0.0],
+            max: [1.0, 1.0],
+        };
+        let sprite = Sprite::new(glam::Vec2::ONE, uv).with_z_order(-2.0);
+        assert_eq!(sprite.z_order, -2.0);
+        assert_eq!(Sprite::new(glam::Vec2::ONE, uv).z_order, 0.0);
     }
 
     #[test]

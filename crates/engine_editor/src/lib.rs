@@ -25,6 +25,7 @@
 // this crate too (not just downstream ones).
 extern crate self as engine_editor;
 
+mod asset_import;
 mod assets;
 mod chrome;
 mod console;
@@ -42,6 +43,7 @@ pub mod play;
 pub mod prefab;
 mod preview;
 pub mod profiler;
+mod resolve;
 mod search;
 mod session;
 mod shell;
@@ -51,6 +53,10 @@ mod terminal;
 mod theme;
 mod viewport;
 
+pub use asset_import::{
+    IMPORTABLE_EXTENSIONS, ImportOutcome as AssetImportOutcome, import_files, is_importable,
+    unique_destination,
+};
 pub use assets::{
     AssetEntry, AssetIndex, AssetKind, resolve_ids as resolve_asset_ids, scan as scan_assets,
 };
@@ -68,6 +74,7 @@ pub use preview::{
     AudioSummary, MeshSummary, PreviewCache, TextureSummary, audio_summary, human_bytes,
     mesh_summary, texture_summary, waveform_bins,
 };
+pub use resolve::{EditorResolver, ResolveReport, resolve_pending};
 pub use search::{
     Jump as SearchJump, MAX_TEXT_HITS, SearchMode, SearchQuery, SearchState, SymbolHit, TextHit,
     TextResults, run_text_search, symbol_kind_label,

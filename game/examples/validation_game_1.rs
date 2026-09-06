@@ -14,14 +14,17 @@
 //!
 //! Run with `cargo run -p game --example validation_game_1`.
 //!
+//! Rebuilt on [`run_game`] (T-08): the window, GPU context, sprite
+//! pipeline, camera binding and frame loop are all the engine's now, so
+//! what is left below is level data plus gameplay. A 2D game is a game
+//! with an orthographic camera and no meshes — not a separate code path.
+//!
 //! Deliberately out of scope (see the feature's design notes): no on-screen
 //! win/lose text (the engine has no text rendering yet — reported via
 //! `tracing::info!` instead), no `AssetDatabase` integration (Stage 3/4
 //! territory — the one atlas this game uses gets one [`AssetId`], not
 //! looked up through a database), no wall-collision system (arena bounds
 //! are a plain position clamp, not a collision check).
-
-use std::sync::Arc;
 
 use engine::ecs::components as ecs_components;
 use engine::ecs::prelude::{Component, Entity, Resource, With, World};
@@ -54,6 +57,13 @@ const PLAYER_COLOR: [u8; 4] = [80, 140, 255, 255];
 const COLLECTIBLE_COLOR: [u8; 4] = [255, 210, 60, 255];
 const HAZARD_COLOR: [u8; 4] = [230, 60, 60, 255];
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// Sprite layers ([`Sprite::z_order`]): the player draws over the pickups,
+/// which draw over the hazards. Explicit, so layering does not depend on
+/// the order entities happen to be spawned in.
+const HAZARD_LAYER: f32 = 0.0;
+const COLLECTIBLE_LAYER: f32 = 1.0;
+const PLAYER_LAYER: f32 = 2.0;
 
 const COLLECTIBLE_POSITIONS: [glam::Vec2; 5] = [
     glam::Vec2::new(-5.0, 2.5),
@@ -145,6 +155,7 @@ fn build_level(atlas_id: AssetId) -> Scene {
             region: PLAYER_REGION.to_string(),
             size: PLAYER_SIZE.to_array(),
             color: WHITE,
+            z_order: PLAYER_LAYER,
         }),
         ..Default::default()
     }];
@@ -160,6 +171,7 @@ fn build_level(atlas_id: AssetId) -> Scene {
                 region: COLLECTIBLE_REGION.to_string(),
                 size: [COLLECTIBLE_RADIUS * 2.0, COLLECTIBLE_RADIUS * 2.0],
                 color: WHITE,
+                z_order: COLLECTIBLE_LAYER,
             }),
             ..Default::default()
         });
@@ -176,6 +188,7 @@ fn build_level(atlas_id: AssetId) -> Scene {
                 region: HAZARD_REGION.to_string(),
                 size: HAZARD_SIZE.to_array(),
                 color: WHITE,
+                z_order: HAZARD_LAYER,
             }),
             ..Default::default()
         });
@@ -208,6 +221,7 @@ fn spawn_from_scene(world: &mut World, scene: &Scene, atlas_layout: &AtlasLayout
 
         let mut sprite = ecs_components::Sprite::new(glam::Vec2::from_array(sprite_data.size), uv);
         sprite.color = sprite_data.color;
+        sprite.z_order = sprite_data.z_order;
 
         let mut entity_mut = world.spawn((
             ecs_components::Transform::from(Transform::from_translation(translation)),
@@ -227,269 +241,135 @@ fn spawn_from_scene(world: &mut World, scene: &Scene, atlas_layout: &AtlasLayout
     }
 }
 
-/// GPU resources, the ECS world, and per-frame state for the running game.
-struct Scene2D {
-    sprite_pipeline: SpritePipeline,
-    quad: Mesh,
-    camera: Camera,
-    camera_binding: CameraBinding,
-    atlas_binding: SpriteAtlasBinding,
-    ecs: Ecs,
+/// The game: an action map plus the atlas layout the level was spawned
+/// from. Everything else lives in the ECS world the engine owns.
+struct ValidationGame {
     action_map: ActionMap<PlayerAction>,
-    last_frame: std::time::Instant,
 }
 
-struct GameHandler {
-    input: InputState,
-    gpu: Option<GpuContext>,
-    scene: Option<Scene2D>,
-}
-
-impl GameHandler {
-    fn init_gpu_and_scene(&mut self, window: Arc<Window>) {
-        let size = window.inner_size();
-        let gpu = match GpuContext::new(window) {
-            Ok(gpu) => gpu,
-            Err(err) => {
-                tracing::error!(error = %err, "failed to initialize GPU context");
-                return;
-            }
-        };
-
-        let sprite_pipeline = gpu.create_sprite_pipeline("sprite");
-
-        let (quad_vertices, quad_indices) = quad();
-        let quad_mesh = match gpu.create_mesh("sprite quad", &quad_vertices, &quad_indices) {
-            Ok(mesh) => mesh,
-            Err(err) => {
-                tracing::error!(error = %err, "failed to create sprite quad mesh");
-                return;
-            }
-        };
-
-        let aspect_ratio = size.width as f32 / size.height.max(1) as f32;
-        let camera = Camera::new_orthographic(
-            glam::Vec3::new(0.0, 0.0, 5.0),
-            glam::Vec3::ZERO,
-            aspect_ratio,
-            CAMERA_HEIGHT,
-        );
-        let camera_binding =
-            gpu.create_sprite_camera_binding(&sprite_pipeline, &camera.to_uniform());
-
-        let atlas_texture = gpu.create_texture_from_rgba(
+impl Game for ValidationGame {
+    fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+        // One procedural atlas: three solid cells, sliced into a grid.
+        let atlas_texture = ctx.gpu().create_texture_from_rgba(
             "sprite atlas",
             CELL_SIZE * 3,
             CELL_SIZE,
             &atlas_rgba(CELL_SIZE, &[PLAYER_COLOR, COLLECTIBLE_COLOR, HAZARD_COLOR]),
         );
-        let mut atlas_layout = match AtlasLayout::new(CELL_SIZE * 3, CELL_SIZE) {
-            Ok(layout) => layout,
-            Err(err) => {
-                tracing::error!(error = %err, "failed to create atlas layout");
-                return;
-            }
-        };
-        if let Err(err) = atlas_layout.add_grid(3, 1) {
-            tracing::error!(error = %err, "failed to slice atlas into a grid");
-            return;
-        }
+        let mut atlas_layout = AtlasLayout::new(CELL_SIZE * 3, CELL_SIZE)
+            .map_err(|err| GameError::Setup(err.to_string()))?;
+        atlas_layout
+            .add_grid(3, 1)
+            .map_err(|err| GameError::Setup(err.to_string()))?;
         let atlas = TextureAtlas::new(atlas_texture, atlas_layout);
-        let atlas_binding = gpu.create_sprite_atlas_binding(&sprite_pipeline, &atlas);
+        ctx.set_sprite_atlas(&atlas);
 
         // Build the level, save it to a real file, then load it back —
         // "saved and loaded as a real scene file" exercised for real, not
         // just spawned directly from `build_level`'s in-memory `Scene`.
         let scene_path = std::env::temp_dir().join("vge-validation-game-1-scene.ron");
         let level = build_level(AssetId::new());
-        if let Err(err) = level.save_to_file(&scene_path) {
-            tracing::error!(error = %err, path = %scene_path.display(), "failed to save scene");
-            return;
-        }
+        level
+            .save_to_file(&scene_path)
+            .map_err(|err| GameError::Setup(err.to_string()))?;
         tracing::info!(path = %scene_path.display(), "saved validation game scene");
 
-        let loaded_scene = match Scene::load_from_file(&scene_path) {
-            Ok(scene) => scene,
-            Err(err) => {
-                tracing::error!(error = %err, path = %scene_path.display(), "failed to load scene");
-                return;
-            }
-        };
+        let loaded_scene =
+            Scene::load_from_file(&scene_path).map_err(|err| GameError::Setup(err.to_string()))?;
         tracing::info!(
             path = %scene_path.display(),
             entities = loaded_scene.entities.len(),
             "loaded validation game scene"
         );
 
-        let mut ecs = Ecs::new();
-        spawn_from_scene(ecs.world_mut(), &loaded_scene, &atlas.layout);
-        ecs.insert_resource(GameState {
+        let layout = atlas.layout.clone();
+        let world = ctx.world_mut();
+        spawn_from_scene(world, &loaded_scene, &layout);
+        world.insert_resource(GameState {
             collected: 0,
             total_collectibles: COLLECTIBLE_POSITIONS.len() as u32,
             phase: Phase::Playing,
         });
-
-        let mut action_map: ActionMap<PlayerAction> = ActionMap::new();
-        action_map
-            .bind(PlayerAction::Left, Binding::Key(KeyCode::KeyA))
-            .bind(PlayerAction::Left, Binding::Key(KeyCode::ArrowLeft))
-            .bind(PlayerAction::Right, Binding::Key(KeyCode::KeyD))
-            .bind(PlayerAction::Right, Binding::Key(KeyCode::ArrowRight))
-            .bind(PlayerAction::Up, Binding::Key(KeyCode::KeyW))
-            .bind(PlayerAction::Up, Binding::Key(KeyCode::ArrowUp))
-            .bind(PlayerAction::Down, Binding::Key(KeyCode::KeyS))
-            .bind(PlayerAction::Down, Binding::Key(KeyCode::ArrowDown));
-
-        self.scene = Some(Scene2D {
-            sprite_pipeline,
-            quad: quad_mesh,
-            camera,
-            camera_binding,
-            atlas_binding,
-            ecs,
-            action_map,
-            last_frame: std::time::Instant::now(),
-        });
-        self.gpu = Some(gpu);
-    }
-}
-
-impl PlatformHandler for GameHandler {
-    fn on_window_ready(&mut self, window: Arc<Window>) {
-        tracing::info!("window ready");
-        self.init_gpu_and_scene(window);
+        Ok(())
     }
 
-    fn on_event(&mut self, event: PlatformEvent) {
-        self.input.apply_event(&event);
-        match event {
-            PlatformEvent::CloseRequested => tracing::info!("close requested"),
-            PlatformEvent::Resized { width, height } => {
-                let Some(gpu) = &mut self.gpu else { return };
-                if let Err(err) = gpu.resize(width, height) {
-                    tracing::warn!(error = %err, "skipped surface resize");
-                    return;
-                }
-                if let Some(scene) = &mut self.scene {
-                    scene.camera.aspect_ratio = width as f32 / height.max(1) as f32;
-                    gpu.write_uniform_buffer(
-                        &scene.camera_binding.buffer,
-                        &scene.camera.to_uniform(),
-                    );
+    fn update(&mut self, ctx: &mut GameContext<'_>, dt: f32) {
+        let phase = ctx
+            .world()
+            .get_resource::<GameState>()
+            .map_or(Phase::Lost, |state| state.phase);
+        if phase != Phase::Playing {
+            return;
+        }
+
+        let mut horizontal = glam::Vec2::ZERO;
+        if self.action_map.is_held(PlayerAction::Left, ctx.input()) {
+            horizontal.x -= 1.0;
+        }
+        if self.action_map.is_held(PlayerAction::Right, ctx.input()) {
+            horizontal.x += 1.0;
+        }
+        if self.action_map.is_held(PlayerAction::Up, ctx.input()) {
+            horizontal.y += 1.0;
+        }
+        if self.action_map.is_held(PlayerAction::Down, ctx.input()) {
+            horizontal.y -= 1.0;
+        }
+        let delta = horizontal.normalize_or_zero() * MOVE_SPEED * dt;
+
+        let world = ctx.world_mut();
+        let mut player_pos = glam::Vec2::ZERO;
+        {
+            let mut player_query =
+                world.query_filtered::<&mut ecs_components::Transform, With<Player>>();
+            if let Ok(mut transform) = player_query.single_mut(world) {
+                let pos = (transform.0.translation.xy() + delta)
+                    .clamp(-ARENA_HALF_EXTENTS, ARENA_HALF_EXTENTS);
+                transform.0.translation = pos.extend(0.0);
+                player_pos = pos;
+            }
+        }
+
+        let player_aabb = Aabb2d::new(player_pos, PLAYER_SIZE);
+
+        let mut collected_entities: Vec<Entity> = Vec::new();
+        {
+            let mut collectible_query =
+                world.query_filtered::<(Entity, &ecs_components::Transform), With<Collectible>>();
+            for (entity, transform) in collectible_query.iter(world) {
+                let circle = Circle2d::new(transform.0.translation.xy(), COLLECTIBLE_RADIUS);
+                if aabb_vs_circle(&player_aabb, &circle) {
+                    collected_entities.push(entity);
                 }
             }
-            PlatformEvent::RedrawRequested => {
-                let (Some(gpu), Some(scene)) = (&self.gpu, &mut self.scene) else {
-                    return;
-                };
+        }
+        let collected_now = collected_entities.len() as u32;
+        for entity in collected_entities {
+            world.despawn(entity);
+        }
 
-                let now = std::time::Instant::now();
-                let dt = now
-                    .duration_since(scene.last_frame)
-                    .as_secs_f32()
-                    .min(1.0 / 20.0);
-                scene.last_frame = now;
-
-                let phase = scene
-                    .ecs
-                    .resource::<GameState>()
-                    .map(|state| state.phase)
-                    .unwrap_or(Phase::Lost);
-
-                if phase == Phase::Playing {
-                    let mut horizontal = glam::Vec2::ZERO;
-                    if scene.action_map.is_held(PlayerAction::Left, &self.input) {
-                        horizontal.x -= 1.0;
-                    }
-                    if scene.action_map.is_held(PlayerAction::Right, &self.input) {
-                        horizontal.x += 1.0;
-                    }
-                    if scene.action_map.is_held(PlayerAction::Up, &self.input) {
-                        horizontal.y += 1.0;
-                    }
-                    if scene.action_map.is_held(PlayerAction::Down, &self.input) {
-                        horizontal.y -= 1.0;
-                    }
-                    let delta = horizontal.normalize_or_zero() * MOVE_SPEED * dt;
-
-                    let mut player_pos = glam::Vec2::ZERO;
-                    {
-                        let world = scene.ecs.world_mut();
-                        let mut player_query =
-                            world.query_filtered::<&mut ecs_components::Transform, With<Player>>();
-                        if let Ok(mut transform) = player_query.single_mut(world) {
-                            let pos = (transform.0.translation.xy() + delta)
-                                .clamp(-ARENA_HALF_EXTENTS, ARENA_HALF_EXTENTS);
-                            transform.0.translation = pos.extend(0.0);
-                            player_pos = pos;
-                        }
-                    }
-
-                    let player_aabb = Aabb2d::new(player_pos, PLAYER_SIZE);
-
-                    let mut collected_entities: Vec<Entity> = Vec::new();
-                    {
-                        let world = scene.ecs.world_mut();
-                        let mut collectible_query = world
-                            .query_filtered::<(Entity, &ecs_components::Transform), With<Collectible>>(
-                            );
-                        for (entity, transform) in collectible_query.iter(world) {
-                            let circle =
-                                Circle2d::new(transform.0.translation.xy(), COLLECTIBLE_RADIUS);
-                            if aabb_vs_circle(&player_aabb, &circle) {
-                                collected_entities.push(entity);
-                            }
-                        }
-                    }
-                    let collected_now = collected_entities.len() as u32;
-                    for entity in collected_entities {
-                        scene.ecs.world_mut().despawn(entity);
-                    }
-
-                    let mut hit_hazard = false;
-                    {
-                        let world = scene.ecs.world_mut();
-                        let mut hazard_query =
-                            world.query_filtered::<&ecs_components::Transform, With<Hazard>>();
-                        for transform in hazard_query.iter(world) {
-                            let hazard_aabb =
-                                Aabb2d::new(transform.0.translation.xy(), HAZARD_SIZE);
-                            if aabb_vs_aabb(&player_aabb, &hazard_aabb) {
-                                hit_hazard = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if let Some(state) = scene.ecs.resource_mut::<GameState>() {
-                        state.collected += collected_now;
-                        if hit_hazard {
-                            state.phase = Phase::Lost;
-                            tracing::info!("you lose — touched a hazard");
-                        } else if state.collected >= state.total_collectibles {
-                            state.phase = Phase::Won;
-                            tracing::info!(collected = state.collected, "you win!");
-                        }
-                    }
-                }
-
-                self.input.end_frame();
-
-                if let Err(err) = extract_and_render_sprites(
-                    scene.ecs.world_mut(),
-                    gpu,
-                    &scene.sprite_pipeline,
-                    &scene.quad,
-                    &scene.camera_binding,
-                    &scene.atlas_binding,
-                ) {
-                    tracing::error!(error = %err, "frame render failed");
+        let mut hit_hazard = false;
+        {
+            let mut hazard_query =
+                world.query_filtered::<&ecs_components::Transform, With<Hazard>>();
+            for transform in hazard_query.iter(world) {
+                let hazard_aabb = Aabb2d::new(transform.0.translation.xy(), HAZARD_SIZE);
+                if aabb_vs_aabb(&player_aabb, &hazard_aabb) {
+                    hit_hazard = true;
+                    break;
                 }
             }
-            PlatformEvent::KeyboardInput { .. }
-            | PlatformEvent::MouseButtonInput { .. }
-            | PlatformEvent::CursorMoved { .. }
-            | PlatformEvent::MouseWheel { .. } => {}
+        }
+
+        if let Some(mut state) = world.get_resource_mut::<GameState>() {
+            state.collected += collected_now;
+            if hit_hazard {
+                state.phase = Phase::Lost;
+                tracing::info!("you lose — touched a hazard");
+            } else if state.collected >= state.total_collectibles {
+                state.phase = Phase::Won;
+                tracing::info!(collected = state.collected, "you win!");
+            }
         }
     }
 }
@@ -497,19 +377,28 @@ impl PlatformHandler for GameHandler {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     logging::init_default()?;
 
-    let config = EngineConfig::new("VGE Validation Game 1", env!("CARGO_PKG_VERSION"));
-    let mut app = App::new(config)?;
+    let mut config = GameConfig::new("VGE Validation Game 1", 1280, 720);
+    // The one thing that makes this a 2D game: an orthographic camera
+    // looking down -Z at the XY plane. No meshes are ever spawned, so
+    // the 3D half of the frame costs nothing.
+    config.camera = Camera::new_orthographic(
+        glam::Vec3::new(0.0, 0.0, 5.0),
+        glam::Vec3::ZERO,
+        config.width as f32 / config.height as f32,
+        CAMERA_HEIGHT,
+    );
 
-    let window_config = WindowConfig::new(app.config().app_name.clone(), 1280, 720);
-    run_windowed(
-        window_config,
-        GameHandler {
-            input: InputState::new(),
-            gpu: None,
-            scene: None,
-        },
-    )?;
+    let mut action_map: ActionMap<PlayerAction> = ActionMap::new();
+    action_map
+        .bind(PlayerAction::Left, Binding::Key(KeyCode::KeyA))
+        .bind(PlayerAction::Left, Binding::Key(KeyCode::ArrowLeft))
+        .bind(PlayerAction::Right, Binding::Key(KeyCode::KeyD))
+        .bind(PlayerAction::Right, Binding::Key(KeyCode::ArrowRight))
+        .bind(PlayerAction::Up, Binding::Key(KeyCode::KeyW))
+        .bind(PlayerAction::Up, Binding::Key(KeyCode::ArrowUp))
+        .bind(PlayerAction::Down, Binding::Key(KeyCode::KeyS))
+        .bind(PlayerAction::Down, Binding::Key(KeyCode::ArrowDown));
 
-    app.shutdown()?;
+    run_game(config, ValidationGame { action_map })?;
     Ok(())
 }

@@ -232,6 +232,7 @@ fn material(base_color_factor: [f32; 4], roughness_factor: f32) -> Material {
         base_color_factor,
         metallic_factor: 0.0,
         roughness_factor,
+        ..Material::DEFAULT
     }
 }
 

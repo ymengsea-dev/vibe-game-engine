@@ -30,13 +30,13 @@
 //! everything else — an optional pass in [`GpuContext::render_scene`],
 //! not always-on.
 //!
-//! Stage 2 "Sprite batch renderer": a second, independent 2D draw path —
-//! [`SpritePipeline`] instances a [`quad`] per [`SpriteInstance`] in
-//! [`SpriteBatch`] (one draw call per batch), alpha-blended, sampling a
-//! [`TextureAtlas`] ([`AtlasLayout`] maps named/gridded regions to
-//! normalized UVs). Drawn standalone via [`GpuContext::render_sprites`],
-//! not through [`GpuContext::render_scene`] — see the `sprite` module docs
-//! for why.
+//! Stage 2 "Sprite batch renderer": the 2D draw path — [`SpritePipeline`]
+//! instances a [`quad`] per [`SpriteInstance`] in [`SpriteBatch`] (one
+//! draw call per batch), alpha-blended, sampling a [`TextureAtlas`]
+//! ([`AtlasLayout`] maps named/gridded regions to normalized UVs). Drawn
+//! inside [`GpuContext::render_scene`]'s scene pass as a [`SpriteFrame`],
+//! against the same HDR target and depth buffer as 3D geometry, so one
+//! frame can hold both — see the `sprite` module docs.
 //!
 //! Stage 3 "Render graph": [`GpuContext::render_scene`]'s
 //! shadow/scene/tonemap sequence now runs through a [`RenderGraph`] —
@@ -166,7 +166,9 @@ mod skinning;
 mod skybox;
 mod sprite;
 mod terrain;
+mod text;
 mod texture;
+mod ui_pass;
 mod vegetation;
 
 pub use bounds::{Aabb, Frustum, Plane};
@@ -179,10 +181,10 @@ pub use error::RendererError;
 pub use gpu::{GpuContext, REQUESTED_MSAA_SAMPLE_COUNT};
 pub use instancing::{InstanceBuffer, InstanceRaw, InstancedDrawable, InstancedPipeline};
 pub use light::{
-    DirectionalLight, DirectionalLightUniform, LightSet, LightsUniform, MAX_DIRECTIONAL_LIGHTS,
-    MAX_POINT_LIGHTS, PointLight, PointLightUniform,
+    AmbientLight, DirectionalLight, DirectionalLightUniform, LightSet, LightsUniform,
+    MAX_DIRECTIONAL_LIGHTS, MAX_POINT_LIGHTS, PointLight, PointLightUniform,
 };
-pub use material::{Material, MaterialUniform};
+pub use material::{AlphaMode, Material, MaterialUniform};
 pub use mesh::{Mesh, Vertex, cube, quad};
 pub use model::ModelUniform;
 pub use particle::{
@@ -190,9 +192,9 @@ pub use particle::{
     ParticleInstanceBuffer, ParticlePipeline, ParticlePipelines,
 };
 pub use pipeline::{
-    CameraBinding, DebugLinePipeline, DebugLineVertex, Drawable, HdrTarget, LightsBinding,
-    MaterialBinding, ModelBinding, Pipeline, ShadowMap, ShadowPipeline, SkyboxBinding,
-    SkyboxPipeline,
+    CameraBinding, DEPTH_FORMAT, DebugLinePipeline, DebugLineVertex, Drawable, HdrTarget,
+    LightsBinding, MaterialBinding, MaterialMaps, ModelBinding, Pipeline, RenderTarget, ShadowMap,
+    ShadowPipeline, SkyboxBinding, SkyboxPipeline,
 };
 pub use post::{
     BloomSettings, BlurUniform, ColorGrade, CompositeUniform, DEFAULT_EXPOSURE, OutlineSettings,
@@ -208,9 +210,14 @@ pub use skinning::{
 };
 pub use skybox::{SkyboxUniform, skybox_uniform};
 pub use sprite::{
-    AtlasLayout, PixelRect, SpriteAtlasBinding, SpriteBatch, SpriteInstance, SpritePipeline,
-    TextureAtlas, UvRect,
+    AtlasLayout, PixelRect, SpriteAtlasBinding, SpriteBatch, SpriteFrame, SpriteInstance,
+    SpritePipeline, TextureAtlas, UvRect,
 };
 pub use terrain::{Brush, BrushFalloff, Heightmap};
+pub use text::{
+    GLYPH_ADVANCE, GLYPH_HEIGHT, GLYPH_WIDTH, GlyphAtlas, GlyphUv, LINE_ADVANCE, PositionedGlyph,
+    TextLayout, covers, glyph_bitmap, layout_text,
+};
 pub use texture::{Texture, decode_rgba8};
+pub use ui_pass::{ScreenUniform, UiPipeline, UiQuad};
 pub use vegetation::{VegetationPipeline, Wind, WindBinding, WindUniform};

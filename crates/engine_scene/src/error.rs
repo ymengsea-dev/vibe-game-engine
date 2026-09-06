@@ -33,6 +33,17 @@ pub enum SceneError {
     #[error("scene file I/O error: {0}")]
     Io(String),
 
+    /// A [`crate::SceneResolver`] could not turn an asset reference into
+    /// a live renderable component — an unknown id, a reference pointing
+    /// at the wrong kind of asset, or a failed GPU upload.
+    ///
+    /// Never fatal to a scene load: [`crate::Scene::instantiate_with_resolver`]
+    /// logs one of these, counts it in
+    /// [`crate::InstantiateReport::unresolved`], and spawns the entity
+    /// without its geometry.
+    #[error("failed to resolve asset reference: {0}")]
+    Resolve(String),
+
     /// A parsed scene's format `version` is newer than this engine
     /// understands. Upgrading the engine, not the scene, is what this
     /// needs — see [`crate::CURRENT_SCENE_VERSION`].

@@ -7,10 +7,10 @@ use bevy_ecs::world::World;
 use engine_renderer::{
     Aabb, CameraBinding, DebugLinePipeline, DebugLineVertex, Drawable, Frustum, GpuContext,
     HdrTarget, InstanceBuffer, InstanceRaw, InstancedDrawable, InstancedPipeline, LightsBinding,
-    Mesh, ModelUniform, ParticleFrame, Pipeline, PostProcessStack, RenderAssets, RendererError,
-    ShadowMap, ShadowPipeline, SkinnedDrawable, SkinnedPipeline, SkyboxBinding, SkyboxPipeline,
-    SpriteAtlasBinding, SpriteBatch, SpriteInstance, SpritePipeline, VegetationPipeline,
-    WindBinding,
+    Mesh, ModelUniform, ParticleFrame, Pipeline, PostProcessStack, RenderAssets, RenderTarget,
+    RendererError, ShadowMap, ShadowPipeline, SkinnedDrawable, SkinnedPipeline, SkyboxBinding,
+    SkyboxPipeline, SpriteAtlasBinding, SpriteBatch, SpriteFrame, SpriteInstance, SpritePipeline,
+    VegetationPipeline, WindBinding,
 };
 use glam::Mat4;
 
@@ -66,6 +66,10 @@ pub struct RenderStats {
     /// Of `vegetation_total`, how many were inside the camera frustum and
     /// so drawn through the wind-animated vegetation pipeline.
     pub vegetation_drawn: u32,
+    /// `Sprite` entities drawn this frame. `0` when the caller passed no
+    /// sprite pipeline/atlas, and `0` means the sprite draw was skipped
+    /// entirely — no instance buffer, no pipeline switch.
+    pub sprites_drawn: u32,
 }
 
 /// Whether a mesh whose object-space extent is `local_bounds`, positioned
@@ -78,6 +82,35 @@ pub struct RenderStats {
 /// outside.
 fn is_visible(frustum: &Frustum, local_bounds: &Aabb, world_from_local: &Mat4) -> bool {
     frustum.intersects_aabb(&local_bounds.transformed(world_from_local))
+}
+
+/// The GPU handles a caller supplies for the sprite draw: the pipeline,
+/// the unit quad every instance stamps out, and the atlas they all
+/// sample. The instances themselves come from the world, so this is the
+/// only part of a [`SpriteFrame`] the caller has to provide.
+///
+/// `None` (no atlas registered, say) skips sprites for that frame — the
+/// entities stay spawned, they simply are not drawn.
+#[derive(Clone, Copy)]
+pub struct SpriteTarget<'a> {
+    /// The sprite pipeline, built with
+    /// [`engine_renderer::GpuContext::create_sprite_pipeline`].
+    pub pipeline: &'a SpritePipeline,
+    /// The unit quad, typically [`engine_renderer::quad`] uploaded once.
+    pub quad: &'a Mesh,
+    /// The atlas every sprite in the world samples.
+    pub atlas: &'a SpriteAtlasBinding,
+}
+
+/// How far `point` lies into the view volume, for back-to-front sorting.
+///
+/// Measured against the frustum's near plane, whose normal points along
+/// the view direction — so a larger value is farther from the camera.
+/// Using the frustum avoids threading the camera's eye position through
+/// an already very wide call.
+fn view_depth(frustum: &Frustum, point: glam::Vec3) -> f32 {
+    let near = &frustum.planes[4];
+    near.normal.dot(point) + near.d
 }
 
 /// The frustum-visible subset of `instances`, packed as [`InstanceRaw`]
@@ -195,6 +228,19 @@ struct VisibleMesh<'a> {
 /// into a per-frame instance buffer; [`RenderStats`] reports the
 /// total/drawn instance counts. Instanced meshes cast no shadows yet.
 ///
+/// **Transparent surfaces** (materials whose `AlphaMode` is `Blend`)
+/// sit out the opaque path entirely: they are never GPU-batched
+/// (batching reorders, and blending is order-dependent) and are sorted
+/// back-to-front by view depth before being handed to the transparent
+/// pass, which tests depth without writing it.
+///
+/// `sprites` (`Some(SpriteTarget)`) turns on `Sprite` processing: every
+/// sprite entity is collected by [`extract_sprites`] and drawn inside
+/// the scene pass, against the same HDR target and depth buffer as the
+/// 3D geometry, so a frame can hold both and post-processing covers
+/// them equally. `None` — or a world with no sprites — skips the draw
+/// entirely and leaves [`RenderStats::sprites_drawn`] at `0`.
+///
 /// `particles` (an `engine_renderer::ParticleFrame`, e.g. from
 /// [`crate::particles::extract_particles`]) is forwarded straight to
 /// `render_scene`, which draws the billboards last in the scene pass, into
@@ -208,6 +254,10 @@ struct VisibleMesh<'a> {
 /// through the wind-animated pipeline. `None` skips vegetation entirely
 /// (and leaves `RenderStats::vegetation_total` at `0`). Vegetation casts
 /// no shadows yet.
+///
+/// `ui` (`Some((&UiPipeline, &[UiQuad]))`) is drawn last of all, after
+/// post-processing has composited, straight onto the target with no
+/// depth — a HUD must not be tonemapped or occluded.
 ///
 /// This is a plain function, not a `bevy_ecs` system — it needs `&World`
 /// plus the GPU handles (`gpu`/`pipeline`/`shadow_pipeline`/`shadow_map`/
@@ -253,10 +303,85 @@ pub fn extract_and_render(
     skinned_pipeline: &SkinnedPipeline,
     instanced_pipeline: &InstancedPipeline,
     debug_lines: Option<(&DebugLinePipeline, &[DebugLineVertex])>,
+    sprites: Option<SpriteTarget<'_>>,
     particles: Option<ParticleFrame<'_>>,
     vegetation: Option<(&VegetationPipeline, &WindBinding)>,
+    ui: Option<(&engine_renderer::UiPipeline, &[engine_renderer::UiQuad])>,
+) -> Result<RenderStats, RendererError> {
+    extract_and_render_to(
+        None,
+        world,
+        assets,
+        gpu,
+        pipeline,
+        shadow_pipeline,
+        shadow_map,
+        skybox_pipeline,
+        skybox,
+        hdr_target,
+        post,
+        camera,
+        frustum,
+        lights,
+        skinned_pipeline,
+        instanced_pipeline,
+        debug_lines,
+        sprites,
+        particles,
+        vegetation,
+        ui,
+    )
+}
+
+/// [`extract_and_render`], but compositing into `target` when one is
+/// given instead of the swapchain.
+///
+/// `None` is exactly [`extract_and_render`] — the window path. `Some` is
+/// for callers drawing somewhere else: the editor's Scene view renders
+/// into an off-screen texture it then shows inside an egui panel, using
+/// the same extraction and the same passes a shipped game uses, so what
+/// the editor displays is what the game will draw.
+///
+/// A `target`'s format must match the one `post` was built for; see
+/// [`engine_renderer::GpuContext::create_post_process_stack_for_format`].
+///
+/// # Errors
+///
+/// Propagates [`RendererError`] from the underlying render call.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "forwards render_scene's GPU handles as-is; see its own allow for why"
+)]
+pub fn extract_and_render_to(
+    target: Option<RenderTarget<'_>>,
+    world: &mut World,
+    assets: &RenderAssets,
+    gpu: &GpuContext,
+    pipeline: &Pipeline,
+    shadow_pipeline: &ShadowPipeline,
+    shadow_map: &ShadowMap,
+    skybox_pipeline: &SkyboxPipeline,
+    skybox: &SkyboxBinding,
+    hdr_target: &HdrTarget,
+    post: &PostProcessStack,
+    camera: &CameraBinding,
+    frustum: &Frustum,
+    lights: &LightsBinding,
+    skinned_pipeline: &SkinnedPipeline,
+    instanced_pipeline: &InstancedPipeline,
+    debug_lines: Option<(&DebugLinePipeline, &[DebugLineVertex])>,
+    sprites: Option<SpriteTarget<'_>>,
+    particles: Option<ParticleFrame<'_>>,
+    vegetation: Option<(&VegetationPipeline, &WindBinding)>,
+    ui: Option<(&engine_renderer::UiPipeline, &[engine_renderer::UiQuad])>,
 ) -> Result<RenderStats, RendererError> {
     propagate_transforms(world);
+
+    // Sprites first: `extract_sprites` needs `&mut World`, and every
+    // collection below borrows the world shared for the rest of the
+    // call. The batch it returns owns its instances, so nothing here
+    // keeps that mutable borrow alive.
+    let sprite_batch = sprites.map(|_| extract_sprites(world, frustum));
 
     // All query states built up front: `world.query` needs `&mut World`,
     // but the collected drawables below borrow `&World` shared, so a
@@ -271,6 +396,8 @@ pub fn extract_and_render(
     // where several share a mesh+material, folded into one instanced draw
     // (GPU batching, planned below).
     let mut shadow_casters = Vec::new();
+    // `(view depth, drawable)` so the sort key survives the borrow.
+    let mut transparent: Vec<(f32, Drawable<'_>)> = Vec::new();
     let mut visible: Vec<VisibleMesh<'_>> = Vec::new();
     for (transform, mesh_renderer) in mesh_query.iter(&*world) {
         let Some(mesh) = assets.meshes.get(mesh_renderer.mesh) else {
@@ -309,6 +436,20 @@ pub fn extract_and_render(
         });
 
         if is_visible(frustum, &mesh.local_bounds, &world_from_local) {
+            // Transparent surfaces sit out the opaque path entirely:
+            // they must not be batched (batching reorders) and they need
+            // their own back-to-front sort below.
+            if material.transparent {
+                transparent.push((
+                    view_depth(frustum, world_from_local.w_axis.truncate()),
+                    Drawable {
+                        model: &mesh_renderer.model,
+                        material,
+                        mesh,
+                    },
+                ));
+                continue;
+            }
             visible.push(VisibleMesh {
                 mesh_handle: mesh_renderer.mesh,
                 material_handle: mesh_renderer.material,
@@ -319,6 +460,11 @@ pub fn extract_and_render(
             });
         }
     }
+
+    // Sorted back-to-front, so nearer surfaces blend over farther ones.
+    // `total_cmp`, not `partial_cmp`: a NaN depth must not panic a frame.
+    transparent.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let transparent: Vec<Drawable<'_>> = transparent.into_iter().map(|(_, d)| d).collect();
 
     // Skinned meshes: model matrix synced here like the unskinned path;
     // joint matrices are the caller's to upload into `skin.joints_buffer`
@@ -510,6 +656,18 @@ pub fn extract_and_render(
         })
         .collect();
 
+    // Borrowed after the batch itself, so the frame's instance slice
+    // outlives the render call that reads it.
+    let sprite_frame = match (sprites, &sprite_batch) {
+        (Some(target), Some(batch)) if !batch.is_empty() => Some(SpriteFrame {
+            pipeline: target.pipeline,
+            quad: target.quad,
+            atlas: target.atlas,
+            instances: batch.instances(),
+        }),
+        _ => None,
+    };
+
     let stats = RenderStats {
         meshes_total: shadow_casters.len() as u32,
         meshes_drawn: visible.len() as u32,
@@ -520,46 +678,86 @@ pub fn extract_and_render(
         auto_batched_drawn,
         vegetation_total,
         vegetation_drawn,
+        sprites_drawn: sprite_frame.map_or(0, |frame| frame.instances.len() as u32),
     };
 
     let vegetation_frame =
         vegetation.map(|(pipeline, wind)| (pipeline, wind, vegetation_drawables.as_slice()));
 
-    gpu.render_scene(
-        pipeline,
-        shadow_pipeline,
-        shadow_map,
-        skybox_pipeline,
-        skybox,
-        hdr_target,
-        post,
-        camera,
-        lights,
-        &drawables,
-        &shadow_casters,
-        skinned_pipeline,
-        &skinned_drawables,
-        instanced_pipeline,
-        &instanced_drawables,
-        debug_lines,
-        particles,
-        vegetation_frame,
-    )?;
+    match target {
+        Some(target) => gpu.render_scene_to(
+            target,
+            pipeline,
+            shadow_pipeline,
+            shadow_map,
+            skybox_pipeline,
+            skybox,
+            hdr_target,
+            post,
+            camera,
+            lights,
+            &drawables,
+            &shadow_casters,
+            &transparent,
+            skinned_pipeline,
+            &skinned_drawables,
+            instanced_pipeline,
+            &instanced_drawables,
+            debug_lines,
+            sprite_frame,
+            particles,
+            vegetation_frame,
+            ui,
+        )?,
+        None => gpu.render_scene(
+            pipeline,
+            shadow_pipeline,
+            shadow_map,
+            skybox_pipeline,
+            skybox,
+            hdr_target,
+            post,
+            camera,
+            lights,
+            &drawables,
+            &shadow_casters,
+            &transparent,
+            skinned_pipeline,
+            &skinned_drawables,
+            instanced_pipeline,
+            &instanced_drawables,
+            debug_lines,
+            sprite_frame,
+            particles,
+            vegetation_frame,
+            ui,
+        )?,
+    }
 
     Ok(stats)
 }
 
-/// Propagates the entity hierarchy's transforms (see
-/// [`propagate_transforms`]), then queries the world for every
-/// `(GlobalTransform, Sprite)` entity, builds one [`SpriteBatch`] from all
-/// of them, and renders it in a single frame.
+/// Collects every `(GlobalTransform, Sprite)` entity into one
+/// [`SpriteBatch`], in draw order.
 ///
-/// The 2D counterpart to [`extract_and_render`] — see [`Sprite`]'s docs
-/// for why it needs no per-entity GPU-binding sync the way `MeshRenderer`
-/// does. `pipeline`/`quad`/`camera`/`atlas` are supplied by the caller,
-/// same as `extract_and_render`'s GPU handles: one shared sprite pipeline,
-/// one static quad mesh, one camera, and one atlas for the whole frame,
-/// not per-entity data.
+/// Transforms must already be propagated — [`extract_and_render_to`]
+/// does that before calling this, and a standalone caller should call
+/// [`propagate_transforms`] first.
+///
+/// # Draw order
+///
+/// Depth is tested against the scene but not written (a sprite is
+/// alpha-blended), so sprite-versus-sprite order is decided here, not by
+/// the GPU. Three keys, in order:
+///
+/// 1. [`Sprite::z_order`] ascending — higher layers draw last, on top.
+/// 2. View depth descending — farther sprites first, so nearer ones
+///    blend over them. This is what a 3D scene's billboards want, and it
+///    is the only key that moves when every `z_order` is the default
+///    `0.0`.
+/// 3. Entity id ascending — never a visual choice, only a tie-break so
+///    the order does not change between frames (ECS iteration order is
+///    not a promise) or between runs.
 ///
 /// A sprite entity's world-space rotation comes from
 /// [`crate::components::Transform`]'s quaternion via
@@ -567,35 +765,41 @@ pub fn extract_and_render(
 /// rotation about `Z` (the only kind a 2D game produces; anything tilting
 /// out of the XY plane isn't representable by a flat sprite's single
 /// rotation angle anyway).
-///
-/// # Errors
-///
-/// Propagates [`RendererError`] from [`GpuContext::render_sprites`].
-pub fn extract_and_render_sprites(
-    world: &mut World,
-    gpu: &GpuContext,
-    sprite_pipeline: &SpritePipeline,
-    quad: &Mesh,
-    camera: &CameraBinding,
-    atlas: &SpriteAtlasBinding,
-) -> Result<(), RendererError> {
-    propagate_transforms(world);
-
-    let mut batch = SpriteBatch::new();
-    let mut query = world.query::<(&GlobalTransform, &Sprite)>();
-    for (transform, sprite) in query.iter(&*world) {
+pub fn extract_sprites(world: &mut World, frustum: &Frustum) -> SpriteBatch {
+    // `(z_order, view depth, entity id, instance)` — the sort keys
+    // carried alongside so the comparison touches no component data.
+    let mut sorted: Vec<(f32, f32, u64, SpriteInstance)> = Vec::new();
+    let mut query = world.query::<(Entity, &GlobalTransform, &Sprite)>();
+    for (entity, transform, sprite) in query.iter(&*world) {
         let rotation = transform.0.rotation.to_scaled_axis().z;
-        batch.push(SpriteInstance {
-            position: transform.0.translation.to_array(),
-            size: sprite.size.to_array(),
-            rotation,
-            uv_min: sprite.uv.min,
-            uv_max: sprite.uv.max,
-            color: sprite.color,
-        });
+        sorted.push((
+            sprite.z_order,
+            view_depth(frustum, transform.0.translation),
+            entity.to_bits(),
+            SpriteInstance {
+                position: transform.0.translation.to_array(),
+                size: sprite.size.to_array(),
+                rotation,
+                uv_min: sprite.uv.min,
+                uv_max: sprite.uv.max,
+                color: sprite.color,
+            },
+        ));
     }
 
-    gpu.render_sprites(sprite_pipeline, quad, camera, atlas, &batch)
+    // `total_cmp`, not `partial_cmp`: a NaN `z_order` from game code must
+    // not panic the frame, and a total order keeps the sort well-defined.
+    sorted.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then_with(|| b.1.total_cmp(&a.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+
+    let mut batch = SpriteBatch::new();
+    for (_, _, _, instance) in sorted {
+        batch.push(instance);
+    }
+    batch
 }
 
 /// Despawns `entity`, first releasing its [`MeshRenderer`]'s `mesh`/
@@ -671,6 +875,43 @@ pub fn despawn_vegetation_renderer(
 
 #[cfg(test)]
 mod tests {
+    use super::view_depth;
+
+    #[test]
+    fn view_depth_grows_with_distance_from_the_camera() {
+        // Camera at the origin looking down -Z.
+        let camera =
+            engine_renderer::Camera::new(glam::Vec3::ZERO, glam::Vec3::new(0.0, 0.0, -1.0), 1.0);
+        let frustum = camera.frustum();
+
+        let near_point = glam::Vec3::new(0.0, 0.0, -5.0);
+        let far_point = glam::Vec3::new(0.0, 0.0, -50.0);
+
+        assert!(
+            view_depth(&frustum, far_point) > view_depth(&frustum, near_point),
+            "a farther point must sort as deeper, or back-to-front ordering inverts",
+        );
+    }
+
+    #[test]
+    fn transparent_sort_is_back_to_front() {
+        let camera =
+            engine_renderer::Camera::new(glam::Vec3::ZERO, glam::Vec3::new(0.0, 0.0, -1.0), 1.0);
+        let frustum = camera.frustum();
+
+        let mut depths: Vec<f32> = [-5.0, -50.0, -20.0]
+            .into_iter()
+            .map(|z| view_depth(&frustum, glam::Vec3::new(0.0, 0.0, z)))
+            .collect();
+        // The exact comparator the render path uses.
+        depths.sort_by(|a, b| b.total_cmp(a));
+
+        assert!(
+            depths.windows(2).all(|w| w[0] >= w[1]),
+            "sorted order must run farthest to nearest",
+        );
+    }
+
     use super::*;
     use engine_renderer::Camera;
     use glam::Vec3;
@@ -684,6 +925,101 @@ mod tests {
             min: Vec3::splat(-0.5),
             max: Vec3::splat(0.5),
         }
+    }
+
+    /// A world holding one sprite per `(z_order, z position)` pair, with
+    /// its `GlobalTransform` already set — `extract_sprites` reads that,
+    /// not `Transform`, and does not propagate.
+    fn world_with_sprites(sprites: &[(f32, f32)]) -> World {
+        let uv = engine_renderer::UvRect {
+            min: [0.0, 0.0],
+            max: [1.0, 1.0],
+        };
+        let mut world = World::new();
+        for &(z_order, z) in sprites {
+            let mut sprite = Sprite::new(glam::Vec2::ONE, uv);
+            sprite.z_order = z_order;
+            world.spawn((
+                GlobalTransform(engine_utils::Transform::from_translation(Vec3::new(
+                    0.0, 0.0, z,
+                ))),
+                sprite,
+            ));
+        }
+        world
+    }
+
+    #[test]
+    fn sprite_batch_sorts_back_to_front() {
+        // Camera at z = 5 looking at the origin, so a smaller z is
+        // farther away and must be drawn first.
+        let mut world = world_with_sprites(&[(0.0, 2.0), (0.0, -4.0), (0.0, 0.0)]);
+        let batch = extract_sprites(&mut world, &view_frustum());
+
+        let order: Vec<f32> = batch
+            .instances()
+            .iter()
+            .map(|instance| instance.position[2])
+            .collect();
+        assert_eq!(
+            order,
+            vec![-4.0, 0.0, 2.0],
+            "sprites on one layer must draw farthest-first so nearer ones blend over them",
+        );
+    }
+
+    #[test]
+    fn z_order_outranks_view_depth() {
+        // The nearer sprite (z = 4) is on the lower layer, so it draws
+        // first even though depth alone would put it last.
+        let mut world = world_with_sprites(&[(1.0, -4.0), (0.0, 4.0)]);
+        let batch = extract_sprites(&mut world, &view_frustum());
+
+        let order: Vec<f32> = batch
+            .instances()
+            .iter()
+            .map(|instance| instance.position[2])
+            .collect();
+        assert_eq!(
+            order,
+            vec![4.0, -4.0],
+            "z_order is the primary key: a low layer draws under a high one at any depth",
+        );
+    }
+
+    #[test]
+    fn z_order_breaks_ties_deterministically() {
+        // Same layer, same position: nothing separates these but the
+        // entity id, and the order must not wander between calls.
+        let mut world = world_with_sprites(&[(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]);
+        let frustum = view_frustum();
+
+        let first = extract_sprites(&mut world, &frustum);
+        let second = extract_sprites(&mut world, &frustum);
+        assert_eq!(
+            first.instances(),
+            second.instances(),
+            "two extracts of an unchanged world must produce the same draw order",
+        );
+        assert_eq!(first.len(), 3);
+    }
+
+    #[test]
+    fn empty_sprite_set_skips_the_pass() {
+        // No sprite entities at all: the batch is empty, which is what
+        // `extract_and_render_to` tests before building a `SpriteFrame` —
+        // no instance buffer, no pipeline switch, no draw.
+        let mut world = World::new();
+        let batch = extract_sprites(&mut world, &view_frustum());
+        assert!(batch.is_empty());
+        assert_eq!(batch.len(), 0);
+    }
+
+    #[test]
+    fn a_nan_z_order_does_not_panic_the_sort() {
+        let mut world = world_with_sprites(&[(f32::NAN, 0.0), (0.0, 1.0), (1.0, -1.0)]);
+        let batch = extract_sprites(&mut world, &view_frustum());
+        assert_eq!(batch.len(), 3, "every sprite must survive a NaN layer");
     }
 
     #[test]

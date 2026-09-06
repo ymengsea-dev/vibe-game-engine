@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use engine_ecs::components::{AssetSource, Disabled, Name, Transform as TransformComponent};
+use engine_ecs::components::{
+    AssetSource, Disabled, MeshSource, Name, Transform as TransformComponent,
+};
 use engine_ecs::prelude::{Entity, Without, World};
 use engine_project::Project;
 use engine_scene::{Scene, SceneError, write_atomic};
@@ -201,6 +203,15 @@ pub struct EditorState {
     /// Prefab"). The host writes the file and refreshes the asset list.
     /// Drained each frame.
     pub create_prefab_request: Option<Entity>,
+    /// Set when the user picked `Assets ▸ Import…`. The host opens the
+    /// file dialog, because the dialog blocks and the copy needs the
+    /// project directory — neither belongs in a menu closure that only
+    /// has `&mut egui::Ui`.
+    pub import_request: bool,
+    /// Files dropped on the window since the last frame, awaiting import.
+    pub dropped_files: Vec<std::path::PathBuf>,
+    /// Set when the user picked `Assets ▸ Refresh`.
+    pub rescan_request: bool,
     /// Set at startup when unsaved scene edits were recovered from a
     /// previous session's autosave (see
     /// [`EditorState::recover_from_autosave`]). Purely informational —
@@ -289,6 +300,9 @@ impl EditorState {
             search: crate::search::SearchState::default(),
             open_script_request: None,
             create_prefab_request: None,
+            import_request: false,
+            dropped_files: Vec::new(),
+            rescan_request: false,
             recovered_from_autosave: false,
         }
     }
@@ -462,9 +476,12 @@ impl EditorState {
     /// browser): a [`Name`] from the file stem, an identity `Transform`,
     /// and an [`AssetSource`] holding the path. Returns the new entity.
     ///
-    /// Nothing is imported or rendered from the asset yet — the entity
-    /// shows in the hierarchy and as a placeholder cube in the viewport,
-    /// and the reference survives save/load.
+    /// A mesh asset also gets a [`MeshSource`], which is what makes it
+    /// *render*: the per-frame reconciliation pass
+    /// ([`crate::resolve_pending`]) turns that reference into a live
+    /// `MeshRenderer` as soon as the importer has the asset decoded, and
+    /// [`engine_scene::capture_renderables`] writes it back out on save.
+    /// Until then the entity draws as a wireframe placeholder.
     pub fn spawn_asset_entity(&mut self, asset_path: &Path) -> Entity {
         let name = asset_path
             .file_stem()
@@ -477,9 +494,27 @@ impl EditorState {
             }
             None => AssetSource::new(asset_path.to_string_lossy().into_owned()),
         };
-        self.world
-            .spawn((Name::new(name), TransformComponent::default(), source))
-            .id()
+        // A mesh reference needs both halves. There is no separate
+        // material asset yet, so the mesh's own id stands in for it —
+        // the glTF's embedded material travels with the mesh.
+        let mesh_source = self
+            .asset_index
+            .id_for(asset_path)
+            .filter(|_| {
+                matches!(
+                    crate::assets::AssetKind::from_path(asset_path),
+                    crate::assets::AssetKind::Mesh
+                )
+            })
+            .map(|id| MeshSource::new(id.to_string(), id.to_string()));
+
+        let mut entity = self
+            .world
+            .spawn((Name::new(name), TransformComponent::default(), source));
+        if let Some(mesh_source) = mesh_source {
+            entity.insert(mesh_source);
+        }
+        entity.id()
     }
 
     /// Loads a `.prefab` file (`prefab_path` relative to the assets

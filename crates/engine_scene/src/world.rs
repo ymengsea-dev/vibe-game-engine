@@ -6,11 +6,13 @@
 //! references. Together they are what the editor's "Save Scene" / "Open
 //! Scene" actions use.
 //!
-//! Only `Name`, `Transform`, `Camera`, and the `ChildOf` parent link are
-//! carried — the component set the editor currently creates.
-//! `MeshRenderer`/`Sprite` need asset-handle resolution this conversion
-//! has no access to (a `RenderAssets` + GPU); round-tripping those is
-//! future work, tracked with the drag-into-scene feature.
+//! Both directions carry renderables. A live `MeshRenderer` holds GPU
+//! handles rather than asset ids, so the ids travel on sibling carrier
+//! components (`MeshSource`/`SpriteSource`) that
+//! [`Scene::instantiate_with_resolver`] stamps on spawn and
+//! [`Scene::from_world`] reads back via [`capture_renderables`]. A
+//! reference that failed to resolve still round-trips, so re-saving a
+//! scene whose asset file is missing never deletes the reference.
 
 use std::collections::HashMap;
 
@@ -18,7 +20,9 @@ use bevy_ecs::hierarchy::ChildOf;
 use bevy_ecs::prelude::{Entity, World};
 use engine_ecs::components::{AssetSource, Camera, Disabled, Lock, Name, Static, Transform};
 
+use crate::capture::capture_renderables;
 use crate::format::{CameraData, Scene, SceneEntity, TransformData};
+use crate::resolve::{InstantiateReport, NullResolver, SceneResolver, insert_components};
 
 impl Scene {
     /// Captures every **named** entity in `world` — its `Name`, plus its
@@ -62,15 +66,21 @@ impl Scene {
                 },
             )
             .collect();
+        // `Lock` and the renderable carriers are read here, not in the
+        // query tuple above (kept small, and `capture_renderables` needs
+        // `&World` while the query holds it). That helper is shared with
+        // the editor's prefab capture so the two can't drift.
+        for (entity, scene_entity) in &mut collected {
+            scene_entity.locked = world.get::<Lock>(*entity).is_some();
+            let (mesh_renderer, sprite) = capture_renderables(world, *entity);
+            scene_entity.mesh_renderer = mesh_renderer;
+            scene_entity.sprite = sprite;
+        }
+
         // By name, not `Entity` order: neither `Entity`'s `Ord` nor its
         // `to_bits` tracks spawn order (both are niche-optimized), and a
         // name-sorted file diffs cleanly. `sort_by` is stable, so equal
         // names keep their iteration order.
-        // `Lock` is read here, not in the query tuple above (kept small).
-        for (entity, scene_entity) in &mut collected {
-            scene_entity.locked = world.get::<Lock>(*entity).is_some();
-        }
-
         collected.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name));
 
         let index_of: HashMap<Entity, usize> = collected
@@ -108,35 +118,36 @@ impl Scene {
     /// as untrusted, same stance as [`Scene::from_ron_str`]. Call
     /// [`Scene::validate`] first to reject such a scene outright instead.
     pub fn instantiate(&self, world: &mut World) -> Vec<Entity> {
+        self.instantiate_with_resolver(world, &mut NullResolver)
+            .spawned
+    }
+
+    /// Spawns this scene's entities into `world` exactly as
+    /// [`Scene::instantiate`] does, additionally resolving each entity's
+    /// mesh/sprite asset references through `resolver` into live
+    /// renderable components.
+    ///
+    /// This is the method that makes a saved scene *visible* again:
+    /// [`Scene::instantiate`] carries names, transforms, cameras, and
+    /// hierarchy, but a `MeshRenderer` holds GPU handles that only an
+    /// asset-owning caller can rebuild. See [`SceneResolver`].
+    ///
+    /// A reference that fails to resolve is logged, counted in
+    /// [`InstantiateReport::unresolved`], and skipped — the entity still
+    /// spawns with everything else intact. Scene data is untrusted; one
+    /// broken asset never costs you the rest of the scene.
+    pub fn instantiate_with_resolver(
+        &self,
+        world: &mut World,
+        resolver: &mut impl SceneResolver,
+    ) -> InstantiateReport {
+        let mut unresolved = 0;
         let spawned: Vec<Entity> = self
             .entities
             .iter()
             .map(|scene_entity| {
                 let mut entity_mut = world.spawn_empty();
-                if let Some(name) = &scene_entity.name {
-                    entity_mut.insert(Name::new(name.clone()));
-                }
-                if let Some(transform) = scene_entity.transform {
-                    entity_mut.insert(Transform::from(engine_utils::Transform::from(transform)));
-                }
-                if let Some(camera) = scene_entity.camera {
-                    entity_mut.insert(Camera::from(engine_renderer::Camera::from(camera)));
-                }
-                if scene_entity.asset_source.is_some() || scene_entity.asset_id.is_some() {
-                    entity_mut.insert(AssetSource {
-                        path: scene_entity.asset_source.clone().unwrap_or_default(),
-                        id: scene_entity.asset_id.clone(),
-                    });
-                }
-                if scene_entity.disabled {
-                    entity_mut.insert(Disabled);
-                }
-                if scene_entity.is_static {
-                    entity_mut.insert(Static);
-                }
-                if scene_entity.locked {
-                    entity_mut.insert(Lock);
-                }
+                insert_components(&mut entity_mut, scene_entity, resolver, &mut unresolved);
                 entity_mut.id()
             })
             .collect();
@@ -150,7 +161,18 @@ impl Scene {
             }
         }
 
-        spawned
+        if unresolved > 0 {
+            tracing::warn!(
+                unresolved,
+                entities = spawned.len(),
+                "scene instantiated with unresolved asset references"
+            );
+        }
+
+        InstantiateReport {
+            spawned,
+            unresolved,
+        }
     }
 }
 
@@ -346,5 +368,314 @@ mod tests {
         let mut world = World::new();
         let spawned = scene.instantiate(&mut world);
         assert!(world.get::<ChildOf>(spawned[0]).is_none());
+    }
+
+    // --- T-01: resolver-aware instantiation -------------------------
+
+    fn scene_with_one_sprite_entity() -> Scene {
+        Scene {
+            entities: vec![SceneEntity {
+                name: Some("Coin".into()),
+                sprite: Some(crate::format::SpriteData {
+                    atlas: crate::format::AssetRef {
+                        id: "3fa85f64-5717-4562-b3fc-2c963f66afa6".into(),
+                    },
+                    region: "coin_0".into(),
+                    size: [1.0, 1.0],
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    z_order: 0.0,
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn instantiate_with_resolver_inserts_resolved_renderable() {
+        let scene = scene_with_one_sprite_entity();
+        let mut world = World::new();
+        let mut resolver = crate::resolve::test_support::StubResolver::resolving_sprites();
+
+        let report = scene.instantiate_with_resolver(&mut world, &mut resolver);
+
+        assert_eq!(report.spawned.len(), 1);
+        assert!(report.is_fully_resolved());
+        assert!(
+            world
+                .get::<engine_ecs::components::Sprite>(report.spawned[0])
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn instantiate_with_resolver_skips_unresolved_and_counts_it() {
+        let scene = scene_with_one_sprite_entity();
+        let mut world = World::new();
+        let mut resolver = crate::resolve::test_support::StubResolver::failing();
+
+        let report = scene.instantiate_with_resolver(&mut world, &mut resolver);
+
+        assert_eq!(report.unresolved, 1);
+        assert!(!report.is_fully_resolved());
+        assert!(
+            world
+                .get::<engine_ecs::components::Sprite>(report.spawned[0])
+                .is_none()
+        );
+        assert_eq!(
+            world.get::<Name>(report.spawned[0]).map(|n| n.0.as_str()),
+            Some("Coin"),
+        );
+    }
+
+    #[test]
+    fn broken_reference_does_not_abort_the_remaining_entities() {
+        let mut scene = scene_with_one_sprite_entity();
+        scene.entities.push(SceneEntity {
+            name: Some("Plain".into()),
+            transform: Some(TransformData {
+                translation: [7.0, 0.0, 0.0],
+                rotation: glam::Quat::IDENTITY.to_array(),
+                scale: [1.0, 1.0, 1.0],
+            }),
+            ..Default::default()
+        });
+        let mut world = World::new();
+        let mut resolver = crate::resolve::test_support::StubResolver::failing();
+
+        let report = scene.instantiate_with_resolver(&mut world, &mut resolver);
+
+        assert_eq!(report.spawned.len(), 2, "both entities still spawn");
+        assert_eq!(report.unresolved, 1);
+        let transform = world
+            .get::<Transform>(report.spawned[1])
+            .expect("second entity keeps its transform");
+        assert_eq!(transform.0.translation.x, 7.0);
+    }
+
+    #[test]
+    fn instantiate_without_resolver_is_unchanged() {
+        let scene = scene_with_one_sprite_entity();
+        let mut world = World::new();
+
+        let spawned = scene.instantiate(&mut world);
+
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(
+            world.get::<Name>(spawned[0]).map(|n| n.0.as_str()),
+            Some("Coin"),
+        );
+        assert!(
+            world
+                .get::<engine_ecs::components::Sprite>(spawned[0])
+                .is_none(),
+            "NullResolver resolves nothing, exactly as before this trait existed",
+        );
+    }
+
+    // --- T-02: capture of renderable references ---------------------
+
+    use engine_ecs::components::{MeshSource, Sprite as EcsSprite, SpriteSource};
+
+    const MESH_ID: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    const MATERIAL_ID: &str = "9c858901-8a57-4791-81fe-4c455b099bc9";
+    const ATLAS_ID: &str = "16fd2706-8baf-433b-82eb-8c7fada847da";
+
+    fn sprite_source() -> SpriteSource {
+        SpriteSource {
+            atlas: ATLAS_ID.into(),
+            region: "coin_0".into(),
+            size: [2.0, 3.0],
+            color: [1.0, 0.5, 0.25, 1.0],
+            z_order: 0.0,
+        }
+    }
+
+    #[test]
+    fn from_world_captures_mesh_renderer() {
+        let mut world = World::new();
+        world.spawn((Name::new("Crate"), MeshSource::new(MESH_ID, MATERIAL_ID)));
+
+        let scene = Scene::from_world(&mut world);
+
+        let mesh_renderer = scene.entities[0]
+            .mesh_renderer
+            .as_ref()
+            .expect("mesh reference should be saved");
+        assert_eq!(mesh_renderer.mesh.id, MESH_ID);
+        assert_eq!(mesh_renderer.material.id, MATERIAL_ID);
+    }
+
+    #[test]
+    fn from_world_captures_sprite() {
+        let mut world = World::new();
+        world.spawn((Name::new("Coin"), sprite_source()));
+
+        let scene = Scene::from_world(&mut world);
+
+        let sprite = scene.entities[0]
+            .sprite
+            .as_ref()
+            .expect("sprite reference should be saved");
+        assert_eq!(sprite.atlas.id, ATLAS_ID);
+        assert_eq!(sprite.region, "coin_0");
+        assert_eq!(sprite.size, [2.0, 3.0]);
+    }
+
+    #[test]
+    fn scene_round_trips_renderables() {
+        let mut world = World::new();
+        world.spawn((
+            Name::new("Crate"),
+            Transform::from(MathTransform::from_translation(Vec3::new(4.0, 0.0, 0.0))),
+            MeshSource::new(MESH_ID, MATERIAL_ID),
+        ));
+        world.spawn((Name::new("Coin"), sprite_source()));
+
+        // world -> Scene -> RON -> Scene -> world
+        let text = Scene::from_world(&mut world)
+            .to_ron_string()
+            .expect("scene should serialize");
+        let parsed = Scene::from_ron_str(&text).expect("scene should parse back");
+        let mut reloaded = World::new();
+        let report = parsed.instantiate_with_resolver(
+            &mut reloaded,
+            &mut crate::resolve::test_support::StubResolver::resolving_sprites(),
+        );
+
+        let named: std::collections::HashMap<String, bevy_ecs::prelude::Entity> = report
+            .spawned
+            .iter()
+            .filter_map(|&entity| {
+                reloaded
+                    .get::<Name>(entity)
+                    .map(|name| (name.0.clone(), entity))
+            })
+            .collect();
+
+        let crate_entity = named["Crate"];
+        let mesh = reloaded
+            .get::<MeshSource>(crate_entity)
+            .expect("mesh reference survives the round trip");
+        assert_eq!(mesh.mesh, MESH_ID);
+        assert_eq!(mesh.material, MATERIAL_ID);
+        assert_eq!(
+            reloaded
+                .get::<Transform>(crate_entity)
+                .map(|t| t.0.translation.x),
+            Some(4.0),
+        );
+
+        let coin = named["Coin"];
+        assert_eq!(
+            reloaded.get::<SpriteSource>(coin).map(|s| s.region.clone()),
+            Some("coin_0".to_string()),
+        );
+        assert!(
+            reloaded.get::<EcsSprite>(coin).is_some(),
+            "the resolver rebuilt the live sprite",
+        );
+    }
+
+    #[test]
+    fn unresolved_reference_survives_a_save_cycle() {
+        // The data-loss guard: open a scene whose asset file is gone,
+        // save it again, and the reference must still be in the file.
+        let original = Scene {
+            entities: vec![SceneEntity {
+                name: Some("Crate".into()),
+                mesh_renderer: Some(crate::format::MeshRendererData {
+                    mesh: crate::format::AssetRef { id: MESH_ID.into() },
+                    material: crate::format::AssetRef {
+                        id: MATERIAL_ID.into(),
+                    },
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let mut world = World::new();
+        let report = original.instantiate_with_resolver(
+            &mut world,
+            &mut crate::resolve::test_support::StubResolver::failing(),
+        );
+        assert_eq!(
+            report.unresolved, 1,
+            "the asset genuinely failed to resolve"
+        );
+
+        let resaved = Scene::from_world(&mut world);
+
+        let mesh_renderer = resaved.entities[0]
+            .mesh_renderer
+            .as_ref()
+            .expect("a reference must never be deleted by re-saving an unresolved scene");
+        assert_eq!(mesh_renderer.mesh.id, MESH_ID);
+        assert_eq!(mesh_renderer.material.id, MATERIAL_ID);
+    }
+
+    #[test]
+    fn live_sprite_edits_win_over_stored_values() {
+        let mut world = World::new();
+        let mut edited = EcsSprite::new(
+            glam::Vec2::new(8.0, 8.0),
+            engine_renderer::UvRect {
+                min: [0.0, 0.0],
+                max: [1.0, 1.0],
+            },
+        );
+        edited.color = [0.0, 0.0, 1.0, 1.0];
+        world.spawn((Name::new("Coin"), sprite_source(), edited));
+
+        let scene = Scene::from_world(&mut world);
+
+        let sprite = scene.entities[0].sprite.as_ref().expect("sprite saved");
+        assert_eq!(sprite.size, [8.0, 8.0], "the Inspector edit must be saved");
+        assert_eq!(sprite.color, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn old_scene_ron_without_renderables_still_parses() {
+        // A pre-T-02 file: no `mesh_renderer`, no `sprite` keys at all.
+        let text = r#"(
+            version: 2,
+            entities: [
+                (
+                    name: Some("Crate"),
+                    transform: Some((
+                        translation: (1.0, 2.0, 3.0),
+                        rotation: (0.0, 0.0, 0.0, 1.0),
+                        scale: (1.0, 1.0, 1.0),
+                    )),
+                ),
+            ],
+        )"#;
+
+        let scene = Scene::from_ron_str(text).expect("old scene files must keep parsing");
+
+        assert_eq!(scene.entities.len(), 1);
+        assert!(scene.entities[0].mesh_renderer.is_none());
+        assert!(scene.entities[0].sprite.is_none());
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_asset_ref() {
+        let scene = Scene {
+            entities: vec![SceneEntity {
+                name: Some("Crate".into()),
+                mesh_renderer: Some(crate::format::MeshRendererData {
+                    mesh: crate::format::AssetRef { id: String::new() },
+                    material: crate::format::AssetRef {
+                        id: MATERIAL_ID.into(),
+                    },
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert!(scene.validate().is_err());
     }
 }

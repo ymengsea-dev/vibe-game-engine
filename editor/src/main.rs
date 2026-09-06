@@ -346,6 +346,64 @@ fn is_meta_path(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("meta"))
 }
 
+/// Serves the frame's asset requests: a dialog import, dropped files, or
+/// an explicit rescan.
+///
+/// Every path ends in the same rescan + re-import, so an asset reaches
+/// the browser identically however it arrived.
+fn handle_asset_requests(state: &mut EditorState) {
+    let mut sources: Vec<std::path::PathBuf> = std::mem::take(&mut state.dropped_files);
+
+    if std::mem::take(&mut state.import_request) {
+        // Blocking, so the editor freezes while the dialog is open. That
+        // is what a native file dialog does everywhere; making it async
+        // would need a channel and a state machine for no visible gain.
+        if let Some(picked) = rfd::FileDialog::new()
+            .add_filter("Assets", &engine_editor::IMPORTABLE_EXTENSIONS)
+            .set_title("Import assets")
+            .pick_files()
+        {
+            sources.extend(picked);
+        }
+    }
+
+    let explicit_rescan = std::mem::take(&mut state.rescan_request);
+    if sources.is_empty() && !explicit_rescan {
+        return;
+    }
+
+    if !sources.is_empty() {
+        let assets_dir = state.project.assets_dir();
+        let outcomes = engine_editor::import_files(&assets_dir, &sources);
+        let imported = outcomes.iter().filter(|o| o.succeeded()).count();
+        for outcome in &outcomes {
+            if outcome.succeeded() {
+                tracing::info!("{}", outcome.summary());
+            } else {
+                tracing::warn!("{}", outcome.summary());
+            }
+        }
+        tracing::info!(imported, total = outcomes.len(), "asset import finished");
+    }
+
+    rescan_assets(state);
+}
+
+/// Rescans the assets directory and re-runs the import pass.
+///
+/// Shared by every path that changes what is on disk.
+fn rescan_assets(state: &mut EditorState) {
+    let assets_dir = state.project.assets_dir();
+    match scan_assets(&assets_dir) {
+        Ok(assets) => state.assets = assets,
+        Err(err) => {
+            tracing::warn!(error = %err, "asset rescan failed");
+            return;
+        }
+    }
+    state.asset_index = state.importer.run(&assets_dir, &mut state.assets);
+}
+
 /// Reacts to asset source-file changes reported by the watcher: rescans
 /// the assets directory and re-runs the import pass (cache-gated, so
 /// unchanged files aren't re-decoded and vanished ones are evicted).
@@ -869,6 +927,11 @@ impl PlatformHandler for EditorHandler {
                 self.autosave_session();
                 self.autosave_scene();
             }
+            PlatformEvent::FileDropped { path } => {
+                // Queued rather than imported here: this runs mid-event,
+                // outside the frame that owns the asset pass.
+                self.state.dropped_files.push(path);
+            }
             PlatformEvent::KeyboardInput { .. }
             | PlatformEvent::MouseButtonInput { .. }
             | PlatformEvent::CursorMoved { .. }
@@ -895,17 +958,28 @@ impl EditorHandler {
             self.state.play.tick(&mut self.state.world);
             self.state.profiler.record_span("play", span.elapsed());
 
+            // Turn any newly-importable asset references into live
+            // renderables before drawing — covers scene loads, drag-in,
+            // and imports that finished after the entity was created.
             let span = std::time::Instant::now();
-            let entity_transforms = self.state.entity_transforms();
-            self.state.profiler.record_span("extract", span.elapsed());
+            let resolved =
+                viewport.resolve_pending(&mut self.state.world, &self.state.importer, gpu);
+            if resolved.failed > 0 {
+                tracing::warn!(
+                    failed = resolved.failed,
+                    "some scene entities could not resolve their mesh"
+                );
+            }
+            self.state.profiler.record_span("resolve", span.elapsed());
 
             let span = std::time::Instant::now();
             viewport.set_dimension(gpu, self.state.dimension.is_2d());
+            let gizmo_origin = self.state.gizmo_origin();
             viewport.render(
                 gpu,
-                &entity_transforms,
+                &mut self.state.world,
                 self.state.gizmo_mode,
-                self.state.gizmo_origin(),
+                gizmo_origin,
             );
             self.state.profiler.record_span("viewport", span.elapsed());
 
@@ -927,6 +1001,7 @@ impl EditorHandler {
 
             handle_prefab_request(&mut self.state);
             handle_asset_changes(&mut self.state, self.asset_watcher.as_ref());
+            handle_asset_requests(&mut self.state);
 
             // Unconditional, even though the frame itself might not
             // get drawn below (surface acquisition can skip a frame) —

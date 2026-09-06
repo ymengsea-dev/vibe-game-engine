@@ -198,6 +198,11 @@ pub struct SpriteData {
     pub size: [f32; 2],
     /// Linear RGBA tint.
     pub color: [f32; 4],
+    /// Explicit 2D layer: higher draws on top. Defaults to `0.0`, which
+    /// is also what every scene written before layering existed reads
+    /// back as.
+    #[serde(default)]
+    pub z_order: f32,
 }
 
 /// One entity's serializable components. Every field is optional — an
@@ -418,6 +423,7 @@ mod tests {
                         region: "0_0".to_string(),
                         size: [1.0, 1.0],
                         color: [1.0, 1.0, 1.0, 1.0],
+                        z_order: 0.0,
                     }),
                     ..Default::default()
                 },
@@ -484,5 +490,18 @@ mod tests {
         assert_eq!(parsed.entities.len(), 1);
         assert!(parsed.entities[0].transform.is_none());
         assert!(parsed.entities[0].camera.is_none());
+    }
+    #[test]
+    fn sprite_without_a_z_order_reads_as_layer_zero() {
+        // Every scene file written before layering existed omits the
+        // field; it must load as the default rather than failing.
+        let text = r#"(
+            atlas: (id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+            region: "coin_0",
+            size: (1.0, 1.0),
+            color: (1.0, 1.0, 1.0, 1.0),
+        )"#;
+        let sprite: SpriteData = ron::from_str(text).expect("legacy sprite data must still load");
+        assert_eq!(sprite.z_order, 0.0);
     }
 }

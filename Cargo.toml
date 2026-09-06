@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "apps/*", "game", "editor"]
+members = ["crates/*", "apps/*", "games/*", "game", "editor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -59,6 +59,11 @@ egui-winit = "0.36"
 egui-wgpu = "0.36"
 # Font-file validation before handing bytes to egui (same parser epaint uses).
 ab_glyph = "0.2.32"
+# Gamepad input. Its own poll loop, not a winit event source — see
+# `engine_platform::gamepad`.
+gilrs = "0.11.2"
+# Native file dialogs, for the editor's asset import.
+rfd = "0.17.2"
 # Integrated terminal (editor-only, feature-gated): PTY process + VT model.
 portable-pty = "0.9"
 alacritty_terminal = "0.26"

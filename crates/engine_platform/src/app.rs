@@ -62,6 +62,16 @@ pub trait PlatformHandler {
     /// [`PlatformHandler::should_exit`]. [`PlatformHandler::on_event`]
     /// still receives the [`crate::event::PlatformEvent::CloseRequested`]
     /// beforehand either way. Default: `true` (close immediately).
+    /// Called once, immediately before the event loop exits, by either
+    /// route: an OS close request the handler accepted, or
+    /// [`PlatformHandler::should_exit`] returning `true`.
+    ///
+    /// The last point at which a handler can act — flushing a save, for
+    /// instance. `should_exit` takes `&self` and so cannot, which is why
+    /// this exists separately. Default: no-op.
+    fn on_exit(&mut self) {}
+
+    /// Called when the OS asks the window to close.
     fn on_close_requested(&mut self) -> bool {
         true
     }
@@ -121,6 +131,7 @@ impl<H: PlatformHandler> ApplicationHandler for Runner<H> {
             // The handler may veto the close (e.g. to prompt about unsaved
             // work); it can then exit later via `should_exit`.
             if self.handler.on_close_requested() {
+                self.handler.on_exit();
                 event_loop.exit();
             }
             return;
@@ -132,6 +143,7 @@ impl<H: PlatformHandler> ApplicationHandler for Runner<H> {
         // A handler that has decided it's done (e.g. a game calling
         // `request_exit`) — the only programmatic way out of the loop.
         if self.handler.should_exit() {
+            self.handler.on_exit();
             event_loop.exit();
             return;
         }

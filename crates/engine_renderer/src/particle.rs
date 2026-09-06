@@ -257,7 +257,9 @@ impl GpuContext {
                     cull_mode: None,
                     ..Default::default()
                 },
-                depth_stencil: None,
+                // Transparent billboards: occluded by geometry, but they
+                // must not write depth or they would hide each other.
+                depth_stencil: Some(crate::pipeline::transparent_depth_state()),
                 multisample: self.scene_multisample_state(),
                 multiview_mask: None,
                 cache: None,

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::SceneError;
 use crate::format::SceneEntity;
+use crate::resolve::{NullResolver, SceneResolver, insert_components};
 
 /// A reusable entity template.
 ///
@@ -125,40 +126,34 @@ impl Prefab {
         world: &mut World,
         configure: impl FnOnce(&mut EntityWorldMut<'_>),
     ) -> Entity {
+        self.instantiate_with_resolver(world, &mut NullResolver, configure)
+            .0
+    }
+
+    /// Spawns this prefab's entity as [`Prefab::instantiate_with`] does,
+    /// additionally resolving its mesh/sprite asset references through
+    /// `resolver` into live renderable components.
+    ///
+    /// Returns the spawned entity and how many of its references failed
+    /// to resolve (`0` when everything resolved or nothing needed
+    /// resolving). A failed reference is logged and skipped, never fatal —
+    /// same contract as [`crate::Scene::instantiate_with_resolver`], which
+    /// shares this method's implementation.
+    ///
+    /// `parent` is still not wired up: it indexes into an owning
+    /// [`crate::Scene`]'s entity list, which a lone prefab has no
+    /// equivalent of.
+    pub fn instantiate_with_resolver(
+        &self,
+        world: &mut World,
+        resolver: &mut impl SceneResolver,
+        configure: impl FnOnce(&mut EntityWorldMut<'_>),
+    ) -> (Entity, usize) {
+        let mut unresolved = 0;
         let mut entity_mut = world.spawn_empty();
-
-        if let Some(name) = &self.entity.name {
-            entity_mut.insert(engine_ecs::components::Name::new(name.clone()));
-        }
-        if let Some(transform) = self.entity.transform {
-            entity_mut.insert(engine_ecs::components::Transform::from(
-                engine_utils::Transform::from(transform),
-            ));
-        }
-        if let Some(camera) = self.entity.camera {
-            entity_mut.insert(engine_ecs::components::Camera::from(
-                engine_renderer::Camera::from(camera),
-            ));
-        }
-        if let Some(path) = &self.entity.asset_source {
-            entity_mut.insert(engine_ecs::components::AssetSource {
-                path: path.clone(),
-                id: self.entity.asset_id.clone(),
-            });
-        }
-        if self.entity.disabled {
-            entity_mut.insert(engine_ecs::components::Disabled);
-        }
-        if self.entity.is_static {
-            entity_mut.insert(engine_ecs::components::Static);
-        }
-        // `parent` and `mesh_renderer` aren't wired up here: `parent` is
-        // only meaningful with the full sibling list a lone `Prefab`
-        // doesn't have, and `mesh_renderer` needs GPU/asset resolution
-        // this single-entity API doesn't have access to (Stage 3/4).
-
+        insert_components(&mut entity_mut, &self.entity, resolver, &mut unresolved);
         configure(&mut entity_mut);
-        entity_mut.id()
+        (entity_mut.id(), unresolved)
     }
 
     /// Spawns a new entity in `world` with this prefab's components, but

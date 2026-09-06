@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 bevy_ecs.workspace = true
 egui.workspace = true
+rfd.workspace = true
 egui-winit.workspace = true
 egui-wgpu.workspace = true
 wgpu.workspace = true

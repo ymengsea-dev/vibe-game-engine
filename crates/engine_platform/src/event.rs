@@ -15,7 +15,10 @@ pub use winit::keyboard::KeyCode;
 /// A platform-level event delivered to a [`crate::PlatformHandler`].
 ///
 /// Not `Eq` (holds `f32`/`f64` payloads for cursor/scroll events).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Not `Copy`: [`PlatformEvent::FileDropped`] carries an owned path.
+/// Every other variant is trivially copyable, so `Clone` costs nothing
+/// for them.
+#[derive(Debug, Clone, PartialEq)]
 pub enum PlatformEvent {
     /// The window was resized to the given physical pixel size.
     Resized {
@@ -61,6 +64,13 @@ pub enum PlatformEvent {
         /// Vertical scroll delta (lines, or approximated from pixels).
         delta_y: f32,
     },
+    /// A file was dragged from the desktop and dropped on the window.
+    ///
+    /// One event per file: dropping a selection of three delivers three.
+    FileDropped {
+        /// Absolute path to the dropped file.
+        path: std::path::PathBuf,
+    },
 }
 
 /// Translates a raw winit window event into a [`PlatformEvent`], or `None`
@@ -78,6 +88,7 @@ pub(crate) fn map_window_event(event: &winit::event::WindowEvent) -> Option<Plat
             height: size.height,
         }),
         WE::RedrawRequested => Some(PlatformEvent::RedrawRequested),
+        WE::DroppedFile(path) => Some(PlatformEvent::FileDropped { path: path.clone() }),
         WE::KeyboardInput { event, .. } => {
             map_physical_key(event.physical_key, event.state.is_pressed(), event.repeat)
         }

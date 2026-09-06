@@ -561,6 +561,32 @@ impl GpuContext {
         height: u32,
         settings: PostSettings,
     ) -> PostProcessStack {
+        self.create_post_process_stack_for_format(
+            hdr_target,
+            width,
+            height,
+            settings,
+            self.config().format,
+        )
+    }
+
+    /// [`GpuContext::create_post_process_stack`], but compositing into
+    /// `target_format` instead of the surface's own format.
+    ///
+    /// The composite pass is the only stage that touches the final
+    /// target, so its format is the only thing that changes. Needed by
+    /// any caller rendering somewhere other than the swapchain — the
+    /// editor's Scene view composites into an `Rgba8Unorm` texture,
+    /// because that is the only format
+    /// `egui_wgpu::Renderer::register_native_texture` accepts.
+    pub fn create_post_process_stack_for_format(
+        &self,
+        hdr_target: &HdrTarget,
+        width: u32,
+        height: u32,
+        settings: PostSettings,
+        target_format: wgpu::TextureFormat,
+    ) -> PostProcessStack {
         let device = self.device();
 
         let bloom_width = (width / 2).max(1);
@@ -694,7 +720,7 @@ impl GpuContext {
             "post composite",
             &composite_shader,
             &composite_pipeline_layout,
-            self.config().format,
+            target_format,
         );
 
         // --- uniform buffers ---

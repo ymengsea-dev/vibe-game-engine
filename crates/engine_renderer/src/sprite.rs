@@ -2,26 +2,33 @@
 //! pipeline, plus texture atlas support so many differently-shaped
 //! sprites can share one texture (and one draw call).
 //!
-//! Deliberately standalone from [`crate::Pipeline`]'s 3D scene pass — no
-//! shadows, skybox, or HDR/tonemap chain, and (unlike every other pipeline
-//! in this crate so far) real alpha blending, since transparent sprites
-//! are the common case. [`GpuContext::render_sprites`] draws directly into
-//! the swapchain, one full self-contained frame, the same shape as
-//! [`GpuContext::render_clear`].
+//! Drawn **inside** [`crate::Pipeline`]'s scene pass, not beside it: the
+//! sprite pipeline targets the same HDR colour target at the same sample
+//! count, tests the same depth buffer, and is submitted after the sorted
+//! transparent geometry and before particles. Three consequences a 2D
+//! game gets for free: post-processing (tonemap, bloom, grade) applies to
+//! sprites exactly as it does to meshes, a sprite behind a mesh is
+//! occluded by it, and a game can mix 2D and 3D in one frame.
 //!
-//! The camera driving this is the same [`crate::Camera`]/[`CameraUniform`]
+//! Depth is *tested* but not *written* (`transparent_depth_state`) — a
+//! sprite is alpha-blended, so writing depth would let a nearer sprite
+//! reject a farther one it should be blending over. Sprite-versus-sprite
+//! order is therefore decided entirely by draw order, which is why
+//! [`crate::SpriteBatch`]'s producer sorts (see
+//! `engine_ecs::extract_and_render`).
+//!
+//! The camera driving this is the same [`crate::Camera`]/[`crate::CameraUniform`]
 //! the 3D pipeline uses — set [`crate::Projection::Orthographic`] and it
-//! works unmodified; no separate 2D camera type.
+//! works unmodified; no separate 2D camera type. The bind group is
+//! literally the scene's own [`crate::CameraBinding`]: [`SpritePipeline`] borrows
+//! [`crate::Pipeline`]'s camera layout rather than declaring a second
+//! same-shaped one, so there is one camera uniform per frame, not two.
 
 use std::collections::HashMap;
 
-use wgpu::util::DeviceExt;
-
-use crate::camera::CameraUniform;
 use crate::error::RendererError;
 use crate::gpu::GpuContext;
 use crate::mesh::{Mesh, Vertex};
-use crate::pipeline::CameraBinding;
 use crate::texture::Texture;
 
 const SPRITE_SHADER_SOURCE: &str = include_str!("shaders/sprite.wgsl");
@@ -215,14 +222,15 @@ const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 ///
 /// `#[repr(C)]` + [`bytemuck::Pod`]/[`bytemuck::Zeroable`] make this
 /// safely castable to bytes for GPU upload, the same pattern as
-/// [`crate::DebugLineVertex`]. Drawn via [`SpriteBatch`] and
-/// [`GpuContext::render_sprites`], one instanced draw call per batch.
+/// [`crate::DebugLineVertex`]. Drawn via [`SpriteBatch`]/[`SpriteFrame`],
+/// one instanced draw call per batch.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SpriteInstance {
-    /// World-space anchor position (the quad's center). `z` doesn't
-    /// affect depth testing (this pipeline has no depth buffer, same as
-    /// [`crate::Pipeline`]) — it only matters through the camera's own
+    /// World-space anchor position (the quad's center). `z` reaches the
+    /// depth buffer through the camera's view-projection like any other
+    /// geometry, so a sprite behind a mesh is occluded by it — it also
+    /// matters through the camera's own
     /// view/projection, e.g. as a manual draw-order hint under an
     /// orthographic camera looking down `-Z`.
     pub position: [f32; 3],
@@ -259,7 +267,7 @@ impl SpriteInstance {
 
     /// This instance format's wgpu buffer layout (`step_mode: Instance`,
     /// attribute locations `3..=8` — continuing after [`Vertex`]'s `0..=2`,
-    /// since [`GpuContext::render_sprites`] binds both buffers together).
+    /// since the sprite pass binds both buffers together).
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: size_of::<SpriteInstance>() as wgpu::BufferAddress,
@@ -270,11 +278,13 @@ impl SpriteInstance {
 }
 
 /// A frame's worth of sprites to draw, accumulated CPU-side and uploaded/
-/// drawn in one instanced call by [`GpuContext::render_sprites`] — the
+/// drawn in one instanced call by the scene pass's sprite draw — the
 /// "batch" in "sprite batch renderer".
 ///
-/// Draw order is push order (painter's algorithm, no depth buffer) — sort
-/// before pushing if draw order matters.
+/// Draw order is push order. Depth is tested against the scene but not
+/// written (see the module docs), so sprites do not sort themselves
+/// against each other — push them back-to-front. `engine_ecs`'s extract
+/// does that; a hand-built batch must do it too.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpriteBatch {
     instances: Vec<SpriteInstance>,
@@ -313,51 +323,62 @@ impl SpriteBatch {
 }
 
 /// A compiled instanced-textured-quad render pipeline: `sprite.wgsl`,
-/// expecting the camera uniform (`@group(0)`, the same shape as
-/// [`crate::Pipeline`]'s) and an atlas texture+sampler (`@group(1)`).
-/// Alpha-blended, no depth buffer, targets the swapchain's own format
-/// directly (see the module docs for why this is standalone from
-/// [`crate::Pipeline`]).
+/// bound to [`crate::Pipeline`]'s own camera layout (`@group(0)`) and an
+/// atlas texture+sampler (`@group(1)`). Alpha-blended, depth-tested but
+/// not depth-writing, targeting the HDR scene target at the scene pass's
+/// sample count.
 pub struct SpritePipeline {
-    render_pipeline: wgpu::RenderPipeline,
-    camera_bind_group_layout: wgpu::BindGroupLayout,
+    pub(crate) render_pipeline: wgpu::RenderPipeline,
     atlas_bind_group_layout: wgpu::BindGroupLayout,
+}
+
+/// One frame's worth of sprites, handed to
+/// [`GpuContext::render_scene`] the way [`crate::ParticleFrame`] is.
+///
+/// `instances` must already be in draw order (back-to-front); see
+/// [`SpriteBatch`].
+#[derive(Clone, Copy)]
+pub struct SpriteFrame<'a> {
+    /// The sprite pipeline to draw with.
+    pub pipeline: &'a SpritePipeline,
+    /// The unit quad every instance stamps out — typically [`crate::quad`]
+    /// uploaded via [`GpuContext::create_mesh`].
+    pub quad: &'a Mesh,
+    /// The atlas every instance samples.
+    pub atlas: &'a SpriteAtlasBinding,
+    /// The sprites, in draw order.
+    pub instances: &'a [SpriteInstance],
+}
+
+impl SpriteFrame<'_> {
+    /// Whether there is nothing to draw this frame.
+    pub fn is_empty(&self) -> bool {
+        self.instances.is_empty()
+    }
 }
 
 /// A [`TextureAtlas`]'s texture/sampler, bound to a [`SpritePipeline`]'s
 /// shader at `@group(1)`. No uniform buffer (unlike
 /// [`crate::MaterialBinding`]) — an atlas has no per-frame-changing data.
 pub struct SpriteAtlasBinding {
-    bind_group: wgpu::BindGroup,
+    pub(crate) bind_group: wgpu::BindGroup,
 }
 
 impl GpuContext {
-    /// Compiles `sprite.wgsl` into a [`SpritePipeline`] targeting this
-    /// context's surface format, with alpha blending enabled — the one
-    /// pipeline in this crate that needs real sprite transparency rather
-    /// than opaque draw-order compositing.
-    pub fn create_sprite_pipeline(&self, label: &str) -> SpritePipeline {
+    /// Compiles `sprite.wgsl` into a [`SpritePipeline`] that draws inside
+    /// `scene`'s pass: the HDR colour format, `scene`'s sample count, its
+    /// depth buffer (tested, not written), and alpha blending.
+    ///
+    /// `scene` is borrowed only for its camera bind group layout, which
+    /// this pipeline shares at `@group(0)` — one camera uniform serves
+    /// both the 3D and the sprite draws.
+    pub fn create_sprite_pipeline(&self, label: &str, scene: &crate::Pipeline) -> SpritePipeline {
         let device = self.device();
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&format!("{label} shader")),
             source: wgpu::ShaderSource::Wgsl(SPRITE_SHADER_SOURCE.into()),
         });
-
-        let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("sprite camera bind group layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
 
         let atlas_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -384,10 +405,7 @@ impl GpuContext {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(&format!("{label} layout")),
-            bind_group_layouts: &[
-                Some(&camera_bind_group_layout),
-                Some(&atlas_bind_group_layout),
-            ],
+            bind_group_layouts: &[Some(scene.camera_layout()), Some(&atlas_bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -404,8 +422,10 @@ impl GpuContext {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
+                // The HDR scene target, not the swapchain: post-processing
+                // runs after this pass and must see the sprites.
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: self.config().format,
+                    format: crate::pipeline::HDR_TEXTURE_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -414,39 +434,19 @@ impl GpuContext {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            depth_stencil: Some(crate::pipeline::transparent_depth_state()),
+            multisample: wgpu::MultisampleState {
+                count: self.msaa_sample_count(),
+                ..Default::default()
+            },
             multiview_mask: None,
             cache: None,
         });
 
         SpritePipeline {
             render_pipeline,
-            camera_bind_group_layout,
             atlas_bind_group_layout,
         }
-    }
-
-    /// Creates a uniform buffer + bind group exposing `uniform` to
-    /// `pipeline`'s shader — the sprite-pipeline counterpart of
-    /// [`GpuContext::create_camera_binding`], reusing [`CameraBinding`]
-    /// itself (against this pipeline's own, differently-shaped camera bind
-    /// group layout) rather than a duplicate type.
-    pub fn create_sprite_camera_binding(
-        &self,
-        pipeline: &SpritePipeline,
-        uniform: &CameraUniform,
-    ) -> CameraBinding {
-        let buffer = self.create_uniform_buffer("sprite camera uniform", uniform);
-        let bind_group = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sprite camera bind group"),
-            layout: &pipeline.camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-        });
-        CameraBinding { buffer, bind_group }
     }
 
     /// Creates the bind group exposing `atlas`'s texture/sampler to
@@ -471,95 +471,6 @@ impl GpuContext {
             ],
         });
         SpriteAtlasBinding { bind_group }
-    }
-
-    /// Renders one full frame of `batch`: acquires the current surface
-    /// texture, clears it, draws every instance in `batch` against `quad`
-    /// (typically built from [`crate::quad`] via
-    /// [`GpuContext::create_mesh`]) in a single instanced draw call, and
-    /// presents. Standalone — doesn't touch [`crate::Pipeline`]'s HDR
-    /// target or the swapchain any other pass might also be writing.
-    ///
-    /// An empty `batch` still clears and presents (the "nothing to draw
-    /// yet" case, not an error) — no instance buffer is allocated for it.
-    ///
-    /// Skip/error handling for surface texture acquisition matches
-    /// [`GpuContext::render_clear`] — see its docs for the full list of
-    /// transient conditions treated as "skip this frame".
-    ///
-    /// # Errors
-    ///
-    /// This currently never returns `Err` (all failure modes are
-    /// recoverable skips), but returns `Result` for the same reason
-    /// [`GpuContext::render_clear`] does.
-    pub fn render_sprites(
-        &self,
-        pipeline: &SpritePipeline,
-        quad: &Mesh,
-        camera: &CameraBinding,
-        atlas: &SpriteAtlasBinding,
-        batch: &SpriteBatch,
-    ) -> Result<(), RendererError> {
-        let Some(surface_texture) = self.acquire_frame() else {
-            return Ok(());
-        };
-
-        let view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("VGE sprite frame encoder"),
-            });
-
-        // Built here (not inside the pass below) so it outlives the pass
-        // that borrows it — same reasoning as `render_scene`'s debug-line
-        // vertex buffer. `None` for an empty batch: a zero-length instance
-        // buffer is legal but pointless to allocate.
-        let instance_buffer = (!batch.is_empty()).then(|| {
-            self.device()
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("sprite instances"),
-                    contents: bytemuck::cast_slice(batch.instances()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("VGE sprite pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color()),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            if let Some(instance_buffer) = &instance_buffer {
-                render_pass.set_pipeline(&pipeline.render_pipeline);
-                render_pass.set_bind_group(0, &camera.bind_group, &[]);
-                render_pass.set_bind_group(1, &atlas.bind_group, &[]);
-                render_pass.set_vertex_buffer(0, quad.vertex_buffer.slice(..));
-                render_pass.set_vertex_buffer(1, instance_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(quad.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..quad.index_count, 0, 0..batch.len() as u32);
-            }
-        }
-
-        self.queue().submit(std::iter::once(encoder.finish()));
-        self.present(surface_texture);
-        Ok(())
     }
 }
 

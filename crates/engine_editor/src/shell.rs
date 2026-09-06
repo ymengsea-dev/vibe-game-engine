@@ -123,7 +123,7 @@ impl EditorShell {
                 egui::MenuBar::new().ui(ui, |ui| {
                     menu_file(ui, state);
                     menu_edit(ui, state);
-                    menu_assets(ui);
+                    menu_assets(ui, state);
                     menu_gameobject(ui, state);
                     menu_component(ui);
                     menu_tools(ui);
@@ -741,11 +741,22 @@ fn menu_edit(ui: &mut egui::Ui, state: &mut EditorState) {
     });
 }
 
-/// Assets menu: import / refresh — both pending the asset pipeline work.
-fn menu_assets(ui: &mut egui::Ui) {
+/// Assets menu: import files into the project, or rescan it.
+///
+/// Both only raise a flag. The dialog blocks and the copy needs the
+/// project directory and importer, none of which a menu closure holding
+/// `&mut egui::Ui` can reach — the host acts on the flag next frame, the
+/// same arrangement `create_prefab_request` uses.
+fn menu_assets(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.menu_button("Assets", |ui| {
-        ui.add_enabled(false, egui::Button::new("Import…"));
-        ui.add_enabled(false, egui::Button::new("Refresh"));
+        if ui.button("Import…").clicked() {
+            state.import_request = true;
+            ui.close();
+        }
+        if ui.button("Refresh").clicked() {
+            state.rescan_request = true;
+            ui.close();
+        }
     });
 }
 

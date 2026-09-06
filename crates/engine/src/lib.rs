@@ -10,6 +10,7 @@
 //! use engine::prelude::*;
 //! ```
 
+pub use engine_ai as ai;
 pub use engine_animation as animation;
 pub use engine_asset as asset;
 pub use engine_audio as audio;
@@ -27,17 +28,15 @@ pub use engine_scripting as scripting;
 pub use engine_ui as ui;
 pub use engine_utils as utils;
 
-#[cfg(feature = "studio")]
-pub use engine_ai as ai;
-
 pub mod app;
 
 /// Commonly used engine types, re-exported for convenient glob imports.
 ///
 /// Populated as subsystems are implemented milestone by milestone.
 pub mod prelude {
-    pub use crate::app::{Game, GameConfig, GameContext, GameError, Time, run_game};
-    #[cfg(feature = "studio")]
+    pub use crate::app::{
+        Game, GameConfig, GameContext, GameError, SavePolicy, SceneParts, Time, run_game,
+    };
     pub use engine_ai::{
         GridCoord, NavError, NavGrid, find_path, find_path_world, follow_path, line_of_sight,
         smooth_path,
@@ -63,10 +62,11 @@ pub mod prelude {
     pub use engine_core::{App, AppState, EngineConfig, EngineError, FixedTimestep};
     pub use engine_ecs::prelude::{Bundle, ChildOf, Children, Entity, World};
     pub use engine_ecs::{
-        BlendMode, Ecs, ParticleEmitter, ParticleEmitterConfig, RenderStats, Rng,
+        AnimationEvent, AnimationEvents, AnimationPlayer, AudioEmitter, AudioListener, BlendMode,
+        Ecs, ParticleEmitter, ParticleEmitterConfig, RenderStats, Rng, SpriteTarget,
         despawn_instanced_mesh_renderer, despawn_mesh_renderer, despawn_skinned_mesh_renderer,
-        despawn_vegetation_renderer, extract_and_render, extract_and_render_sprites,
-        extract_particles, sync_rigid_bodies, update_particles,
+        despawn_vegetation_renderer, extract_and_render, extract_particles, extract_sprites,
+        sync_rigid_bodies, update_audio, update_particles,
     };
     #[cfg(feature = "studio")]
     pub use engine_editor::{
@@ -86,17 +86,18 @@ pub mod prelude {
         move_character_2d,
     };
     pub use engine_platform::{
-        ActionMap, Binding, InputState, KeyCode, MouseButton, PlatformError, PlatformEvent,
-        PlatformHandler, Window, WindowConfig, WindowEvent, run_windowed,
+        ActionMap, AxisBinding, Binding, DEFAULT_DEADZONE, GamepadAxis, GamepadButton, Gamepads,
+        InputState, KeyCode, MouseButton, PlatformError, PlatformEvent, PlatformHandler, Stick,
+        Window, WindowConfig, WindowEvent, run_windowed,
     };
     pub use engine_project::{CURRENT_PROJECT_VERSION, Project, ProjectError, ProjectManifest};
     pub use engine_renderer::{
-        Aabb, AtlasLayout, BloomSettings, Brush, BrushFalloff, Camera, CameraBinding, CameraRig,
-        CameraUniform, ColorGrade, DEFAULT_EXPOSURE, DebugLinePipeline, DebugLineVertex,
-        DirectionalLight, Frustum, GpuContext, HdrTarget, Heightmap, InstanceBuffer, InstanceRaw,
-        InstancedDrawable, InstancedPipeline, JointMatricesUniform, LightSet, LightsBinding,
-        MAX_JOINTS, Material, MaterialBinding, MaterialUniform, Mesh, ModelUniform,
-        OutlineSettings, ParticleCameraBinding, ParticleCameraUniform, ParticleFrame,
+        Aabb, AlphaMode, AmbientLight, AtlasLayout, BloomSettings, Brush, BrushFalloff, Camera,
+        CameraBinding, CameraRig, CameraUniform, ColorGrade, DEFAULT_EXPOSURE, DebugLinePipeline,
+        DebugLineVertex, DirectionalLight, Frustum, GpuContext, HdrTarget, Heightmap,
+        InstanceBuffer, InstanceRaw, InstancedDrawable, InstancedPipeline, JointMatricesUniform,
+        LightSet, LightsBinding, MAX_JOINTS, Material, MaterialBinding, MaterialUniform, Mesh,
+        ModelUniform, OutlineSettings, ParticleCameraBinding, ParticleCameraUniform, ParticleFrame,
         ParticleInstance, ParticleInstanceBuffer, ParticlePipeline, ParticlePipelines, Pipeline,
         PixelRect, Plane, PointLight, PostProcessStack, PostSettings, Projection, RenderAssets,
         RendererError, ScatterArea, ScatterConfig, ScatterError, ShadowMap, ShadowPipeline,
@@ -107,8 +108,9 @@ pub mod prelude {
         scatter, skybox_uniform,
     };
     pub use engine_scene::{
-        AssetRef, CURRENT_SCENE_VERSION, CameraData, MeshRendererData, Prefab, ProjectionData,
-        Scene, SceneEntity, SceneError, SpriteData, TransformData,
+        AssetRef, CURRENT_SCENE_VERSION, CameraData, InstantiateReport, MeshRendererData,
+        NullResolver, Prefab, ProjectionData, SaveGame, SavedEntity, Scene, SceneEntity,
+        SceneError, SceneResolver, SpriteData, TransformData, WorldSnapshot, capture_renderables,
     };
     pub use engine_ui::{
         Anchor, Color as UiColor, DrawCommand, DrawKind, Node as UiNode, NodeId, PointerInput,
@@ -117,4 +119,23 @@ pub mod prelude {
     pub use engine_utils::{AssetHandle, AssetStore, JobError, JobSystem, Transform};
     pub use glam;
     pub use tracing;
+}
+
+#[cfg(test)]
+mod tests {
+    /// Navigation must be reachable from a runtime build. It used to sit
+    /// behind the `studio` feature, which `apps/player` turns off — a
+    /// shipped game could not pathfind (T-10). Written against the
+    /// prelude, and run under `--no-default-features` as well, so the
+    /// gating cannot regress silently.
+    #[test]
+    fn navigation_is_available_without_the_studio_feature() {
+        use crate::prelude::{GridCoord, NavGrid, find_path};
+
+        let grid = NavGrid::new(4, 4, 1.0, glam::Vec2::ZERO).expect("a 4x4 grid is valid");
+        let path = find_path(&grid, GridCoord::new(0, 0), GridCoord::new(3, 3))
+            .expect("an empty grid always has a path");
+        assert_eq!(path.first().copied(), Some(GridCoord::new(0, 0)));
+        assert_eq!(path.last().copied(), Some(GridCoord::new(3, 3)));
+    }
 }

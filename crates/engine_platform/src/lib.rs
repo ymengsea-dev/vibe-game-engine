@@ -16,13 +16,18 @@ mod app;
 mod config;
 mod error;
 mod event;
+mod gamepad;
 mod input;
 
-pub use actions::{ActionMap, Binding};
+pub use actions::{ActionMap, AxisBinding, Binding};
 pub use app::{PlatformHandler, Window, run_windowed};
 pub use config::WindowConfig;
 pub use error::PlatformError;
 pub use event::{KeyCode, MouseButton, PlatformEvent};
+pub use gamepad::{
+    DEFAULT_DEADZONE, GamepadAxes, GamepadAxis, GamepadButton, GamepadUpdate, Gamepads, Stick,
+    apply_axis_deadzone, apply_radial_deadzone,
+};
 pub use input::InputState;
 /// Winit's raw window event type, re-exported for
 /// [`PlatformHandler::on_raw_window_event`] implementors that need it

@@ -189,7 +189,8 @@ impl GpuContext {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: None,
+            // Opaque (alpha-cutout comes later); wind only moves vertices.
+            depth_stencil: Some(crate::pipeline::opaque_depth_state()),
             multisample: self.scene_multisample_state(),
             multiview_mask: None,
             cache: None,

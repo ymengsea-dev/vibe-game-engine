@@ -1,103 +1,184 @@
-//! A 3D scene rendered off-screen into a texture, displayable inside an
-//! egui panel (the "Scene view"/"Game view") via [`crate::EditorShell`].
+//! The Scene view: the editor's world rendered off-screen into a texture
+//! that an egui panel displays.
 //!
-//! Deliberately minimal pipeline for this iteration — every entity draws
-//! as the same plain lit cube, not the standalone game demo's full
-//! pipeline (shadows, skybox, HDR, real per-entity meshes/materials,
-//! physics, audio). [`Viewport::render`] takes one
-//! `engine_utils::Transform` per entity (see
-//! [`crate::EditorState::entity_transforms`]) and draws a cube at each —
-//! real per-entity meshes are future work, but which *entities* show up
-//! and where already matches the hierarchy/inspector panels exactly.
+//! ## The same renderer a shipped game uses
 //!
-//! [`Viewport::render`] can also draw the `gizmo` module's translate
-//! handles at a given world position, in the same pass, using a second,
-//! equally minimal line pipeline.
+//! This draws through [`engine_ecs::extract_and_render_to`] — the exact
+//! call [`engine::app`]'s frame loop makes, with the exact PBR / shadow /
+//! skybox / HDR / post-processing stack. What the editor shows is what
+//! the game will draw.
+//!
+//! It did not always work that way: until task T-03 this module owned a
+//! toy pipeline that drew *every* entity as the same untextured grey
+//! cube, capped at 256 of them, with no depth buffer. Geometry, material,
+//! lighting and draw order were all fiction. Everything below exists to
+//! not be that.
+//!
+//! ## Off-screen, not the swapchain
+//!
+//! `egui_wgpu::Renderer::register_native_texture` accepts exactly one
+//! format ([`VIEWPORT_TEXTURE_FORMAT`]), and the window's swapchain
+//! belongs to egui, not to us. So the viewport owns its own
+//! [`HdrTarget`] and a [`PostProcessStack`] built for that format
+//! (`create_post_process_stack_for_format`), and composites into its own
+//! texture via [`engine_renderer::RenderTarget`].
+//!
+//! ## Overlays
+//!
+//! The translate/rotate/scale gizmo, and a wireframe box for any entity
+//! with no resolvable mesh, both ride the renderer's existing
+//! `debug_lines` channel rather than a private pipeline — one line list,
+//! drawn in the scene pass, depth-configured to stay visible through
+//! geometry so a gizmo behind a wall is still grabbable.
 
-use engine_renderer::{Camera, DebugLineVertex, GpuContext, Mesh, ModelUniform, Vertex, cube};
-use engine_utils::Transform;
+use engine_ecs::components::{Disabled, GlobalTransform, MeshRenderer};
+use engine_ecs::prelude::World;
+use engine_renderer::{
+    Camera, CameraBinding, DebugLinePipeline, DebugLineVertex, DirectionalLight, GpuContext,
+    HdrTarget, InstancedPipeline, LightSet, LightsBinding, Pipeline, PostProcessStack,
+    PostSettings, RenderAssets, RenderTarget, ShadowMap, ShadowPipeline, SkinnedPipeline,
+    SkyboxBinding, SkyboxPipeline, directional_light_view_projection, skybox_uniform,
+};
 use glam::{Mat4, Vec3};
-use wgpu::util::DeviceExt;
 
 use crate::error::EditorError;
-use crate::gizmo::{self, Axis, GizmoMode};
+use crate::gizmo::{self, GizmoMode};
 use crate::shell::EditorShell;
-
-const SHADER_SOURCE: &str = include_str!("shaders/viewport.wgsl");
-const GIZMO_SHADER_SOURCE: &str = include_str!("shaders/gizmo.wgsl");
 
 /// `egui_wgpu::Renderer::register_native_texture` requires exactly this
 /// format for a texture it's asked to display.
-const VIEWPORT_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+pub const VIEWPORT_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// Two [`DebugLineVertex`]s per axis handle ([`Axis::ALL`]) — the exact
-/// size of the gizmo vertex buffer, written fresh (via
-/// [`wgpu::Queue::write_buffer`], not recreated) every frame a gizmo is
-/// drawn.
-const GIZMO_VERTEX_COUNT: usize = Axis::ALL.len() * 2;
+/// Half-extent of the wireframe box drawn for an entity with no
+/// resolvable mesh, in world units. Big enough to click, small enough not
+/// to swamp real geometry.
+const PLACEHOLDER_HALF_EXTENT: f32 = 0.5;
 
-/// How many entities [`Viewport::render`] can draw at once — it pre-
-/// allocates exactly this many (buffer, bind group) pairs up front
-/// (see [`Viewport::new`]) so each entity gets its own model-uniform
-/// buffer (required: they're all drawn within one render pass, so a
-/// single shared, repeatedly-overwritten buffer would only ever show the
-/// last entity written before the pass actually executes). Extra
-/// entities beyond this cap are silently not drawn — a fixed limit,
-/// same pragmatic choice as the viewport's fixed pixel size.
-const MAX_VIEWPORT_ENTITIES: usize = 256;
+/// Colour of that wireframe box: a desaturated amber, readable as
+/// "something is here but its asset didn't load".
+const PLACEHOLDER_COLOR: [f32; 4] = [0.85, 0.65, 0.2, 1.0];
 
-/// [`DebugLineVertex`]'s field layout — `engine_renderer` doesn't expose
-/// its own copy of this publicly (it's only needed inside that crate's
-/// own pipeline setup), so this pipeline declares an identical one.
-fn gizmo_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
-    wgpu::VertexBufferLayout {
-        array_stride: size_of::<DebugLineVertex>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &ATTRIBUTES,
+/// The 12 edges of a unit cube, as index pairs into
+/// [`box_corners`]' output.
+const BOX_EDGES: [(usize, usize); 12] = [
+    (0, 1),
+    (1, 3),
+    (3, 2),
+    (2, 0),
+    (4, 5),
+    (5, 7),
+    (7, 6),
+    (6, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+];
+
+/// The eight corners of an axis-aligned box of `half_extent`, centred on
+/// `centre`, in the order [`BOX_EDGES`] indexes.
+fn box_corners(centre: Vec3, half_extent: f32) -> [Vec3; 8] {
+    let mut corners = [Vec3::ZERO; 8];
+    for (i, corner) in corners.iter_mut().enumerate() {
+        let sign = |bit: usize| if i & (1 << bit) == 0 { -1.0 } else { 1.0 };
+        *corner = centre + Vec3::new(sign(0), sign(1), sign(2)) * half_extent;
+    }
+    corners
+}
+
+/// Appends a wireframe box to `out` as line-list vertices.
+fn push_wire_box(out: &mut Vec<DebugLineVertex>, centre: Vec3, half_extent: f32, color: [f32; 4]) {
+    let corners = box_corners(centre, half_extent);
+    for &(a, b) in &BOX_EDGES {
+        out.push(DebugLineVertex {
+            position: corners[a].into(),
+            color,
+        });
+        out.push(DebugLineVertex {
+            position: corners[b].into(),
+            color,
+        });
     }
 }
 
-/// A fixed-size off-screen render of a placeholder 3D scene (one lit
-/// cube), registered with egui as a displayable texture.
+/// Builds the frame's overlay line list: a wireframe box per entity with
+/// no resolvable mesh, plus the gizmo handles at `gizmo_origin`.
 ///
-/// Fixed size rather than resizing to fill its panel — dynamically
-/// resizing the viewport (recreating the texture and re-registering it
-/// with egui every time its panel changes size) is future work.
+/// Pure over its inputs so it can be unit-tested without a GPU.
+fn overlay_lines(
+    placeholders: &[Vec3],
+    gizmo_origin: Option<Vec3>,
+    gizmo_mode: GizmoMode,
+    two_d: bool,
+) -> Vec<DebugLineVertex> {
+    let mut lines = Vec::new();
+    for &centre in placeholders {
+        push_wire_box(
+            &mut lines,
+            centre,
+            PLACEHOLDER_HALF_EXTENT,
+            PLACEHOLDER_COLOR,
+        );
+    }
+    if let Some(origin) = gizmo_origin {
+        for &axis in gizmo::axes_for(gizmo_mode, two_d) {
+            let (start, end) = gizmo::axis_endpoints(origin, axis);
+            let color = axis.color();
+            lines.push(DebugLineVertex {
+                position: start.into(),
+                color,
+            });
+            lines.push(DebugLineVertex {
+                position: end.into(),
+                color,
+            });
+        }
+    }
+    lines
+}
+
+/// The editor's off-screen scene render.
+///
+/// Fixed size rather than resizing to fill its panel — resizing means
+/// recreating the texture, the HDR target and the post stack, and
+/// re-registering with egui, which is future work.
 pub struct Viewport {
     width: u32,
     height: u32,
     view: wgpu::TextureView,
     texture_id: egui::TextureId,
-    render_pipeline: wgpu::RenderPipeline,
-    camera_bind_group: wgpu::BindGroup,
-    /// The camera uniform buffer behind `camera_bind_group`, kept so
-    /// [`Viewport::set_dimension`] can re-upload a swapped camera.
-    camera_buffer: wgpu::Buffer,
-    /// One (buffer, bind group) pair per potential entity slot — see
-    /// [`MAX_VIEWPORT_ENTITIES`].
-    model_bindings: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
-    mesh: Mesh,
     camera: Camera,
     /// `true` while the 2D authoring camera / gizmo conventions are
     /// active — see [`Viewport::set_dimension`].
     two_d: bool,
-    gizmo_pipeline: wgpu::RenderPipeline,
-    gizmo_vertex_buffer: wgpu::Buffer,
+
+    // The real renderer, owned per-viewport because it targets our
+    // off-screen texture rather than the window.
+    pipeline: Pipeline,
+    shadow_pipeline: ShadowPipeline,
+    shadow_map: ShadowMap,
+    skinned_pipeline: SkinnedPipeline,
+    instanced_pipeline: InstancedPipeline,
+    skybox_pipeline: SkyboxPipeline,
+    skybox: SkyboxBinding,
+    debug_line_pipeline: DebugLinePipeline,
+    hdr_target: HdrTarget,
+    post: PostProcessStack,
+    camera_binding: CameraBinding,
+    lights_binding: LightsBinding,
+    lights: LightSet,
+    /// GPU meshes/materials the scene's entities resolved to. Owned here
+    /// because the entities' `MeshRenderer` handles index into it.
+    assets: RenderAssets,
 }
 
 impl Viewport {
-    /// Creates a `width` by `height` viewport rendering a single cube lit
-    /// by a fixed directional light, and registers its texture with
-    /// `shell`'s egui renderer via [`EditorShell::register_texture`].
+    /// Creates a `width` by `height` Scene view and registers its texture
+    /// with `shell`'s egui renderer.
     ///
     /// # Errors
     ///
-    /// Returns [`EditorError::Renderer`] if the cube's GPU mesh fails to
-    /// build (in practice this never happens — [`cube`] always returns
-    /// non-empty geometry — but mesh creation is fallible in general, so
-    /// this stays a `Result` rather than assuming that never changes).
+    /// [`EditorError::Renderer`] if any GPU resource fails to build.
     pub fn new(
         gpu: &GpuContext,
         shell: &mut EditorShell,
@@ -123,204 +204,100 @@ impl Viewport {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let texture_id = shell.register_texture(device, &view);
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("viewport shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
-        });
-
-        let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("viewport camera bind group layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-        let model_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("viewport model bind group layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("viewport pipeline layout"),
-            bind_group_layouts: &[
-                Some(&camera_bind_group_layout),
-                Some(&model_bind_group_layout),
-            ],
-            immediate_size: 0,
-        });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("viewport pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(Vertex::layout())],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(VIEWPORT_TEXTURE_FORMAT.into())],
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = gpu.create_pbr_pipeline("editor pbr");
+        let shadow_pipeline = gpu.create_shadow_pipeline(&pipeline, "editor shadow");
+        let skinned_pipeline = gpu.create_skinned_pbr_pipeline(&pipeline, "editor skinned pbr");
+        let instanced_pipeline =
+            gpu.create_instanced_pbr_pipeline(&pipeline, "editor instanced pbr");
+        let skybox_pipeline = gpu.create_skybox_pipeline("editor skybox");
+        let debug_line_pipeline = gpu.create_debug_line_pipeline(&pipeline, "editor overlay lines");
 
         let camera = Self::perspective_camera(width, height);
-        let camera_buffer =
-            gpu.create_uniform_buffer("viewport camera uniform", &camera.to_uniform());
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("viewport camera bind group"),
-            layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
+        // One sun, angled down and slightly forward so authored geometry
+        // reads as solid rather than flat-lit.
+        let lights = LightSet {
+            directional: vec![DirectionalLight {
+                direction: Vec3::new(-0.4, -1.0, -0.3).normalize(),
+                color: Vec3::ONE,
+                intensity: 3.0,
             }],
-        });
+            point: Vec::new(),
+            // Same daylight ambient the runtime defaults to, so the
+            // Scene view and a shipped build agree on how things look.
+            ambient: engine_renderer::AmbientLight::DAYLIGHT,
+        };
+        let (sun_direction, sun_color) = lights
+            .directional
+            .first()
+            .map(|light| (light.direction, light.color))
+            .unwrap_or((Vec3::NEG_Y, Vec3::ONE));
 
-        // One buffer/bind group per potential entity slot — see
-        // `MAX_VIEWPORT_ENTITIES`'s docs for why each needs its own
-        // rather than sharing one.
-        let model_bindings: Vec<(wgpu::Buffer, wgpu::BindGroup)> = (0..MAX_VIEWPORT_ENTITIES)
-            .map(|i| {
-                let buffer = gpu.create_uniform_buffer(
-                    &format!("viewport model uniform {i}"),
-                    &ModelUniform::IDENTITY,
-                );
-                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(&format!("viewport model bind group {i}")),
-                    layout: &model_bind_group_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer.as_entire_binding(),
-                    }],
-                });
-                (buffer, bind_group)
-            })
-            .collect();
+        let light_space = directional_light_view_projection(sun_direction, Vec3::ZERO, 16.0);
+        let shadow_map = gpu.create_shadow_map(&shadow_pipeline, light_space);
+        let camera_binding = gpu.create_camera_binding(&pipeline, &camera.to_uniform());
+        let lights_binding =
+            gpu.create_lights_binding(&pipeline, &lights.to_uniform(), &shadow_map);
+        let skybox = gpu.create_skybox_binding(
+            &skybox_pipeline,
+            &skybox_uniform(&camera, sun_direction, sun_color),
+        );
 
-        let (vertices, indices) = cube();
-        let mesh = gpu.create_mesh("viewport cube", &vertices, &indices)?;
-
-        // Reuses `camera_bind_group_layout`/`camera_bind_group` above —
-        // `gizmo.wgsl` reads the same leading `view_proj` field as
-        // `viewport.wgsl`'s `CameraUniform`, the same trick
-        // `engine_renderer`'s `debug_line.wgsl` uses against the main
-        // game pipeline's camera.
-        let gizmo_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("viewport gizmo shader"),
-            source: wgpu::ShaderSource::Wgsl(GIZMO_SHADER_SOURCE.into()),
-        });
-        let gizmo_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("viewport gizmo pipeline layout"),
-                bind_group_layouts: &[Some(&camera_bind_group_layout)],
-                immediate_size: 0,
-            });
-        let gizmo_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("viewport gizmo pipeline"),
-            layout: Some(&gizmo_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &gizmo_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(gizmo_vertex_layout())],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &gizmo_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(VIEWPORT_TEXTURE_FORMAT.into())],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let gizmo_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("viewport gizmo vertex buffer"),
-            contents: bytemuck::cast_slice(
-                &[DebugLineVertex {
-                    position: [0.0; 3],
-                    color: [0.0; 4],
-                }; GIZMO_VERTEX_COUNT],
-            ),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
+        let hdr_target = gpu.create_hdr_target(width, height);
+        // Composites into our own texture's format, not the window's.
+        let post = gpu.create_post_process_stack_for_format(
+            &hdr_target,
+            width,
+            height,
+            PostSettings::default(),
+            VIEWPORT_TEXTURE_FORMAT,
+        );
 
         Ok(Self {
             width,
             height,
             view,
             texture_id,
-            render_pipeline,
-            camera_bind_group,
-            camera_buffer,
-            model_bindings,
-            mesh,
             camera,
             two_d: false,
-            gizmo_pipeline,
-            gizmo_vertex_buffer,
+            pipeline,
+            shadow_pipeline,
+            shadow_map,
+            skinned_pipeline,
+            instanced_pipeline,
+            skybox_pipeline,
+            skybox,
+            debug_line_pipeline,
+            hdr_target,
+            post,
+            camera_binding,
+            lights_binding,
+            lights,
+            assets: RenderAssets::new(),
         })
     }
 
     /// The perspective camera used in 3D authoring mode.
     fn perspective_camera(width: u32, height: u32) -> Camera {
         Camera::new(
-            Vec3::new(1.5, 1.5, 2.5),
+            Vec3::new(4.0, 3.0, 6.0),
             Vec3::ZERO,
             width as f32 / height.max(1) as f32,
         )
     }
 
-    /// The orthographic front-view camera used in 2D authoring mode:
-    /// looking down `-Z` from `+Z`, `+Y` up, so world X runs right and
-    /// world Y runs up on screen.
+    /// The orthographic front view used in 2D authoring mode.
     fn orthographic_camera(width: u32, height: u32) -> Camera {
         Camera::new_orthographic(
             Vec3::new(0.0, 0.0, 10.0),
             Vec3::ZERO,
             width as f32 / height.max(1) as f32,
-            6.0,
+            10.0,
         )
     }
 
-    /// Switches the viewport between 3D (perspective) and 2D
-    /// (orthographic front view) authoring. Re-uploads the camera
-    /// uniform only when the mode actually changes; also flips which
-    /// gizmo axes [`Viewport::render`] draws (see
-    /// [`crate::gizmo::axes_for`]).
+    /// Switches between the 3D perspective camera and the 2D
+    /// orthographic front view, re-uploading only when the mode actually
+    /// changes.
     pub fn set_dimension(&mut self, gpu: &GpuContext, two_d: bool) {
         if self.two_d == two_d {
             return;
@@ -331,121 +308,170 @@ impl Viewport {
         } else {
             Self::perspective_camera(self.width, self.height)
         };
-        gpu.write_uniform_buffer(&self.camera_buffer, &self.camera.to_uniform());
+        gpu.write_uniform_buffer(&self.camera_binding.buffer, &self.camera.to_uniform());
     }
 
-    /// This viewport's size, in pixels — matches the texture
-    /// [`Viewport::texture_id`] refers to.
+    /// This viewport's pixel dimensions.
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
-    /// The egui texture id this viewport's render target is registered
-    /// under — pass to `egui::Image::new` to display it.
+    /// The egui texture handle this viewport's panel displays.
     pub fn texture_id(&self) -> egui::TextureId {
         self.texture_id
     }
 
-    /// This viewport's camera's view-projection matrix — what
-    /// `gizmo::project_to_screen` needs to place the gizmo's handles
-    /// (see [`crate::EditorShell::run_frame`]'s Scene View panel, where
-    /// that projection happens).
+    /// The camera's combined view-projection, for screen-space gizmo
+    /// picking.
     pub fn view_projection_matrix(&self) -> Mat4 {
         self.camera.view_projection_matrix()
     }
 
-    /// Renders `entities` (each drawn as this viewport's placeholder
-    /// cube, at its own transform — see `MAX_VIEWPORT_ENTITIES`'s docs
-    /// for the cap on how many) and, if `gizmo_origin` is `Some`, the
-    /// gizmo's axis handles at that world position, into this viewport's
-    /// off-screen texture. Which handles are drawn follows
-    /// [`gizmo::axes_for`]`(gizmo_mode, two_d)` — all three in 3D, the
-    /// screen-plane subset in 2D. Self-contained (its own command
-    /// encoder and submit) — unlike the main game pipeline, this never
-    /// touches a swapchain, so there's no acquire/present step to share
-    /// with anything else.
-    pub fn render(
-        &self,
+    /// Resolves any of `world`'s renderable references that are now
+    /// importable into live components, uploading into this viewport's
+    /// own asset store.
+    ///
+    /// A method rather than a free function because the pipeline the
+    /// uploads are built against and the store they land in both belong
+    /// to this viewport — passing them out separately would borrow it
+    /// twice. See [`crate::resolve_pending`] for what a pass does.
+    pub fn resolve_pending(
+        &mut self,
+        world: &mut World,
+        importer: &crate::AssetImporter,
         gpu: &GpuContext,
-        entities: &[Transform],
+    ) -> crate::ResolveReport {
+        crate::resolve_pending(world, importer, gpu, &self.pipeline, &mut self.assets)
+    }
+
+    /// Renders `world` into this viewport's texture, with the gizmo drawn
+    /// at `gizmo_origin` and a wireframe box for every visible entity
+    /// that has no resolvable mesh.
+    ///
+    /// Errors are logged rather than returned: a dropped frame must not
+    /// take the editor down, and the next frame usually recovers.
+    pub fn render(
+        &mut self,
+        gpu: &GpuContext,
+        world: &mut World,
         gizmo_mode: GizmoMode,
         gizmo_origin: Option<Vec3>,
     ) {
-        let mut encoder = gpu
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("editor viewport encoder"),
-            });
+        gpu.write_uniform_buffer(&self.camera_binding.buffer, &self.camera.to_uniform());
+        gpu.write_uniform_buffer(&self.lights_binding.buffer, &self.lights.to_uniform());
+        let (sun_direction, sun_color) = self
+            .lights
+            .directional
+            .first()
+            .map(|light| (light.direction, light.color))
+            .unwrap_or((Vec3::NEG_Y, Vec3::ONE));
+        gpu.write_uniform_buffer(
+            &self.skybox.buffer,
+            &skybox_uniform(&self.camera, sun_direction, sun_color),
+        );
 
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("editor viewport pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05,
-                            g: 0.05,
-                            b: 0.08,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+        let placeholders = placeholder_positions(world);
+        let lines = overlay_lines(&placeholders, gizmo_origin, gizmo_mode, self.two_d);
+        let debug_lines = (!lines.is_empty()).then_some((&self.debug_line_pipeline, &lines[..]));
 
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.mesh.vertex_buffer.slice(..));
-            render_pass
-                .set_index_buffer(self.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-
-            // `zip` already stops at the shorter of the two — a no-op
-            // cap once `entities.len() <= MAX_VIEWPORT_ENTITIES`, and the
-            // actual cap (extra entities silently not drawn) otherwise.
-            for (transform, (buffer, bind_group)) in entities.iter().zip(&self.model_bindings) {
-                gpu.write_uniform_buffer(buffer, &ModelUniform::from(transform));
-                render_pass.set_bind_group(1, bind_group, &[]);
-                render_pass.draw_indexed(0..self.mesh.index_count, 0, 0..1);
-            }
-
-            if let Some(origin) = gizmo_origin {
-                let axes = gizmo::axes_for(gizmo_mode, self.two_d);
-                let mut vertices = [DebugLineVertex {
-                    position: [0.0; 3],
-                    color: [0.0; 4],
-                }; GIZMO_VERTEX_COUNT];
-                for (i, &axis) in axes.iter().enumerate() {
-                    let (start, end) = gizmo::axis_endpoints(origin, axis);
-                    let color = axis.color();
-                    vertices[i * 2] = DebugLineVertex {
-                        position: start.into(),
-                        color,
-                    };
-                    vertices[i * 2 + 1] = DebugLineVertex {
-                        position: end.into(),
-                        color,
-                    };
-                }
-                gpu.queue().write_buffer(
-                    &self.gizmo_vertex_buffer,
-                    0,
-                    bytemuck::cast_slice(&vertices),
-                );
-
-                render_pass.set_pipeline(&self.gizmo_pipeline);
-                render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.gizmo_vertex_buffer.slice(..));
-                render_pass.draw(0..(axes.len() * 2) as u32, 0..1);
-            }
+        let frustum = self.camera.frustum();
+        if let Err(err) = engine_ecs::extract_and_render_to(
+            Some(RenderTarget::new(&self.view)),
+            world,
+            &self.assets,
+            gpu,
+            &self.pipeline,
+            &self.shadow_pipeline,
+            &self.shadow_map,
+            &self.skybox_pipeline,
+            &self.skybox,
+            &self.hdr_target,
+            &self.post,
+            &self.camera_binding,
+            &frustum,
+            &self.lights_binding,
+            &self.skinned_pipeline,
+            &self.instanced_pipeline,
+            debug_lines,
+            // No sprites: every sprite in a scene samples its own atlas
+            // texture, and the Scene view has no atlas binding to draw
+            // them with yet. 2D scenes show their meshes, not their
+            // sprites, until that is wired.
+            None,
+            None,
+            None,
+            // The editor draws its own chrome through egui; the runtime
+            // UI pass is for shipped games.
+            None,
+        ) {
+            tracing::error!(error = %err, "editor viewport frame failed");
         }
+    }
+}
 
-        gpu.queue().submit(std::iter::once(encoder.finish()));
+/// World-space positions of every visible entity that has a transform but
+/// no [`MeshRenderer`] — lights, cameras, empties, and anything whose
+/// asset failed to resolve. These get a wireframe box so they stay
+/// visible and selectable.
+fn placeholder_positions(world: &mut World) -> Vec<Vec3> {
+    let mut query = world.query_filtered::<&GlobalTransform, (
+        bevy_ecs::prelude::Without<MeshRenderer>,
+        bevy_ecs::prelude::Without<Disabled>,
+    )>();
+    query
+        .iter(world)
+        .map(|global| global.0.translation)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box_has_twelve_edges_as_twentyfour_vertices() {
+        let mut lines = Vec::new();
+        push_wire_box(&mut lines, Vec3::ZERO, 1.0, PLACEHOLDER_COLOR);
+        assert_eq!(lines.len(), 24, "12 edges, 2 vertices each");
+    }
+
+    #[test]
+    fn box_corners_are_symmetric_about_the_centre() {
+        let corners = box_corners(Vec3::new(5.0, 0.0, 0.0), 2.0);
+        let sum: Vec3 = corners.iter().copied().sum();
+        // Eight corners symmetric about the centre average back to it.
+        assert!((sum / 8.0 - Vec3::new(5.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn overlay_has_no_lines_with_nothing_to_draw() {
+        let lines = overlay_lines(&[], None, GizmoMode::Translate, false);
+        assert!(lines.is_empty(), "an empty overlay must skip the draw");
+    }
+
+    #[test]
+    fn overlay_includes_a_box_per_placeholder() {
+        let lines = overlay_lines(
+            &[Vec3::ZERO, Vec3::X, Vec3::Y],
+            None,
+            GizmoMode::Translate,
+            false,
+        );
+        assert_eq!(lines.len(), 3 * 24);
+    }
+
+    #[test]
+    fn overlay_appends_gizmo_handles_after_placeholders() {
+        let with_gizmo =
+            overlay_lines(&[Vec3::ZERO], Some(Vec3::ZERO), GizmoMode::Translate, false);
+        let axes = gizmo::axes_for(GizmoMode::Translate, false).len();
+        assert_eq!(with_gizmo.len(), 24 + axes * 2);
+    }
+
+    #[test]
+    fn two_d_mode_draws_fewer_gizmo_axes_than_three_d() {
+        let three_d = overlay_lines(&[], Some(Vec3::ZERO), GizmoMode::Translate, false);
+        let two_d = overlay_lines(&[], Some(Vec3::ZERO), GizmoMode::Translate, true);
+        assert!(two_d.len() < three_d.len());
     }
 }

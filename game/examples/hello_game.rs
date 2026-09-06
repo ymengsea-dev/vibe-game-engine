@@ -31,6 +31,7 @@ impl Game for HelloGame {
                 base_color_factor: [0.9, 0.5, 0.3, 1.0],
                 metallic_factor: 0.1,
                 roughness_factor: 0.6,
+                ..Material::DEFAULT
             },
             Transform::from_translation(glam::Vec3::new(0.0, 0.6, 0.0)),
         ));
@@ -46,6 +47,7 @@ impl Game for HelloGame {
                 base_color_factor: [0.4, 0.6, 0.4, 1.0],
                 metallic_factor: 0.0,
                 roughness_factor: 0.9,
+                ..Material::DEFAULT
             },
             Transform::from_translation(glam::Vec3::new(0.0, -0.25, 0.0))
                 .with_scale(glam::Vec3::new(8.0, 0.5, 8.0)),

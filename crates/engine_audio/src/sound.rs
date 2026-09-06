@@ -17,8 +17,15 @@ use crate::error::AudioError;
 ///
 /// Well suited to short sound effects: no per-play disk I/O, safe to play
 /// many times (including overlapping/simultaneous plays) with tight
-/// timing. For music or other long tracks, prefer [`StreamingSound`] —
+/// timing.
+///
+/// [`Clone`] is cheap: kira's sample buffer is reference-counted, so a
+/// clone shares the decoded audio rather than copying it. That matters
+/// because playing consumes the sound — anything that replays (an ECS
+/// [`crate::AudioContext`]-driven emitter, a footstep, a UI click) clones
+/// per play. For music or other long tracks, prefer [`StreamingSound`] —
 /// holding a whole song decoded in memory is wasteful.
+#[derive(Clone)]
 pub struct StaticSound {
     pub(crate) data: StaticSoundData,
 }

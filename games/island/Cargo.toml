@@ -1,0 +1,25 @@
+[package]
+name = "island"
+description = "Playable vertical slice: a walkable procedural island. The standing acceptance test for the engine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "island"
+path = "src/main.rs"
+
+[dependencies]
+# The runtime facade only — no editor, no AI (NFR-004). This slice must
+# link exactly what a shipped game links.
+engine = { path = "../../crates/engine", default-features = false }
+glam.workspace = true
+serde = { workspace = true, features = ["derive"] }
+ron.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
