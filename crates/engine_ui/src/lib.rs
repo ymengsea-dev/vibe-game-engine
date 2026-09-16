@@ -19,8 +19,20 @@
 //! - No glyph rendering — a [`Widget::Label`]/[`Widget::Button`] emits a
 //!   [`DrawKind::Text`] command carrying the string; wiring that to a
 //!   font atlas in `engine_renderer` is the next slice.
-//! - No scrolling, no flex/grid, no focus/keyboard nav — anchor +
-//!   offset + fixed size only.
+//! - No scrolling, no flex/grid — anchor + offset + fixed size only.
+//!
+//! ## Focus
+//!
+//! A [`Ui`] tracks one focused node so a menu works with a keyboard or a
+//! gamepad and no pointer at all. [`Ui::focus_next`] walks paint order
+//! and wraps; [`Ui::focus_direction`] moves geometrically and stops at
+//! the edge (see its docs for why the two differ). [`Ui::activate`]
+//! clicks whatever is focused. The focused node gets a ring drawn over
+//! everything else in [`Ui::draw_list`].
+//!
+//! Nothing here reads an input device: this crate has no
+//! `engine_platform` dependency, so the frame loop (`engine::app`) is
+//! what turns a d-pad press into a [`Ui::focus_direction`] call.
 
 use engine_utils::AssetId;
 
@@ -85,6 +97,11 @@ impl Rect {
             && point[1] >= self.y
             && point[1] < self.y + self.h
     }
+}
+
+/// A rectangle's centre point, the reference used by directional focus.
+fn centre(rect: Rect) -> [f32; 2] {
+    [rect.x + rect.w * 0.5, rect.y + rect.h * 0.5]
 }
 
 /// Where a node's box attaches within its parent's rectangle.
@@ -195,10 +212,50 @@ pub struct Node {
     pub style: Style,
     /// What it draws / how it behaves.
     pub widget: Widget,
+    /// Whether focus can land here.
+    ///
+    /// [`Ui::add`] defaults it to "is this a [`Widget::Button`]", which
+    /// is right for most trees. It is a node property rather than a
+    /// widget one so a game can override both directions: a disabled
+    /// button stops being reachable, and a [`Widget::Panel`] acting as a
+    /// list row becomes reachable.
+    pub focusable: bool,
     /// Child node ids, painted after (on top of) this node.
     children: Vec<NodeId>,
     /// Filled by [`Ui::layout`]; meaningless before the first call.
     computed: Rect,
+}
+
+/// The outline drawn around the focused node.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusRing {
+    /// Ring colour.
+    pub color: Color,
+    /// Border thickness in pixels. Zero draws no ring.
+    pub thickness: f32,
+}
+
+impl Default for FocusRing {
+    /// A 2px white outline.
+    fn default() -> Self {
+        Self {
+            color: Color::WHITE,
+            thickness: 2.0,
+        }
+    }
+}
+
+/// Which way [`Ui::focus_direction`] should look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusDirection {
+    /// Towards smaller `y`.
+    Up,
+    /// Towards larger `y`.
+    Down,
+    /// Towards smaller `x`.
+    Left,
+    /// Towards larger `x`.
+    Right,
 }
 
 /// A retained UI tree.
@@ -210,6 +267,10 @@ pub struct Ui {
     /// The node a pointer press started over, tracked so a release only
     /// counts as a click if it lands on the same node.
     press_target: Option<NodeId>,
+    /// The focused node, if any. Always a focusable, existing id.
+    focus: Option<NodeId>,
+    /// How the focused node is outlined.
+    ring: FocusRing,
 }
 
 /// The pointer state for one [`Ui::interact`] call.
@@ -262,6 +323,8 @@ impl Ui {
             root: None,
             screen: [width.max(0.0), height.max(0.0)],
             press_target: None,
+            focus: None,
+            ring: FocusRing::default(),
         }
     }
 
@@ -275,6 +338,9 @@ impl Ui {
         self.nodes.clear();
         self.root = None;
         self.press_target = None;
+        // Ids are about to be reused by the next tree; keeping the old
+        // one would focus an unrelated node.
+        self.focus = None;
     }
 
     /// Adds a node under `parent` (or as the root when `parent` is
@@ -285,9 +351,11 @@ impl Ui {
     /// the root if there isn't one) rather than panicking.
     pub fn add(&mut self, parent: Option<NodeId>, style: Style, widget: Widget) -> NodeId {
         let id = self.nodes.len();
+        let focusable = matches!(widget, Widget::Button { .. });
         self.nodes.push(Node {
             style,
             widget,
+            focusable,
             children: Vec::new(),
             computed: Rect {
                 x: 0.0,
@@ -380,6 +448,191 @@ impl Ui {
         }
     }
 
+    /// The focused node, if any.
+    pub fn focus(&self) -> Option<NodeId> {
+        self.focus
+    }
+
+    /// Moves focus to `id`, or clears it with `None`.
+    ///
+    /// Returns whether the request took effect: an id that does not
+    /// exist, or exists but is not [`Node::focusable`], is refused and
+    /// leaves the previous focus alone. Refusing rather than clearing
+    /// means a game that focuses a stale id does not silently lose
+    /// keyboard control of its menu.
+    pub fn set_focus(&mut self, id: Option<NodeId>) -> bool {
+        match id {
+            None => {
+                self.focus = None;
+                true
+            }
+            Some(id) => {
+                if self.nodes.get(id).is_some_and(|node| node.focusable) {
+                    self.focus = Some(id);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Marks whether focus can land on `id`. Focusing out of a node that
+    /// is currently focused clears the focus.
+    ///
+    /// Returns `false` if `id` does not exist.
+    pub fn set_focusable(&mut self, id: NodeId, focusable: bool) -> bool {
+        let Some(node) = self.nodes.get_mut(id) else {
+            return false;
+        };
+        node.focusable = focusable;
+        if !focusable && self.focus == Some(id) {
+            self.focus = None;
+        }
+        true
+    }
+
+    /// The outline drawn around the focused node.
+    pub fn focus_ring(&self) -> FocusRing {
+        self.ring
+    }
+
+    /// Replaces the focus outline. A `thickness` of zero draws none.
+    pub fn set_focus_ring(&mut self, ring: FocusRing) {
+        self.ring = ring;
+    }
+
+    /// Every focusable node, in paint order (the order
+    /// [`Ui::draw_list`] emits them, which is the order a player reads
+    /// them).
+    pub fn focusables(&self) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        if let Some(root) = self.root {
+            self.collect_focusables(root, &mut out);
+        }
+        out
+    }
+
+    fn collect_focusables(&self, id: NodeId, out: &mut Vec<NodeId>) {
+        let node = &self.nodes[id];
+        if node.focusable {
+            out.push(id);
+        }
+        for &child in &node.children {
+            self.collect_focusables(child, out);
+        }
+    }
+
+    /// Moves focus to the next focusable node in paint order, **wrapping**
+    /// past the last one back to the first — the tab-order convention.
+    ///
+    /// With nothing focused yet, focuses the first focusable node. A tree
+    /// with no focusable nodes is a no-op. Returns the newly focused node.
+    pub fn focus_next(&mut self) -> Option<NodeId> {
+        self.step_focus(1)
+    }
+
+    /// [`Ui::focus_next`] backwards.
+    pub fn focus_previous(&mut self) -> Option<NodeId> {
+        self.step_focus(-1)
+    }
+
+    fn step_focus(&mut self, step: isize) -> Option<NodeId> {
+        let order = self.focusables();
+        if order.is_empty() {
+            return None;
+        }
+        let next = match self
+            .focus
+            .and_then(|id| order.iter().position(|&o| o == id))
+        {
+            Some(index) => {
+                let len = order.len() as isize;
+                // `rem_euclid` so a backwards step from index 0 lands on
+                // the last entry rather than going negative.
+                ((index as isize + step).rem_euclid(len)) as usize
+            }
+            // Nothing focused (or focus sits outside the current tree):
+            // start at whichever end the step is heading away from.
+            None if step >= 0 => 0,
+            None => order.len() - 1,
+        };
+        self.focus = Some(order[next]);
+        self.focus
+    }
+
+    /// Moves focus to the nearest focusable node lying in `direction`,
+    /// and **stops at the edge** rather than wrapping.
+    ///
+    /// The asymmetry with [`Ui::focus_next`] is deliberate. Tab order is
+    /// a list, and a list wraps. Directional focus is spatial: pressing
+    /// Right at the rightmost button and landing back on the leftmost one
+    /// reads as the cursor teleporting, so nothing happens instead.
+    ///
+    /// With nothing focused yet, focuses the first focusable node — a
+    /// player's first d-pad press should select something, not nothing.
+    ///
+    /// ## How "nearest" is decided
+    ///
+    /// Only nodes whose centre lies strictly beyond the focused node's
+    /// centre along `direction`'s axis are candidates. Each is scored
+    /// `axis_distance + 2 * cross_offset`, so a button a little further
+    /// away but squarely in line beats one that is closer but far off to
+    /// the side. Lowest score wins; equal scores break by [`NodeId`], so
+    /// the choice never wanders between frames.
+    ///
+    /// Rectangles come from [`Ui::layout`] — call it first, or every
+    /// node is still at the origin and the scoring is meaningless.
+    pub fn focus_direction(&mut self, direction: FocusDirection) -> Option<NodeId> {
+        let order = self.focusables();
+        if order.is_empty() {
+            return None;
+        }
+        let Some(current) = self.focus.filter(|id| order.contains(id)) else {
+            self.focus = Some(order[0]);
+            return self.focus;
+        };
+
+        let from = centre(self.nodes[current].computed);
+        let mut best: Option<(f32, NodeId)> = None;
+        for &id in &order {
+            if id == current {
+                continue;
+            }
+            let to = centre(self.nodes[id].computed);
+            let (axis, cross) = match direction {
+                FocusDirection::Up => (from[1] - to[1], (to[0] - from[0]).abs()),
+                FocusDirection::Down => (to[1] - from[1], (to[0] - from[0]).abs()),
+                FocusDirection::Left => (from[0] - to[0], (to[1] - from[1]).abs()),
+                FocusDirection::Right => (to[0] - from[0], (to[1] - from[1]).abs()),
+            };
+            if axis <= 0.0 {
+                continue;
+            }
+            let score = axis + 2.0 * cross;
+            if best.is_none_or(|(best_score, _)| score < best_score) {
+                best = Some((score, id));
+            }
+        }
+
+        if let Some((_, id)) = best {
+            self.focus = Some(id);
+        }
+        self.focus
+    }
+
+    /// Clicks the focused node, the way a pointer release over it would.
+    ///
+    /// Returns the activated id, or `None` when nothing is focused or the
+    /// focused node is not a [`Widget::Button`] (a focusable panel can
+    /// hold focus without being clickable). Feed the result into whatever
+    /// already handles [`Ui::interact`]'s list — activation is a click,
+    /// not a second kind of event.
+    pub fn activate(&mut self) -> Option<NodeId> {
+        let id = self.focus?;
+        matches!(self.nodes.get(id)?.widget, Widget::Button { .. }).then_some(id)
+    }
+
     /// Feeds one frame of pointer input and returns the ids of every
     /// [`Widget::Button`] that completed a click this frame (pressed and
     /// released over the same button).
@@ -397,6 +650,12 @@ impl Ui {
                 && matches!(self.nodes[released].widget, Widget::Button { .. })
             {
                 clicked.push(released);
+                // A clicked button takes focus, so picking up a gamepad
+                // mid-menu resumes from what the mouse last touched
+                // rather than from wherever focus happened to be.
+                if self.nodes[released].focusable {
+                    self.focus = Some(released);
+                }
             }
             self.press_target = None;
         }
@@ -416,7 +675,64 @@ impl Ui {
         if let Some(root) = self.root {
             self.collect_draw(root, pointer, &mut out);
         }
+        self.collect_focus_ring(&mut out);
         out
+    }
+
+    /// Appends the focused node's outline as four thin fills.
+    ///
+    /// Last in the list, not next to the node it surrounds: a sibling
+    /// painted later would otherwise cover the ring on exactly the
+    /// overlapping menus where it matters most. Four fills rather than a
+    /// new [`DrawKind`] keeps every renderer that can already draw a
+    /// rectangle able to draw a focus ring.
+    fn collect_focus_ring(&self, out: &mut Vec<DrawCommand>) {
+        let Some(id) = self.focus else { return };
+        let Some(node) = self.nodes.get(id) else {
+            return;
+        };
+        let rect = node.computed;
+        let t = self.ring.thickness;
+        if t <= 0.0 || rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
+        // Drawn inside the node's box, so a ring never overlaps its
+        // neighbour and layout does not shift when focus moves.
+        let t = t.min(rect.w * 0.5).min(rect.h * 0.5);
+        let sides = [
+            Rect {
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: t,
+            },
+            Rect {
+                x: rect.x,
+                y: rect.y + rect.h - t,
+                w: rect.w,
+                h: t,
+            },
+            Rect {
+                x: rect.x,
+                y: rect.y + t,
+                w: t,
+                h: (rect.h - 2.0 * t).max(0.0),
+            },
+            Rect {
+                x: rect.x + rect.w - t,
+                y: rect.y + t,
+                w: t,
+                h: (rect.h - 2.0 * t).max(0.0),
+            },
+        ];
+        for side in sides {
+            if side.w > 0.0 && side.h > 0.0 {
+                out.push(DrawCommand {
+                    rect: side,
+                    kind: DrawKind::Fill(self.ring.color),
+                });
+            }
+        }
     }
 
     fn collect_draw(&self, id: NodeId, pointer: [f32; 2], out: &mut Vec<DrawCommand>) {
@@ -486,6 +802,208 @@ mod tests {
             bg: Color::rgb(0.2, 0.2, 0.2),
             hot_bg: Color::rgb(0.4, 0.4, 0.4),
         }
+    }
+
+    /// Four buttons in a plus shape around (100, 100), each 40x20:
+    /// `up`, `down`, `left`, `right`. Laid out and ready to navigate.
+    fn cross_menu() -> (Ui, [NodeId; 4]) {
+        let mut ui = Ui::new(200.0, 200.0);
+        let root = ui.add(
+            None,
+            Style {
+                anchor: Anchor::TopLeft,
+                offset: [0.0, 0.0],
+                size: [200.0, 200.0],
+            },
+            panel(Color::TRANSPARENT),
+        );
+        let at = |x: f32, y: f32| Style {
+            anchor: Anchor::TopLeft,
+            offset: [x, y],
+            size: [40.0, 20.0],
+        };
+        let up = ui.add(Some(root), at(80.0, 40.0), button());
+        let down = ui.add(Some(root), at(80.0, 140.0), button());
+        let left = ui.add(Some(root), at(20.0, 90.0), button());
+        let right = ui.add(Some(root), at(140.0, 90.0), button());
+        ui.layout();
+        (ui, [up, down, left, right])
+    }
+
+    #[test]
+    fn buttons_are_focusable_by_default_and_panels_are_not() {
+        let mut ui = Ui::new(100.0, 100.0);
+        let p = ui.add(None, Style::default(), panel(Color::WHITE));
+        let b = ui.add(Some(p), Style::default(), button());
+        assert!(!ui.node(p).unwrap().focusable);
+        assert!(ui.node(b).unwrap().focusable);
+        assert_eq!(ui.focusables(), vec![b]);
+    }
+
+    #[test]
+    fn focus_moves_to_nearest_node_in_direction() {
+        let (mut ui, [up, down, left, right]) = cross_menu();
+        ui.set_focus(Some(left));
+
+        assert_eq!(ui.focus_direction(FocusDirection::Right), Some(right));
+        assert_eq!(
+            ui.focus,
+            Some(right),
+            "the node squarely in line wins over the two off to the side"
+        );
+
+        ui.set_focus(Some(up));
+        assert_eq!(ui.focus_direction(FocusDirection::Down), Some(down));
+        ui.set_focus(Some(down));
+        assert_eq!(ui.focus_direction(FocusDirection::Up), Some(up));
+        ui.set_focus(Some(right));
+        assert_eq!(ui.focus_direction(FocusDirection::Left), Some(left));
+    }
+
+    #[test]
+    fn focus_direction_stops_at_the_edge() {
+        let (mut ui, [_, _, left, _]) = cross_menu();
+        ui.set_focus(Some(left));
+        // Nothing lies further left; focus must stay put rather than
+        // wrapping round to the right-hand button.
+        assert_eq!(ui.focus_direction(FocusDirection::Left), Some(left));
+    }
+
+    #[test]
+    fn first_directional_press_selects_something() {
+        let (mut ui, _) = cross_menu();
+        assert_eq!(ui.focus(), None);
+        assert!(ui.focus_direction(FocusDirection::Down).is_some());
+    }
+
+    #[test]
+    fn focus_wraps_at_the_edge() {
+        let (mut ui, [up, down, left, right]) = cross_menu();
+        assert_eq!(ui.focus_next(), Some(up));
+        assert_eq!(ui.focus_next(), Some(down));
+        assert_eq!(ui.focus_next(), Some(left));
+        assert_eq!(ui.focus_next(), Some(right));
+        assert_eq!(ui.focus_next(), Some(up), "tab order wraps");
+        assert_eq!(ui.focus_previous(), Some(right), "and wraps backwards");
+    }
+
+    #[test]
+    fn activate_fires_focused_node() {
+        let (mut ui, [up, down, _, _]) = cross_menu();
+        ui.set_focus(Some(down));
+        assert_eq!(ui.activate(), Some(down));
+        ui.set_focus(Some(up));
+        assert_eq!(ui.activate(), Some(up), "and follows focus");
+    }
+
+    #[test]
+    fn activate_without_focus_is_none() {
+        let (mut ui, _) = cross_menu();
+        assert_eq!(ui.activate(), None);
+    }
+
+    #[test]
+    fn activate_on_a_focusable_non_button_is_none() {
+        // A panel can hold focus (a list row) without being clickable.
+        let mut ui = Ui::new(100.0, 100.0);
+        let p = ui.add(None, Style::default(), panel(Color::WHITE));
+        ui.set_focusable(p, true);
+        assert!(ui.set_focus(Some(p)));
+        assert_eq!(ui.activate(), None);
+    }
+
+    #[test]
+    fn navigation_with_no_focusables_is_a_noop() {
+        let mut ui = Ui::new(100.0, 100.0);
+        let p = ui.add(None, Style::default(), panel(Color::WHITE));
+        ui.add(Some(p), Style::default(), panel(Color::WHITE));
+        ui.layout();
+
+        assert_eq!(ui.focus_next(), None);
+        assert_eq!(ui.focus_previous(), None);
+        assert_eq!(ui.focus_direction(FocusDirection::Down), None);
+        assert_eq!(ui.activate(), None);
+        assert_eq!(ui.focus(), None);
+    }
+
+    #[test]
+    fn set_focus_refuses_a_missing_or_unfocusable_id() {
+        let (mut ui, [up, _, _, _]) = cross_menu();
+        ui.set_focus(Some(up));
+        assert!(!ui.set_focus(Some(999)), "a missing id is refused");
+        assert_eq!(ui.focus(), Some(up), "and leaves the old focus alone");
+        assert!(!ui.set_focus(Some(0)), "the root panel is not focusable");
+        assert_eq!(ui.focus(), Some(up));
+    }
+
+    #[test]
+    fn unfocusing_the_focused_node_drops_the_focus() {
+        let (mut ui, [up, _, _, _]) = cross_menu();
+        ui.set_focus(Some(up));
+        ui.set_focusable(up, false);
+        assert_eq!(ui.focus(), None);
+        assert!(!ui.focusables().contains(&up));
+    }
+
+    #[test]
+    fn clear_drops_focus() {
+        let (mut ui, [up, _, _, _]) = cross_menu();
+        ui.set_focus(Some(up));
+        ui.clear();
+        assert_eq!(ui.focus(), None, "ids are about to be reused");
+    }
+
+    #[test]
+    fn focus_ring_paints_last_and_only_when_focused() {
+        let (mut ui, [up, _, _, _]) = cross_menu();
+        let unfocused = ui.draw_list([f32::MIN, f32::MIN]);
+        ui.set_focus(Some(up));
+        let focused = ui.draw_list([f32::MIN, f32::MIN]);
+
+        assert_eq!(
+            focused.len(),
+            unfocused.len() + 4,
+            "a ring is four edge fills"
+        );
+        let ring = &focused[focused.len() - 4..];
+        let rect = ui.rect_of(up).unwrap();
+        for command in ring {
+            assert!(matches!(command.kind, DrawKind::Fill(_)));
+            assert!(
+                command.rect.x >= rect.x && command.rect.y >= rect.y,
+                "the ring is drawn inside the focused node's box",
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_thickness_ring_draws_nothing() {
+        let (mut ui, [up, _, _, _]) = cross_menu();
+        let plain = ui.draw_list([f32::MIN, f32::MIN]).len();
+        ui.set_focus(Some(up));
+        ui.set_focus_ring(FocusRing {
+            color: Color::WHITE,
+            thickness: 0.0,
+        });
+        assert_eq!(ui.draw_list([f32::MIN, f32::MIN]).len(), plain);
+    }
+
+    #[test]
+    fn clicking_a_button_focuses_it() {
+        let (mut ui, [_, down, _, _]) = cross_menu();
+        let inside = [100.0, 150.0];
+        ui.interact(PointerInput {
+            position: inside,
+            pressed: true,
+            released: false,
+        });
+        let clicked = ui.interact(PointerInput {
+            position: inside,
+            pressed: false,
+            released: true,
+        });
+        assert_eq!(clicked, vec![down]);
+        assert_eq!(ui.focus(), Some(down));
     }
 
     #[test]

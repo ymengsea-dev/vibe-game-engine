@@ -25,6 +25,7 @@ mod audio_import;
 mod bundle;
 mod database;
 mod error;
+mod gltf_export;
 mod gltf_import;
 mod hot_reload;
 mod loader;
@@ -42,10 +43,16 @@ pub use database::AssetDatabase;
 /// path so existing callers are unaffected.
 pub use engine_utils::AssetId;
 pub use error::AssetError;
+pub use gltf_export::{
+    ExportAlphaMode, ExportAnimation, ExportAnimationEvent, ExportChannel, ExportChannelValues,
+    ExportJoint, ExportMaterial, ExportMesh, ExportSkin, ExportSkinnedMesh, ExportTexture,
+    GltfScene, encode_png_rgba8, encode_wav_mono16, export_gltf, export_gltf_scene,
+};
 pub use gltf_import::{
-    ImportedAnimation, ImportedAnimationChannels, ImportedCamera, ImportedGltf, ImportedImage,
-    ImportedInterpolation, ImportedJoint, ImportedKeyframes, ImportedMaterial, ImportedMesh,
-    ImportedSkeleton, ImportedSkinWeights, import_gltf_slice,
+    ImportedAnimation, ImportedAnimationChannels, ImportedAnimationEvent, ImportedCamera,
+    ImportedGltf, ImportedImage, ImportedInterpolation, ImportedJoint, ImportedKeyframes,
+    ImportedMaterial, ImportedMesh, ImportedSkeleton, ImportedSkinWeights, import_gltf_file,
+    import_gltf_slice, import_gltf_slice_with,
 };
 pub use hot_reload::AssetWatcher;
 pub use loader::{AssetLoader, LoadHandle, LoadStatus};

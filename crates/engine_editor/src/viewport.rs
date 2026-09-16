@@ -32,7 +32,7 @@
 //! geometry so a gizmo behind a wall is still grabbable.
 
 use engine_ecs::components::{Disabled, GlobalTransform, MeshRenderer};
-use engine_ecs::prelude::World;
+use engine_ecs::prelude::{Entity, World};
 use engine_renderer::{
     Camera, CameraBinding, DebugLinePipeline, DebugLineVertex, DirectionalLight, GpuContext,
     HdrTarget, InstancedPipeline, LightSet, LightsBinding, Pipeline, PostProcessStack,
@@ -162,6 +162,9 @@ pub struct Viewport {
     skybox_pipeline: SkyboxPipeline,
     skybox: SkyboxBinding,
     debug_line_pipeline: DebugLinePipeline,
+    /// The frame's debug geometry, rebuilt every frame and kept between
+    /// them for its allocation.
+    debug_draw: engine_renderer::DebugDraw,
     hdr_target: HdrTarget,
     post: PostProcessStack,
     camera_binding: CameraBinding,
@@ -267,6 +270,7 @@ impl Viewport {
             skybox_pipeline,
             skybox,
             debug_line_pipeline,
+            debug_draw: engine_renderer::DebugDraw::new(),
             hdr_target,
             post,
             camera_binding,
@@ -327,6 +331,23 @@ impl Viewport {
         self.camera.view_projection_matrix()
     }
 
+    /// Drops every mesh, material and texture this viewport has
+    /// uploaded.
+    ///
+    /// Called when the studio switches projects: the handles belong to
+    /// files that are no longer open, and keeping them would both waste
+    /// GPU memory and let the new project draw the old one's geometry
+    /// wherever an id happened to collide.
+    pub fn release_assets(&mut self) {
+        self.assets = RenderAssets::new();
+    }
+
+    /// How many meshes this viewport currently holds — the hook a test
+    /// uses to prove a project swap actually released them.
+    pub fn uploaded_mesh_count(&self) -> usize {
+        self.assets.meshes.len()
+    }
+
     /// Resolves any of `world`'s renderable references that are now
     /// importable into live components, uploading into this viewport's
     /// own asset store.
@@ -344,6 +365,31 @@ impl Viewport {
         crate::resolve_pending(world, importer, gpu, &self.pipeline, &mut self.assets)
     }
 
+    /// Drops live mesh renderers whose source ids changed so the next
+    /// resolution pass uploads fresh GPU resources. Handles are released by
+    /// removing the component, preserving ref-count ownership.
+    pub fn invalidate_changed_assets(
+        &mut self,
+        world: &mut World,
+        changed_ids: &std::collections::HashSet<engine_asset::AssetId>,
+    ) -> usize {
+        let stale: Vec<Entity> = world
+            .query::<(Entity, &engine_ecs::components::MeshSource)>()
+            .iter(world)
+            .filter(|(_, source)| {
+                crate::assets::parse_asset_id(&source.mesh)
+                    .is_some_and(|id| changed_ids.contains(&id))
+            })
+            .map(|(entity, _)| entity)
+            .collect();
+        for entity in &stale {
+            if let Ok(mut entity_mut) = world.get_entity_mut(*entity) {
+                entity_mut.remove::<engine_ecs::components::MeshRenderer>();
+            }
+        }
+        stale.len()
+    }
+
     /// Renders `world` into this viewport's texture, with the gizmo drawn
     /// at `gizmo_origin` and a wireframe box for every visible entity
     /// that has no resolvable mesh.
@@ -356,6 +402,7 @@ impl Viewport {
         world: &mut World,
         gizmo_mode: GizmoMode,
         gizmo_origin: Option<Vec3>,
+        overlays: crate::OverlayToggles,
     ) {
         gpu.write_uniform_buffer(&self.camera_binding.buffer, &self.camera.to_uniform());
         gpu.write_uniform_buffer(&self.lights_binding.buffer, &self.lights.to_uniform());
@@ -371,8 +418,17 @@ impl Viewport {
         );
 
         let placeholders = placeholder_positions(world);
-        let lines = overlay_lines(&placeholders, gizmo_origin, gizmo_mode, self.two_d);
-        let debug_lines = (!lines.is_empty()).then_some((&self.debug_line_pipeline, &lines[..]));
+        // One buffer for the frame's whole line list: the gizmo, the
+        // placeholder boxes and every enabled overlay go in together, so
+        // the cost of turning an overlay on is its vertices and not a
+        // draw call.
+        self.debug_draw.clear();
+        for vertex in overlay_lines(&placeholders, gizmo_origin, gizmo_mode, self.two_d) {
+            self.debug_draw.push_vertex(vertex);
+        }
+        crate::overlays::build(world, &self.lights, overlays, &mut self.debug_draw);
+        let lines = self.debug_draw.vertices();
+        let debug_lines = (!lines.is_empty()).then_some((&self.debug_line_pipeline, lines));
 
         let frustum = self.camera.frustum();
         if let Err(err) = engine_ecs::extract_and_render_to(

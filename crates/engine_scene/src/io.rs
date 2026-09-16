@@ -50,6 +50,11 @@ impl Scene {
                 .map_err(|reason| SceneError::Validation(format!("entity {index}: {reason}")))?;
         }
         self.validate_hierarchy().map_err(SceneError::Validation)?;
+        if let Some(nav_grid) = &self.nav_grid {
+            nav_grid
+                .validate()
+                .map_err(|reason| SceneError::Validation(format!("nav_grid: {reason}")))?;
+        }
         Ok(())
     }
 

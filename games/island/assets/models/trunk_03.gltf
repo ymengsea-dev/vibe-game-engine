@@ -1,0 +1,144 @@
+{
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 36,
+      "max": [
+        0.16999346017837524,
+        1.9994745254516602,
+        0.14721865952014923
+      ],
+      "min": [
+        -0.16999346017837524,
+        0.0,
+        -0.14721865952014923
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 36,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 36,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5125,
+      "count": 36,
+      "type": "SCALAR"
+    }
+  ],
+  "asset": {
+    "generator": "RustyEngine engine_asset::export_gltf",
+    "version": "2.0"
+  },
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteLength": 432,
+      "byteOffset": 0,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 432,
+      "byteOffset": 432,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 288,
+      "byteOffset": 864,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 144,
+      "byteOffset": 1152,
+      "target": 34963
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 1296,
+      "uri": "data:application/octet-stream;base64,xBIuPgAAAAAAAAAAxBIuPsju/z8AAAAAwxKuPQAAAAB9wBY+wxKuPQAAAAB9wBY+xBIuPsju/z8AAAAAwxKuPcju/z99wBY+wxKuPQAAAAB9wBY+wxKuPcju/z99wBY+xRKuvQAAAAB9wBY+xRKuvQAAAAB9wBY+wxKuPcju/z99wBY+xRKuvcju/z99wBY+xRKuvQAAAAB9wBY+xRKuvcju/z99wBY+xBIuvgAAAACxUH+yxBIuvgAAAACxUH+yxRKuvcju/z99wBY+xBIuvsju/z+xUH+yxBIuvgAAAACxUH+yxBIuvsju/z+xUH+ywhKuvQAAAAB9wBa+whKuvQAAAAB9wBa+xBIuvsju/z+xUH+ywhKuvcju/z99wBa+whKuvQAAAAB9wBa+whKuvcju/z99wBa+whKuPQAAAAB9wBa+whKuPQAAAAB9wBa+whKuvcju/z99wBa+whKuPcju/z99wBa+whKuPQAAAAB9wBa+whKuPcju/z99wBa+xBIuPgAAAACxUP8yxBIuPgAAAACxUP8ywhKuPcju/z99wBa+xBIuPsju/z+xUP8y17NdPwAAAIABAAA/17NdPwAAAIABAAA/17NdPwAAAIABAAA/17NdPwAAAIABAAA/17NdPwAAAIABAAA/17NdPwAAAIABAAA/AAAAAAAAAIAAAIA/AAAAAAAAAIAAAIA/AAAAAAAAAIAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/2bNdvwAAAAD///8+2bNdvwAAAAD///8+2bNdvwAAAAD///8+2bNdvwAAAAD///8+2bNdvwAAAAD///8+2bNdvwAAAAD///8+1rNdvwAAAAACAAC/1rNdvwAAAAACAAC/1rNdvwAAAAACAAC/1rNdvwAAAAACAAC/1rNdvwAAAAACAAC/1rNdvwAAAAACAAC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/17NdPwAAAAD///++17NdPwAAAAD///++17NdPwAAAAD///++17NdPwAAAAD///++17NdPwAAAAD///++17NdPwAAAAD///++AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAAAEAAAACAAAAAwAAAAQAAAAFAAAABgAAAAcAAAAIAAAACQAAAAoAAAALAAAADAAAAA0AAAAOAAAADwAAABAAAAARAAAAEgAAABMAAAAUAAAAFQAAABYAAAAXAAAAGAAAABkAAAAaAAAAGwAAABwAAAAdAAAAHgAAAB8AAAAgAAAAIQAAACIAAAAjAAAA"
+    }
+  ],
+  "images": [
+    {
+      "name": "bark",
+      "uri": "../textures/bark.png"
+    }
+  ],
+  "materials": [
+    {
+      "alphaMode": "OPAQUE",
+      "name": "bark",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "baseColorTexture": {
+          "index": 0
+        },
+        "metallicFactor": 0.0,
+        "roughnessFactor": 0.8999999761581421
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "name": "trunk_03",
+      "primitives": [
+        {
+          "attributes": {
+            "NORMAL": 1,
+            "POSITION": 0,
+            "TEXCOORD_0": 2
+          },
+          "indices": 3,
+          "material": 0,
+          "mode": 4
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0,
+      "name": "trunk_03"
+    }
+  ],
+  "samplers": [
+    {
+      "magFilter": 9729,
+      "minFilter": 9987,
+      "wrapS": 10497,
+      "wrapT": 10497
+    }
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "textures": [
+    {
+      "sampler": 0,
+      "source": 0
+    }
+  ]
+}

@@ -59,6 +59,19 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
+/// Maximum variable-step delta delivered to gameplay and presentation
+/// systems. A stalled/resumed window must not teleport entities or trigger an
+/// unbounded burst of work in one frame.
+pub const MAX_FRAME_SECONDS: f32 = 0.1;
+
+fn clamp_frame_seconds(seconds: f32) -> f32 {
+    if seconds.is_finite() && seconds >= 0.0 {
+        seconds.min(MAX_FRAME_SECONDS)
+    } else {
+        0.0
+    }
+}
+
 use engine_core::FixedTimestep;
 use engine_ecs::Ecs;
 use engine_ecs::prelude::{Bundle, Entity};
@@ -110,11 +123,7 @@ pub struct Time {
 
 impl Time {
     fn advance(&mut self, frame_seconds: f32) {
-        let delta = if frame_seconds.is_finite() && frame_seconds >= 0.0 {
-            frame_seconds
-        } else {
-            0.0
-        };
+        let delta = clamp_frame_seconds(frame_seconds);
         self.delta = delta;
         self.elapsed += delta;
         self.frame = self.frame.saturating_add(1);
@@ -150,6 +159,13 @@ pub struct GameConfig {
     pub save_path: Option<std::path::PathBuf>,
     /// When to persist. See [`SavePolicy`].
     pub save_policy: SavePolicy,
+    /// Whether the frame loop drives UI focus from the keyboard and
+    /// gamepad (arrow keys / d-pad / left stick to move, Enter or the
+    /// south face button to activate). On by default, and inert while
+    /// the UI has nothing focusable, so a game whose arrow keys drive
+    /// gameplay is unaffected until it builds a menu. Set `false` to
+    /// bind menu navigation yourself.
+    pub ui_navigation: bool,
 }
 
 impl GameConfig {
@@ -182,6 +198,7 @@ impl GameConfig {
             // for would be a surprise.
             save_path: None,
             save_policy: SavePolicy::default(),
+            ui_navigation: true,
         }
     }
 
@@ -351,8 +368,14 @@ struct Runtime {
     /// Where the UI atlas's opaque white texel sits, for untextured
     /// quads.
     ui_white_uv: [f32; 4],
-    /// Nodes clicked this frame, from the pre-`update` hit test.
+    /// Nodes clicked this frame, from the pre-`update` hit test plus any
+    /// keyboard/gamepad activation.
     ui_clicked: Vec<engine_ui::NodeId>,
+    /// Whether the loop drives UI focus from the keyboard and gamepad.
+    ui_navigation: bool,
+    /// Last frame's discrete left-stick direction, so a held stick moves
+    /// focus once instead of every frame.
+    ui_nav_stick: (i8, i8),
     /// Where this game's save lives, if it saves at all.
     save_path: Option<std::path::PathBuf>,
     /// When to persist.
@@ -520,6 +543,148 @@ impl GameContext<'_> {
         );
     }
 
+    /// Builds a physics body for every entity in `scene` that carries
+    /// [`engine_scene::ColliderData`], attaching it to the matching
+    /// entity from `report`.
+    ///
+    /// Returns how many bodies were created.
+    ///
+    /// ## Why this is a separate call
+    ///
+    /// `Scene::instantiate` lives in `engine_scene`, which has no
+    /// physics dependency — deliberately, so the scene format stays
+    /// plain data that the editor, the player and a headless tool can
+    /// all read. Turning that data into rapier bodies needs a live
+    /// physics world, which only the frame loop owns. So instantiate,
+    /// then call this.
+    ///
+    /// ## Scale
+    ///
+    /// A primitive shape is scaled by its entity's transform, using the
+    /// largest axis for shapes that cannot be scaled unevenly (a sphere
+    /// has one radius). A [`engine_scene::ColliderShape::TriMesh`] is
+    /// scaled per axis, since its vertices are.
+    ///
+    /// A trimesh whose mesh is missing from `library`, or whose
+    /// triangles rapier rejects, is logged and skipped: one bad collider
+    /// must not cost the rest of the level its collision.
+    pub fn spawn_scene_colliders(
+        &mut self,
+        scene: &engine_scene::Scene,
+        report: &engine_scene::InstantiateReport,
+        library: &engine_scene::AssetLibrary,
+    ) -> usize {
+        use engine_scene::{BodyKind, ColliderShape};
+
+        let mut built = 0;
+        for (index, scene_entity) in scene.entities.iter().enumerate() {
+            let Some(collider) = &scene_entity.collider else {
+                continue;
+            };
+            let Some(&entity) = report.spawned.get(index) else {
+                continue;
+            };
+            let transform = scene_entity
+                .transform
+                .map(engine_utils::Transform::from)
+                .unwrap_or(engine_utils::Transform::IDENTITY);
+            // One number for shapes with a single radius: a sphere
+            // scaled 2x on X only is not a sphere, and silently picking
+            // the wrong axis would put collision where the art is not.
+            let uniform = transform.scale.max_element();
+
+            let shape = match &collider.shape {
+                ColliderShape::Ball { radius } => {
+                    Some(engine_physics::ColliderBuilder::ball(radius * uniform))
+                }
+                ColliderShape::Cuboid { half_extents } => {
+                    let scaled = glam::Vec3::from_array(*half_extents) * transform.scale;
+                    Some(engine_physics::ColliderBuilder::cuboid(
+                        scaled.x, scaled.y, scaled.z,
+                    ))
+                }
+                ColliderShape::Cylinder {
+                    half_height,
+                    radius,
+                } => Some(engine_physics::ColliderBuilder::cylinder(
+                    half_height * transform.scale.y,
+                    radius * uniform,
+                )),
+                ColliderShape::Capsule {
+                    half_height,
+                    radius,
+                } => Some(engine_physics::ColliderBuilder::capsule_y(
+                    half_height * transform.scale.y,
+                    radius * uniform,
+                )),
+                ColliderShape::TriMesh { mesh } => {
+                    match engine_scene::load_mesh_geometry(library, mesh) {
+                        Ok(Some((vertices, indices))) => {
+                            let points: Vec<glam::Vec3> = vertices
+                                .iter()
+                                .map(|vertex| {
+                                    glam::Vec3::from_array(vertex.position) * transform.scale
+                                })
+                                .collect();
+                            let triangles: Vec<[u32; 3]> = indices
+                                .chunks_exact(3)
+                                .map(|t| [t[0], t[1], t[2]])
+                                .collect();
+                            match engine_physics::ColliderBuilder::trimesh(points, triangles) {
+                                Ok(builder) => Some(builder),
+                                Err(err) => {
+                                    tracing::warn!(
+                                        entity = scene_entity.name.as_deref().unwrap_or("<unnamed>"),
+                                        error = %err,
+                                        "skipping collider: rapier rejected the mesh"
+                                    );
+                                    None
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::warn!(
+                                entity = scene_entity.name.as_deref().unwrap_or("<unnamed>"),
+                                mesh = %mesh.id,
+                                "skipping collider: the project does not carry that mesh"
+                            );
+                            None
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                entity = scene_entity.name.as_deref().unwrap_or("<unnamed>"),
+                                error = %err,
+                                "skipping collider: mesh could not be loaded"
+                            );
+                            None
+                        }
+                    }
+                }
+            };
+            let Some(shape) = shape else { continue };
+
+            let body = match collider.body {
+                BodyKind::Fixed => engine_physics::RigidBodyBuilder::fixed(),
+                BodyKind::Dynamic => engine_physics::RigidBodyBuilder::dynamic(),
+                BodyKind::Kinematic => engine_physics::RigidBodyBuilder::kinematic_position_based(),
+            }
+            .translation(transform.translation)
+            .rotation(transform.rotation.to_scaled_axis());
+
+            let (rigid_body, collider_component) =
+                engine_ecs::components::RigidBody::spawn(&mut self.runtime.physics, body, shape);
+            self.runtime
+                .ecs
+                .world_mut()
+                .entity_mut(entity)
+                .insert((rigid_body, collider_component));
+            built += 1;
+        }
+
+        tracing::info!(bodies = built, "spawned colliders from scene data");
+        built
+    }
+
     /// The game's UI tree. Build or mutate it here; the frame loop lays
     /// it out, feeds it pointer input, and draws it.
     pub fn ui_mut(&mut self) -> &mut engine_ui::Ui {
@@ -529,6 +694,23 @@ impl GameContext<'_> {
     /// The UI tree, for reading node rects.
     pub fn ui(&self) -> &engine_ui::Ui {
         &self.runtime.ui
+    }
+
+    /// Every UI node clicked this frame — by the pointer, or by a
+    /// keyboard/gamepad activation of the focused node
+    /// ([`GameConfig::ui_navigation`]).
+    ///
+    /// Computed before [`Game::update`] runs, so a game reads this
+    /// frame's clicks, not last frame's. Both input routes land in the
+    /// same list on purpose: a menu handler should never need to know
+    /// which device pressed the button.
+    pub fn ui_clicked(&self) -> &[engine_ui::NodeId] {
+        &self.runtime.ui_clicked
+    }
+
+    /// Whether `id` was clicked this frame. See [`GameContext::ui_clicked`].
+    pub fn was_clicked(&self, id: engine_ui::NodeId) -> bool {
+        self.runtime.ui_clicked.contains(&id)
     }
 
     /// The audio backend, or `None` if it failed to start.
@@ -928,11 +1110,12 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
             }
             PlatformEvent::RedrawRequested => {
                 let now = Instant::now();
-                let frame_seconds = self
+                let raw_frame_seconds = self
                     .last_frame
                     .map(|last| now.duration_since(last).as_secs_f32())
                     .unwrap_or(0.0);
                 self.last_frame = Some(now);
+                let frame_seconds = clamp_frame_seconds(raw_frame_seconds);
 
                 // Gamepads polled before the game's hooks so a button
                 // pressed this frame is visible to them, and before
@@ -975,7 +1158,24 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
                         .is_mouse_button_released(engine_platform::MouseButton::Left),
                 };
                 runtime.ui.layout();
-                let clicked = runtime.ui.interact(pointer);
+                let mut clicked = runtime.ui.interact(pointer);
+
+                // Menu navigation after the pointer pass, so a click this
+                // frame has already moved focus and an activation lands
+                // on the node the player just touched.
+                if runtime.ui_navigation {
+                    let (direction, activate) =
+                        ui_navigation_input(&runtime.input, &mut runtime.ui_nav_stick);
+                    if let Some(direction) = direction {
+                        runtime.ui.focus_direction(direction);
+                    }
+                    if activate
+                        && let Some(id) = runtime.ui.activate()
+                        && !clicked.contains(&id)
+                    {
+                        clicked.push(id);
+                    }
+                }
                 runtime.ui_clicked = clicked;
 
                 self.game.update(
@@ -985,6 +1185,14 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
                     frame_seconds,
                 );
                 runtime.input.end_frame();
+
+                // Laid out a second time, because `update` may have built
+                // or restyled nodes. Without this a menu opened this frame
+                // draws at zero size — invisible for one frame, and
+                // unnavigable, since focus is decided from laid-out
+                // rectangles. A tree walk over a handful of nodes; cheaper
+                // than the class of bug it removes.
+                runtime.ui.layout();
 
                 // After the game's hooks (so a sound triggered this frame
                 // starts this frame) and before rendering, which runs
@@ -1126,6 +1334,95 @@ fn ui_atlas_with_white(atlas: &engine_renderer::GlyphAtlas) -> (u32, u32, Vec<u8
 /// Text expands here rather than in `engine_ui`, which deliberately knows
 /// nothing about fonts — it emits a string and a rect, and this is where
 /// that becomes glyph quads.
+/// Deadzone the left stick must clear before it counts as a menu
+/// direction. Higher than the gameplay deadzone: a stick resting just
+/// off centre must not walk the focus across a menu.
+const UI_STICK_THRESHOLD: f32 = 0.6;
+
+/// The stick's discrete direction this frame, reported **only on the
+/// frame it changes** — a held stick moves focus once, not once per
+/// frame. `previous` carries the last direction between calls.
+///
+/// The dominant axis wins, so a diagonal push picks one direction rather
+/// than jumping twice.
+fn stick_nav_edge(x: f32, y: f32, previous: &mut (i8, i8)) -> Option<engine_ui::FocusDirection> {
+    let discrete = |v: f32| {
+        if v >= UI_STICK_THRESHOLD {
+            1
+        } else if v <= -UI_STICK_THRESHOLD {
+            -1
+        } else {
+            0
+        }
+    };
+    let current = if x.abs() >= y.abs() {
+        (discrete(x), 0)
+    } else {
+        (0, discrete(y))
+    };
+
+    let changed = current != *previous;
+    *previous = current;
+    if !changed {
+        return None;
+    }
+    match current {
+        (1, _) => Some(engine_ui::FocusDirection::Right),
+        (-1, _) => Some(engine_ui::FocusDirection::Left),
+        // Stick Y is positive up; screen Y grows downwards.
+        (_, 1) => Some(engine_ui::FocusDirection::Up),
+        (_, -1) => Some(engine_ui::FocusDirection::Down),
+        _ => None,
+    }
+}
+
+/// This frame's menu navigation: at most one direction (so a diagonal
+/// press does not move twice) plus whether the player asked to activate.
+fn ui_navigation_input(
+    input: &engine_platform::InputState,
+    previous_stick: &mut (i8, i8),
+) -> (Option<engine_ui::FocusDirection>, bool) {
+    use engine_platform::{GamepadAxis, GamepadButton, KeyCode};
+    use engine_ui::FocusDirection;
+
+    let pressed = [
+        (KeyCode::ArrowUp, GamepadButton::DPadUp, FocusDirection::Up),
+        (
+            KeyCode::ArrowDown,
+            GamepadButton::DPadDown,
+            FocusDirection::Down,
+        ),
+        (
+            KeyCode::ArrowLeft,
+            GamepadButton::DPadLeft,
+            FocusDirection::Left,
+        ),
+        (
+            KeyCode::ArrowRight,
+            GamepadButton::DPadRight,
+            FocusDirection::Right,
+        ),
+    ]
+    .into_iter()
+    .find_map(|(key, button, direction)| {
+        (input.is_key_pressed(key) || input.is_button_pressed(button)).then_some(direction)
+    });
+
+    let direction = pressed.or_else(|| {
+        stick_nav_edge(
+            input.axis(GamepadAxis::LeftStickX),
+            input.axis(GamepadAxis::LeftStickY),
+            previous_stick,
+        )
+    });
+
+    let activate = input.is_key_pressed(KeyCode::Enter)
+        || input.is_key_pressed(KeyCode::Space)
+        || input.is_button_pressed(GamepadButton::South);
+
+    (direction, activate)
+}
+
 fn ui_quads(
     commands: &[engine_ui::DrawCommand],
     atlas: &engine_renderer::GlyphAtlas,
@@ -1263,6 +1560,8 @@ fn build_runtime(
         ui_pipeline,
         ui_white_uv,
         ui_clicked: Vec::new(),
+        ui_navigation: config.ui_navigation,
+        ui_nav_stick: (0, 0),
         save_path: config.save_path.clone(),
         save_policy: config.save_policy,
         since_save: 0.0,
@@ -1484,6 +1783,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_held_stick_moves_focus_once() {
+        let mut previous = (0, 0);
+        assert_eq!(
+            stick_nav_edge(0.0, -1.0, &mut previous),
+            Some(engine_ui::FocusDirection::Down),
+            "stick Y is positive up, screen Y grows down",
+        );
+        assert_eq!(
+            stick_nav_edge(0.0, -1.0, &mut previous),
+            None,
+            "holding it must not scroll the menu every frame",
+        );
+        // Back to centre, then pushed again: that is a new press.
+        assert_eq!(stick_nav_edge(0.0, 0.0, &mut previous), None);
+        assert_eq!(
+            stick_nav_edge(0.0, -1.0, &mut previous),
+            Some(engine_ui::FocusDirection::Down),
+        );
+    }
+
+    #[test]
+    fn a_resting_stick_is_not_a_direction() {
+        let mut previous = (0, 0);
+        assert_eq!(stick_nav_edge(0.4, -0.3, &mut previous), None);
+        assert_eq!(previous, (0, 0));
+    }
+
+    #[test]
+    fn a_diagonal_push_picks_one_direction() {
+        let mut previous = (0, 0);
+        // Slightly more horizontal than vertical.
+        assert_eq!(
+            stick_nav_edge(0.9, 0.8, &mut previous),
+            Some(engine_ui::FocusDirection::Right),
+        );
+    }
+
+    #[test]
+    fn ui_navigation_is_on_by_default() {
+        assert!(GameConfig::new("Test", 800, 400).ui_navigation);
+    }
+
+    #[test]
     fn config_new_is_valid_and_sizes_the_camera() {
         let config = GameConfig::new("Test", 800, 400);
         assert!(config.validate().is_ok());
@@ -1518,18 +1860,29 @@ mod tests {
     #[test]
     fn time_advance_accumulates_and_ignores_bad_deltas() {
         let mut time = Time::default();
-        time.advance(0.5);
-        time.advance(0.25);
-        assert!((time.elapsed - 0.75).abs() < 1e-6);
-        assert!((time.delta - 0.25).abs() < 1e-6);
+        time.advance(0.05);
+        time.advance(0.025);
+        assert!((time.elapsed - 0.075).abs() < 1e-6);
+        assert!((time.delta - 0.025).abs() < 1e-6);
         assert_eq!(time.frame, 2);
 
         time.advance(f32::NAN);
         time.advance(-1.0);
         time.advance(f32::INFINITY);
-        assert!((time.elapsed - 0.75).abs() < 1e-6);
+        assert!((time.elapsed - 0.075).abs() < 1e-6);
         assert_eq!(time.delta, 0.0);
         assert_eq!(time.frame, 5);
+    }
+
+    #[test]
+    fn variable_delta_is_bounded_before_it_reaches_gameplay() {
+        let mut time = Time::default();
+        time.advance(MAX_FRAME_SECONDS * 4.0);
+        assert_eq!(time.delta, MAX_FRAME_SECONDS);
+        assert_eq!(time.elapsed, MAX_FRAME_SECONDS);
+
+        time.advance(0.016);
+        assert!((time.elapsed - (MAX_FRAME_SECONDS + 0.016)).abs() < 1e-6);
     }
 
     #[test]

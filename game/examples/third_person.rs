@@ -468,5 +468,6 @@ fn bend_clip(name: &str, duration: f32, tip_angle: f32) -> ImportedAnimation {
         name: Some(name.to_string()),
         duration,
         channels,
+        events: Vec::new(),
     }
 }

@@ -154,6 +154,17 @@ pub enum CodeEvent {
         /// Path relative to the file-tree root.
         path: PathBuf,
     },
+    /// The user asked for a new file or directory in the Files tree.
+    /// `path` is relative to the tree root and comes from a text field
+    /// in the webview — **untrusted**. The host must reject anything
+    /// that leaves the project root (see `engine_project::Project::resolve`)
+    /// before creating it, then re-send the tree.
+    CreateRequested {
+        /// Tree-root-relative path to create.
+        path: PathBuf,
+        /// `true` for a directory, `false` for an empty file.
+        folder: bool,
+    },
     /// The webview's script bridge is live. The host should (re)send the
     /// file tree and open its starting file on this — sending earlier
     /// races the Monaco/loader boot.
@@ -285,6 +296,10 @@ enum RawEvent {
     Closed {
         path: String,
     },
+    Create {
+        path: String,
+        folder: bool,
+    },
     Lsp {
         nonce: u64,
         kind: String,
@@ -317,6 +332,10 @@ impl CodeEvent {
             RawEvent::Open { path } => Some(Self::OpenRequested { path: path.into() }),
             RawEvent::Ready => Some(Self::Ready),
             RawEvent::Closed { path } => Some(Self::TabClosed { path: path.into() }),
+            RawEvent::Create { path, folder } => Some(Self::CreateRequested {
+                path: path.into(),
+                folder,
+            }),
             RawEvent::Lsp {
                 nonce,
                 kind,
@@ -654,6 +673,20 @@ mod tests {
             Some(CodeEvent::SaveRequested {
                 path: PathBuf::from("a.rs"),
                 contents: "fn main(){}".to_string()
+            })
+        );
+        assert_eq!(
+            CodeEvent::parse(r#"{"type":"create","path":"src/systems/ai.rs","folder":false}"#),
+            Some(CodeEvent::CreateRequested {
+                path: PathBuf::from("src/systems/ai.rs"),
+                folder: false,
+            })
+        );
+        assert_eq!(
+            CodeEvent::parse(r#"{"type":"create","path":"src/systems","folder":true}"#),
+            Some(CodeEvent::CreateRequested {
+                path: PathBuf::from("src/systems"),
+                folder: true,
             })
         );
         assert_eq!(

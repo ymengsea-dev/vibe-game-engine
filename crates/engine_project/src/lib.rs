@@ -97,6 +97,105 @@ pub enum ProjectError {
     Build(String),
 }
 
+/// One named way to build and run the project: which crate, which cargo
+/// profile, which scene it starts on, which features are on.
+///
+/// A game has more than one of these before it ships — a fast debug
+/// build to test with, an optimised one to hand out, often a third with
+/// cheats or a profiler compiled in. They live in `project.ron` rather
+/// than the editor session because they are the project's, not this
+/// machine's: everyone who opens the project gets the same
+/// configurations. Which one *you* have selected is per-user, and lives
+/// in the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildConfiguration {
+    /// What the toolbar shows. Unique within a project by convention;
+    /// nothing enforces it.
+    pub name: String,
+    /// The cargo profile to compile with.
+    #[serde(default)]
+    pub profile: build::BuildProfile,
+    /// The cargo package to build. `None` derives it from the project
+    /// name, which is right for a single-crate project.
+    #[serde(default)]
+    pub crate_name: Option<String>,
+    /// The scene this configuration starts on, relative to the project
+    /// root. `None` uses the manifest's `main_scene`.
+    #[serde(default)]
+    pub scene: Option<PathBuf>,
+    /// Cargo features to enable for this configuration.
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
+impl BuildConfiguration {
+    /// A configuration named `name` building at `profile`, with
+    /// everything else defaulted.
+    pub fn new(name: impl Into<String>, profile: build::BuildProfile) -> Self {
+        Self {
+            name: name.into(),
+            profile,
+            crate_name: None,
+            scene: None,
+            features: Vec::new(),
+        }
+    }
+
+    /// The cargo package this configuration builds: its own
+    /// `crate_name`, or one derived from the project's name.
+    pub fn crate_name(&self, project: &Project) -> String {
+        self.crate_name
+            .clone()
+            .unwrap_or_else(|| crate_name_from(project.name()))
+    }
+}
+
+/// The configurations a project gets when its manifest names none —
+/// exactly the two the studio's toolbar has always offered, so an older
+/// project loses nothing by not having said so.
+fn default_configurations() -> Vec<BuildConfiguration> {
+    vec![
+        BuildConfiguration::new("Debug", build::BuildProfile::Debug),
+        BuildConfiguration::new("Release", build::BuildProfile::Release),
+    ]
+}
+
+/// Turns a project name into a plausible cargo package name: ASCII
+/// alphanumerics lowercased, everything else an underscore, and a
+/// leading digit prefixed (cargo rejects a crate starting with one).
+pub fn crate_name_from(project_name: &str) -> String {
+    let mut name: String = project_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() {
+        return "game".to_owned();
+    }
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        name.insert(0, '_');
+    }
+    name
+}
+
+/// Makes `root` absolute without resolving symlinks or touching the
+/// disk beyond reading the working directory.
+///
+/// A project opened as `games/island` from the command line would
+/// otherwise store a relative root, and every consumer that changes
+/// directory — the export build runs `cargo` *in* the project root —
+/// would then resolve `games/island/target` against the project itself.
+/// A path that cannot be made absolute (no working directory) is kept
+/// as given.
+fn absolute_root(root: PathBuf) -> PathBuf {
+    std::path::absolute(&root).unwrap_or(root)
+}
+
 /// The serialized contents of `project.ron`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectManifest {
@@ -107,6 +206,30 @@ pub struct ProjectManifest {
     /// The scene the editor opens by default, as a path relative to the
     /// project root. Must stay inside the root.
     pub main_scene: PathBuf,
+    /// The project's build/run configurations, in toolbar order. A
+    /// manifest written before this field existed loads with an empty
+    /// list, which [`Project::open`] fills with a default Debug/Release
+    /// pair — an empty list would leave the studio with nothing to
+    /// build.
+    #[serde(default)]
+    pub configurations: Vec<BuildConfiguration>,
+}
+
+impl ProjectManifest {
+    /// Applies additive migrations in memory and stamps the current format.
+    /// Returns whether the manifest changed and should be saved.
+    pub fn migrate(&mut self) -> bool {
+        let mut changed = false;
+        if self.configurations.is_empty() {
+            self.configurations = default_configurations();
+            changed = true;
+        }
+        if self.version != CURRENT_PROJECT_VERSION {
+            self.version = CURRENT_PROJECT_VERSION;
+            changed = true;
+        }
+        changed
+    }
 }
 
 /// An opened project: its root directory and parsed [`ProjectManifest`].
@@ -127,7 +250,7 @@ impl Project {
     /// `project.ron`; [`ProjectError::Io`] on any filesystem failure;
     /// [`ProjectError::Scene`] if the starter scene can't be written.
     pub fn create(root: impl Into<PathBuf>, name: impl Into<String>) -> Result<Self, ProjectError> {
-        let root = root.into();
+        let root = absolute_root(root.into());
         let manifest_path = root.join(MANIFEST_FILE);
         if manifest_path.exists() {
             return Err(ProjectError::AlreadyExists(root));
@@ -148,6 +271,7 @@ impl Project {
             version: CURRENT_PROJECT_VERSION,
             name: name.into(),
             main_scene: PathBuf::from(DEFAULT_MAIN_SCENE),
+            configurations: default_configurations(),
         };
         let project = Self { root, manifest };
         project.save_manifest()?;
@@ -171,7 +295,7 @@ impl Project {
     /// [`ProjectError::PathEscapesRoot`] if `main_scene` leaves the root;
     /// [`ProjectError::Io`] on a filesystem failure.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ProjectError> {
-        let root = root.into();
+        let root = absolute_root(root.into());
         let manifest_path = root.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(ProjectError::NotFound(manifest_path));
@@ -181,7 +305,7 @@ impl Project {
             path: manifest_path.clone(),
             source,
         })?;
-        let manifest: ProjectManifest =
+        let mut manifest: ProjectManifest =
             ron::from_str(&text).map_err(|err| ProjectError::Parse {
                 path: manifest_path.clone(),
                 message: err.to_string(),
@@ -196,6 +320,16 @@ impl Project {
         if !is_contained(&manifest.main_scene) {
             return Err(ProjectError::PathEscapesRoot(manifest.main_scene.clone()));
         }
+        // A configuration's scene is a path out of a file on disk, so it
+        // gets the same treatment as `main_scene`.
+        for configuration in &manifest.configurations {
+            if let Some(scene) = &configuration.scene
+                && !is_contained(scene)
+            {
+                return Err(ProjectError::PathEscapesRoot(scene.clone()));
+            }
+        }
+        let migrated = manifest.migrate();
 
         for dir in STANDARD_DIRS {
             let path = root.join(dir);
@@ -206,7 +340,12 @@ impl Project {
             }
         }
 
-        Ok(Self { root, manifest })
+        let project = Self { root, manifest };
+        if migrated {
+            project.save_manifest()?;
+            tracing::info!(path = %project.root.join(MANIFEST_FILE).display(), "migrated project manifest");
+        }
+        Ok(project)
     }
 
     /// [`Project::open`] if `root` holds a `project.ron`, else
@@ -237,9 +376,34 @@ impl Project {
         &self.manifest.name
     }
 
+    /// The project's build/run configurations, in toolbar order. Never
+    /// empty for a project that came through [`Project::open`] or
+    /// [`Project::create`].
+    pub fn configurations(&self) -> &[BuildConfiguration] {
+        &self.manifest.configurations
+    }
+
+    /// The configuration at `index`, or the first one if `index` is out
+    /// of range — a stale selection (the session remembers an index, and
+    /// someone may have deleted a configuration since) must not stop the
+    /// studio building.
+    pub fn configuration(&self, index: usize) -> Option<&BuildConfiguration> {
+        self.manifest
+            .configurations
+            .get(index)
+            .or_else(|| self.manifest.configurations.first())
+    }
+
     /// The parsed manifest.
     pub fn manifest(&self) -> &ProjectManifest {
         &self.manifest
+    }
+
+    /// The manifest, mutably — to rename the project or point it at a
+    /// different main scene. Call [`Project::save_manifest`] afterwards;
+    /// this only changes the in-memory copy.
+    pub fn manifest_mut(&mut self) -> &mut ProjectManifest {
+        &mut self.manifest
     }
 
     /// Absolute path to `src/`.
@@ -418,6 +582,104 @@ mod tests {
         let reopened = Project::open(&root).expect("open still succeeds");
         assert!(reopened.assets_dir().is_dir(), "assets dir recreated");
         cleanup(&root);
+    }
+
+    #[test]
+    fn manifest_without_configurations_gets_a_default_one() {
+        let root = temp_root("old-manifest");
+        std::fs::create_dir_all(&root).unwrap();
+        // A manifest written before configurations existed.
+        std::fs::write(
+            root.join(MANIFEST_FILE),
+            "(version: 1, name: \"Old\", main_scene: \"scenes/main.ron\")",
+        )
+        .unwrap();
+
+        let project = Project::open(&root).expect("an older manifest still opens");
+        assert!(
+            !project.configurations().is_empty(),
+            "a project with no configurations still has to be buildable"
+        );
+        assert_eq!(project.configurations()[0].name, "Debug");
+        assert_eq!(
+            project.configuration(0).map(|c| c.profile),
+            Some(build::BuildProfile::Debug)
+        );
+        // A stale selection falls back rather than vanishing.
+        assert_eq!(
+            project.configuration(99).map(|c| c.name.as_str()),
+            Some("Debug")
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn configurations_survive_a_manifest_round_trip() {
+        let root = temp_root("config-round-trip");
+        let mut project = Project::create(&root, "Round Trip").expect("create");
+        project
+            .manifest_mut()
+            .configurations
+            .push(BuildConfiguration {
+                name: "Profiling".to_owned(),
+                profile: build::BuildProfile::Release,
+                crate_name: Some("island".to_owned()),
+                scene: Some(PathBuf::from("scenes/bench.ron")),
+                features: vec!["profiler".to_owned(), "overlays".to_owned()],
+            });
+        project.save_manifest().expect("save");
+
+        let reopened = Project::open(&root).expect("reopen");
+        assert_eq!(reopened.configurations().len(), 3);
+        let profiling = &reopened.configurations()[2];
+        assert_eq!(profiling.features, vec!["profiler", "overlays"]);
+        assert_eq!(profiling.crate_name(&reopened), "island");
+        cleanup(&root);
+    }
+
+    #[test]
+    fn a_configuration_scene_cannot_escape_the_project() {
+        let root = temp_root("config-escape");
+        let project = Project::create(&root, "Escape").expect("create");
+        let manifest = "(version: 1, name: \"Escape\", main_scene: \"scenes/main.ron\", configurations: [(name: \"Bad\", scene: Some(\"../../etc/passwd\"))])";
+        std::fs::write(project.root().join(MANIFEST_FILE), manifest).unwrap();
+
+        assert!(matches!(
+            Project::open(&root),
+            Err(ProjectError::PathEscapesRoot(_))
+        ));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn a_project_opened_by_a_relative_path_still_has_an_absolute_root() {
+        // Cargo runs tests with the package directory as the working
+        // directory, so a path under `target/` is a genuine relative
+        // path without this test touching global state (changing the
+        // process directory would race the other tests).
+        let relative = PathBuf::from("target").join("relative-root-test");
+        let _ = std::fs::remove_dir_all(&relative);
+        Project::create(&relative, "Relative").expect("create");
+
+        // The export build runs cargo *inside* the project root, so a
+        // relative root would resolve `<root>/target` against the
+        // project itself and never find the compiled binary.
+        let project = Project::open(&relative).expect("opens by relative path");
+        assert!(
+            project.root().is_absolute(),
+            "root stayed relative: {}",
+            project.root().display()
+        );
+        assert!(project.main_scene_path().is_absolute());
+        let _ = std::fs::remove_dir_all(&relative);
+    }
+
+    #[test]
+    fn crate_names_are_derived_from_the_project_name() {
+        assert_eq!(crate_name_from("Island"), "island");
+        assert_eq!(crate_name_from("My First Game!"), "my_first_game_");
+        assert_eq!(crate_name_from("2048"), "_2048");
+        assert_eq!(crate_name_from(""), "game");
     }
 
     #[test]

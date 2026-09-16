@@ -11,13 +11,52 @@
 //! View gizmo also calls [`transform_of`]/[`set_transform`] directly.
 
 use engine_ecs::components::{
-    AssetSource, Camera, Disabled, Lock, Name, Sprite, Static, Transform,
+    AssetSource, Camera, Disabled, Lock, Name, Script, Sprite, Static, Transform,
 };
 use engine_ecs::prelude::{Component, Entity, World};
 use engine_utils::Transform as MathTransform;
 use glam::{Vec2, Vec3};
 
+use engine_scene::{
+    AssetRef, AudioEmitterData, BodyKind, ColliderShape, SceneAudioEmitter, SceneCollider,
+};
+
+use crate::assets::AssetKind;
 use crate::inspect::{InspectField, Inspectable};
+
+/// Validates a project-relative script reference before it enters the ECS.
+pub fn valid_script_path(path: &std::path::Path) -> bool {
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| !matches!(component, std::path::Component::ParentDir))
+        && matches!(path.extension().and_then(|e| e.to_str()), Some("rs"))
+}
+
+/// Whether an asset-browser payload is suitable for a typed inspector slot.
+pub fn accepts_asset_kind(kind: AssetKind, expected: AssetKind) -> bool {
+    kind == expected && kind.is_referenceable()
+}
+
+/// Produces a compact, allocation-only summary suitable for an inspector row.
+pub fn collider_shape_summary(shape: &ColliderShape) -> String {
+    match shape {
+        ColliderShape::Ball { radius } => format!("Ball (radius {radius:.3})"),
+        ColliderShape::Cuboid { half_extents } => format!(
+            "Cuboid (half-extents [{:.3}, {:.3}, {:.3}])",
+            half_extents[0], half_extents[1], half_extents[2]
+        ),
+        ColliderShape::Cylinder {
+            half_height,
+            radius,
+        } => format!("Cylinder (half-height {half_height:.3}, radius {radius:.3})"),
+        ColliderShape::Capsule {
+            half_height,
+            radius,
+        } => format!("Capsule (half-height {half_height:.3}, radius {radius:.3})"),
+        ColliderShape::TriMesh { .. } => "Triangle mesh".to_string(),
+    }
+}
 
 /// `entity`'s current name, or `None` if it has no [`Name`] component.
 pub fn name_of(world: &World, entity: Entity) -> Option<String> {
@@ -160,6 +199,159 @@ const REGISTRY: &[ComponentUi] = &[
         copy_to: copy_component::<Camera>,
     },
     ComponentUi {
+        name: "Audio Emitter",
+        type_name: "SceneAudioEmitter",
+        present: has::<SceneAudioEmitter>,
+        insert_default: |world, entity| {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                // An empty asset id: the emitter is placed first and
+                // pointed at a sound after, which is the order a person
+                // works in. It resolves to silence until then.
+                entity_mut.insert(SceneAudioEmitter(AudioEmitterData::new(AssetRef {
+                    id: String::new(),
+                })));
+            }
+        },
+        remove: strip::<SceneAudioEmitter>,
+        inspect: |world, entity, ui| {
+            let Some(mut value) = world
+                .get::<SceneAudioEmitter>(entity)
+                .map(|carrier| carrier.0.clone())
+            else {
+                return false;
+            };
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Sound");
+                changed |= value.sound.id.inspect_field(ui, 0.0);
+                if released_asset(ui, AssetKind::Audio).is_some() {
+                    ui.weak("Audio drop received; import resolution will assign its stable id.");
+                }
+            });
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(&mut value.autoplay, "Autoplay").changed();
+                changed |= ui.checkbox(&mut value.looping, "Loop").changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Gain");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut value.gain)
+                            .speed(0.05)
+                            .range(0.0..=4.0),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Radius");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut value.radius)
+                            .speed(0.25)
+                            .range(0.0..=1000.0),
+                    )
+                    .changed();
+            });
+            if changed && let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(SceneAudioEmitter(value));
+            }
+            changed
+        },
+        copy_to: copy_component::<SceneAudioEmitter>,
+    },
+    ComponentUi {
+        name: "Collider",
+        type_name: "SceneCollider",
+        present: has::<SceneCollider>,
+        insert_default: |world, entity| {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(SceneCollider(engine_scene::ColliderData {
+                    shape: ColliderShape::Cuboid {
+                        half_extents: [0.5, 0.5, 0.5],
+                    },
+                    body: BodyKind::Fixed,
+                }));
+            }
+        },
+        remove: strip::<SceneCollider>,
+        inspect: |world, entity, ui| {
+            let Some(mut value) = world.get::<SceneCollider>(entity).cloned() else {
+                return false;
+            };
+            let mut changed = false;
+            egui::ComboBox::from_label("Body")
+                .selected_text(format!("{:?}", value.0.body))
+                .show_ui(ui, |ui| {
+                    for body in [BodyKind::Fixed, BodyKind::Dynamic, BodyKind::Kinematic] {
+                        changed |= ui
+                            .selectable_value(&mut value.0.body, body, format!("{body:?}"))
+                            .changed();
+                    }
+                });
+            ui.label(collider_shape_summary(&value.0.shape));
+            match &mut value.0.shape {
+                ColliderShape::Ball { radius } => {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(radius)
+                                .prefix("Radius ")
+                                .speed(0.05)
+                                .range(0.001..=10000.0),
+                        )
+                        .changed()
+                }
+                ColliderShape::Cuboid { half_extents } => {
+                    for (axis, extent) in ["X", "Y", "Z"].into_iter().zip(half_extents) {
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(extent)
+                                    .prefix(format!("Half {axis} "))
+                                    .speed(0.05)
+                                    .range(0.001..=10000.0),
+                            )
+                            .changed();
+                    }
+                }
+                ColliderShape::Cylinder {
+                    half_height,
+                    radius,
+                }
+                | ColliderShape::Capsule {
+                    half_height,
+                    radius,
+                } => {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(half_height)
+                                .prefix("Half height ")
+                                .speed(0.05)
+                                .range(0.001..=10000.0),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(radius)
+                                .prefix("Radius ")
+                                .speed(0.05)
+                                .range(0.001..=10000.0),
+                        )
+                        .changed();
+                }
+                ColliderShape::TriMesh { mesh } => {
+                    ui.label(format!("Mesh asset {}", mesh.id));
+                    if released_asset(ui, AssetKind::Mesh).is_some() {
+                        ui.weak("Mesh drop received; import resolution will assign its stable id.");
+                    }
+                }
+            }
+            if changed && let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(value);
+            }
+            changed
+        },
+        copy_to: copy_component::<SceneCollider>,
+    },
+    ComponentUi {
         name: "Sprite",
         type_name: "Sprite",
         present: has::<Sprite>,
@@ -214,6 +406,11 @@ const REGISTRY: &[ComponentUi] = &[
                     path.inspect_field(ui, 0.0)
                 })
                 .inner;
+            let mut changed = changed;
+            if let Some(dropped) = released_asset(ui, AssetKind::Mesh) {
+                path = dropped.to_string_lossy().into_owned();
+                changed = true;
+            }
 
             // The stable id is read-only here — it comes from the asset's
             // `.meta` sidecar and the editor re-resolves it on load.
@@ -241,7 +438,50 @@ const REGISTRY: &[ComponentUi] = &[
         },
         copy_to: copy_component::<AssetSource>,
     },
+    ComponentUi {
+        name: "Script",
+        type_name: "Script",
+        present: has::<Script>,
+        insert_default: |world, entity| {
+            if let Ok(mut e) = world.get_entity_mut(entity) {
+                e.insert(Script::default());
+            }
+        },
+        remove: strip::<Script>,
+        inspect: |world, entity, ui| {
+            let Some(mut value) = world.get::<Script>(entity).cloned() else {
+                return false;
+            };
+            let mut path = value.path.clone();
+            let changed = path.inspect_field(ui, 0.0);
+            if !path.is_empty() && !valid_script_path(std::path::Path::new(&path)) {
+                ui.colored_label(egui::Color32::RED, "Expected a project-relative .rs path");
+            }
+            if changed {
+                value.path = path;
+                if let Ok(mut e) = world.get_entity_mut(entity) {
+                    e.insert(value);
+                }
+            }
+            changed
+        },
+        copy_to: copy_component::<Script>,
+    },
 ];
+
+fn released_asset(ui: &mut egui::Ui, expected: AssetKind) -> Option<std::path::PathBuf> {
+    let response =
+        ui.allocate_response(egui::vec2(ui.available_width(), 20.0), egui::Sense::hover());
+    if let Some(path) = response.dnd_release_payload::<std::path::PathBuf>()
+        && accepts_asset_kind(AssetKind::from_path(&path), expected)
+    {
+        return Some((*path).clone());
+    }
+    if response.hovered() {
+        ui.weak(format!("Drop {} asset here", expected.label()));
+    }
+    None
+}
 
 /// Draws the inspector for `selected`, or a placeholder message if
 /// nothing (or a since-despawned entity) is selected.
@@ -604,5 +844,31 @@ mod tests {
         });
         // No interaction in a headless pass, so nothing is requested.
         assert_eq!(open_script, None);
+    }
+
+    #[test]
+    fn script_paths_are_project_relative_rust_files() {
+        assert!(valid_script_path(std::path::Path::new("src/player.rs")));
+        assert!(!valid_script_path(std::path::Path::new("src/player.ron")));
+        assert!(!valid_script_path(std::path::Path::new("../player.rs")));
+        assert!(!valid_script_path(std::path::Path::new("/tmp/player.rs")));
+    }
+
+    #[test]
+    fn typed_asset_targets_reject_mismatched_kinds() {
+        assert!(accepts_asset_kind(AssetKind::Audio, AssetKind::Audio));
+        assert!(!accepts_asset_kind(AssetKind::Texture, AssetKind::Audio));
+        assert!(!accepts_asset_kind(AssetKind::Other, AssetKind::Mesh));
+    }
+
+    #[test]
+    fn collider_summary_covers_dimensions_without_live_physics_handles() {
+        let shape = ColliderShape::Cuboid {
+            half_extents: [1.0, 2.0, 3.0],
+        };
+        assert_eq!(
+            collider_shape_summary(&shape),
+            "Cuboid (half-extents [1.000, 2.000, 3.000])"
+        );
     }
 }

@@ -1,4 +1,5 @@
 //! Shared per-frame editor state: everything panels read or write,
+#![cfg_attr(feature = "dock-shell", allow(dead_code))]
 //! bundled into one type so [`crate::EditorShell::run_frame`] doesn't
 //! grow an unbounded parameter list as more panels get added (it was
 //! already at four before this — hierarchy/inspector's world + selected
@@ -15,10 +16,9 @@ use engine_project::Project;
 use engine_scene::{Scene, SceneError, write_atomic};
 use glam::Vec3;
 
-use crate::assets::{AssetEntry, AssetIndex};
+use crate::assets::{AssetBrowser, AssetEntry, AssetIndex};
 use crate::chrome::{
-    BottomTab, BuildConfig, EditorDimension, InspectorTab, PanelVisibility, TransformSpace,
-    Workspace,
+    BottomTab, EditorDimension, InspectorTab, PanelVisibility, TransformSpace, Workspace,
 };
 use crate::console::{ConsoleFilter, ConsoleLog};
 use crate::diagnostics::{Diagnostic, Diagnostics};
@@ -30,10 +30,12 @@ use crate::history::History;
 use crate::import::AssetImporter;
 use crate::inspector;
 use crate::output::OutputLog;
+use crate::overlays::OverlayToggles;
 use crate::play::PlayState;
 use crate::preview::PreviewCache;
 use crate::profiler::FrameProfiler;
 use crate::session::{EditorSession, SESSION_VERSION};
+use crate::terrain_tools::TerrainToolState;
 
 /// Where the editor's "Save Scene" / "Open Scene" actions read and write,
 /// relative to the editor's working directory.
@@ -44,6 +46,14 @@ pub const DEFAULT_SCENE_PATH: &str = "scene.ron";
 /// mirrors how [`crate::Viewport`] is borrowed rather than owned by the
 /// shell itself.
 pub struct EditorState {
+    /// Bounded AI conversation state; transport is supplied by the host.
+    pub ai_chat: editor_ai::ChatSession,
+    /// Active AI intent mode used to constrain future tool dispatch.
+    pub ai_mode: editor_ai::AiMode,
+    /// Unsubmitted text in the AI Assistant composer.
+    pub ai_input: String,
+    /// Bounded plan/action history shown in the AI Assistant panel.
+    pub action_log: editor_tools::ActionLog,
     /// The scene the hierarchy/inspector panels show — also what
     /// [`EditorState::entity_transforms`] draws from for
     /// [`crate::Viewport::render`], so an entity added here shows up in
@@ -73,6 +83,10 @@ pub struct EditorState {
     /// The asset file the asset browser panel most recently selected, if
     /// any — a path relative to the scanned root.
     pub selected_asset: Option<PathBuf>,
+    /// The Asset Browser's own state: grouping, the folder imports land
+    /// in, and its pending new-folder request. The grouping is persisted
+    /// per project via [`EditorSession`].
+    pub asset_browser: AssetBrowser,
     /// Cached preview render state (thumbnail / waveform) for
     /// `selected_asset`, rebuilt when the selection or import pass
     /// changes. See the `preview` module.
@@ -108,6 +122,14 @@ pub struct EditorState {
     /// Play-mode: run the scene (via the play schedule) and rewind on
     /// stop. See [`PlayState`].
     pub play: PlayState,
+    /// A project the user asked to open, recorded by the File menu and
+    /// carried out by the shell binary — which owns the GPU resources
+    /// and language server a swap also has to reset. See
+    /// [`crate::ProjectRequest`].
+    pub project_request: Option<crate::ProjectRequest>,
+    /// Recently opened projects, for the File ▸ Open Recent menu. Loaded
+    /// from the user's config at startup by the shell binary.
+    pub recent_projects: crate::RecentProjects,
     /// The open project. Asset scanning, the scene path, and session
     /// save/restore all resolve against this.
     pub project: Project,
@@ -129,8 +151,23 @@ pub struct EditorState {
     /// A guarded action (quit / new scene / revert) waiting on the
     /// "unsaved changes" dialog. `None` when no dialog is open.
     pub pending_action: Option<PendingAction>,
-    /// The build profile shown in the toolbar (display-only for now).
-    pub build_config: BuildConfig,
+    /// Which of the project's `BuildConfiguration`s the toolbar has
+    /// selected, as an index into
+    /// [`engine_project::Project::configurations`]. Persisted per user in
+    /// the session — the definitions are the project's, the choice is
+    /// yours. May be stale after someone edits `project.ron`, so read it
+    /// through [`EditorState::selected_configuration`].
+    pub configuration_index: usize,
+    /// Set by File ▸ Build & Export…: the folder to stage the export
+    /// into. Taken by the shell binary, which owns the build thread.
+    pub export_request: Option<PathBuf>,
+    /// Whether an export build is running. The menu item is disabled
+    /// while it is — two cargo builds writing one `target/` is a way to
+    /// lose an afternoon.
+    pub export_running: bool,
+    /// Which Scene-view debug overlays are on. Persisted per project in
+    /// the session.
+    pub overlays: OverlayToggles,
     /// The gizmo coordinate space shown in the toolbar (display-only for
     /// now — the gizmo still uses world axes).
     pub transform_space: TransformSpace,
@@ -138,6 +175,8 @@ pub struct EditorState {
     /// orthographic front view and constrains the gizmo to the screen
     /// plane. In-memory only (not persisted in the session yet).
     pub dimension: EditorDimension,
+    /// Terrain and vegetation authoring controls used by the Scene View.
+    pub terrain_tools: TerrainToolState,
     /// When set (and more than one entity is selected), an Inspector
     /// field edit on the primary is copied to every other selected
     /// entity that has the same component.
@@ -253,6 +292,10 @@ impl EditorState {
     ) -> Self {
         let scene_path = project.main_scene_path();
         Self {
+            ai_chat: editor_ai::ChatSession::default(),
+            ai_mode: editor_ai::AiMode::default(),
+            ai_input: String::new(),
+            action_log: editor_tools::ActionLog::default(),
             world,
             selected_entity: None,
             secondary_selection: Vec::new(),
@@ -260,6 +303,7 @@ impl EditorState {
             asset_index: AssetIndex::new(),
             importer: AssetImporter::new(),
             selected_asset: None,
+            asset_browser: AssetBrowser::default(),
             preview: PreviewCache::new(),
             console,
             console_filter: ConsoleFilter::default(),
@@ -271,15 +315,21 @@ impl EditorState {
             history: History::new(),
             profiler: FrameProfiler::new(),
             play: PlayState::new(),
+            project_request: None,
+            recent_projects: crate::RecentProjects::new(),
             project,
             workspace: Workspace::default(),
             panels: PanelVisibility::default(),
             workspace_layouts: Workspace::ALL.map(Workspace::visibility),
             dirty: DirtyState::default(),
             pending_action: None,
-            build_config: BuildConfig::default(),
+            configuration_index: 0,
+            overlays: OverlayToggles::default(),
+            export_request: None,
+            export_running: false,
             transform_space: TransformSpace::default(),
             dimension: EditorDimension::default(),
+            terrain_tools: TerrainToolState::default(),
             batch_edit: false,
             bottom_tab: BottomTab::default(),
             inspector_tab: InspectorTab::default(),
@@ -313,6 +363,42 @@ impl EditorState {
         self.dirty.mark_scene();
     }
 
+    /// Applies a scene mutation from the shared Studio tool schema through
+    /// the same snapshot-based undo path used by panel edits.
+    pub fn apply_tool_scene_edit(
+        &mut self,
+        request: &editor_tools::ToolRequest,
+    ) -> Result<(), String> {
+        self.history
+            .begin_frame(&mut self.world, self.selected_entity);
+        match request {
+            editor_tools::ToolRequest::CreateEntity { name } => {
+                self.world.spawn((
+                    engine_ecs::components::Name::new(name),
+                    engine_ecs::components::Transform::default(),
+                ));
+            }
+            editor_tools::ToolRequest::SetTransform {
+                entity,
+                translation,
+            } => {
+                let target = engine_ecs::prelude::Entity::from_bits(*entity);
+                let Some(mut transform) = self
+                    .world
+                    .get_mut::<engine_ecs::components::Transform>(target)
+                else {
+                    return Err(format!("entity {entity} was not found"));
+                };
+                transform.0.translation = glam::Vec3::from_array(*translation);
+            }
+            _ => return Err("request is not a scene mutation".into()),
+        }
+        if self.history.settle(&mut self.world, self.selected_entity) {
+            self.mark_dirty();
+        }
+        Ok(())
+    }
+
     /// Replaces the world with a fresh empty scene: clears the selection
     /// and any in-progress gizmo drag, resets the undo history, and marks
     /// the scene dirty (the empty world is not yet on disk). The scene
@@ -323,6 +409,46 @@ impl EditorState {
         self.dragging_axis = None;
         self.history = History::new();
         self.dirty.mark_scene();
+    }
+
+    /// Adopts `project`, discarding everything that belonged to the
+    /// previous one.
+    ///
+    /// Resets the world, selection, undo history, asset list, asset
+    /// index and import cache, and points `scene_path` at the new
+    /// project's main scene. **Does not** load that scene or touch GPU
+    /// resources: the caller loads the scene (so it can report a
+    /// readable error) and the shell binary rebuilds its render assets,
+    /// language server and code editor.
+    ///
+    /// Anything left un-reset here is a bug with a memorable symptom —
+    /// the new project rendering the old project's meshes, or an undo
+    /// that reaches back into a world that no longer exists.
+    pub fn adopt_project(&mut self, project: Project) {
+        self.scene_path = project.main_scene_path();
+        self.project = project;
+
+        self.world = World::new();
+        self.clear_selection();
+        self.dragging_axis = None;
+        self.history = History::new();
+
+        // The import cache is keyed by path, and paths from the old
+        // project mean nothing here.
+        self.assets = Vec::new();
+        self.asset_index = AssetIndex::new();
+        self.importer = AssetImporter::new();
+        self.selected_asset = None;
+        self.preview = PreviewCache::new();
+
+        // Nothing is unsaved in a project just opened, and a pending
+        // prompt about the *old* project's changes would be nonsense.
+        self.dirty = DirtyState::default();
+        self.pending_action = None;
+        self.project_request = None;
+        self.play = PlayState::new();
+
+        self.recent_projects.push(self.project.root());
     }
 
     /// Switches the active workspace and applies its panel-visibility
@@ -340,6 +466,12 @@ impl EditorState {
         self.panels = self.workspace_layouts[self.workspace.index()];
     }
 
+    /// The build configuration the toolbar has selected, falling back to
+    /// the project's first if the remembered index no longer exists.
+    pub fn selected_configuration(&self) -> Option<&engine_project::BuildConfiguration> {
+        self.project.configuration(self.configuration_index)
+    }
+
     /// Restores editor-only state from a loaded [`EditorSession`]: the
     /// workspace, the exact panel visibility (which may differ from the
     /// workspace preset), and — if its file still exists inside the
@@ -347,6 +479,14 @@ impl EditorState {
     pub fn apply_session(&mut self, session: EditorSession) {
         self.workspace = session.workspace;
         self.panels = session.panels;
+        self.asset_browser.view = session.asset_view;
+        self.asset_browser.preview_open = session.preview_open;
+        self.overlays = session.overlays;
+        // Clamped, not trusted: the session is per-user state that may
+        // be older than the project's configuration list.
+        self.configuration_index = session
+            .configuration_index
+            .min(self.project.configurations().len().saturating_sub(1));
         for (slot, saved) in self
             .workspace_layouts
             .iter_mut()
@@ -381,6 +521,10 @@ impl EditorState {
             panels: self.panels,
             layouts: layouts.to_vec(),
             last_scene,
+            asset_view: self.asset_browser.view,
+            preview_open: self.asset_browser.preview_open,
+            configuration_index: self.configuration_index,
+            overlays: self.overlays,
         }
     }
 
@@ -515,6 +659,11 @@ impl EditorState {
             entity.insert(mesh_source);
         }
         entity.id()
+    }
+
+    /// Returns the current read-only reverse dependency report for scene assets.
+    pub fn asset_dependencies(&mut self) -> Vec<crate::dependencies::AssetDependency> {
+        crate::dependencies::scan(&mut self.world, &self.asset_index)
     }
 
     /// Loads a `.prefab` file (`prefab_path` relative to the assets
@@ -726,6 +875,154 @@ mod tests {
     }
 
     #[test]
+    fn asset_drag_builds_a_component_scene_that_round_trips() {
+        use engine_asset::AssetId;
+        use engine_ecs::components::{Camera, MeshSource};
+
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let asset_path = PathBuf::from("props/crate.gltf");
+        let asset_id = AssetId::new();
+        state.asset_index.insert(asset_id, asset_path.clone());
+        let asset_id_text = asset_id.to_string();
+
+        // This is the same operation used by an Asset Browser drag/drop.
+        let crate_entity = state.spawn_asset_entity(&asset_path);
+        state
+            .world
+            .entity_mut(crate_entity)
+            .insert(Camera::from(engine_renderer::Camera::new(
+                Vec3::new(0.0, 1.0, 3.0),
+                Vec3::ZERO,
+                16.0 / 9.0,
+            )));
+        state.mark_dirty();
+
+        let source = state.world.get::<AssetSource>(crate_entity).unwrap();
+        assert_eq!(source.path, asset_path.to_string_lossy());
+        assert_eq!(source.id.as_deref(), Some(asset_id_text.as_str()));
+        assert!(state.world.get::<MeshSource>(crate_entity).is_some());
+        assert!(state.world.get::<Camera>(crate_entity).is_some());
+
+        state.save_scene().expect("save authored scene");
+        let mut reopened = editor_state(&project);
+        reopened.load_scene().expect("reopen authored scene");
+        let mut names = reopened.world.query::<&Name>();
+        assert!(names.iter(&reopened.world).any(|name| name.0 == "crate"));
+        let mut meshes = reopened.world.query::<&MeshSource>();
+        assert_eq!(meshes.iter(&reopened.world).count(), 1);
+    }
+
+    #[test]
+    fn adopting_a_project_drops_everything_from_the_previous_one() {
+        // The failure this prevents is memorable: the new project
+        // rendering the old project's meshes, or an undo reaching into
+        // a world that no longer exists.
+        let first = temp_project();
+        let second = temp_project();
+        let mut state = editor_state(&first);
+
+        state.world.spawn(Name::new("left over"));
+        state.selected_entity = state.world.spawn(Name::new("selected")).id().into();
+        state
+            .secondary_selection
+            .push(state.world.spawn_empty().id());
+        state.assets.push(AssetEntry {
+            relative_path: PathBuf::from("old.png"),
+            kind: crate::AssetKind::Texture,
+            id: None,
+        });
+        state.selected_asset = Some(PathBuf::from("old.png"));
+        state.dirty.mark_scene();
+        state.pending_action = Some(PendingAction::Quit);
+
+        state.adopt_project(second.0.clone());
+
+        assert_eq!(state.project.root(), second.0.root());
+        assert_eq!(state.scene_path, second.0.main_scene_path());
+        // Compared against a fresh `World` rather than zero: bevy_ecs
+        // keeps internal entities of its own, and the claim here is
+        // "nothing of the old project survived", not "no entities".
+        assert_eq!(
+            state.world.iter_entities().count(),
+            World::new().iter_entities().count(),
+            "the old project's entities must be gone",
+        );
+        assert!(state.selected_entity.is_none());
+        assert!(state.secondary_selection.is_empty());
+        assert!(
+            state.assets.is_empty(),
+            "asset list belonged to the old project"
+        );
+        assert!(state.selected_asset.is_none());
+        assert!(!state.history.can_undo(), "undo must not cross projects");
+        assert!(
+            !state.dirty.any(),
+            "a just-opened project has no unsaved edits"
+        );
+        assert!(
+            state.pending_action.is_none(),
+            "a prompt about the old project's changes would be nonsense",
+        );
+    }
+
+    #[test]
+    fn tool_scene_edits_share_the_undo_boundary() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state
+            .apply_tool_scene_edit(&editor_tools::ToolRequest::CreateEntity {
+                name: "Tool Cube".into(),
+            })
+            .unwrap();
+        assert!(state.history.can_undo());
+        assert!(
+            state
+                .world
+                .query::<&Name>()
+                .iter(&state.world)
+                .any(|name| name.0 == "Tool Cube")
+        );
+        assert!(state.dirty.any());
+        state
+            .history
+            .undo(&mut state.world, &mut state.selected_entity);
+        assert!(
+            !state
+                .world
+                .query::<&Name>()
+                .iter(&state.world)
+                .any(|name| name.0 == "Tool Cube")
+        );
+    }
+
+    #[test]
+    fn adopting_a_project_records_it_as_recent() {
+        let first = temp_project();
+        let second = temp_project();
+        let mut state = editor_state(&first);
+        state.recent_projects.push(first.0.root());
+
+        state.adopt_project(second.0.clone());
+
+        assert_eq!(
+            state.recent_projects.paths.len(),
+            2,
+            "both projects should be listed",
+        );
+        assert!(
+            state.recent_projects.paths[0].ends_with(
+                second
+                    .0
+                    .root()
+                    .file_name()
+                    .expect("a project directory has a name")
+            ),
+            "the project just opened is the newest entry",
+        );
+    }
+
+    #[test]
     fn new_starts_clean_in_the_world_workspace_with_the_project_scene() {
         let project = temp_project();
         let state = editor_state(&project);
@@ -925,6 +1222,51 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_configuration_index_clamps_to_one_that_exists() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let count = state.project.configurations().len();
+        assert!(count >= 2, "a scaffolded project has Debug and Release");
+
+        let session = EditorSession {
+            version: SESSION_VERSION,
+            workspace: Workspace::World,
+            panels: PanelVisibility::default(),
+            layouts: Vec::new(),
+            asset_view: crate::AssetView::default(),
+            preview_open: true,
+            // Someone deleted configurations since this session was written.
+            configuration_index: 99,
+            overlays: crate::OverlayToggles::default(),
+            last_scene: None,
+        };
+        state.apply_session(session);
+
+        assert_eq!(state.configuration_index, count - 1);
+        assert!(
+            state.selected_configuration().is_some(),
+            "the toolbar always has something to show"
+        );
+    }
+
+    #[test]
+    fn the_selected_configuration_round_trips_through_a_session() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.configuration_index = 1;
+
+        let captured = state.capture_session();
+        assert_eq!(captured.configuration_index, 1);
+
+        let mut reopened = editor_state(&project);
+        reopened.apply_session(captured);
+        assert_eq!(
+            reopened.selected_configuration().map(|c| c.name.as_str()),
+            Some("Release")
+        );
+    }
+
+    #[test]
     fn apply_session_adopts_an_existing_last_scene() {
         let project = temp_project();
         let mut state = editor_state(&project);
@@ -934,6 +1276,10 @@ mod tests {
             workspace: Workspace::World,
             panels: PanelVisibility::default(),
             layouts: Vec::new(),
+            asset_view: crate::AssetView::default(),
+            preview_open: true,
+            configuration_index: 0,
+            overlays: crate::OverlayToggles::default(),
             last_scene: Some(PathBuf::from("scenes/main.ron")),
         };
         state.apply_session(session);
@@ -952,6 +1298,10 @@ mod tests {
             workspace: Workspace::World,
             panels: PanelVisibility::default(),
             layouts: Vec::new(),
+            asset_view: crate::AssetView::default(),
+            preview_open: true,
+            configuration_index: 0,
+            overlays: crate::OverlayToggles::default(),
             last_scene: Some(PathBuf::from("scenes/does_not_exist.ron")),
         };
         state.apply_session(session);

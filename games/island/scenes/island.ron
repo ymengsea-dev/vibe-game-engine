@@ -1,0 +1,5822 @@
+(
+    version: 4,
+    entities: [
+        (
+            name: Some("Wind"),
+            transform: Some((
+                translation: (0.0, 6.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            )),
+            audio_emitter: Some((
+                sound: (
+                    id: "dd61a058-2720-4b76-a5ae-7f3ef7814c92",
+                ),
+                autoplay: true,
+                looping: true,
+                gain: 0.5,
+                radius: 60.0,
+            )),
+        ),
+        (
+            name: Some("Terrain"),
+            transform: Some((
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2bf6fc1a-fe24-4740-abc6-99f381203682",
+                ),
+                material: (
+                    id: "2bf6fc1a-fe24-4740-abc6-99f381203682",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: TriMesh(
+                    mesh: (
+                        id: "2bf6fc1a-fe24-4740-abc6-99f381203682",
+                    ),
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 001 Trunk"),
+            transform: Some((
+                translation: (3.5274162, 2.7290647, 15.964615),
+                rotation: (0.0, 0.19214693, 0.0, 0.98136616),
+                scale: (1.189675, 1.189675, 1.189675),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 001 Canopy"),
+            transform: Some((
+                translation: (3.5274162, 2.7290647, 15.964615),
+                rotation: (0.0, 0.19214693, 0.0, 0.98136616),
+                scale: (1.189675, 1.189675, 1.189675),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 002 Trunk"),
+            transform: Some((
+                translation: (-19.953842, 1.1838799, 11.597443),
+                rotation: (0.0, 0.97023875, 0.0, -0.24215043),
+                scale: (0.9261159, 0.9261159, 0.9261159),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 002 Canopy"),
+            transform: Some((
+                translation: (-19.953842, 1.1838799, 11.597443),
+                rotation: (0.0, 0.97023875, 0.0, -0.24215043),
+                scale: (0.9261159, 0.9261159, 0.9261159),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 003 Trunk"),
+            transform: Some((
+                translation: (1.5612602, 3.2155614, -18.949379),
+                rotation: (0.0, 0.9978898, 0.0, 0.06493022),
+                scale: (1.3319975, 1.3319975, 1.3319975),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 003 Canopy"),
+            transform: Some((
+                translation: (1.5612602, 3.2155614, -18.949379),
+                rotation: (0.0, 0.9978898, 0.0, 0.06493022),
+                scale: (1.3319975, 1.3319975, 1.3319975),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 004 Trunk"),
+            transform: Some((
+                translation: (21.405628, 1.0475532, 11.129475),
+                rotation: (0.0, 0.8953329, 0.0, 0.4453976),
+                scale: (0.95443165, 0.95443165, 0.95443165),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 004 Canopy"),
+            transform: Some((
+                translation: (21.405628, 1.0475532, 11.129475),
+                rotation: (0.0, 0.8953329, 0.0, 0.4453976),
+                scale: (0.95443165, 0.95443165, 0.95443165),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 005 Trunk"),
+            transform: Some((
+                translation: (-3.0972824, 2.4449382, 2.4437485),
+                rotation: (0.0, 0.92448384, 0.0, -0.3812212),
+                scale: (1.3267235, 1.3267235, 1.3267235),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 005 Canopy"),
+            transform: Some((
+                translation: (-3.0972824, 2.4449382, 2.4437485),
+                rotation: (0.0, 0.92448384, 0.0, -0.3812212),
+                scale: (1.3267235, 1.3267235, 1.3267235),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 006 Trunk"),
+            transform: Some((
+                translation: (-16.727757, 2.1175218, -7.128891),
+                rotation: (0.0, 0.056935273, 0.0, 0.99837786),
+                scale: (1.0505846, 1.0505846, 1.0505846),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 006 Canopy"),
+            transform: Some((
+                translation: (-16.727757, 2.1175218, -7.128891),
+                rotation: (0.0, 0.056935273, 0.0, 0.99837786),
+                scale: (1.0505846, 1.0505846, 1.0505846),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 007 Trunk"),
+            transform: Some((
+                translation: (6.533844, 3.1264143, 6.5198593),
+                rotation: (0.0, 0.24451566, 0.0, 0.9696453),
+                scale: (0.852371, 0.852371, 0.852371),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 007 Canopy"),
+            transform: Some((
+                translation: (6.533844, 3.1264143, 6.5198593),
+                rotation: (0.0, 0.24451566, 0.0, 0.9696453),
+                scale: (0.852371, 0.852371, 0.852371),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 008 Trunk"),
+            transform: Some((
+                translation: (6.7239037, 3.339594, -7.294632),
+                rotation: (0.0, 0.44463128, 0.0, 0.8957137),
+                scale: (0.93282247, 0.93282247, 0.93282247),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 008 Canopy"),
+            transform: Some((
+                translation: (6.7239037, 3.339594, -7.294632),
+                rotation: (0.0, 0.44463128, 0.0, 0.8957137),
+                scale: (0.93282247, 0.93282247, 0.93282247),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 009 Trunk"),
+            transform: Some((
+                translation: (3.0925064, 2.6408994, 3.8745117),
+                rotation: (0.0, 0.9901776, 0.0, -0.13981558),
+                scale: (0.861172, 0.861172, 0.861172),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 009 Canopy"),
+            transform: Some((
+                translation: (3.0925064, 2.6408994, 3.8745117),
+                rotation: (0.0, 0.9901776, 0.0, -0.13981558),
+                scale: (0.861172, 0.861172, 0.861172),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 010 Trunk"),
+            transform: Some((
+                translation: (17.168003, 1.3227745, 17.549767),
+                rotation: (0.0, 0.3427413, 0.0, -0.9394298),
+                scale: (0.9946242, 0.9946242, 0.9946242),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 010 Canopy"),
+            transform: Some((
+                translation: (17.168003, 1.3227745, 17.549767),
+                rotation: (0.0, 0.3427413, 0.0, -0.9394298),
+                scale: (0.9946242, 0.9946242, 0.9946242),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 011 Trunk"),
+            transform: Some((
+                translation: (-18.319157, 1.6814388, -0.43838882),
+                rotation: (0.0, 0.085660405, 0.0, -0.9963244),
+                scale: (1.1857752, 1.1857752, 1.1857752),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 011 Canopy"),
+            transform: Some((
+                translation: (-18.319157, 1.6814388, -0.43838882),
+                rotation: (0.0, 0.085660405, 0.0, -0.9963244),
+                scale: (1.1857752, 1.1857752, 1.1857752),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 012 Trunk"),
+            transform: Some((
+                translation: (-23.249872, 0.6671374, 9.450897),
+                rotation: (0.0, 0.99837077, 0.0, 0.05705959),
+                scale: (1.1114416, 1.1114416, 1.1114416),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 012 Canopy"),
+            transform: Some((
+                translation: (-23.249872, 0.6671374, 9.450897),
+                rotation: (0.0, 0.99837077, 0.0, 0.05705959),
+                scale: (1.1114416, 1.1114416, 1.1114416),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 013 Trunk"),
+            transform: Some((
+                translation: (-18.758757, 1.7088716, -4.820366),
+                rotation: (0.0, 0.25245884, 0.0, -0.9676076),
+                scale: (1.2136302, 1.2136302, 1.2136302),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 013 Canopy"),
+            transform: Some((
+                translation: (-18.758757, 1.7088716, -4.820366),
+                rotation: (0.0, 0.25245884, 0.0, -0.9676076),
+                scale: (1.2136302, 1.2136302, 1.2136302),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 014 Trunk"),
+            transform: Some((
+                translation: (-8.311453, 0.6086792, 24.235363),
+                rotation: (0.0, 0.91383636, 0.0, 0.40608266),
+                scale: (1.2265246, 1.2265246, 1.2265246),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 014 Canopy"),
+            transform: Some((
+                translation: (-8.311453, 0.6086792, 24.235363),
+                rotation: (0.0, 0.91383636, 0.0, 0.40608266),
+                scale: (1.2265246, 1.2265246, 1.2265246),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 015 Trunk"),
+            transform: Some((
+                translation: (-9.3769, 2.6827927, -2.4229736),
+                rotation: (0.0, 0.94935554, 0.0, 0.3142039),
+                scale: (1.0046897, 1.0046897, 1.0046897),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 015 Canopy"),
+            transform: Some((
+                translation: (-9.3769, 2.6827927, -2.4229736),
+                rotation: (0.0, 0.94935554, 0.0, 0.3142039),
+                scale: (1.0046897, 1.0046897, 1.0046897),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 016 Trunk"),
+            transform: Some((
+                translation: (6.4999657, 2.9291306, 4.519146),
+                rotation: (0.0, 0.8340144, 0.0, -0.5517427),
+                scale: (1.0044544, 1.0044544, 1.0044544),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 016 Canopy"),
+            transform: Some((
+                translation: (6.4999657, 2.9291306, 4.519146),
+                rotation: (0.0, 0.8340144, 0.0, -0.5517427),
+                scale: (1.0044544, 1.0044544, 1.0044544),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 017 Trunk"),
+            transform: Some((
+                translation: (-8.915976, 2.3262591, 16.784264),
+                rotation: (0.0, 0.8921321, 0.0, 0.45177463),
+                scale: (1.2888527, 1.2888527, 1.2888527),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 017 Canopy"),
+            transform: Some((
+                translation: (-8.915976, 2.3262591, 16.784264),
+                rotation: (0.0, 0.8921321, 0.0, 0.45177463),
+                scale: (1.2888527, 1.2888527, 1.2888527),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 018 Trunk"),
+            transform: Some((
+                translation: (-12.625294, 2.5568786, 4.9309998),
+                rotation: (0.0, 0.8251377, 0.0, 0.5649317),
+                scale: (1.2987524, 1.2987524, 1.2987524),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 018 Canopy"),
+            transform: Some((
+                translation: (-12.625294, 2.5568786, 4.9309998),
+                rotation: (0.0, 0.8251377, 0.0, 0.5649317),
+                scale: (1.2987524, 1.2987524, 1.2987524),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 019 Trunk"),
+            transform: Some((
+                translation: (-5.7047653, 2.8026557, 14.665165),
+                rotation: (0.0, 0.83252114, 0.0, 0.5539933),
+                scale: (1.3296757, 1.3296757, 1.3296757),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 019 Canopy"),
+            transform: Some((
+                translation: (-5.7047653, 2.8026557, 14.665165),
+                rotation: (0.0, 0.83252114, 0.0, 0.5539933),
+                scale: (1.3296757, 1.3296757, 1.3296757),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 020 Trunk"),
+            transform: Some((
+                translation: (16.597363, 2.315954, -7.5697575),
+                rotation: (0.0, 0.47727397, 0.0, -0.87875456),
+                scale: (1.1191317, 1.1191317, 1.1191317),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 020 Canopy"),
+            transform: Some((
+                translation: (16.597363, 2.315954, -7.5697575),
+                rotation: (0.0, 0.47727397, 0.0, -0.87875456),
+                scale: (1.1191317, 1.1191317, 1.1191317),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 021 Trunk"),
+            transform: Some((
+                translation: (10.137875, 3.1542785, -6.779972),
+                rotation: (0.0, 0.8693612, 0.0, -0.49417713),
+                scale: (0.84926033, 0.84926033, 0.84926033),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 021 Canopy"),
+            transform: Some((
+                translation: (10.137875, 3.1542785, -6.779972),
+                rotation: (0.0, 0.8693612, 0.0, -0.49417713),
+                scale: (0.84926033, 0.84926033, 0.84926033),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 022 Trunk"),
+            transform: Some((
+                translation: (-18.058498, 1.7378144, -1.6312408),
+                rotation: (0.0, 0.27926722, 0.0, 0.9602134),
+                scale: (0.95765394, 0.95765394, 0.95765394),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 022 Canopy"),
+            transform: Some((
+                translation: (-18.058498, 1.7378144, -1.6312408),
+                rotation: (0.0, 0.27926722, 0.0, 0.9602134),
+                scale: (0.95765394, 0.95765394, 0.95765394),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 023 Trunk"),
+            transform: Some((
+                translation: (0.053138733, 3.5761437, -8.274265),
+                rotation: (0.0, 0.17337865, 0.0, 0.98485523),
+                scale: (0.9677157, 0.9677157, 0.9677157),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 023 Canopy"),
+            transform: Some((
+                translation: (0.053138733, 3.5761437, -8.274265),
+                rotation: (0.0, 0.17337865, 0.0, 0.98485523),
+                scale: (0.9677157, 0.9677157, 0.9677157),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 024 Trunk"),
+            transform: Some((
+                translation: (-2.1391125, 2.563149, 16.86282),
+                rotation: (0.0, 0.8072738, 0.0, -0.5901771),
+                scale: (1.3316082, 1.3316082, 1.3316082),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 024 Canopy"),
+            transform: Some((
+                translation: (-2.1391125, 2.563149, 16.86282),
+                rotation: (0.0, 0.8072738, 0.0, -0.5901771),
+                scale: (1.3316082, 1.3316082, 1.3316082),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 025 Trunk"),
+            transform: Some((
+                translation: (3.284958, 2.7938104, 15.434383),
+                rotation: (0.0, 0.27253002, 0.0, 0.9621473),
+                scale: (1.3176112, 1.3176112, 1.3176112),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 025 Canopy"),
+            transform: Some((
+                translation: (3.284958, 2.7938104, 15.434383),
+                rotation: (0.0, 0.27253002, 0.0, 0.9621473),
+                scale: (1.3176112, 1.3176112, 1.3176112),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 026 Trunk"),
+            transform: Some((
+                translation: (-1.1870689, 3.8122892, -13.640636),
+                rotation: (0.0, 0.04632856, 0.0, -0.9989263),
+                scale: (1.1245037, 1.1245037, 1.1245037),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 026 Canopy"),
+            transform: Some((
+                translation: (-1.1870689, 3.8122892, -13.640636),
+                rotation: (0.0, 0.04632856, 0.0, -0.9989263),
+                scale: (1.1245037, 1.1245037, 1.1245037),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 027 Trunk"),
+            transform: Some((
+                translation: (5.711483, 1.2240216, 22.900589),
+                rotation: (0.0, 0.85711366, 0.0, 0.51512736),
+                scale: (1.3072166, 1.3072166, 1.3072166),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 027 Canopy"),
+            transform: Some((
+                translation: (5.711483, 1.2240216, 22.900589),
+                rotation: (0.0, 0.85711366, 0.0, 0.51512736),
+                scale: (1.3072166, 1.3072166, 1.3072166),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 028 Trunk"),
+            transform: Some((
+                translation: (-0.09415817, 1.8198667, -23.476479),
+                rotation: (0.0, 0.16259725, 0.0, -0.98669255),
+                scale: (0.9541538, 0.9541538, 0.9541538),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 028 Canopy"),
+            transform: Some((
+                translation: (-0.09415817, 1.8198667, -23.476479),
+                rotation: (0.0, 0.16259725, 0.0, -0.98669255),
+                scale: (0.9541538, 0.9541538, 0.9541538),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 029 Trunk"),
+            transform: Some((
+                translation: (10.424633, 3.0069163, 5.4273033),
+                rotation: (0.0, 0.9998584, 0.0, 0.016830679),
+                scale: (1.1776953, 1.1776953, 1.1776953),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 029 Canopy"),
+            transform: Some((
+                translation: (10.424633, 3.0069163, 5.4273033),
+                rotation: (0.0, 0.9998584, 0.0, 0.016830679),
+                scale: (1.1776953, 1.1776953, 1.1776953),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 030 Trunk"),
+            transform: Some((
+                translation: (-5.7778587, 2.267097, 18.248886),
+                rotation: (0.0, 0.23090023, 0.0, -0.97297746),
+                scale: (1.2102005, 1.2102005, 1.2102005),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 030 Canopy"),
+            transform: Some((
+                translation: (-5.7778587, 2.267097, 18.248886),
+                rotation: (0.0, 0.23090023, 0.0, -0.97297746),
+                scale: (1.2102005, 1.2102005, 1.2102005),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 031 Trunk"),
+            transform: Some((
+                translation: (-7.45467, 2.560422, 0.73329926),
+                rotation: (0.0, 0.89167553, 0.0, -0.45267516),
+                scale: (0.9852127, 0.9852127, 0.9852127),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 031 Canopy"),
+            transform: Some((
+                translation: (-7.45467, 2.560422, 0.73329926),
+                rotation: (0.0, 0.89167553, 0.0, -0.45267516),
+                scale: (0.9852127, 0.9852127, 0.9852127),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 032 Trunk"),
+            transform: Some((
+                translation: (17.245926, 2.350267, -4.7099266),
+                rotation: (0.0, 0.33100507, 0.0, 0.94362897),
+                scale: (1.3364308, 1.3364308, 1.3364308),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 032 Canopy"),
+            transform: Some((
+                translation: (17.245926, 2.350267, -4.7099266),
+                rotation: (0.0, 0.33100507, 0.0, 0.94362897),
+                scale: (1.3364308, 1.3364308, 1.3364308),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 033 Trunk"),
+            transform: Some((
+                translation: (-6.9130383, 3.32251, -14.145399),
+                rotation: (0.0, 0.07008896, 0.0, -0.9975408),
+                scale: (0.7931654, 0.7931654, 0.7931654),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 033 Canopy"),
+            transform: Some((
+                translation: (-6.9130383, 3.32251, -14.145399),
+                rotation: (0.0, 0.07008896, 0.0, -0.9975408),
+                scale: (0.7931654, 0.7931654, 0.7931654),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 034 Trunk"),
+            transform: Some((
+                translation: (9.01363, 2.984373, -4.3329754),
+                rotation: (0.0, 0.92391354, 0.0, 0.38260138),
+                scale: (0.80798805, 0.80798805, 0.80798805),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 034 Canopy"),
+            transform: Some((
+                translation: (9.01363, 2.984373, -4.3329754),
+                rotation: (0.0, 0.92391354, 0.0, 0.38260138),
+                scale: (0.80798805, 0.80798805, 0.80798805),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 035 Trunk"),
+            transform: Some((
+                translation: (10.492161, 2.7343223, -0.6466408),
+                rotation: (0.0, 0.7397712, 0.0, -0.67285854),
+                scale: (1.0522976, 1.0522976, 1.0522976),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 035 Canopy"),
+            transform: Some((
+                translation: (10.492161, 2.7343223, -0.6466408),
+                rotation: (0.0, 0.7397712, 0.0, -0.67285854),
+                scale: (1.0522976, 1.0522976, 1.0522976),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 036 Trunk"),
+            transform: Some((
+                translation: (-2.0388355, 2.712489, 15.75943),
+                rotation: (0.0, 0.9725573, 0.0, -0.23266345),
+                scale: (1.1396067, 1.1396067, 1.1396067),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 036 Canopy"),
+            transform: Some((
+                translation: (-2.0388355, 2.712489, 15.75943),
+                rotation: (0.0, 0.9725573, 0.0, -0.23266345),
+                scale: (1.1396067, 1.1396067, 1.1396067),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 037 Trunk"),
+            transform: Some((
+                translation: (-8.47888, 2.039235, 18.63971),
+                rotation: (0.0, 0.60356677, 0.0, 0.7973125),
+                scale: (0.91922206, 0.91922206, 0.91922206),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 037 Canopy"),
+            transform: Some((
+                translation: (-8.47888, 2.039235, 18.63971),
+                rotation: (0.0, 0.60356677, 0.0, 0.7973125),
+                scale: (0.91922206, 0.91922206, 0.91922206),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 038 Trunk"),
+            transform: Some((
+                translation: (11.782391, 2.9646192, 8.370491),
+                rotation: (0.0, 0.9058028, 0.0, 0.42369953),
+                scale: (0.8537804, 0.8537804, 0.8537804),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 038 Canopy"),
+            transform: Some((
+                translation: (11.782391, 2.9646192, 8.370491),
+                rotation: (0.0, 0.9058028, 0.0, 0.42369953),
+                scale: (0.8537804, 0.8537804, 0.8537804),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 039 Trunk"),
+            transform: Some((
+                translation: (-2.4091682, 2.6591375, 16.15269),
+                rotation: (0.0, 0.047743674, 0.0, -0.99885964),
+                scale: (1.0450503, 1.0450503, 1.0450503),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 039 Canopy"),
+            transform: Some((
+                translation: (-2.4091682, 2.6591375, 16.15269),
+                rotation: (0.0, 0.047743674, 0.0, -0.99885964),
+                scale: (1.0450503, 1.0450503, 1.0450503),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 040 Trunk"),
+            transform: Some((
+                translation: (-3.1053467, 1.7886602, 21.0018),
+                rotation: (0.0, 0.9901968, 0.0, 0.13967893),
+                scale: (1.1603615, 1.1603615, 1.1603615),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 040 Canopy"),
+            transform: Some((
+                translation: (-3.1053467, 1.7886602, 21.0018),
+                rotation: (0.0, 0.9901968, 0.0, 0.13967893),
+                scale: (1.1603615, 1.1603615, 1.1603615),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 041 Trunk"),
+            transform: Some((
+                translation: (5.1166916, 3.1586113, 11.960411),
+                rotation: (0.0, 0.9288618, 0.0, 0.37042642),
+                scale: (1.1578106, 1.1578106, 1.1578106),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 041 Canopy"),
+            transform: Some((
+                translation: (5.1166916, 3.1586113, 11.960411),
+                rotation: (0.0, 0.9288618, 0.0, 0.37042642),
+                scale: (1.1578106, 1.1578106, 1.1578106),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 042 Trunk"),
+            transform: Some((
+                translation: (11.351292, 3.025967, 8.208061),
+                rotation: (0.0, 0.29374242, 0.0, 0.95588464),
+                scale: (0.9632812, 0.9632812, 0.9632812),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 042 Canopy"),
+            transform: Some((
+                translation: (11.351292, 3.025967, 8.208061),
+                rotation: (0.0, 0.29374242, 0.0, 0.95588464),
+                scale: (0.9632812, 0.9632812, 0.9632812),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 043 Trunk"),
+            transform: Some((
+                translation: (6.22958, 3.0895264, 13.00272),
+                rotation: (0.0, 0.869353, 0.0, -0.49419165),
+                scale: (0.83880186, 0.83880186, 0.83880186),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 043 Canopy"),
+            transform: Some((
+                translation: (6.22958, 3.0895264, 13.00272),
+                rotation: (0.0, 0.869353, 0.0, -0.49419165),
+                scale: (0.83880186, 0.83880186, 0.83880186),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 044 Trunk"),
+            transform: Some((
+                translation: (-10.87767, 1.0711758, 21.809906),
+                rotation: (0.0, 0.4330194, 0.0, 0.9013846),
+                scale: (1.0011618, 1.0011618, 1.0011618),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 044 Canopy"),
+            transform: Some((
+                translation: (-10.87767, 1.0711758, 21.809906),
+                rotation: (0.0, 0.4330194, 0.0, 0.9013846),
+                scale: (1.0011618, 1.0011618, 1.0011618),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 045 Trunk"),
+            transform: Some((
+                translation: (-10.75429, 2.78182, -15.040087),
+                rotation: (0.0, 0.48030466, 0.0, 0.8771017),
+                scale: (1.2244996, 1.2244996, 1.2244996),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 045 Canopy"),
+            transform: Some((
+                translation: (-10.75429, 2.78182, -15.040087),
+                rotation: (0.0, 0.48030466, 0.0, 0.8771017),
+                scale: (1.2244996, 1.2244996, 1.2244996),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 046 Trunk"),
+            transform: Some((
+                translation: (-19.774803, 1.4070022, 6.345726),
+                rotation: (0.0, 0.16867828, 0.0, -0.98567116),
+                scale: (1.2267575, 1.2267575, 1.2267575),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 046 Canopy"),
+            transform: Some((
+                translation: (-19.774803, 1.4070022, 6.345726),
+                rotation: (0.0, 0.16867828, 0.0, -0.98567116),
+                scale: (1.2267575, 1.2267575, 1.2267575),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 047 Trunk"),
+            transform: Some((
+                translation: (-6.2140713, 0.80627394, 24.08881),
+                rotation: (0.0, 0.98394513, 0.0, -0.17847139),
+                scale: (1.2283264, 1.2283264, 1.2283264),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 047 Canopy"),
+            transform: Some((
+                translation: (-6.2140713, 0.80627394, 24.08881),
+                rotation: (0.0, 0.98394513, 0.0, -0.17847139),
+                scale: (1.2283264, 1.2283264, 1.2283264),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 048 Trunk"),
+            transform: Some((
+                translation: (0.9174843, 2.2743893, 1.5049477),
+                rotation: (0.0, 0.032205407, 0.0, -0.99948126),
+                scale: (1.2089498, 1.2089498, 1.2089498),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 048 Canopy"),
+            transform: Some((
+                translation: (0.9174843, 2.2743893, 1.5049477),
+                rotation: (0.0, 0.032205407, 0.0, -0.99948126),
+                scale: (1.2089498, 1.2089498, 1.2089498),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 049 Trunk"),
+            transform: Some((
+                translation: (-14.998528, 0.941501, 20.247013),
+                rotation: (0.0, 0.99297976, 0.0, 0.11828437),
+                scale: (0.8926199, 0.8926199, 0.8926199),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 049 Canopy"),
+            transform: Some((
+                translation: (-14.998528, 0.941501, 20.247013),
+                rotation: (0.0, 0.99297976, 0.0, 0.11828437),
+                scale: (0.8926199, 0.8926199, 0.8926199),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 050 Trunk"),
+            transform: Some((
+                translation: (-22.730612, 0.545104, 12.073986),
+                rotation: (0.0, 0.9499553, 0.0, 0.31238598),
+                scale: (1.0684371, 1.0684371, 1.0684371),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 050 Canopy"),
+            transform: Some((
+                translation: (-22.730612, 0.545104, 12.073986),
+                rotation: (0.0, 0.9499553, 0.0, 0.31238598),
+                scale: (1.0684371, 1.0684371, 1.0684371),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 051 Trunk"),
+            transform: Some((
+                translation: (-22.885618, 0.6376039, -11.87706),
+                rotation: (0.0, 0.8585569, 0.0, -0.51271826),
+                scale: (1.1912665, 1.1912665, 1.1912665),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 051 Canopy"),
+            transform: Some((
+                translation: (-22.885618, 0.6376039, -11.87706),
+                rotation: (0.0, 0.8585569, 0.0, -0.51271826),
+                scale: (1.1912665, 1.1912665, 1.1912665),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 052 Trunk"),
+            transform: Some((
+                translation: (-6.562664, 2.5264027, 0.6959152),
+                rotation: (0.0, 0.81066185, 0.0, -0.58551455),
+                scale: (0.8854897, 0.8854897, 0.8854897),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 052 Canopy"),
+            transform: Some((
+                translation: (-6.562664, 2.5264027, 0.6959152),
+                rotation: (0.0, 0.81066185, 0.0, -0.58551455),
+                scale: (0.8854897, 0.8854897, 0.8854897),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 053 Trunk"),
+            transform: Some((
+                translation: (-1.1210938, 3.1124933, 10.434647),
+                rotation: (0.0, 0.7403181, 0.0, -0.6722567),
+                scale: (1.1643769, 1.1643769, 1.1643769),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 053 Canopy"),
+            transform: Some((
+                translation: (-1.1210938, 3.1124933, 10.434647),
+                rotation: (0.0, 0.7403181, 0.0, -0.6722567),
+                scale: (1.1643769, 1.1643769, 1.1643769),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 054 Trunk"),
+            transform: Some((
+                translation: (16.111794, 1.2764629, -18.481337),
+                rotation: (0.0, 0.75970876, 0.0, -0.6502635),
+                scale: (1.3228469, 1.3228469, 1.3228469),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 054 Canopy"),
+            transform: Some((
+                translation: (16.111794, 1.2764629, -18.481337),
+                rotation: (0.0, 0.75970876, 0.0, -0.6502635),
+                scale: (1.3228469, 1.3228469, 1.3228469),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 055 Trunk"),
+            transform: Some((
+                translation: (-23.40771, 0.7602544, -5.718092),
+                rotation: (0.0, 0.10613798, 0.0, 0.9943514),
+                scale: (1.2309668, 1.2309668, 1.2309668),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 055 Canopy"),
+            transform: Some((
+                translation: (-23.40771, 0.7602544, -5.718092),
+                rotation: (0.0, 0.10613798, 0.0, 0.9943514),
+                scale: (1.2309668, 1.2309668, 1.2309668),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 056 Trunk"),
+            transform: Some((
+                translation: (8.898205, 2.0586395, 19.181164),
+                rotation: (0.0, 0.8054202, 0.0, -0.5927042),
+                scale: (1.1586709, 1.1586709, 1.1586709),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 056 Canopy"),
+            transform: Some((
+                translation: (8.898205, 2.0586395, 19.181164),
+                rotation: (0.0, 0.8054202, 0.0, -0.5927042),
+                scale: (1.1586709, 1.1586709, 1.1586709),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 057 Trunk"),
+            transform: Some((
+                translation: (9.596325, 2.4636893, -17.712822),
+                rotation: (0.0, 0.77793807, 0.0, -0.62834096),
+                scale: (0.7736983, 0.7736983, 0.7736983),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 057 Canopy"),
+            transform: Some((
+                translation: (9.596325, 2.4636893, -17.712822),
+                rotation: (0.0, 0.77793807, 0.0, -0.62834096),
+                scale: (0.7736983, 0.7736983, 0.7736983),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 058 Trunk"),
+            transform: Some((
+                translation: (-2.7721977, 3.113984, 11.123772),
+                rotation: (0.0, 0.9322269, 0.0, 0.36187434),
+                scale: (0.807269, 0.807269, 0.807269),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 058 Canopy"),
+            transform: Some((
+                translation: (-2.7721977, 3.113984, 11.123772),
+                rotation: (0.0, 0.9322269, 0.0, 0.36187434),
+                scale: (0.807269, 0.807269, 0.807269),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 059 Trunk"),
+            transform: Some((
+                translation: (1.2250557, 3.0841959, 11.651142),
+                rotation: (0.0, 0.90522635, 0.0, 0.42492968),
+                scale: (1.2633121, 1.2633121, 1.2633121),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 059 Canopy"),
+            transform: Some((
+                translation: (1.2250557, 3.0841959, 11.651142),
+                rotation: (0.0, 0.90522635, 0.0, 0.42492968),
+                scale: (1.2633121, 1.2633121, 1.2633121),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 060 Trunk"),
+            transform: Some((
+                translation: (-0.7435036, 2.3309455, 18.449718),
+                rotation: (0.0, 0.2767471, 0.0, -0.9609428),
+                scale: (1.2604302, 1.2604302, 1.2604302),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 060 Canopy"),
+            transform: Some((
+                translation: (-0.7435036, 2.3309455, 18.449718),
+                rotation: (0.0, 0.2767471, 0.0, -0.9609428),
+                scale: (1.2604302, 1.2604302, 1.2604302),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 061 Trunk"),
+            transform: Some((
+                translation: (-8.198498, 2.8732228, -3.9266186),
+                rotation: (0.0, 0.5538284, 0.0, -0.8326308),
+                scale: (0.84088635, 0.84088635, 0.84088635),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 061 Canopy"),
+            transform: Some((
+                translation: (-8.198498, 2.8732228, -3.9266186),
+                rotation: (0.0, 0.5538284, 0.0, -0.8326308),
+                scale: (0.84088635, 0.84088635, 0.84088635),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 062 Trunk"),
+            transform: Some((
+                translation: (4.7421875, 3.3594136, -16.04978),
+                rotation: (0.0, 0.99949515, 0.0, 0.03177223),
+                scale: (1.1660042, 1.1660042, 1.1660042),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 062 Canopy"),
+            transform: Some((
+                translation: (4.7421875, 3.3594136, -16.04978),
+                rotation: (0.0, 0.99949515, 0.0, 0.03177223),
+                scale: (1.1660042, 1.1660042, 1.1660042),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 063 Trunk"),
+            transform: Some((
+                translation: (9.274746, 1.5663897, 20.995419),
+                rotation: (0.0, 0.53176165, 0.0, -0.846894),
+                scale: (0.86988235, 0.86988235, 0.86988235),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 063 Canopy"),
+            transform: Some((
+                translation: (9.274746, 1.5663897, 20.995419),
+                rotation: (0.0, 0.53176165, 0.0, -0.846894),
+                scale: (0.86988235, 0.86988235, 0.86988235),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 064 Trunk"),
+            transform: Some((
+                translation: (-10.747465, 2.2186208, 16.522232),
+                rotation: (0.0, 0.53242457, 0.0, 0.84647745),
+                scale: (0.80966157, 0.80966157, 0.80966157),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 064 Canopy"),
+            transform: Some((
+                translation: (-10.747465, 2.2186208, 16.522232),
+                rotation: (0.0, 0.53242457, 0.0, 0.84647745),
+                scale: (0.80966157, 0.80966157, 0.80966157),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 065 Trunk"),
+            transform: Some((
+                translation: (5.9926605, 2.6560292, 16.540993),
+                rotation: (0.0, 0.61230624, 0.0, -0.7906207),
+                scale: (0.76475537, 0.76475537, 0.76475537),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 065 Canopy"),
+            transform: Some((
+                translation: (5.9926605, 2.6560292, 16.540993),
+                rotation: (0.0, 0.61230624, 0.0, -0.7906207),
+                scale: (0.76475537, 0.76475537, 0.76475537),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 066 Trunk"),
+            transform: Some((
+                translation: (-4.1292286, 3.156498, 9.632416),
+                rotation: (0.0, 0.69092995, 0.0, -0.7229217),
+                scale: (0.9964601, 0.9964601, 0.9964601),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 066 Canopy"),
+            transform: Some((
+                translation: (-4.1292286, 3.156498, 9.632416),
+                rotation: (0.0, 0.69092995, 0.0, -0.7229217),
+                scale: (0.9964601, 0.9964601, 0.9964601),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 067 Trunk"),
+            transform: Some((
+                translation: (23.092567, 1.0830127, -3.9940777),
+                rotation: (0.0, 0.6821765, 0.0, 0.7311876),
+                scale: (0.8306047, 0.8306047, 0.8306047),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 067 Canopy"),
+            transform: Some((
+                translation: (23.092567, 1.0830127, -3.9940777),
+                rotation: (0.0, 0.6821765, 0.0, 0.7311876),
+                scale: (0.8306047, 0.8306047, 0.8306047),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 068 Trunk"),
+            transform: Some((
+                translation: (-4.0788536, 1.6790063, -23.316826),
+                rotation: (0.0, 0.9011004, 0.0, 0.4336105),
+                scale: (1.0488446, 1.0488446, 1.0488446),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 068 Canopy"),
+            transform: Some((
+                translation: (-4.0788536, 1.6790063, -23.316826),
+                rotation: (0.0, 0.9011004, 0.0, 0.4336105),
+                scale: (1.0488446, 1.0488446, 1.0488446),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 069 Trunk"),
+            transform: Some((
+                translation: (0.18053055, 2.8653555, 14.444374),
+                rotation: (0.0, 0.82162976, 0.0, 0.5700215),
+                scale: (0.8797059, 0.8797059, 0.8797059),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 069 Canopy"),
+            transform: Some((
+                translation: (0.18053055, 2.8653555, 14.444374),
+                rotation: (0.0, 0.82162976, 0.0, 0.5700215),
+                scale: (0.8797059, 0.8797059, 0.8797059),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 070 Trunk"),
+            transform: Some((
+                translation: (23.247452, 0.8747636, -8.678381),
+                rotation: (0.0, 0.88206637, 0.0, -0.47112516),
+                scale: (1.079975, 1.079975, 1.079975),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 070 Canopy"),
+            transform: Some((
+                translation: (23.247452, 0.8747636, -8.678381),
+                rotation: (0.0, 0.88206637, 0.0, -0.47112516),
+                scale: (1.079975, 1.079975, 1.079975),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 071 Trunk"),
+            transform: Some((
+                translation: (-4.8014545, 3.637021, -10.150068),
+                rotation: (0.0, 0.20721053, 0.0, -0.9782964),
+                scale: (0.9216734, 0.9216734, 0.9216734),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 071 Canopy"),
+            transform: Some((
+                translation: (-4.8014545, 3.637021, -10.150068),
+                rotation: (0.0, 0.20721053, 0.0, -0.9782964),
+                scale: (0.9216734, 0.9216734, 0.9216734),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 072 Trunk"),
+            transform: Some((
+                translation: (11.699902, 2.971584, 7.615471),
+                rotation: (0.0, 0.9525087, 0.0, -0.30451137),
+                scale: (1.1225005, 1.1225005, 1.1225005),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 072 Canopy"),
+            transform: Some((
+                translation: (11.699902, 2.971584, 7.615471),
+                rotation: (0.0, 0.9525087, 0.0, -0.30451137),
+                scale: (1.1225005, 1.1225005, 1.1225005),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 073 Trunk"),
+            transform: Some((
+                translation: (12.340939, 0.5661317, -23.569763),
+                rotation: (0.0, 0.4916588, 0.0, 0.8707879),
+                scale: (1.0430747, 1.0430747, 1.0430747),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 073 Canopy"),
+            transform: Some((
+                translation: (12.340939, 0.5661317, -23.569763),
+                rotation: (0.0, 0.4916588, 0.0, 0.8707879),
+                scale: (1.0430747, 1.0430747, 1.0430747),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 074 Trunk"),
+            transform: Some((
+                translation: (2.3137245, 2.5409508, 17.19349),
+                rotation: (0.0, 0.5539706, 0.0, -0.8325363),
+                scale: (1.2705865, 1.2705865, 1.2705865),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 074 Canopy"),
+            transform: Some((
+                translation: (2.3137245, 2.5409508, 17.19349),
+                rotation: (0.0, 0.5539706, 0.0, -0.8325363),
+                scale: (1.2705865, 1.2705865, 1.2705865),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 075 Trunk"),
+            transform: Some((
+                translation: (13.491745, 2.641205, 9.757153),
+                rotation: (0.0, 0.0052567795, 0.0, -0.9999862),
+                scale: (1.0303147, 1.0303147, 1.0303147),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 075 Canopy"),
+            transform: Some((
+                translation: (13.491745, 2.641205, 9.757153),
+                rotation: (0.0, 0.0052567795, 0.0, -0.9999862),
+                scale: (1.0303147, 1.0303147, 1.0303147),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 076 Trunk"),
+            transform: Some((
+                translation: (2.840496, 2.8115606, 15.22897),
+                rotation: (0.0, 0.44389665, 0.0, 0.896078),
+                scale: (1.1373711, 1.1373711, 1.1373711),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 076 Canopy"),
+            transform: Some((
+                translation: (2.840496, 2.8115606, 15.22897),
+                rotation: (0.0, 0.44389665, 0.0, 0.896078),
+                scale: (1.1373711, 1.1373711, 1.1373711),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 077 Trunk"),
+            transform: Some((
+                translation: (-4.412039, 2.468611, 1.8544388),
+                rotation: (0.0, 0.2519003, 0.0, -0.9677532),
+                scale: (1.2933792, 1.2933792, 1.2933792),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 077 Canopy"),
+            transform: Some((
+                translation: (-4.412039, 2.468611, 1.8544388),
+                rotation: (0.0, 0.2519003, 0.0, -0.9677532),
+                scale: (1.2933792, 1.2933792, 1.2933792),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 078 Trunk"),
+            transform: Some((
+                translation: (4.2122383, 0.7624587, 24.543655),
+                rotation: (0.0, 0.5396449, 0.0, 0.8418927),
+                scale: (1.0562129, 1.0562129, 1.0562129),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 078 Canopy"),
+            transform: Some((
+                translation: (4.2122383, 0.7624587, 24.543655),
+                rotation: (0.0, 0.5396449, 0.0, 0.8418927),
+                scale: (1.0562129, 1.0562129, 1.0562129),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 079 Trunk"),
+            transform: Some((
+                translation: (-3.5936584, 2.244772, 18.769505),
+                rotation: (0.0, 0.867921, 0.0, -0.4967023),
+                scale: (0.9685343, 0.9685343, 0.9685343),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 079 Canopy"),
+            transform: Some((
+                translation: (-3.5936584, 2.244772, 18.769505),
+                rotation: (0.0, 0.867921, 0.0, -0.4967023),
+                scale: (0.9685343, 0.9685343, 0.9685343),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 080 Trunk"),
+            transform: Some((
+                translation: (-11.09532, 0.55102825, -24.199497),
+                rotation: (0.0, 0.7959474, 0.0, 0.6053658),
+                scale: (1.3489792, 1.3489792, 1.3489792),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 080 Canopy"),
+            transform: Some((
+                translation: (-11.09532, 0.55102825, -24.199497),
+                rotation: (0.0, 0.7959474, 0.0, 0.6053658),
+                scale: (1.3489792, 1.3489792, 1.3489792),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 081 Trunk"),
+            transform: Some((
+                translation: (-10.254524, 3.2639947, -10.431694),
+                rotation: (0.0, 0.77648497, 0.0, -0.6301358),
+                scale: (1.1610261, 1.1610261, 1.1610261),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 081 Canopy"),
+            transform: Some((
+                translation: (-10.254524, 3.2639947, -10.431694),
+                rotation: (0.0, 0.77648497, 0.0, -0.6301358),
+                scale: (1.1610261, 1.1610261, 1.1610261),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 082 Trunk"),
+            transform: Some((
+                translation: (-12.181692, 2.6236587, 11.838524),
+                rotation: (0.0, 0.2741595, 0.0, -0.9616842),
+                scale: (1.2783263, 1.2783263, 1.2783263),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 082 Canopy"),
+            transform: Some((
+                translation: (-12.181692, 2.6236587, 11.838524),
+                rotation: (0.0, 0.2741595, 0.0, -0.9616842),
+                scale: (1.2783263, 1.2783263, 1.2783263),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 083 Trunk"),
+            transform: Some((
+                translation: (16.24612, 1.8622298, 15.082115),
+                rotation: (0.0, 0.58786494, 0.0, 0.8089591),
+                scale: (1.308789, 1.308789, 1.308789),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 083 Canopy"),
+            transform: Some((
+                translation: (16.24612, 1.8622298, 15.082115),
+                rotation: (0.0, 0.58786494, 0.0, 0.8089591),
+                scale: (1.308789, 1.308789, 1.308789),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 084 Trunk"),
+            transform: Some((
+                translation: (18.385983, 0.8216574, 18.558498),
+                rotation: (0.0, 0.4550214, 0.0, 0.8904805),
+                scale: (1.0894711, 1.0894711, 1.0894711),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 084 Canopy"),
+            transform: Some((
+                translation: (18.385983, 0.8216574, 18.558498),
+                rotation: (0.0, 0.4550214, 0.0, 0.8904805),
+                scale: (1.0894711, 1.0894711, 1.0894711),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 085 Trunk"),
+            transform: Some((
+                translation: (-16.040882, 1.119141, 18.84256),
+                rotation: (0.0, 0.8520081, 0.0, 0.5235286),
+                scale: (0.98220205, 0.98220205, 0.98220205),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 085 Canopy"),
+            transform: Some((
+                translation: (-16.040882, 1.119141, 18.84256),
+                rotation: (0.0, 0.8520081, 0.0, 0.5235286),
+                scale: (0.98220205, 0.98220205, 0.98220205),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 086 Trunk"),
+            transform: Some((
+                translation: (-13.538586, 1.9552099, 16.362366),
+                rotation: (0.0, 0.74150497, 0.0, 0.6709474),
+                scale: (0.7590668, 0.7590668, 0.7590668),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 086 Canopy"),
+            transform: Some((
+                translation: (-13.538586, 1.9552099, 16.362366),
+                rotation: (0.0, 0.74150497, 0.0, 0.6709474),
+                scale: (0.7590668, 0.7590668, 0.7590668),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 087 Trunk"),
+            transform: Some((
+                translation: (-14.889336, 1.9705781, 14.681328),
+                rotation: (0.0, 0.7801427, 0.0, 0.62560153),
+                scale: (1.2562275, 1.2562275, 1.2562275),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 087 Canopy"),
+            transform: Some((
+                translation: (-14.889336, 1.9705781, 14.681328),
+                rotation: (0.0, 0.7801427, 0.0, 0.62560153),
+                scale: (1.2562275, 1.2562275, 1.2562275),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 088 Trunk"),
+            transform: Some((
+                translation: (-13.028599, 2.3768008, 1.9472275),
+                rotation: (0.0, 0.3278212, 0.0, 0.94473976),
+                scale: (0.99498814, 0.99498814, 0.99498814),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 088 Canopy"),
+            transform: Some((
+                translation: (-13.028599, 2.3768008, 1.9472275),
+                rotation: (0.0, 0.3278212, 0.0, 0.94473976),
+                scale: (0.99498814, 0.99498814, 0.99498814),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 089 Trunk"),
+            transform: Some((
+                translation: (-14.509041, 2.3136635, -14.491722),
+                rotation: (0.0, 0.87143266, 0.0, 0.49051517),
+                scale: (0.8115659, 0.8115659, 0.8115659),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 089 Canopy"),
+            transform: Some((
+                translation: (-14.509041, 2.3136635, -14.491722),
+                rotation: (0.0, 0.87143266, 0.0, 0.49051517),
+                scale: (0.8115659, 0.8115659, 0.8115659),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 090 Trunk"),
+            transform: Some((
+                translation: (12.788849, 2.7649643, 2.3439255),
+                rotation: (0.0, 0.09918978, 0.0, 0.99506855),
+                scale: (1.3244009, 1.3244009, 1.3244009),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 090 Canopy"),
+            transform: Some((
+                translation: (12.788849, 2.7649643, 2.3439255),
+                rotation: (0.0, 0.09918978, 0.0, 0.99506855),
+                scale: (1.3244009, 1.3244009, 1.3244009),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 091 Trunk"),
+            transform: Some((
+                translation: (-15.96999, 2.0421226, 5.2213287),
+                rotation: (0.0, 0.911791, 0.0, -0.41065454),
+                scale: (0.8064254, 0.8064254, 0.8064254),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 091 Canopy"),
+            transform: Some((
+                translation: (-15.96999, 2.0421226, 5.2213287),
+                rotation: (0.0, 0.911791, 0.0, -0.41065454),
+                scale: (0.8064254, 0.8064254, 0.8064254),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 092 Trunk"),
+            transform: Some((
+                translation: (6.802269, 2.234279, -20.568123),
+                rotation: (0.0, 0.96447414, 0.0, 0.26417723),
+                scale: (1.2384009, 1.2384009, 1.2384009),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 092 Canopy"),
+            transform: Some((
+                translation: (6.802269, 2.234279, -20.568123),
+                rotation: (0.0, 0.96447414, 0.0, 0.26417723),
+                scale: (1.2384009, 1.2384009, 1.2384009),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 093 Trunk"),
+            transform: Some((
+                translation: (8.298031, 0.63969636, 24.21828),
+                rotation: (0.0, 0.695954, 0.0, -0.7180863),
+                scale: (0.85534614, 0.85534614, 0.85534614),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 093 Canopy"),
+            transform: Some((
+                translation: (8.298031, 0.63969636, 24.21828),
+                rotation: (0.0, 0.695954, 0.0, -0.7180863),
+                scale: (0.85534614, 0.85534614, 0.85534614),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 094 Trunk"),
+            transform: Some((
+                translation: (-11.145233, 1.8351829, -19.937687),
+                rotation: (0.0, 0.7330291, 0.0, 0.68019724),
+                scale: (1.3000171, 1.3000171, 1.3000171),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 094 Canopy"),
+            transform: Some((
+                translation: (-11.145233, 1.8351829, -19.937687),
+                rotation: (0.0, 0.7330291, 0.0, 0.68019724),
+                scale: (1.3000171, 1.3000171, 1.3000171),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 095 Trunk"),
+            transform: Some((
+                translation: (-5.5339546, 0.71097016, -25.639492),
+                rotation: (0.0, 0.028471045, 0.0, 0.9995946),
+                scale: (1.3031316, 1.3031316, 1.3031316),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 095 Canopy"),
+            transform: Some((
+                translation: (-5.5339546, 0.71097016, -25.639492),
+                rotation: (0.0, 0.028471045, 0.0, 0.9995946),
+                scale: (1.3031316, 1.3031316, 1.3031316),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 096 Trunk"),
+            transform: Some((
+                translation: (-16.588236, 2.103683, -11.103636),
+                rotation: (0.0, 0.9889745, 0.0, -0.14808592),
+                scale: (1.1571691, 1.1571691, 1.1571691),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 096 Canopy"),
+            transform: Some((
+                translation: (-16.588236, 2.103683, -11.103636),
+                rotation: (0.0, 0.9889745, 0.0, -0.14808592),
+                scale: (1.1571691, 1.1571691, 1.1571691),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 097 Trunk"),
+            transform: Some((
+                translation: (-8.461483, 3.3992095, -8.73609),
+                rotation: (0.0, 0.033309422, 0.0, 0.9994451),
+                scale: (0.7982364, 0.7982364, 0.7982364),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 097 Canopy"),
+            transform: Some((
+                translation: (-8.461483, 3.3992095, -8.73609),
+                rotation: (0.0, 0.033309422, 0.0, 0.9994451),
+                scale: (0.7982364, 0.7982364, 0.7982364),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 098 Trunk"),
+            transform: Some((
+                translation: (12.1236, 2.671284, -14.240051),
+                rotation: (0.0, 0.7579829, 0.0, 0.6522744),
+                scale: (0.76573014, 0.76573014, 0.76573014),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 098 Canopy"),
+            transform: Some((
+                translation: (12.1236, 2.671284, -14.240051),
+                rotation: (0.0, 0.7579829, 0.0, 0.6522744),
+                scale: (0.76573014, 0.76573014, 0.76573014),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 099 Trunk"),
+            transform: Some((
+                translation: (-21.688137, 1.0842478, 6.599098),
+                rotation: (0.0, 0.9801008, 0.0, -0.19850025),
+                scale: (0.7535274, 0.7535274, 0.7535274),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 099 Canopy"),
+            transform: Some((
+                translation: (-21.688137, 1.0842478, 6.599098),
+                rotation: (0.0, 0.9801008, 0.0, -0.19850025),
+                scale: (0.7535274, 0.7535274, 0.7535274),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 100 Trunk"),
+            transform: Some((
+                translation: (-11.645063, 2.5958405, 3.644081),
+                rotation: (0.0, 0.9865483, 0.0, -0.16346984),
+                scale: (0.78932035, 0.78932035, 0.78932035),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 100 Canopy"),
+            transform: Some((
+                translation: (-11.645063, 2.5958405, 3.644081),
+                rotation: (0.0, 0.9865483, 0.0, -0.16346984),
+                scale: (0.78932035, 0.78932035, 0.78932035),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 101 Trunk"),
+            transform: Some((
+                translation: (21.689598, 1.0562556, -11.104002),
+                rotation: (0.0, 0.94381124, 0.0, 0.33048493),
+                scale: (1.3227158, 1.3227158, 1.3227158),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 101 Canopy"),
+            transform: Some((
+                translation: (21.689598, 1.0562556, -11.104002),
+                rotation: (0.0, 0.94381124, 0.0, 0.33048493),
+                scale: (1.3227158, 1.3227158, 1.3227158),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 102 Trunk"),
+            transform: Some((
+                translation: (-22.694088, 0.8905344, -4.0510254),
+                rotation: (0.0, 0.37980515, 0.0, -0.92506653),
+                scale: (0.872687, 0.872687, 0.872687),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 102 Canopy"),
+            transform: Some((
+                translation: (-22.694088, 0.8905344, -4.0510254),
+                rotation: (0.0, 0.37980515, 0.0, -0.92506653),
+                scale: (0.872687, 0.872687, 0.872687),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 103 Trunk"),
+            transform: Some((
+                translation: (-23.292194, 0.65090847, 0.7115059),
+                rotation: (0.0, 0.7920675, 0.0, -0.6104335),
+                scale: (1.09754, 1.09754, 1.09754),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 103 Canopy"),
+            transform: Some((
+                translation: (-23.292194, 0.65090847, 0.7115059),
+                rotation: (0.0, 0.7920675, 0.0, -0.6104335),
+                scale: (1.09754, 1.09754, 1.09754),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 104 Trunk"),
+            transform: Some((
+                translation: (-19.367157, 0.98464954, -16.626963),
+                rotation: (0.0, 0.84055513, 0.0, -0.54172605),
+                scale: (0.8994213, 0.8994213, 0.8994213),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 104 Canopy"),
+            transform: Some((
+                translation: (-19.367157, 0.98464954, -16.626963),
+                rotation: (0.0, 0.84055513, 0.0, -0.54172605),
+                scale: (0.8994213, 0.8994213, 0.8994213),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 105 Trunk"),
+            transform: Some((
+                translation: (-2.2782803, 2.519104, -21.308609),
+                rotation: (0.0, 0.9549264, 0.0, -0.2968428),
+                scale: (1.1759562, 1.1759562, 1.1759562),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 105 Canopy"),
+            transform: Some((
+                translation: (-2.2782803, 2.519104, -21.308609),
+                rotation: (0.0, 0.9549264, 0.0, -0.2968428),
+                scale: (1.1759562, 1.1759562, 1.1759562),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 106 Trunk"),
+            transform: Some((
+                translation: (11.244366, 0.9913962, -22.741467),
+                rotation: (0.0, 0.9913769, 0.0, -0.13104162),
+                scale: (1.1119344, 1.1119344, 1.1119344),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 106 Canopy"),
+            transform: Some((
+                translation: (11.244366, 0.9913962, -22.741467),
+                rotation: (0.0, 0.9913769, 0.0, -0.13104162),
+                scale: (1.1119344, 1.1119344, 1.1119344),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 107 Trunk"),
+            transform: Some((
+                translation: (16.406681, 1.572349, 17.0228),
+                rotation: (0.0, 0.8288327, 0.0, -0.5594966),
+                scale: (0.825281, 0.825281, 0.825281),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 107 Canopy"),
+            transform: Some((
+                translation: (16.406681, 1.572349, 17.0228),
+                rotation: (0.0, 0.8288327, 0.0, -0.5594966),
+                scale: (0.825281, 0.825281, 0.825281),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 108 Trunk"),
+            transform: Some((
+                translation: (1.936676, 2.9066339, 6.378174),
+                rotation: (0.0, 0.73949397, 0.0, 0.6731632),
+                scale: (0.75731146, 0.75731146, 0.75731146),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+                material: (
+                    id: "383bc888-af2e-49c2-9224-d88d0db9b2d5",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 108 Canopy"),
+            transform: Some((
+                translation: (1.936676, 2.9066339, 6.378174),
+                rotation: (0.0, 0.73949397, 0.0, 0.6731632),
+                scale: (0.75731146, 0.75731146, 0.75731146),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+                material: (
+                    id: "2d430a2e-c0c3-4505-bfe9-ff810a28b2f1",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 109 Trunk"),
+            transform: Some((
+                translation: (6.681877, 3.000846, 5.14106),
+                rotation: (0.0, 0.92760795, 0.0, 0.37355515),
+                scale: (0.97803664, 0.97803664, 0.97803664),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+                material: (
+                    id: "f398695e-da4f-4163-bd27-0b26e069b507",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 109 Canopy"),
+            transform: Some((
+                translation: (6.681877, 3.000846, 5.14106),
+                rotation: (0.0, 0.92760795, 0.0, 0.37355515),
+                scale: (0.97803664, 0.97803664, 0.97803664),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+                material: (
+                    id: "53e05597-1d6e-4ea6-a27d-540da3272278",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Tree 110 Trunk"),
+            transform: Some((
+                translation: (8.967022, 3.3448827, -8.970802),
+                rotation: (0.0, 0.28778204, 0.0, -0.95769596),
+                scale: (1.229378, 1.229378, 1.229378),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+                material: (
+                    id: "2038831e-ebfd-447c-b69e-555f3d4612b0",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Cylinder(
+                    half_height: 1.6,
+                    radius: 0.35,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Tree 110 Canopy"),
+            transform: Some((
+                translation: (8.967022, 3.3448827, -8.970802),
+                rotation: (0.0, 0.28778204, 0.0, -0.95769596),
+                scale: (1.229378, 1.229378, 1.229378),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+                material: (
+                    id: "0e6ca279-8801-4a4a-b053-7bb533524ca2",
+                ),
+            )),
+            is_static: true,
+        ),
+        (
+            name: Some("Rock 001"),
+            transform: Some((
+                translation: (0.6744385, 2.3340065, 2.2511368),
+                rotation: (0.0, 0.14919814, 0.0, -0.9888073),
+                scale: (1.3017337, 1.3017337, 1.3017337),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 002"),
+            transform: Some((
+                translation: (22.543877, 0.94935906, 8.832085),
+                rotation: (0.0, 0.9886532, 0.0, -0.15021618),
+                scale: (1.2523324, 1.2523324, 1.2523324),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 003"),
+            transform: Some((
+                translation: (16.821884, 0.8131192, -19.792683),
+                rotation: (0.0, 0.95338136, 0.0, -0.30176803),
+                scale: (1.1315284, 1.1315284, 1.1315284),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 004"),
+            transform: Some((
+                translation: (-21.924921, 0.37555456, 15.009602),
+                rotation: (0.0, 0.71492046, 0.0, -0.69920576),
+                scale: (1.1438471, 1.1438471, 1.1438471),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 005"),
+            transform: Some((
+                translation: (-3.8702354, 1.9757212, 20.103043),
+                rotation: (0.0, 0.6525831, 0.0, 0.75771713),
+                scale: (1.0824381, 1.0824381, 1.0824381),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 006"),
+            transform: Some((
+                translation: (-18.427464, 1.2425519, -16.53125),
+                rotation: (0.0, 0.51519823, 0.0, 0.85707104),
+                scale: (1.1974788, 1.1974788, 1.1974788),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 007"),
+            transform: Some((
+                translation: (1.0824127, 2.577885, -21.323872),
+                rotation: (0.0, 0.04214278, 0.0, 0.9991116),
+                scale: (0.7756596, 0.7756596, 0.7756596),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 008"),
+            transform: Some((
+                translation: (25.277695, 0.46844935, -3.2287693),
+                rotation: (0.0, 0.992409, 0.0, -0.12298107),
+                scale: (1.0853541, 1.0853541, 1.0853541),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 009"),
+            transform: Some((
+                translation: (16.009602, 2.5625584, 2.370861),
+                rotation: (0.0, 0.9628814, 0.0, 0.26992488),
+                scale: (1.306056, 1.306056, 1.306056),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 010"),
+            transform: Some((
+                translation: (-0.59251404, 2.867549, 14.423576),
+                rotation: (0.0, 0.9986849, 0.0, 0.051269054),
+                scale: (1.0557876, 1.0557876, 1.0557876),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 011"),
+            transform: Some((
+                translation: (-0.369236, 3.4648213, -17.867962),
+                rotation: (0.0, 0.82330847, 0.0, 0.5675942),
+                scale: (0.8972072, 0.8972072, 0.8972072),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 012"),
+            transform: Some((
+                translation: (1.0275726, 2.9479911, 6.961384),
+                rotation: (0.0, 0.99999595, 0.0, -0.002856056),
+                scale: (1.2767756, 1.2767756, 1.2767756),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 013"),
+            transform: Some((
+                translation: (14.032787, 2.7363887, 0.31762695),
+                rotation: (0.0, 0.8094154, 0.0, -0.5872365),
+                scale: (1.2339149, 1.2339149, 1.2339149),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 014"),
+            transform: Some((
+                translation: (-2.3489952, 2.933505, 6.6307297),
+                rotation: (0.0, 0.9262254, 0.0, -0.37697005),
+                scale: (1.2724831, 1.2724831, 1.2724831),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 015"),
+            transform: Some((
+                translation: (23.142952, 1.0730461, 1.1532173),
+                rotation: (0.0, 0.5052119, 0.0, 0.8629953),
+                scale: (0.88454854, 0.88454854, 0.88454854),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 016"),
+            transform: Some((
+                translation: (19.252445, 1.6086241, -10.979866),
+                rotation: (0.0, 0.8131225, 0.0, 0.5820926),
+                scale: (1.3241841, 1.3241841, 1.3241841),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 017"),
+            transform: Some((
+                translation: (16.673996, 2.5535762, 0.93662643),
+                rotation: (0.0, 0.9995665, 0.0, -0.02944084),
+                scale: (1.0649263, 1.0649263, 1.0649263),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 018"),
+            transform: Some((
+                translation: (2.2255287, 3.1410892, 10.441418),
+                rotation: (0.0, 0.1908367, 0.0, 0.9816218),
+                scale: (0.889299, 0.889299, 0.889299),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 019"),
+            transform: Some((
+                translation: (-11.913162, 2.221704, -17.64798),
+                rotation: (0.0, 0.10193964, 0.0, 0.9947906),
+                scale: (1.0138073, 1.0138073, 1.0138073),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 020"),
+            transform: Some((
+                translation: (-1.3653374, 1.306461, 22.924938),
+                rotation: (0.0, 0.06362302, 0.0, -0.997974),
+                scale: (1.0073943, 1.0073943, 1.0073943),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 021"),
+            transform: Some((
+                translation: (6.0073814, 0.2426486, -26.819317),
+                rotation: (0.0, 0.45129552, 0.0, -0.8923746),
+                scale: (1.0523154, 1.0523154, 1.0523154),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 022"),
+            transform: Some((
+                translation: (-6.9362106, 2.5325615, 0.16560364),
+                rotation: (0.0, 0.9606161, 0.0, -0.27787894),
+                scale: (1.0231352, 1.0231352, 1.0231352),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 023"),
+            transform: Some((
+                translation: (6.407406, 3.3958592, -13.753418),
+                rotation: (0.0, 0.8163861, 0.0, -0.57750654),
+                scale: (1.1507003, 1.1507003, 1.1507003),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 024"),
+            transform: Some((
+                translation: (-2.4060307, 2.1707592, 19.283375),
+                rotation: (0.0, 0.9593498, 0.0, 0.28221965),
+                scale: (1.040121, 1.040121, 1.040121),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 025"),
+            transform: Some((
+                translation: (21.934586, 1.4164507, 1.8637848),
+                rotation: (0.0, 0.99993485, 0.0, -0.011414562),
+                scale: (1.0974159, 1.0974159, 1.0974159),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 026"),
+            transform: Some((
+                translation: (9.529388, 3.1189594, -5.9184685),
+                rotation: (0.0, 0.31855774, 0.0, 0.94790345),
+                scale: (0.97140425, 0.97140425, 0.97140425),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 027"),
+            transform: Some((
+                translation: (-8.060059, 2.5662894, 0.42292023),
+                rotation: (0.0, 0.37178972, 0.0, 0.92831695),
+                scale: (1.1523076, 1.1523076, 1.1523076),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 028"),
+            transform: Some((
+                translation: (-20.724947, 1.2415745, -0.058185577),
+                rotation: (0.0, 0.5737164, 0.0, 0.819054),
+                scale: (1.2108519, 1.2108519, 1.2108519),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 029"),
+            transform: Some((
+                translation: (-1.0282326, 2.9622414, 7.1289215),
+                rotation: (0.0, 0.4381536, 0.0, -0.8989001),
+                scale: (1.3084779, 1.3084779, 1.3084779),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 030"),
+            transform: Some((
+                translation: (-0.80052185, 1.1545402, -25.221924),
+                rotation: (0.0, 0.9835205, 0.0, -0.18079673),
+                scale: (1.0498288, 1.0498288, 1.0498288),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 031"),
+            transform: Some((
+                translation: (-18.214289, 1.593002, 8.777138),
+                rotation: (0.0, 0.90819955, 0.0, -0.4185375),
+                scale: (0.950956, 0.950956, 0.950956),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 032"),
+            transform: Some((
+                translation: (-12.491779, 2.9157653, -8.089979),
+                rotation: (0.0, 0.90372145, 0.0, -0.42812097),
+                scale: (0.8223046, 0.8223046, 0.8223046),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 033"),
+            transform: Some((
+                translation: (4.224369, 1.8614172, 20.78077),
+                rotation: (0.0, 0.03068624, 0.0, -0.99952906),
+                scale: (1.0476958, 1.0476958, 1.0476958),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 034"),
+            transform: Some((
+                translation: (-5.732929, 2.8072844, -18.757168),
+                rotation: (0.0, 0.7809424, 0.0, -0.6246031),
+                scale: (1.1184299, 1.1184299, 1.1184299),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 035"),
+            transform: Some((
+                translation: (-10.754433, 3.1606145, -11.360218),
+                rotation: (0.0, 0.36935616, 0.0, -0.9292879),
+                scale: (1.1164514, 1.1164514, 1.1164514),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 036"),
+            transform: Some((
+                translation: (2.166069, 1.9263791, 20.550316),
+                rotation: (0.0, 0.9311957, 0.0, -0.36451963),
+                scale: (1.3428864, 1.3428864, 1.3428864),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 037"),
+            transform: Some((
+                translation: (12.036476, 2.8927164, -4.5244083),
+                rotation: (0.0, 0.95635295, 0.0, 0.2922141),
+                scale: (1.2564057, 1.2564057, 1.2564057),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 038"),
+            transform: Some((
+                translation: (-2.0736885, 2.7140672, -3.788868),
+                rotation: (0.0, 0.41759816, 0.0, -0.9086318),
+                scale: (0.8564849, 0.8564849, 0.8564849),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 039"),
+            transform: Some((
+                translation: (-15.522299, 1.4720162, 17.587303),
+                rotation: (0.0, 0.21009672, 0.0, -0.9776806),
+                scale: (1.2803857, 1.2803857, 1.2803857),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 040"),
+            transform: Some((
+                translation: (11.723953, 3.0661542, -8.219524),
+                rotation: (0.0, 0.36939624, 0.0, -0.929272),
+                scale: (1.0031099, 1.0031099, 1.0031099),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 041"),
+            transform: Some((
+                translation: (13.292545, 2.730343, 6.707199),
+                rotation: (0.0, 0.41446826, 0.0, 0.9100638),
+                scale: (0.7528781, 0.7528781, 0.7528781),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 042"),
+            transform: Some((
+                translation: (22.260628, 1.3405063, 0.59684753),
+                rotation: (0.0, 0.53351223, 0.0, 0.84579235),
+                scale: (1.1238658, 1.1238658, 1.1238658),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 043"),
+            transform: Some((
+                translation: (-11.965727, 2.756353, 9.912964),
+                rotation: (0.0, 0.9994344, 0.0, 0.033628635),
+                scale: (1.291609, 1.291609, 1.291609),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 044"),
+            transform: Some((
+                translation: (15.148609, 1.1864938, 19.735435),
+                rotation: (0.0, 0.7321862, 0.0, -0.68110454),
+                scale: (1.0483673, 1.0483673, 1.0483673),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 045"),
+            transform: Some((
+                translation: (8.898819, 2.2979174, -19.059261),
+                rotation: (0.0, 0.24012682, 0.0, 0.9707415),
+                scale: (0.7726347, 0.7726347, 0.7726347),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 046"),
+            transform: Some((
+                translation: (4.377674, 3.1625109, -5.8080177),
+                rotation: (0.0, 0.16802329, 0.0, -0.98578304),
+                scale: (0.7898327, 0.7898327, 0.7898327),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 047"),
+            transform: Some((
+                translation: (-2.1551666, 2.7349443, 5.1036873),
+                rotation: (0.0, 0.7881228, 0.0, 0.6155181),
+                scale: (0.9402969, 0.9402969, 0.9402969),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 048"),
+            transform: Some((
+                translation: (-8.071732, 1.5766879, 20.912045),
+                rotation: (0.0, 0.82893544, 0.0, 0.5593443),
+                scale: (1.2226012, 1.2226012, 1.2226012),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 049"),
+            transform: Some((
+                translation: (-17.810709, 1.0479598, -18.30938),
+                rotation: (0.0, 0.25634632, 0.0, -0.966585),
+                scale: (1.0891951, 1.0891951, 1.0891951),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 050"),
+            transform: Some((
+                translation: (6.601059, 2.6298196, 16.64967),
+                rotation: (0.0, 0.6721691, 0.0, 0.7403977),
+                scale: (1.1165044, 1.1165044, 1.1165044),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 051"),
+            transform: Some((
+                translation: (-11.796757, 2.4593546, -0.91862106),
+                rotation: (0.0, 0.92862004, 0.0, -0.3710321),
+                scale: (1.135279, 1.135279, 1.135279),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 052"),
+            transform: Some((
+                translation: (-4.7636185, 3.3129609, -16.405594),
+                rotation: (0.0, 0.8420525, 0.0, 0.5393956),
+                scale: (1.0663133, 1.0663133, 1.0663133),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+                material: (
+                    id: "9e8a2c38-b55e-493d-9b15-90caef3bd7ef",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 053"),
+            transform: Some((
+                translation: (0.8946037, 1.741405, 21.321232),
+                rotation: (0.0, 0.9227329, 0.0, 0.38544005),
+                scale: (0.84412855, 0.84412855, 0.84412855),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+                material: (
+                    id: "aad4a625-6a48-415a-bd53-1fcf0f9a8017",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 054"),
+            transform: Some((
+                translation: (-0.9209976, 3.7851558, -11.172228),
+                rotation: (0.0, 0.91349953, 0.0, -0.40683982),
+                scale: (1.1537256, 1.1537256, 1.1537256),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+                material: (
+                    id: "3966f5b0-2f3f-4d76-ae59-f6f90e5bd57b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+        (
+            name: Some("Rock 055"),
+            transform: Some((
+                translation: (-18.595242, 1.6579497, -1.8502159),
+                rotation: (0.0, 0.7972017, 0.0, -0.6037131),
+                scale: (1.1764112, 1.1764112, 1.1764112),
+            )),
+            mesh_renderer: Some((
+                mesh: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+                material: (
+                    id: "6a39065d-c256-492a-8c9f-2ba5e11d897b",
+                ),
+            )),
+            is_static: true,
+            collider: Some((
+                shape: Ball(
+                    radius: 0.55,
+                ),
+                body: Fixed,
+            )),
+        ),
+    ],
+)

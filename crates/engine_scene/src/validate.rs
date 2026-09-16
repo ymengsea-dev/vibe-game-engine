@@ -9,7 +9,8 @@
 use glam::{Quat, Vec3};
 
 use crate::format::{
-    AssetRef, CameraData, MeshRendererData, ProjectionData, SceneEntity, SpriteData, TransformData,
+    AssetRef, CameraData, ColliderData, ColliderShape, MeshRendererData, ProjectionData,
+    SceneEntity, SpriteData, TransformData,
 };
 
 impl TransformData {
@@ -138,6 +139,48 @@ impl SpriteData {
     }
 }
 
+impl ColliderData {
+    /// Checks that the shape's dimensions are finite and positive, and
+    /// that a trimesh names a parseable asset.
+    ///
+    /// A zero or negative radius is not a harmless oddity: rapier will
+    /// reject or misbehave on it, and the failure surfaces far from the
+    /// file that caused it.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let positive = |name: &str, value: f32| -> Result<(), String> {
+            if value.is_finite() && value > 0.0 {
+                Ok(())
+            } else {
+                Err(format!("{name} must be finite and > 0, got {value}"))
+            }
+        };
+        match &self.shape {
+            ColliderShape::Ball { radius } => positive("radius", *radius),
+            ColliderShape::Cuboid { half_extents } => {
+                for (axis, value) in ["x", "y", "z"].iter().zip(half_extents) {
+                    positive(&format!("half_extents.{axis}"), *value)?;
+                }
+                Ok(())
+            }
+            ColliderShape::Cylinder {
+                half_height,
+                radius,
+            }
+            | ColliderShape::Capsule {
+                half_height,
+                radius,
+            } => {
+                positive("half_height", *half_height)?;
+                positive("radius", *radius)
+            }
+            ColliderShape::TriMesh { mesh } => mesh
+                .parse_id()
+                .map(|_| ())
+                .map_err(|reason| format!("mesh: {reason}")),
+        }
+    }
+}
+
 impl SceneEntity {
     /// Checks this entity's own components. Doesn't check `parent` — that
     /// needs the owning [`crate::Scene`]'s full entity list to validate
@@ -162,6 +205,59 @@ impl SceneEntity {
             sprite
                 .validate()
                 .map_err(|reason| format!("sprite: {reason}"))?;
+        }
+        if let Some(collider) = &self.collider {
+            collider
+                .validate()
+                .map_err(|reason| format!("collider: {reason}"))?;
+        }
+        if let Some(emitter) = &self.audio_emitter {
+            emitter
+                .validate()
+                .map_err(|reason| format!("audio_emitter: {reason}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl crate::format::AudioEmitterData {
+    /// Checks the emitter's numbers are usable: a non-finite gain would
+    /// reach the mixer, and a negative radius draws an overlay inside
+    /// out.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if !self.gain.is_finite() || self.gain < 0.0 {
+            return Err(format!("gain is not a usable level: {}", self.gain));
+        }
+        if !self.radius.is_finite() || self.radius < 0.0 {
+            return Err(format!("radius is not a usable distance: {}", self.radius));
+        }
+        Ok(())
+    }
+}
+
+impl crate::format::NavGridData {
+    /// Checks the grid is a grid: non-empty, positive cells, a finite
+    /// origin, and exactly one blocked flag per cell.
+    ///
+    /// A scene file is untrusted input, and a short `blocked` list would
+    /// otherwise become an out-of-bounds read the first time something
+    /// pathfinds.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.width == 0 || self.height == 0 {
+            return Err(format!("empty grid: {}x{}", self.width, self.height));
+        }
+        if !self.cell_size.is_finite() || self.cell_size <= 0.0 {
+            return Err(format!("cell size is not positive: {}", self.cell_size));
+        }
+        if !self.origin.iter().all(|value| value.is_finite()) {
+            return Err(format!("origin is not finite: {:?}", self.origin));
+        }
+        if !self.is_well_formed() {
+            return Err(format!(
+                "{} blocked flags for {} cells",
+                self.blocked.len(),
+                self.cell_count()
+            ));
         }
         Ok(())
     }

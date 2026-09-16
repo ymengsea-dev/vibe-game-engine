@@ -128,6 +128,33 @@ impl NavGrid {
         })
     }
 
+    /// Builds a grid straight from row-major blocked flags — what a
+    /// scene file carries.
+    ///
+    /// The caller owns the meaning of the flags; this only checks there
+    /// is exactly one per cell, so a truncated file is an error rather
+    /// than an out-of-bounds read the first time something pathfinds.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`NavGrid::new`] rejects, plus
+    /// [`NavError::InvalidDimensions`] if `blocked.len()` is not
+    /// `width * height`.
+    pub fn from_cells(
+        width: u32,
+        height: u32,
+        cell_size: f32,
+        origin: Vec2,
+        blocked: &[bool],
+    ) -> Result<Self, NavError> {
+        let mut grid = Self::new(width, height, cell_size, origin)?;
+        if blocked.len() != grid.blocked.len() {
+            return Err(NavError::InvalidDimensions { width, height });
+        }
+        grid.blocked.copy_from_slice(blocked);
+        Ok(grid)
+    }
+
     /// Width, in cells.
     pub fn width(&self) -> u32 {
         self.width

@@ -7,18 +7,33 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 publish = false
+# `cargo run -p island` should play the game; the baker is opt-in.
+default-run = "island"
+
+[lib]
+name = "island"
+path = "src/lib.rs"
 
 [[bin]]
 name = "island"
 path = "src/main.rs"
 
+# The asset baker: runs the procedural generators and writes their output
+# into `assets/` and `scenes/` as real files. A tool, not part of the
+# shipped game.
+[[bin]]
+name = "bake"
+path = "src/bin/bake.rs"
+
 [dependencies]
 # The runtime facade only — no editor, no AI (NFR-004). This slice must
 # link exactly what a shipped game links.
 engine = { path = "../../crates/engine", default-features = false }
+engine_project.workspace = true
 glam.workspace = true
 serde = { workspace = true, features = ["derive"] }
 ron.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 
 [lints]

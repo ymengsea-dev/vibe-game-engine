@@ -279,6 +279,7 @@ mod tests {
             name: Some("test".into()),
             duration,
             channels: HashMap::<usize, ImportedAnimationChannels>::new(),
+            events: Vec::new(),
         })
     }
 

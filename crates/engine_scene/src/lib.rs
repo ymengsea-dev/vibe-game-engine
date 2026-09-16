@@ -30,6 +30,7 @@ mod io;
 mod migration;
 mod prefab;
 mod resolve;
+mod runtime;
 mod save;
 mod validate;
 mod world;
@@ -37,11 +38,17 @@ mod world;
 pub use capture::capture_renderables;
 pub use error::SceneError;
 pub use format::{
-    AssetRef, CameraData, MeshRendererData, ProjectionData, Scene, SceneEntity, SpriteData,
-    TransformData,
+    AssetRef, AudioEmitterData, BodyKind, CameraData, ColliderData, ColliderShape,
+    MeshRendererData, NavGridData, ProjectionData, Scene, SceneAudioEmitter, SceneCollider,
+    SceneEntity, SceneNavGrid, SpriteData, TransformData,
 };
 pub use io::write_atomic;
 pub use migration::CURRENT_SCENE_VERSION;
 pub use prefab::Prefab;
 pub use resolve::{InstantiateReport, NullResolver, SceneResolver};
+pub use runtime::{
+    AssetLibrary, BUNDLE_FILE, EXPORT_SCENE_FILE, ExportContent, LoadedSkinnedMesh, MeshGeometry,
+    RuntimeResolver, executable_dir, load_mesh_geometry, load_skinned_mesh, material_from_imported,
+    open_export,
+};
 pub use save::{CURRENT_SAVE_VERSION, SaveGame, SavedEntity, WorldSnapshot};

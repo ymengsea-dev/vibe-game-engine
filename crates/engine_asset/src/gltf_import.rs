@@ -147,6 +147,15 @@ pub struct ImportedAnimationChannels {
     pub scale: Option<ImportedKeyframes<Vec3>>,
 }
 
+/// A named point in an animation clip, read from its `extras`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedAnimationEvent {
+    /// When it fires, in seconds from the clip's start.
+    pub time: f32,
+    /// What fires — game code matches on this name.
+    pub name: String,
+}
+
 /// One imported glTF animation ("clip"): every animated node's channels,
 /// keyed by glTF node index (matching [`ImportedJoint::node_index`], so
 /// a sampler can look up a skeleton joint's channels directly).
@@ -154,6 +163,15 @@ pub struct ImportedAnimationChannels {
 pub struct ImportedAnimation {
     /// This animation's name, if any.
     pub name: Option<String>,
+    /// Named moments in the clip, read from the animation's glTF
+    /// `extras`. Empty for a clip that carries none.
+    ///
+    /// glTF has no event track, so a clip that wants to say "a foot
+    /// lands here" has to put it in `extras`; see
+    /// [`crate::ExportAnimationEvent`], which writes the form this
+    /// reads. Keeping events beside the motion is what stops a footstep
+    /// sound drifting out of sync the first time a clip is retimed.
+    pub events: Vec<ImportedAnimationEvent>,
     /// The latest keyframe time across every channel in this
     /// animation — how long it runs before looping/holding, in seconds.
     /// `0.0` if it has no channels.
@@ -264,7 +282,209 @@ pub struct ImportedGltf {
 pub fn import_gltf_slice(bytes: &[u8]) -> Result<ImportedGltf, AssetError> {
     let (document, buffers, images) =
         gltf::import_slice(bytes).map_err(|err| AssetError::GltfImport(err.to_string()))?;
+    convert(&document, &buffers, &images)
+}
 
+/// Imports a glTF or GLB file **from disk**, resolving any external
+/// buffer or image the file references relative to its own directory.
+///
+/// The difference from [`import_gltf_slice`] is the whole point: a
+/// `.gltf` whose material points at `../textures/grass.png` can only be
+/// read by something that knows where the `.gltf` lives. That is what
+/// makes a texture file in a project's `assets/` folder the *live*
+/// source for a model rather than a copy of bytes already embedded in it
+/// — edit the PNG, and the next load picks it up.
+///
+/// Prefer this whenever a path is available. [`import_gltf_slice`]
+/// remains the right call for bytes with no filesystem behind them, such
+/// as an asset served out of a packed bundle.
+///
+/// # Errors
+///
+/// [`AssetError::GltfImport`] for everything [`import_gltf_slice`]
+/// reports, plus a file that cannot be read and an external reference
+/// that does not resolve.
+pub fn import_gltf_file(path: &std::path::Path) -> Result<ImportedGltf, AssetError> {
+    let (document, buffers, images) = gltf::import(path)
+        .map_err(|err| AssetError::GltfImport(format!("{}: {err}", path.display())))?;
+    convert(&document, &buffers, &images)
+}
+
+/// Imports a glTF or GLB from bytes, resolving anything it references
+/// externally through `resolve` instead of through the filesystem.
+///
+/// This is what makes a *packed* game work. A `.gltf` that names
+/// `../textures/grass.png` can be read from disk ([`import_gltf_file`])
+/// or not at all ([`import_gltf_slice`] refuses it) — but a shipped
+/// export has no directory, only a bundle, and the file is right there
+/// under a neighbouring key. `resolve` is handed the URI exactly as the
+/// glTF wrote it and returns its bytes, or `None` if the store has no
+/// such entry.
+///
+/// Data URIs are decoded here and never reach `resolve`.
+///
+/// # Errors
+///
+/// [`AssetError::GltfImport`] if the document cannot be parsed, if a
+/// buffer or image it references cannot be resolved, or if an image's
+/// bytes cannot be decoded.
+pub fn import_gltf_slice_with(
+    bytes: &[u8],
+    resolve: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Result<ImportedGltf, AssetError> {
+    let gltf =
+        gltf::Gltf::from_slice(bytes).map_err(|err| AssetError::GltfImport(err.to_string()))?;
+    let gltf::Gltf { document, blob } = gltf;
+    let buffers = resolve_buffers(&document, blob, resolve)?;
+    let images = resolve_images(&document, &buffers, resolve)?;
+    convert(&document, &buffers, &images)
+}
+
+/// Fetches a URI's bytes: a `data:` URI decoded in place, anything else
+/// handed to the caller's resolver.
+fn fetch_uri(uri: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Vec<u8>, AssetError> {
+    if let Some(rest) = uri.strip_prefix("data:") {
+        let encoded = rest
+            .split_once(";base64,")
+            .map(|(_, data)| data)
+            .ok_or_else(|| {
+                AssetError::GltfImport("only base64 data URIs are supported".to_owned())
+            })?;
+        return decode_base64(encoded)
+            .ok_or_else(|| AssetError::GltfImport("malformed base64 data URI".to_owned()));
+    }
+    resolve(uri).ok_or_else(|| AssetError::GltfImport(format!("cannot resolve {uri}")))
+}
+
+/// Every buffer the document declares, in index order.
+fn resolve_buffers(
+    document: &gltf::Document,
+    mut blob: Option<Vec<u8>>,
+    resolve: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Result<Vec<gltf::buffer::Data>, AssetError> {
+    let mut out = Vec::with_capacity(document.buffers().len());
+    for buffer in document.buffers() {
+        let mut bytes = match buffer.source() {
+            gltf::buffer::Source::Bin => blob
+                .take()
+                .ok_or_else(|| AssetError::GltfImport("GLB has no binary chunk".to_owned()))?,
+            gltf::buffer::Source::Uri(uri) => fetch_uri(uri, resolve)?,
+        };
+        // glTF allows the stored blob to be padded shorter than the
+        // declared length; readers index up to `length`.
+        if bytes.len() < buffer.length() {
+            bytes.resize(buffer.length(), 0);
+        }
+        out.push(gltf::buffer::Data(bytes));
+    }
+    Ok(out)
+}
+
+/// Every image the document declares, decoded to RGBA8.
+fn resolve_images(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    resolve: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Result<Vec<gltf::image::Data>, AssetError> {
+    let mut out = Vec::with_capacity(document.images().len());
+    for image in document.images() {
+        let encoded = match image.source() {
+            gltf::image::Source::Uri { uri, .. } => fetch_uri(uri, resolve)?,
+            gltf::image::Source::View { view, .. } => {
+                let buffer = buffers.get(view.buffer().index()).ok_or_else(|| {
+                    AssetError::GltfImport("image view points at a missing buffer".to_owned())
+                })?;
+                let start = view.offset();
+                let end = start + view.length();
+                buffer
+                    .0
+                    .get(start..end)
+                    .ok_or_else(|| {
+                        AssetError::GltfImport("image view is out of its buffer".to_owned())
+                    })?
+                    .to_vec()
+            }
+        };
+        let decoded = image::load_from_memory(&encoded)
+            .map_err(|err| AssetError::GltfImport(format!("decoding an image: {err}")))?
+            .to_rgba8();
+        out.push(gltf::image::Data {
+            width: decoded.width(),
+            height: decoded.height(),
+            format: gltf::image::Format::R8G8B8A8,
+            pixels: decoded.into_raw(),
+        });
+    }
+    Ok(out)
+}
+
+/// Decodes standard base64 (RFC 4648, with or without padding).
+/// `None` for anything that is not valid base64.
+fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u32> {
+        match byte {
+            b'A'..=b'Z' => Some(u32::from(byte - b'A')),
+            b'a'..=b'z' => Some(u32::from(byte - b'a') + 26),
+            b'0'..=b'9' => Some(u32::from(byte - b'0') + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    let bytes: Vec<u8> = text
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+        .collect();
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        let mut accumulator = 0u32;
+        for byte in chunk {
+            accumulator = (accumulator << 6) | value(*byte)?;
+        }
+        // A trailing chunk of 2 or 3 characters carries 1 or 2 bytes.
+        let bits = chunk.len() * 6;
+        let full_bytes = bits / 8;
+        accumulator <<= 32 - bits;
+        for index in 0..full_bytes {
+            out.push(((accumulator >> (24 - index * 8)) & 0xFF) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Reads `extras.events` off an animation, if it has any.
+///
+/// Anything malformed is skipped rather than fatal: `extras` is
+/// free-form by definition, so another tool's data living there must not
+/// stop a model loading.
+fn read_animation_events(animation: &gltf::Animation<'_>) -> Vec<ImportedAnimationEvent> {
+    let Some(extras) = animation.extras().as_deref() else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(extras.get()) else {
+        return Vec::new();
+    };
+    let Some(events) = value.get("events").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    events
+        .iter()
+        .filter_map(|event| {
+            let time = event.get("time")?.as_f64()? as f32;
+            let name = event.get("name")?.as_str()?.to_string();
+            Some(ImportedAnimationEvent { time, name })
+        })
+        .collect()
+}
+
+/// The shared body of both importers: glTF's own document/buffer/image
+/// triple, converted into this engine's types.
+fn convert(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    images: &[gltf::image::Data],
+) -> Result<ImportedGltf, AssetError> {
     let out_images = images
         .iter()
         .map(convert_image)
@@ -608,6 +828,7 @@ pub fn import_gltf_slice(bytes: &[u8]) -> Result<ImportedGltf, AssetError> {
             name: animation.name().map(String::from),
             duration,
             channels,
+            events: read_animation_events(&animation),
         });
     }
 

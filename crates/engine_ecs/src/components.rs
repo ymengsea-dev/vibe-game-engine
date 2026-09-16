@@ -563,6 +563,24 @@ pub struct AssetSource {
     pub id: Option<String>,
 }
 
+/// A project-relative Rust script attached to an entity.
+///
+/// The editor owns script discovery and compilation; the component is kept
+/// deliberately small so scenes can carry the authoring reference without
+/// pulling a scripting runtime into the core ECS.
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct Script {
+    /// Path relative to the project root (normally under `src/`).
+    pub path: String,
+}
+
+impl Script {
+    /// Builds a script reference from a project-relative path.
+    pub fn new(path: impl Into<String>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
 impl AssetSource {
     /// Builds an [`AssetSource`] from a path, with no id yet.
     pub fn new(path: impl Into<String>) -> Self {

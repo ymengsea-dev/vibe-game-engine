@@ -18,6 +18,8 @@ bevy_ecs.workspace = true
 engine_utils.workspace = true
 engine_renderer.workspace = true
 engine_ecs.workspace = true
+engine_asset.workspace = true
+engine_audio.workspace = true
 
 [lints]
 workspace = true

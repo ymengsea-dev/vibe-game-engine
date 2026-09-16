@@ -45,15 +45,32 @@ pub enum AssetError {
     #[error("failed to import glTF: {0}")]
     GltfImport(String),
 
+    /// [`crate::export_gltf`] refused to write a file: geometry that no
+    /// importer would accept (empty, a partial triangle, an index past
+    /// the vertex list, a material index that does not exist), or a
+    /// serialization failure.
+    #[error("failed to export glTF: {0}")]
+    GltfExport(String),
+
     /// [`crate::import_texture_bytes`] failed to decode the image (see
     /// [`engine_renderer::decode_rgba8`]).
     #[error("failed to import texture: {0}")]
     TextureImport(String),
 
+    /// [`crate::encode_png_rgba8`] was handed a pixel buffer that does
+    /// not match the given dimensions, or PNG encoding failed.
+    #[error("failed to export texture: {0}")]
+    TextureExport(String),
+
     /// [`crate::import_wav_bytes`] failed: malformed/truncated WAV, or an
     /// unsupported format tag/bit depth.
     #[error("failed to import audio: {0}")]
     AudioImport(String),
+
+    /// [`crate::encode_wav_mono16`] was handed no samples or a zero
+    /// sample rate.
+    #[error("failed to export audio: {0}")]
+    AudioExport(String),
 
     /// [`crate::AssetWatcher::watch`] failed to start watching a path
     /// (e.g. the path doesn't exist).

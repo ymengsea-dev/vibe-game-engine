@@ -268,6 +268,8 @@ fn bar_bend_clip() -> ImportedAnimation {
         name: Some("bend".to_string()),
         duration: 2.0,
         channels,
+        // No events: this demo clip has nothing to announce.
+        events: Vec::new(),
     }
 }
 

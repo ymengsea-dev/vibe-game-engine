@@ -1,0 +1,17 @@
+(
+    version: 1,
+    name: "Island",
+    main_scene: "scenes/island.ron",
+    configurations: [
+        (
+            name: "Debug",
+            profile: Debug,
+            crate_name: Some("island"),
+        ),
+        (
+            name: "Release",
+            profile: Release,
+            crate_name: Some("island"),
+        ),
+    ],
+)

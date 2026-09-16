@@ -237,6 +237,14 @@ impl SavedEntity {
             disabled: self.disabled,
             is_static: self.is_static,
             locked: false,
+            // A save restores a live world, and a live emitter's sound is
+            // already loaded — re-authoring one from the save file would
+            // restart it.
+            audio_emitter: None,
+            // A save restores where a body *was*, not how it was built:
+            // the scene that spawned it already described its collider,
+            // and rebuilding one here would double it up.
+            collider: None,
         }
     }
 }

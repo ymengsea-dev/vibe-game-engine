@@ -92,6 +92,26 @@ pub trait SceneResolver {
         atlas: &AssetRef,
         region: &str,
     ) -> Result<Option<UvRect>, SceneError>;
+
+    /// Resolves a sound reference into a decoded clip.
+    ///
+    /// Defaulted to `Ok(None)` — "not available" — because a resolver
+    /// that only knows about geometry (the editor's, before audio is
+    /// loaded) should spawn a scene's emitters as authorable data
+    /// without having to decode any audio.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Resolve`] if the reference is broken or the bytes
+    /// are not a sound this build can decode.
+    fn resolve_sound(
+        &mut self,
+        sound: &AssetRef,
+        looping: bool,
+    ) -> Result<Option<engine_audio::StaticSound>, SceneError> {
+        let _ = (sound, looping);
+        Ok(None)
+    }
 }
 
 /// A [`SceneResolver`] that resolves nothing, successfully.
@@ -192,6 +212,35 @@ pub(crate) fn insert_components(
     }
     if data.locked {
         entity_mut.insert(Lock);
+    }
+    if let Some(emitter) = &data.audio_emitter {
+        // The carrier always goes on, resolved or not — same rule as
+        // `MeshSource`: it is the only place the authored values survive
+        // on a live entity, so dropping it would delete the emitter from
+        // the file on the next save.
+        entity_mut.insert(crate::format::SceneAudioEmitter(emitter.clone()));
+        match resolver.resolve_sound(&emitter.sound, emitter.looping) {
+            Ok(Some(sound)) => {
+                let mut live = engine_ecs::audio::AudioEmitter::new(sound);
+                live.autoplay = emitter.autoplay;
+                entity_mut.insert(live);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                *unresolved += 1;
+                tracing::warn!(
+                    error = %err,
+                    sound = %emitter.sound.id,
+                    "skipped unresolvable audio emitter"
+                );
+            }
+        }
+    }
+    if let Some(collider) = &data.collider {
+        // A carrier, like `MeshSource` below: the editor has no physics
+        // world, so this component is the only place the collider
+        // survives on a live entity — and the next save reads it back.
+        entity_mut.insert(crate::format::SceneCollider(collider.clone()));
     }
 
     if let Some(mesh_renderer) = &data.mesh_renderer {

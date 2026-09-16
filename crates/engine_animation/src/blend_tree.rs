@@ -189,6 +189,7 @@ mod tests {
             name: None,
             duration: 1.0,
             channels,
+            events: Vec::new(),
         }
     }
 

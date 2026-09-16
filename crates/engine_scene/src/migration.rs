@@ -1,6 +1,13 @@
 //! Scene format version migration.
 //!
-//! Format v1 → v2 (this crate's current version) is purely additive:
+//! Every bump so far has been purely additive, which is why `migrate`
+//! only stamps the version. v3 → v4 added `SceneEntity::audio_emitter`
+//! and `Scene::nav_grid`, both `Option` with `#[serde(default)]`, so a
+//! v3 file loads silent and with no nav grid — exactly what it was.
+//! v2 → v3 added `SceneEntity::collider` the same way, so a v2 file
+//! loads with no body and behaves exactly as it did before.
+//!
+//! Format v1 → v2 was likewise additive:
 //! `SceneEntity` gained `name`/`parent`/`mesh_renderer`, all `Option` with
 //! `#[serde(default)]`, so a v1 RON file already deserializes straight
 //! into today's `SceneEntity`/`Scene` shapes with those fields `None` —
@@ -17,7 +24,7 @@ use crate::format::Scene;
 /// The current on-disk [`Scene`] format version. Bump this — and extend
 /// `migrate` with the new version's transformation — whenever
 /// `Scene`/`SceneEntity`'s shape changes.
-pub const CURRENT_SCENE_VERSION: u32 = 2;
+pub const CURRENT_SCENE_VERSION: u32 = 4;
 
 /// Migrates `scene` to [`CURRENT_SCENE_VERSION`] if it was parsed from an
 /// older format, stamping its `version` field. A no-op if `scene` is
@@ -52,6 +59,7 @@ mod tests {
         let scene = Scene {
             version: CURRENT_SCENE_VERSION,
             entities: vec![SceneEntity::default()],
+            nav_grid: None,
         };
         let migrated = migrate(scene.clone()).unwrap();
         assert_eq!(migrated, scene);
@@ -62,6 +70,7 @@ mod tests {
         let scene = Scene {
             version: 1,
             entities: vec![SceneEntity::default()],
+            nav_grid: None,
         };
         let migrated = migrate(scene).unwrap();
         assert_eq!(migrated.version, CURRENT_SCENE_VERSION);
@@ -72,6 +81,7 @@ mod tests {
         let scene = Scene {
             version: CURRENT_SCENE_VERSION + 1,
             entities: Vec::new(),
+            nav_grid: None,
         };
         let err = migrate(scene).unwrap_err();
         assert!(matches!(

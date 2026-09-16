@@ -14,6 +14,8 @@
 //! panel), AI Assistant (placeholder), Console/Problems/Output,
 //! Profiler, and the central Scene panel.
 
+mod play_process;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,9 +29,13 @@ use editor_lsp::{
 use engine::ecs::components as ecs_components;
 use engine::ecs::components::Name;
 use engine::ecs::prelude::{ChildOf, World};
-use engine::editor::{Diagnostic, MAX_TEXT_HITS, Severity as ProblemSeverity, SymbolHit};
+use engine::editor::{
+    Diagnostic, EditorMode, MAX_TEXT_HITS, Severity as ProblemSeverity, SymbolHit,
+};
 use engine::prelude::*;
-use engine::project::MANIFEST_FILE;
+use engine::project::build::ExportPlan;
+use engine::project::{ASSETS_DIR, MANIFEST_FILE};
+use play_process::{PlayEvent, PlayProcess};
 
 /// Default project directory when the editor is launched with no path
 /// argument — created on first run, reopened afterwards. Relative to the
@@ -43,6 +49,14 @@ const STARTER_MAIN: &str = "//! Entry point for your RustyEngine game.\n\nfn mai
 const STARTER_LIB: &str = "//! Game components and systems.\n\n/// Marker component for the entity the player controls.\npub struct Player;\n";
 
 /// A minimal `Cargo.toml` for a fresh project, so rust-analyzer has a
+/// The directory's own name, for naming a project after its folder.
+fn directory_name(root: &std::path::Path) -> String {
+    root.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Untitled")
+        .to_string()
+}
+
 /// package to load. `project_name` is sanitised into a valid crate name.
 fn starter_cargo_toml(project_name: &str) -> String {
     let mut crate_name: String = project_name
@@ -106,17 +120,28 @@ fn placeholder_world() -> World {
     world
 }
 
-/// Text-file extensions the code editor's Files tree lists from `src/`.
-const CODE_TREE_EXTENSIONS: [&str; 6] = ["rs", "toml", "ron", "wgsl", "glsl", "md"];
+/// Text-file extensions the code editor's Files tree lists.
+const CODE_TREE_EXTENSIONS: [&str; 8] = ["rs", "toml", "ron", "wgsl", "glsl", "md", "json", "txt"];
+
+/// Directories the code editor's Files tree never descends into.
+///
+/// `assets/` has its own browser (and is mostly binary); `target/` is
+/// build output; `.studio/` is editor bookkeeping a person should not be
+/// hand-editing. Everything else under the project root — `src/`,
+/// `scenes/`, whatever folders the user made — is theirs to structure.
+const CODE_TREE_SKIP_DIRS: [&str; 3] = ["target", "assets", ".studio"];
 
 /// How many not-yet-open files a find-references result may pull into the
 /// editor so Monaco's peek view can render them. A large result on a
 /// common symbol shouldn't open hundreds of models.
 const REFERENCE_PREOPEN_LIMIT: usize = 25;
 
-/// Lists the source files under `root`, as paths relative to it, sorted.
-/// Non-existent `root` yields an empty list.
-fn src_file_list(root: &std::path::Path) -> Vec<PathBuf> {
+/// Lists the project's editable text files, as paths relative to
+/// `root`, sorted — the source tree, the scene files and the
+/// configuration at the root (`project.ron`, `Cargo.toml`), which is
+/// what makes the Code panel a project explorer rather than a list of
+/// scripts. Non-existent `root` yields an empty list.
+fn project_file_list(root: &std::path::Path) -> Vec<PathBuf> {
     fn walk(dir: &std::path::Path, base: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>) {
         if depth > 8 {
             return;
@@ -126,7 +151,16 @@ fn src_file_list(root: &std::path::Path) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Dotfiles are tool bookkeeping, not project structure.
+            if name.starts_with('.') {
+                continue;
+            }
             if path.is_dir() {
+                if CODE_TREE_SKIP_DIRS.contains(&name.as_ref()) {
+                    continue;
+                }
                 walk(&path, base, depth + 1, out);
             } else if path
                 .extension()
@@ -145,12 +179,68 @@ fn src_file_list(root: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
+/// Sends the project's current file tree to the code editor, labelled
+/// with the project name.
+fn push_file_tree(code: &CodeEditor, state: &EditorState) {
+    let root = state.project.root();
+    code.set_file_tree(state.project.name(), root, &project_file_list(root));
+}
+
+/// Creates the file or directory the Files tree asked for and returns its
+/// absolute path.
+///
+/// `relative` comes from a text field inside the webview, so it is
+/// untrusted: `Project::resolve` rejects anything
+/// absolute or containing `..` before a single byte is written, and an
+/// existing path is left alone rather than truncated. Every refusal is a
+/// warning and a `None`, never a panic — a fumbled file name must not
+/// take the studio down.
+fn create_project_file(state: &mut EditorState, relative: &Path, folder: bool) -> Option<PathBuf> {
+    let absolute = match state.project.resolve(relative) {
+        Ok(absolute) => absolute,
+        Err(err) => {
+            tracing::warn!(error = %err, path = %relative.display(), "refused to create outside the project");
+            return None;
+        }
+    };
+    if absolute.exists() {
+        tracing::warn!(path = %absolute.display(), "not creating: something is already there");
+        return None;
+    }
+
+    let result = if folder {
+        std::fs::create_dir_all(&absolute)
+    } else {
+        match absolute.parent() {
+            Some(parent) => std::fs::create_dir_all(parent).and_then(|()| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&absolute)
+                    .map(|_| ())
+            }),
+            None => std::fs::write(&absolute, ""),
+        }
+    };
+    match result {
+        Ok(()) => {
+            tracing::info!(path = %absolute.display(), folder, "created");
+            Some(absolute)
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, path = %absolute.display(), "could not create");
+            None
+        }
+    }
+}
+
 /// Positions the Monaco webview over the Code panel (scaling the panel's
 /// logical-point rect to physical pixels) and forwards its events into
 /// editor state (`DirtyState`, cursor, file writes). On [`CodeEvent::Ready`]
-/// it pushes the `src/` file tree and opens `pending_open` (the starting
-/// file); [`CodeEvent::OpenRequested`] and the Asset Browser's
-/// `file_open_request` both resolve to a path and open it.
+/// it pushes the project file tree and opens `pending_open` (the
+/// starting file, project-root-relative); [`CodeEvent::OpenRequested`]
+/// and the Asset Browser's `file_open_request` both resolve to a path
+/// and open it.
 #[allow(clippy::too_many_arguments)]
 fn sync_code_editor(
     code: Option<&CodeEditor>,
@@ -207,14 +297,22 @@ fn sync_code_editor(
                 }
             },
             CodeEvent::OpenRequested { path } => {
-                let absolute = state.project.src_dir().join(&path);
+                let absolute = state.project.root().join(&path);
                 open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
             }
             CodeEvent::Ready => {
-                let src = state.project.src_dir();
-                code.set_file_tree("src", &src, &src_file_list(&src));
+                push_file_tree(code, state);
                 if let Some(rel) = pending_open.take() {
-                    open_in_code_editor(code, lsp.as_mut(), open_docs, &src.join(rel));
+                    let absolute = state.project.root().join(rel);
+                    open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
+                }
+            }
+            CodeEvent::CreateRequested { path, folder } => {
+                if let Some(created) = create_project_file(state, &path, folder) {
+                    push_file_tree(code, state);
+                    if !folder {
+                        open_in_code_editor(code, lsp.as_mut(), open_docs, &created);
+                    }
                 }
             }
             CodeEvent::TabClosed { path } => {
@@ -237,7 +335,7 @@ fn sync_code_editor(
                     // `path` is tree-root-relative, or already absolute
                     // for a file opened from the Asset Browser — `join`
                     // with an absolute path returns it unchanged.
-                    let absolute = state.project.src_dir().join(&path);
+                    let absolute = state.project.root().join(&path);
                     let request_id = match kind {
                         LspKind::Completion => lsp.request_completion(&absolute, line, col),
                         LspKind::Hover => lsp.request_hover(&absolute, line, col),
@@ -346,13 +444,69 @@ fn is_meta_path(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("meta"))
 }
 
+/// The directory an import writes into: the Asset Browser's target
+/// folder, or the assets root if the target has gone missing or does not
+/// resolve inside the project.
+fn import_destination(state: &EditorState) -> PathBuf {
+    let assets_dir = state.project.assets_dir();
+    let target = &state.asset_browser.target_dir;
+    if target.as_os_str().is_empty() {
+        return assets_dir;
+    }
+    let Ok(absolute) = state.project.resolve(&Path::new(ASSETS_DIR).join(target)) else {
+        tracing::warn!(target = %target.display(), "import target escapes the project; using the assets root");
+        return assets_dir;
+    };
+    if absolute.is_dir() {
+        absolute
+    } else {
+        tracing::warn!(target = %target.display(), "import target no longer exists; using the assets root");
+        assets_dir
+    }
+}
+
+/// Creates a folder under the project's assets directory, on the Asset
+/// Browser's request, and aims the browser at it.
+///
+/// `relative` is typed by the user, so it is checked against the project
+/// root before anything is created; a name that escapes, or a path that
+/// already exists, is a warning and nothing else.
+fn create_asset_folder(state: &mut EditorState, relative: &Path) {
+    let inside_project = Path::new(ASSETS_DIR).join(relative);
+    let Ok(absolute) = state.project.resolve(&inside_project) else {
+        tracing::warn!(path = %relative.display(), "refused to create a folder outside the project");
+        return;
+    };
+    if absolute.exists() {
+        tracing::warn!(path = %absolute.display(), "not creating: something is already there");
+        return;
+    }
+    match std::fs::create_dir_all(&absolute) {
+        Ok(()) => {
+            tracing::info!(path = %absolute.display(), "created asset folder");
+            state.asset_browser.target_dir = relative.to_path_buf();
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, path = %absolute.display(), "could not create asset folder");
+        }
+    }
+}
+
 /// Serves the frame's asset requests: a dialog import, dropped files, or
 /// an explicit rescan.
 ///
 /// Every path ends in the same rescan + re-import, so an asset reaches
 /// the browser identically however it arrived.
 fn handle_asset_requests(state: &mut EditorState) {
-    let mut sources: Vec<std::path::PathBuf> = std::mem::take(&mut state.dropped_files);
+    if let Some(relative) = state.asset_browser.new_folder_request.take() {
+        create_asset_folder(state, &relative);
+    }
+
+    let dropped = std::mem::take(&mut state.dropped_files);
+    let mut sources = Vec::new();
+    for path in dropped {
+        collect_drop_sources(&path, &mut sources, 0);
+    }
 
     if std::mem::take(&mut state.import_request) {
         // Blocking, so the editor freezes while the dialog is open. That
@@ -373,7 +527,10 @@ fn handle_asset_requests(state: &mut EditorState) {
     }
 
     if !sources.is_empty() {
-        let assets_dir = state.project.assets_dir();
+        // Imports land in the folder the browser is aimed at, so a
+        // project can keep `textures/` and `audio/` apart instead of
+        // piling everything into the assets root.
+        let assets_dir = import_destination(state);
         let outcomes = engine_editor::import_files(&assets_dir, &sources);
         let imported = outcomes.iter().filter(|o| o.succeeded()).count();
         for outcome in &outcomes {
@@ -387,6 +544,34 @@ fn handle_asset_requests(state: &mut EditorState) {
     }
 
     rescan_assets(state);
+}
+
+/// Expands a Finder drop into regular files without following symlinked
+/// directories. The depth cap prevents a malformed or cyclic drop from
+/// monopolizing the editor, and the importer still filters unsupported files.
+fn collect_drop_sources(path: &Path, out: &mut Vec<PathBuf>, depth: u32) {
+    if depth > 32 {
+        tracing::warn!(path = %path.display(), "ignored deeply nested dropped folder");
+        return;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        tracing::warn!(path = %path.display(), "dropped path is no longer readable");
+        return;
+    };
+    if metadata.is_file() {
+        out.push(path.to_path_buf());
+        return;
+    }
+    if !metadata.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        tracing::warn!(path = %path.display(), "could not read dropped folder");
+        return;
+    };
+    for entry in entries.flatten() {
+        collect_drop_sources(&entry.path(), out, depth + 1);
+    }
 }
 
 /// Rescans the assets directory and re-runs the import pass.
@@ -409,14 +594,14 @@ fn rescan_assets(state: &mut EditorState) {
 /// unchanged files aren't re-decoded and vanished ones are evicted).
 /// Clears the asset selection if its file is gone. Failures are logged,
 /// not fatal.
-fn handle_asset_changes(state: &mut EditorState, watcher: Option<&AssetWatcher>) {
+fn handle_asset_changes(state: &mut EditorState, watcher: Option<&AssetWatcher>) -> Vec<PathBuf> {
     let Some(watcher) = watcher else {
-        return;
+        return Vec::new();
     };
     let changed = watcher.poll_changes();
     if changed.iter().all(|path| is_meta_path(path)) {
         // Nothing but sidecar writes (or nothing at all) — ignore.
-        return;
+        return Vec::new();
     }
 
     let assets_dir = state.project.assets_dir();
@@ -424,10 +609,13 @@ fn handle_asset_changes(state: &mut EditorState, watcher: Option<&AssetWatcher>)
         Ok(assets) => state.assets = assets,
         Err(err) => {
             tracing::warn!(error = %err, "asset rescan after a file change failed");
-            return;
+            return Vec::new();
         }
     }
-    state.asset_index = state.importer.run(&assets_dir, &mut state.assets);
+    let (index, report) = state
+        .importer
+        .reload_changed(&assets_dir, &mut state.assets, &changed);
+    state.asset_index = index;
 
     if let Some(selected) = &state.selected_asset
         && !state
@@ -438,14 +626,14 @@ fn handle_asset_changes(state: &mut EditorState, watcher: Option<&AssetWatcher>)
         state.selected_asset = None;
     }
 
-    let stats = state.importer.stats();
     tracing::info!(
         changed = changed.len(),
-        imported = stats.imported,
-        cached = stats.cached,
-        failed = stats.failed,
+        imported = report.reimported,
+        failed = report.failed,
+        evicted = report.evicted,
         "re-imported changed assets"
     );
+    changed
 }
 
 /// Picks the best `workspace/symbol` match for an "Open Script" jump: a
@@ -793,9 +981,163 @@ struct EditorHandler {
     /// an edited/added/removed asset is re-imported without a restart.
     /// `None` if the directory couldn't be watched.
     asset_watcher: Option<AssetWatcher>,
+    /// Receives the result of the running export build, if one was
+    /// started. The build itself runs on its own thread — `cargo build`
+    /// takes minutes, and the studio has to keep drawing.
+    export: Option<std::sync::mpsc::Receiver<Result<ExportSummary, String>>>,
+    /// Cargo/game child owned by the Play toolbar lifecycle.
+    play_process: PlayProcess,
+}
+
+/// What a finished export produced, in the form the editor logs it.
+/// `engine_project::build::ExportReport` cannot cross the thread
+/// boundary as-is without dragging its error type along, and the editor
+/// only needs the summary.
+struct ExportSummary {
+    binary: PathBuf,
+    bundle_files: usize,
 }
 
 impl EditorHandler {
+    /// Builds, launches, polls, and stops the selected project's real game.
+    fn drive_play(&mut self) {
+        if let Some(event) = self.play_process.poll(&self.state.output) {
+            match event {
+                PlayEvent::Started => {
+                    self.state.play.mark_running();
+                    tracing::info!("project game started");
+                }
+                PlayEvent::Finished => {
+                    tracing::info!("project game exited");
+                    self.state.play.stop(&mut self.state.world);
+                    self.state.clear_selection();
+                }
+                PlayEvent::Failed(message) => {
+                    self.state.output.write_line(format!("[play] {message}"));
+                    tracing::error!(error = %message, "project game stopped");
+                    self.state.play.stop(&mut self.state.world);
+                    self.state.clear_selection();
+                }
+            }
+        }
+
+        match self.state.play.mode() {
+            EditorMode::Edit => {
+                if let Err(message) = self.play_process.stop(&self.state.output) {
+                    tracing::error!(error = %message, "could not stop project game");
+                }
+            }
+            EditorMode::Building if self.play_process.is_idle() => {
+                if self.state.export_running {
+                    return;
+                }
+                if self.state.dirty.scene()
+                    && let Err(err) = self.state.save_scene()
+                {
+                    let message = format!("could not save the scene before Play: {err}");
+                    self.state.output.write_line(format!("[play] {message}"));
+                    tracing::error!(error = %err, "project game could not start");
+                    self.state.play.stop(&mut self.state.world);
+                    return;
+                }
+                let Some(configuration) = self.state.selected_configuration().cloned() else {
+                    let message = "no build configuration selected".to_owned();
+                    self.state.output.write_line(format!("[play] {message}"));
+                    tracing::error!(error = %message, "project game could not start");
+                    self.state.play.stop(&mut self.state.world);
+                    return;
+                };
+                if let Err(message) =
+                    self.play_process
+                        .start(&self.state.project, &configuration, &self.state.output)
+                {
+                    self.state.output.write_line(format!("[play] {message}"));
+                    tracing::error!(error = %message, "project game could not start");
+                    self.state.play.stop(&mut self.state.world);
+                }
+            }
+            EditorMode::Building | EditorMode::Play => {}
+        }
+    }
+
+    /// Starts an export build if the File menu asked for one, and
+    /// reports a finished one.
+    ///
+    /// The build runs on its own thread: `cargo build` takes minutes,
+    /// and a studio that stops drawing for minutes looks hung. Only one
+    /// runs at a time — two cargo builds sharing one `target/` block
+    /// each other on the lock file for no gain.
+    fn drive_export(&mut self) {
+        if let Some(export_dir) = self.state.export_request.take()
+            && !self.state.export_running
+        {
+            if self.state.play.is_playing() {
+                tracing::warn!("Build & Export is unavailable while Play is active");
+                return;
+            }
+            let Some(configuration) = self.state.selected_configuration().cloned() else {
+                tracing::warn!("no build configuration selected");
+                return;
+            };
+            let project = self.state.project.clone();
+            let plan = ExportPlan::for_configuration(&project, &configuration, &export_dir);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            tracing::info!(
+                configuration = %configuration.name,
+                crate_name = %plan.crate_name,
+                out = %export_dir.display(),
+                "export started"
+            );
+            match std::thread::Builder::new()
+                .name("studio-export".to_owned())
+                .spawn(move || {
+                    let result = engine::project::build::export(&project, &plan)
+                        .map(|report| ExportSummary {
+                            binary: report.binary,
+                            bundle_files: report.bundle_files,
+                        })
+                        .map_err(|err| err.to_string());
+                    // The receiver is gone only if the studio is closing.
+                    let _ = sender.send(result);
+                }) {
+                Ok(_) => {
+                    self.state.export_running = true;
+                    self.export = Some(receiver);
+                }
+                Err(err) => tracing::error!(error = %err, "could not start the export thread"),
+            }
+        }
+
+        let Some(receiver) = self.export.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(summary)) => {
+                tracing::info!(
+                    binary = %summary.binary.display(),
+                    bundle_files = summary.bundle_files,
+                    "export finished"
+                );
+                self.finish_export();
+            }
+            Ok(Err(message)) => {
+                tracing::error!(error = %message, "export failed");
+                self.finish_export();
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                tracing::error!("the export thread stopped without reporting");
+                self.finish_export();
+            }
+        }
+    }
+
+    /// Clears the running-export state after a result (or a lost thread).
+    fn finish_export(&mut self) {
+        self.export = None;
+        self.state.export_running = false;
+    }
+
     /// Persists the current workspace / panel layout / open scene to the
     /// project's `.studio/session.ron`. Called on shutdown.
     fn save_session(&self) {
@@ -920,6 +1262,10 @@ impl PlatformHandler for EditorHandler {
                 self.sync_window_title();
 
                 self.render_frame();
+                // After the frame, so a menu click this frame is acted
+                // on with no half-drawn UI referring to a project that
+                // has already been torn down.
+                self.apply_project_request();
                 self.pump_lsp();
                 // Keep the panel layout on disk even if the process is
                 // killed (Ctrl-C on `cargo run`) instead of closed
@@ -941,10 +1287,119 @@ impl PlatformHandler for EditorHandler {
 }
 
 impl EditorHandler {
-    /// Runs one editor frame: play tick, viewport render, egui shell,
+    /// Carries out a project swap the File menu asked for.
+    ///
+    /// The order matters. The session for the *old* project is written
+    /// first (it is about to stop being current), then the world and
+    /// asset caches are reset, then the GPU resources are released, then
+    /// the new project's scene and assets are loaded, and only then are
+    /// the language server and code editor re-pointed.
+    ///
+    /// A failure at any step leaves the current project exactly as it
+    /// was: the new `Project` is opened and its scene validated *before*
+    /// anything is torn down, so a mistyped directory costs you a
+    /// warning rather than your open scene.
+    fn apply_project_request(&mut self) {
+        let Some(request) = self.state.project_request.take() else {
+            return;
+        };
+
+        let opened = if request.create {
+            Project::create(&request.root, directory_name(&request.root))
+        } else {
+            Project::open(&request.root)
+        };
+        let project = match opened {
+            Ok(project) => project,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %request.root.display(),
+                    "could not open that project; staying in the current one"
+                );
+                // A recent entry that no longer opens is noise in the
+                // menu; drop it so the list stays trustworthy.
+                self.state.recent_projects.remove(&request.root);
+                self.save_recent_projects();
+                return;
+            }
+        };
+
+        // The outgoing project's layout, before it stops being current.
+        self.save_session();
+        if let Err(message) = self.play_process.stop(&self.state.output) {
+            tracing::warn!(error = %message, "could not stop the previous project's game");
+        }
+        self.state.play.stop(&mut self.state.world);
+
+        let root = project.root().to_path_buf();
+        self.session_path = project.studio_dir().join(SESSION_FILE);
+        self.state.adopt_project(project);
+        // Every mesh and texture on the GPU belongs to the project just
+        // closed.
+        if let Some(viewport) = &mut self.viewport {
+            viewport.release_assets();
+        }
+        self.open_docs.clear();
+        self.lsp_problems.clear();
+        self.lsp_waiters.clear();
+        self.state.diagnostics.clear();
+
+        // Assets first: the scene resolves its references against them.
+        rescan_assets(&mut self.state);
+        match self.state.load_scene() {
+            Ok(()) => tracing::info!(
+                path = %self.state.scene_path.display(),
+                "opened the project's main scene"
+            ),
+            Err(err) => tracing::warn!(
+                error = %err,
+                "the project's main scene could not be loaded; starting empty"
+            ),
+        }
+
+        // The session belonging to the project just opened.
+        let session = EditorSession::load(&self.session_path);
+        self.saved_session = session.clone();
+        self.state.apply_session(session);
+
+        // rust-analyzer is rooted at a project directory, so it has to
+        // be restarted rather than re-pointed.
+        self.lsp = LspClient::start(&root);
+        // The code editor keeps whatever file it had open; pointing it
+        // at the new project's `src/main.rs` is what makes the swap look
+        // like an open rather than a half-move.
+        self.pending_open = Some(PathBuf::from("src/main.rs"));
+
+        self.save_recent_projects();
+        if let Some(window) = &self.window {
+            window.set_title(&format!(
+                "RustyEngine Studio — {}",
+                self.state.project.name()
+            ));
+        }
+        tracing::info!(root = %root.display(), "switched project");
+    }
+
+    /// Writes the recent-projects list to the user's config directory.
+    ///
+    fn save_recent_projects(&self) {
+        let Some(path) = RecentProjects::default_path() else {
+            return;
+        };
+        if let Err(err) = self.state.recent_projects.save(&path) {
+            tracing::warn!(error = %err, "could not save the recent-projects list");
+        }
+    }
+
+    /// Runs one editor frame: project-game lifecycle, viewport render, egui shell,
     /// code-editor sync, and the wgpu present. A no-op until
     /// [`PlatformHandler::on_window_ready`] has stood everything up.
     fn render_frame(&mut self) {
+        // Before the GPU/shell borrow below: this touches all of `self`.
+        self.drive_play();
+        self.drive_export();
+        let changed_paths = handle_asset_changes(&mut self.state, self.asset_watcher.as_ref());
         {
             let (Some(gpu), Some(shell), Some(viewport), Some(window)) =
                 (&self.gpu, &mut self.shell, &mut self.viewport, &self.window)
@@ -952,11 +1407,23 @@ impl EditorHandler {
                 return;
             };
 
-            self.state.profiler.begin_frame();
+            if !changed_paths.is_empty() {
+                let changed_ids: std::collections::HashSet<_> = changed_paths
+                    .iter()
+                    .filter_map(|path| {
+                        path.strip_prefix(self.state.project.assets_dir())
+                            .ok()
+                            .and_then(|relative| self.state.asset_index.id_for(relative))
+                    })
+                    .collect();
+                let invalidated =
+                    viewport.invalidate_changed_assets(&mut self.state.world, &changed_ids);
+                if invalidated > 0 {
+                    tracing::info!(invalidated, "invalidated live renderers after asset reload");
+                }
+            }
 
-            let span = std::time::Instant::now();
-            self.state.play.tick(&mut self.state.world);
-            self.state.profiler.record_span("play", span.elapsed());
+            self.state.profiler.begin_frame();
 
             // Turn any newly-importable asset references into live
             // renderables before drawing — covers scene loads, drag-in,
@@ -980,6 +1447,7 @@ impl EditorHandler {
                 &mut self.state.world,
                 self.state.gizmo_mode,
                 gizmo_origin,
+                self.state.overlays,
             );
             self.state.profiler.record_span("viewport", span.elapsed());
 
@@ -1000,7 +1468,6 @@ impl EditorHandler {
             );
 
             handle_prefab_request(&mut self.state);
-            handle_asset_changes(&mut self.state, self.asset_watcher.as_ref());
             handle_asset_requests(&mut self.state);
 
             // Unconditional, even though the frame itself might not
@@ -1260,10 +1727,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let console_log = ConsoleLog::new();
     logging::init_default_with_layer(ConsoleLayer::new(console_log.clone()))?;
 
-    // Project root: first CLI argument, else the default dev project.
+    // Project root: first CLI argument, else the most recently opened project (if it exists), else default dev project.
     let root = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
+        .or_else(|| {
+            RecentProjects::default_path()
+                .map(|p| RecentProjects::load(&p))
+                .and_then(|recent| recent.paths.into_iter().find(|path| path.exists()))
+        })
         .unwrap_or_else(|| PathBuf::from(DEFAULT_PROJECT_DIR));
     let is_new_project = !root.join(MANIFEST_FILE).exists();
     let project_name = root
@@ -1272,6 +1744,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or("Untitled")
         .to_string();
     let project = Project::open_or_create(&root, project_name)?;
+    engine_editor::crash::install_report_hook(project.root());
     if is_new_project {
         // Seed the fresh project's main scene with the demo world, so the
         // first run still shows something to edit.
@@ -1309,6 +1782,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = EditorState::new(project, World::new(), assets, console_log);
     state.apply_session(session);
+    // The recent-projects list lives in the user's config, not in a
+    // project — a list of projects cannot live inside one of them. The
+    // project opened at startup counts as the newest entry.
+    if let Some(path) = RecentProjects::default_path() {
+        state.recent_projects = RecentProjects::load(&path);
+        state.recent_projects.push(state.project.root());
+        if let Err(err) = state.recent_projects.save(&path) {
+            tracing::warn!(error = %err, "could not save the recent-projects list");
+        }
+    }
+
     // Import every referenceable asset (mesh / texture / audio), gated by
     // an `ImportCache` so unchanged sources aren't re-decoded, and build
     // the id↔path index so the scene load below can re-resolve a moved or
@@ -1357,10 +1841,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let window_config = WindowConfig::new(app.config().app_name.clone(), 1280, 720);
+    let window_config = WindowConfig::new(app.config().app_name.clone(), 1280, 720)
+        .min_size(900, 600)
+        .maximized(true);
     run_windowed(
         window_config,
         EditorHandler {
+            export: None,
+            play_process: PlayProcess::default(),
             gpu: None,
             shell: None,
             viewport: None,
@@ -1369,7 +1857,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state,
             session_path,
             title_dirty: false,
-            pending_open: Some(PathBuf::from("main.rs")),
+            pending_open: Some(PathBuf::from("src/main.rs")),
             saved_session,
             next_session_save: std::time::Instant::now(),
             next_scene_autosave: std::time::Instant::now(),
@@ -1402,6 +1890,52 @@ mod tests {
             },
             new_text: new_text.to_owned(),
         }
+    }
+
+    fn scratch_project(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vge-editor-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_file_tree_lists_source_scenes_and_config_but_not_build_output() {
+        let root = scratch_project("file-tree");
+        for (relative, contents) in [
+            ("project.ron", "()"),
+            ("Cargo.toml", "[package]"),
+            ("src/main.rs", "fn main() {}"),
+            ("src/systems/movement.rs", "pub fn step() {}"),
+            ("scenes/main.ron", "()"),
+            ("assets/textures/grass.png", "not really a png"),
+            ("target/debug/build.rs", "generated"),
+            (".studio/session.ron", "()"),
+            ("notes.bin", "binary"),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, contents).unwrap();
+        }
+
+        let listed = project_file_list(&root);
+        let listed: Vec<String> = listed
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+
+        assert_eq!(
+            listed,
+            vec![
+                "Cargo.toml",
+                "project.ron",
+                "scenes/main.ron",
+                "src/main.rs",
+                "src/systems/movement.rs",
+            ],
+            "config and sources are the tree; build output, assets and editor state are not"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1498,6 +2032,27 @@ mod tests {
         assert!(is_meta_path(Path::new("brick.png.META")));
         assert!(!is_meta_path(Path::new("assets/rock.gltf")));
         assert!(!is_meta_path(Path::new("notes")));
+    }
+
+    #[test]
+    fn dropped_folder_expands_to_files() {
+        let root = std::env::temp_dir().join(format!(
+            "vge-drop-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("one.png"), b"x").unwrap();
+        std::fs::write(root.join("nested/two.gltf"), b"x").unwrap();
+        let mut files = Vec::new();
+        collect_drop_sources(&root, &mut files, 0);
+        files.sort();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|path| path.is_file()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

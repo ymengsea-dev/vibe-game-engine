@@ -32,6 +32,8 @@ editor_lsp = { path = "crates/editor_lsp", version = "0.1.0" }
 engine_scripting = { path = "crates/engine_scripting", version = "0.1.0" }
 engine_network = { path = "crates/engine_network", version = "0.1.0" }
 engine_ai = { path = "crates/engine_ai", version = "0.1.0" }
+editor_ai = { path = "crates/editor_ai", version = "0.1.0" }
+editor_tools = { path = "crates/editor_tools", version = "0.1.0" }
 engine_utils = { path = "crates/engine_utils", version = "0.1.0" }
 
 # ---------------------------------------------------------------------------
@@ -57,6 +59,7 @@ kira = "0.12"
 egui = "0.36"
 egui-winit = "0.36"
 egui-wgpu = "0.36"
+egui_dock = { version = "0.21.1", features = ["serde"] }
 # Font-file validation before handing bytes to egui (same parser epaint uses).
 ab_glyph = "0.2.32"
 # Gamepad input. Its own poll loop, not a winit event source — see
@@ -78,7 +81,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ron = "0.12"
 # Assets
-gltf = "1"
+# `extras` so animation clips can carry their own events; glTF has no
+# event track, and `extras` is where a format puts what it does not model.
+gltf = { version = "1", features = ["extras"] }
 image = "0.25"
 # Concurrency / async
 rayon = "1"

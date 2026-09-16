@@ -256,6 +256,7 @@ mod tests {
             name: None,
             duration: 1.0,
             channels: HashMap::new(),
+            events: Vec::new(),
         };
 
         let pose = sample_pose(&skeleton, &animation, 0.5);
@@ -285,6 +286,7 @@ mod tests {
             name: None,
             duration: 2.0,
             channels,
+            events: Vec::new(),
         };
 
         let pose = sample_pose(&skeleton, &animation, 1.0);
@@ -314,6 +316,7 @@ mod tests {
             name: None,
             duration: 2.0,
             channels,
+            events: Vec::new(),
         };
 
         // Still mid-way between keyframes — STEP holds the first one.
@@ -346,6 +349,7 @@ mod tests {
             name: None,
             duration: 1.0,
             channels,
+            events: Vec::new(),
         };
 
         let pose = sample_pose(&skeleton, &animation, 0.5);
@@ -376,6 +380,7 @@ mod tests {
             name: None,
             duration: 1.0,
             channels,
+            events: Vec::new(),
         };
 
         let past_the_end = sample_pose(&skeleton, &animation, 100.0);

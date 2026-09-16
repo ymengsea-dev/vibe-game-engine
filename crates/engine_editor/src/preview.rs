@@ -1,4 +1,5 @@
 //! Read-only previews of the selected asset, drawn under the asset
+#![cfg_attr(feature = "dock-shell", allow(dead_code))]
 //! browser.
 //!
 //! Everything here reads the already-decoded data held by

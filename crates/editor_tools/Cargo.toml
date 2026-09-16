@@ -1,0 +1,17 @@
+[package]
+name = "editor_tools"
+description = "Narrow, auditable tool schema shared by Studio and AI integrations."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ron.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

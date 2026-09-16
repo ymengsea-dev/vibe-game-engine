@@ -95,7 +95,12 @@ impl DirtyState {
 }
 
 /// A user action deferred until the "unsaved changes" dialog resolves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Clone` rather than `Copy` since the project actions carry a path:
+/// the alternative was a payload-free enum plus a parallel "and here is
+/// the path" field, which can go out of sync with the action it belongs
+/// to.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingAction {
     /// Close the editor.
     Quit,
@@ -103,10 +108,16 @@ pub enum PendingAction {
     NewScene,
     /// Reload the current scene from disk, discarding in-memory edits.
     RevertScene,
+    /// Open an existing project at this directory.
+    OpenProject(PathBuf),
+    /// Create a project in this directory, then open it.
+    NewProject(PathBuf),
 }
 
 impl PendingAction {
-    /// Every variant.
+    /// Every payload-free variant, for exhaustiveness in tests. The
+    /// project actions are excluded because they carry a path with no
+    /// meaningful sample value.
     pub const ALL: [PendingAction; 3] = [
         PendingAction::Quit,
         PendingAction::NewScene,
@@ -114,11 +125,13 @@ impl PendingAction {
     ];
 
     /// The action phrased for the dialog: "Save changes before {verb}?"
-    pub fn verb(self) -> &'static str {
+    pub fn verb(&self) -> &'static str {
         match self {
             PendingAction::Quit => "closing",
             PendingAction::NewScene => "starting a new scene",
             PendingAction::RevertScene => "reverting the scene",
+            PendingAction::OpenProject(_) => "opening another project",
+            PendingAction::NewProject(_) => "creating a new project",
         }
     }
 }

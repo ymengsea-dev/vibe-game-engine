@@ -421,6 +421,61 @@ pub fn flat_texture(rgb: [u8; 3]) -> (u32, u32, Vec<u8>) {
     (1, 1, vec![rgb[0], rgb[1], rgb[2], 255])
 }
 
+/// The footfall sound, as 16-bit mono samples plus their sample rate.
+///
+/// A deterministic pseudo-noise burst under a low thump, with a fast
+/// decay: cheap, and it reads as a footstep rather than a tone. Returned
+/// as samples rather than an encoded file so the baker can write a
+/// `.wav` and a test can inspect the waveform.
+pub fn footstep_samples() -> (u32, Vec<i16>) {
+    const RATE: u32 = 22_050;
+    const SECONDS: f32 = 0.16;
+    let sample_count = (RATE as f32 * SECONDS) as usize;
+
+    let mut noise = Rng::new(0x5EED);
+    let mut samples = Vec::with_capacity(sample_count);
+    for i in 0..sample_count {
+        let t = i as f32 / RATE as f32;
+        let envelope = (1.0 - t / SECONDS).max(0.0).powi(3);
+        let thump = (t * 70.0 * std::f32::consts::TAU).sin() * 0.5;
+        let hiss = (noise.unit() * 2.0 - 1.0) * 0.35;
+        let value = (thump + hiss) * envelope * 0.5;
+        samples.push((value * i16::MAX as f32) as i16);
+    }
+    (RATE, samples)
+}
+
+/// A looping wind bed for the island's ambience: filtered noise with a
+/// slow swell, seamless end-to-end so it can loop without a click.
+///
+/// Procedural like everything else here — the file the baker writes is
+/// the asset; this generator is not consulted at runtime.
+pub fn wind_samples() -> (u32, Vec<i16>) {
+    const RATE: u32 = 22_050;
+    const SECONDS: f32 = 4.0;
+    let sample_count = (RATE as f32 * SECONDS) as usize;
+
+    let mut noise = Rng::new(0x_1234_5678);
+    let mut smoothed = 0.0f32;
+    let mut samples = Vec::with_capacity(sample_count);
+    for i in 0..sample_count {
+        let t = i as f32 / RATE as f32;
+        // One-pole low pass over white noise: wind is mostly low
+        // frequency, and unfiltered noise reads as static.
+        let white = noise.unit() * 2.0 - 1.0;
+        smoothed += (white - smoothed) * 0.02;
+        // Two swells per loop, and a cosine window at the seam so the
+        // loop point is inaudible.
+        let swell = 0.55 + 0.45 * (t / SECONDS * std::f32::consts::TAU * 2.0).sin();
+        let seam = (t / SECONDS * std::f32::consts::TAU)
+            .cos()
+            .mul_add(-0.5, 0.5);
+        let value = smoothed * swell * (0.35 + 0.65 * seam) * 0.6;
+        samples.push((value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+    }
+    (RATE, samples)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

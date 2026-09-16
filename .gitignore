@@ -10,5 +10,10 @@
 # Default dev project the editor scaffolds when run with no path argument
 /RustyEngineProject/
 
+# Per-user editor state inside any project: open panels, last selection,
+# window layout. The project itself (project.ron, assets/, scenes/, src/)
+# is committed; this is not.
+.studio/
+
 # Environment
 .env

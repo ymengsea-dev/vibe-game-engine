@@ -1,0 +1,10 @@
+/Users/macbook/Desktop/Game engine/vge/games/island/games/island/target/debug/deps/symphonia_format_riff-47a6c372f84b3161.d: /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/lib.rs /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/common.rs /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/wave/mod.rs /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/wave/chunks.rs
+
+/Users/macbook/Desktop/Game engine/vge/games/island/games/island/target/debug/deps/libsymphonia_format_riff-47a6c372f84b3161.rlib: /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/lib.rs /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/common.rs /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/wave/mod.rs /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/wave/chunks.rs
+
+/Users/macbook/Desktop/Game engine/vge/games/island/games/island/target/debug/deps/libsymphonia_format_riff-47a6c372f84b3161.rmeta: /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/lib.rs /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/common.rs /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/wave/mod.rs /Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/wave/chunks.rs
+
+/Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/lib.rs:
+/Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/common.rs:
+/Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/wave/mod.rs:
+/Users/macbook/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/symphonia-format-riff-0.6.1/src/wave/chunks.rs:

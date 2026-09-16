@@ -148,10 +148,12 @@ mod bounds;
 mod camera;
 mod camera_rig;
 mod config;
+mod debug_draw;
 mod error;
 mod gpu;
 mod instancing;
 mod light;
+mod lod;
 mod material;
 mod mesh;
 mod model;
@@ -177,6 +179,7 @@ pub use camera_rig::CameraRig;
 pub use config::{
     build_surface_config, choose_msaa_sample_count, choose_surface_format, should_reconfigure,
 };
+pub use debug_draw::DebugDraw;
 pub use error::RendererError;
 pub use gpu::{GpuContext, REQUESTED_MSAA_SAMPLE_COUNT};
 pub use instancing::{InstanceBuffer, InstanceRaw, InstancedDrawable, InstancedPipeline};
@@ -184,6 +187,7 @@ pub use light::{
     AmbientLight, DirectionalLight, DirectionalLightUniform, LightSet, LightsUniform,
     MAX_DIRECTIONAL_LIGHTS, MAX_POINT_LIGHTS, PointLight, PointLightUniform,
 };
+pub use lod::{LodLevel, LodSelector, LodSet, StreamQueue};
 pub use material::{AlphaMode, Material, MaterialUniform};
 pub use mesh::{Mesh, Vertex, cube, quad};
 pub use model::ModelUniform;

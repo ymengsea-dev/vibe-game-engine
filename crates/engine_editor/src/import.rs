@@ -22,16 +22,19 @@
 //!   startup path; an [`engine_asset::AssetLoader`] integration is later.
 //! - No per-row status badges in the browser — only a one-line summary
 //!   (see [`AssetImporter::stats`]).
-//! - A `.gltf` that references external `.bin`/image files fails
-//!   (`engine_asset::import_gltf_slice` takes a self-contained byte
-//!   slice); it is recorded as [`ImportOutcome::Failed`], not fatal.
+//! - A `.gltf` is imported **by path**
+//!   (`engine_asset::import_gltf_file`), so a model that references an
+//!   external texture — `../textures/grass.png`, as this engine's own
+//!   exporter writes — resolves it relative to the model. Editing that
+//!   texture and re-importing shows the change; the file in the browser
+//!   is the live source, not a copy embedded in the model.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
 use engine_asset::{
-    AssetId, ImportCache, ImportedAudio, ImportedGltf, ImportedTexture, import_gltf_slice,
+    AssetId, ImportCache, ImportedAudio, ImportedGltf, ImportedTexture, import_gltf_file,
     import_texture_bytes, import_wav_bytes,
 };
 
@@ -54,7 +57,7 @@ pub enum ImportOutcome {
 /// large the individual imported types are.
 #[derive(Debug)]
 pub enum ImportedAsset {
-    /// A `.gltf`/`.glb` import (`engine_asset::import_gltf_slice`).
+    /// A `.gltf`/`.glb` import (`engine_asset::import_gltf_file`).
     Mesh(Box<ImportedGltf>),
     /// A `.png`/`.jpg`/`.jpeg` import (`engine_asset::import_texture_bytes`).
     Texture(Box<ImportedTexture>),
@@ -87,6 +90,19 @@ pub struct ImportStats {
     pub cached: usize,
     /// How many failed to read or decode.
     pub failed: usize,
+}
+
+/// Summary returned by a hot-reload pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReloadReport {
+    /// Number of watcher paths considered.
+    pub changed: usize,
+    /// Assets successfully replaced in the import cache.
+    pub reimported: usize,
+    /// Changed assets that failed to decode; prior valid data is retained.
+    pub failed: usize,
+    /// Cached assets removed because their source disappeared.
+    pub evicted: usize,
 }
 
 /// Owns the [`ImportCache`], the in-memory imported-data map, and the
@@ -188,6 +204,42 @@ impl AssetImporter {
         index
     }
 
+    /// Processes watcher output and refreshes the import cache.
+    ///
+    /// The cache still compares bytes, so duplicate or stale watcher events
+    /// are harmless. A failed replacement never removes the previous valid
+    /// imported value; deleted sources are evicted only after the full pass.
+    pub fn reload_changed(
+        &mut self,
+        root: &Path,
+        entries: &mut [AssetEntry],
+        changed: &[std::path::PathBuf],
+    ) -> (AssetIndex, ReloadReport) {
+        let before = self.imported_count();
+        let index = self.run(root, entries);
+        let changed_set: HashSet<std::path::PathBuf> = changed
+            .iter()
+            .filter_map(|path| path.strip_prefix(root).ok().map(Path::to_path_buf))
+            .collect();
+        let mut report = ReloadReport {
+            changed: changed_set.len(),
+            ..ReloadReport::default()
+        };
+        for record in self
+            .records
+            .iter()
+            .filter(|record| changed_set.contains(&record.relative_path))
+        {
+            match record.outcome {
+                ImportOutcome::Imported => report.reimported += 1,
+                ImportOutcome::Failed(_) => report.failed += 1,
+                ImportOutcome::Cached => {}
+            }
+        }
+        report.evicted = before.saturating_sub(self.imported_count());
+        (index, report)
+    }
+
     /// The imported data for `id`, if a pass has imported it and it did
     /// not later fail.
     pub fn get(&self, id: AssetId) -> Option<&ImportedAsset> {
@@ -232,11 +284,16 @@ impl AssetImporter {
 /// one of the [`AssetKind::is_referenceable`] variants — `run` filters
 /// the rest out before calling this.
 fn import_one(kind: AssetKind, absolute: &Path) -> Result<ImportedAsset, String> {
+    // Meshes go by path so external references resolve; everything else
+    // is self-contained and reads faster as bytes.
+    if kind == AssetKind::Mesh {
+        return import_gltf_file(absolute)
+            .map(|gltf| ImportedAsset::Mesh(Box::new(gltf)))
+            .map_err(|err| err.to_string());
+    }
     let bytes = fs::read(absolute).map_err(|err| err.to_string())?;
     match kind {
-        AssetKind::Mesh => import_gltf_slice(&bytes)
-            .map(|gltf| ImportedAsset::Mesh(Box::new(gltf)))
-            .map_err(|err| err.to_string()),
+        AssetKind::Mesh => unreachable_mesh(),
         AssetKind::Texture => import_texture_bytes(&bytes)
             .map(|texture| ImportedAsset::Texture(Box::new(texture)))
             .map_err(|err| err.to_string()),
@@ -247,6 +304,12 @@ fn import_one(kind: AssetKind, absolute: &Path) -> Result<ImportedAsset, String>
             Err("no importer for this asset kind".to_string())
         }
     }
+}
+
+/// The `Mesh` arm above returns early; this keeps the match exhaustive
+/// without a catch-all that would swallow a future asset kind.
+fn unreachable_mesh() -> Result<ImportedAsset, String> {
+    Err("mesh import is handled by path, above".to_string())
 }
 
 #[cfg(test)]

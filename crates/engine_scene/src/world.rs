@@ -72,6 +72,12 @@ impl Scene {
         // the editor's prefab capture so the two can't drift.
         for (entity, scene_entity) in &mut collected {
             scene_entity.locked = world.get::<Lock>(*entity).is_some();
+            scene_entity.collider = world
+                .get::<crate::format::SceneCollider>(*entity)
+                .map(|carrier| carrier.0.clone());
+            scene_entity.audio_emitter = world
+                .get::<crate::format::SceneAudioEmitter>(*entity)
+                .map(|carrier| carrier.0.clone());
             let (mesh_renderer, sprite) = capture_renderables(world, *entity);
             scene_entity.mesh_renderer = mesh_renderer;
             scene_entity.sprite = sprite;
@@ -104,6 +110,11 @@ impl Scene {
         Self {
             version: crate::CURRENT_SCENE_VERSION,
             entities,
+            // Scene-level, so it rides a world resource rather than an
+            // entity — same carrier reasoning, one level up.
+            nav_grid: world
+                .get_resource::<crate::format::SceneNavGrid>()
+                .map(|carrier| carrier.0.clone()),
         }
     }
 
@@ -142,6 +153,11 @@ impl Scene {
         resolver: &mut impl SceneResolver,
     ) -> InstantiateReport {
         let mut unresolved = 0;
+        // Scene-level data goes in before the entities, so a system that
+        // reacts to a spawn can already see the level it spawned into.
+        if let Some(nav_grid) = &self.nav_grid {
+            world.insert_resource(crate::format::SceneNavGrid(nav_grid.clone()));
+        }
         let spawned: Vec<Entity> = self
             .entities
             .iter()
@@ -348,6 +364,7 @@ mod tests {
                 parent: Some(99),
                 ..Default::default()
             }],
+            nav_grid: None,
         };
         let mut world = World::new();
         let spawned = scene.instantiate(&mut world);
@@ -364,6 +381,7 @@ mod tests {
                 parent: Some(0),
                 ..Default::default()
             }],
+            nav_grid: None,
         };
         let mut world = World::new();
         let spawned = scene.instantiate(&mut world);
@@ -490,6 +508,106 @@ mod tests {
             color: [1.0, 0.5, 0.25, 1.0],
             z_order: 0.0,
         }
+    }
+
+    #[test]
+    fn emitter_round_trips_through_the_world() {
+        use crate::format::{AssetRef, AudioEmitterData};
+
+        let emitter = AudioEmitterData {
+            sound: AssetRef {
+                id: "8a1d0f84-0a3a-4a1e-9d5b-2f3d4e5a6b7c".to_owned(),
+            },
+            autoplay: false,
+            looping: true,
+            gain: 0.4,
+            radius: 12.5,
+        };
+        let scene = Scene {
+            version: crate::CURRENT_SCENE_VERSION,
+            entities: vec![SceneEntity {
+                name: Some("Waterfall".to_owned()),
+                audio_emitter: Some(emitter.clone()),
+                ..Default::default()
+            }],
+            nav_grid: None,
+        };
+
+        let mut world = World::new();
+        // No resolver, so no sound is decoded — the authored values must
+        // survive anyway, or the editor deletes them on the next save.
+        scene.instantiate(&mut world);
+        let captured = Scene::from_world(&mut world);
+
+        assert_eq!(captured.entities[0].audio_emitter, Some(emitter));
+    }
+
+    #[test]
+    fn nav_grid_round_trips() {
+        use crate::format::NavGridData;
+
+        let mut grid = NavGridData::new(4, 3, 2.0, [-4.0, -3.0]);
+        grid.blocked[5] = true;
+        grid.blocked[6] = true;
+
+        let scene = Scene {
+            version: crate::CURRENT_SCENE_VERSION,
+            entities: Vec::new(),
+            nav_grid: Some(grid.clone()),
+        };
+
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        let captured = Scene::from_world(&mut world);
+
+        assert_eq!(
+            captured.nav_grid,
+            Some(grid),
+            "a level's walkability is the level's, and has to survive a save"
+        );
+    }
+
+    #[test]
+    fn a_scene_without_a_nav_grid_does_not_invent_one() {
+        let mut world = World::new();
+        Scene::default().instantiate(&mut world);
+        assert_eq!(Scene::from_world(&mut world).nav_grid, None);
+    }
+
+    #[test]
+    fn a_collider_survives_a_round_trip_through_the_world() {
+        // Without the `SceneCollider` carrier this silently deleted
+        // every collider in a scene the moment the editor saved it —
+        // 166 of them in the island's.
+        use crate::format::{BodyKind, ColliderData, ColliderShape};
+
+        let collider = ColliderData {
+            shape: ColliderShape::Capsule {
+                half_height: 0.9,
+                radius: 0.35,
+            },
+            body: BodyKind::Dynamic,
+        };
+        let scene = Scene {
+            version: crate::CURRENT_SCENE_VERSION,
+            entities: vec![SceneEntity {
+                name: Some("Player".to_owned()),
+                transform: Some(TransformData::from(engine_utils::Transform::IDENTITY)),
+                collider: Some(collider.clone()),
+                ..Default::default()
+            }],
+            nav_grid: None,
+        };
+
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        let captured = Scene::from_world(&mut world);
+
+        assert_eq!(
+            captured.entities[0].collider,
+            Some(collider),
+            "a saved scene keeps the colliders the loaded one had"
+        );
     }
 
     #[test]

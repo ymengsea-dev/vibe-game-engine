@@ -28,6 +28,8 @@ pub struct FrameSample {
     /// `(name, milliseconds)` per [`FrameProfiler::record_span`] call,
     /// in call order.
     pub spans: Vec<(String, f32)>,
+    /// Asynchronous GPU duration, when the adapter supports timestamps.
+    pub gpu_ms: Option<f32>,
 }
 
 /// Rolling CPU frame-time history.
@@ -35,6 +37,7 @@ pub struct FrameProfiler {
     frames: VecDeque<FrameSample>,
     frame_start: Instant,
     current_spans: Vec<(String, f32)>,
+    pending_gpu_ms: Option<f32>,
 }
 
 impl Default for FrameProfiler {
@@ -50,6 +53,7 @@ impl FrameProfiler {
             frames: VecDeque::with_capacity(HISTORY_LEN),
             frame_start: Instant::now(),
             current_spans: Vec::new(),
+            pending_gpu_ms: None,
         }
     }
 
@@ -67,6 +71,15 @@ impl FrameProfiler {
             .push((name.to_string(), duration.as_secs_f32() * 1000.0));
     }
 
+    /// Supplies a completed asynchronous GPU result for the next frame.
+    /// Invalid values are ignored, so unsupported adapters naturally fall
+    /// back to CPU-only profiling without blocking the UI thread.
+    pub fn record_gpu_ms(&mut self, milliseconds: f32) {
+        if milliseconds.is_finite() && milliseconds >= 0.0 {
+            self.pending_gpu_ms = Some(milliseconds);
+        }
+    }
+
     /// Closes the current frame: pushes a [`FrameSample`] with the total
     /// elapsed time and the recorded spans, dropping the oldest sample
     /// once history is full.
@@ -74,6 +87,7 @@ impl FrameProfiler {
         let sample = FrameSample {
             total_ms: self.frame_start.elapsed().as_secs_f32() * 1000.0,
             spans: std::mem::take(&mut self.current_spans),
+            gpu_ms: self.pending_gpu_ms.take(),
         };
         if self.frames.len() == HISTORY_LEN {
             self.frames.pop_front();
@@ -136,6 +150,11 @@ pub fn show(ui: &mut egui::Ui, profiler: &FrameProfiler) {
         "CPU: {average:.2} ms avg  ·  {:.2} ms peak  ·  ~{fps:.0} FPS",
         profiler.max_ms()
     ));
+    if let Some(gpu_ms) = profiler.latest().and_then(|sample| sample.gpu_ms) {
+        ui.label(format!("GPU: {gpu_ms:.2} ms (async)"));
+    } else {
+        ui.weak("GPU: unavailable (CPU timing remains active)");
+    }
 
     sparkline(ui, profiler);
 
@@ -247,5 +266,18 @@ mod tests {
         }
         assert!(profiler.average_ms() >= 0.0 && profiler.average_ms() < 100.0);
         assert!(profiler.max_ms() >= profiler.average_ms());
+    }
+
+    #[test]
+    fn gpu_results_are_async_and_invalid_values_are_ignored() {
+        let mut profiler = FrameProfiler::new();
+        profiler.record_gpu_ms(f32::NAN);
+        profiler.begin_frame();
+        profiler.end_frame();
+        assert_eq!(profiler.latest().unwrap().gpu_ms, None);
+        profiler.record_gpu_ms(4.5);
+        profiler.begin_frame();
+        profiler.end_frame();
+        assert_eq!(profiler.latest().unwrap().gpu_ms, Some(4.5));
     }
 }

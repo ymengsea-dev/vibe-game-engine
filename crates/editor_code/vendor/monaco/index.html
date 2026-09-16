@@ -30,7 +30,17 @@
     #files .title { padding: 2px 10px 6px; color: #888; text-transform: uppercase;
       letter-spacing: .04em; font-size: 10px; }
     #files .row { padding: 2px 10px; white-space: nowrap; cursor: default; }
-    #files .row.dir { color: #9aa; }
+    #files .row.dir { color: #9aa; cursor: pointer; }
+    #files .row.dir:hover { background: #2a2d2e; }
+    #files .row.dir.target { background: #2f3b46; color: #cfe3f0; }
+    #files .actions { display: flex; gap: 4px; padding: 0 8px 6px; }
+    #files .actions button { flex: 1 1 auto; background: #2d2d2d; color: #bbb;
+      border: 1px solid #3a3a3a; border-radius: 3px; font-size: 10px;
+      padding: 2px 0; cursor: pointer; font-family: inherit; }
+    #files .actions button:hover { background: #383838; color: #fff; }
+    #files input.new { width: calc(100% - 24px); margin: 2px 10px; background: #1e1e1e;
+      border: 1px solid #4a9eff; border-radius: 2px; color: #eee;
+      font-family: inherit; font-size: 12px; padding: 1px 4px; }
     #files .row.file { color: #cfcfcf; cursor: pointer; }
     #files .row.file:hover { background: #2a2d2e; }
     #files .row.file.active { background: #37373d; color: #fff; }
@@ -177,37 +187,128 @@
         renderFiles();
       }
 
-      // Render the flat relative-path list as an indented folder tree.
-      function renderFiles() {
-        var box = document.getElementById('files');
-        box.textContent = '';
-        var title = document.createElement('div');
-        title.className = 'title';
-        title.textContent = tree.label || 'Files';
-        box.appendChild(title);
+      // Directory collapse state, the directory new files are created
+      // in, and the pending "type a name" row. All keyed by
+      // tree-relative directory path ('' is the root), so they survive a
+      // tree refresh — the host re-sends the whole tree after every
+      // create.
+      var collapsed = {};
+      var targetDir = '';
+      var pendingCreate = null; // { kind: 'file' | 'folder' }
 
-        var seenDirs = {};
-        tree.files.slice().sort().forEach(function (rel) {
+      // Group the flat relative-path list into nested directories.
+      function groupFiles(files) {
+        var root = { dirs: {}, files: [] };
+        files.slice().sort().forEach(function (rel) {
           var parts = rel.split('/');
+          var node = root;
           for (var i = 0; i < parts.length - 1; i++) {
-            var dirPath = parts.slice(0, i + 1).join('/');
-            if (!seenDirs[dirPath]) {
-              seenDirs[dirPath] = true;
-              var d = document.createElement('div');
-              d.className = 'row dir';
-              d.style.paddingLeft = (10 + i * 12) + 'px';
-              d.textContent = parts[i] + '/';
-              box.appendChild(d);
-            }
+            if (!node.dirs[parts[i]]) { node.dirs[parts[i]] = { dirs: {}, files: [] }; }
+            node = node.dirs[parts[i]];
           }
-          var activeRel = current ? relOf(current) : null;
+          node.files.push(rel);
+        });
+        return root;
+      }
+
+      function actionButton(label, title, onClick) {
+        var b = document.createElement('button');
+        b.textContent = label;
+        b.title = title;
+        b.onclick = onClick;
+        return b;
+      }
+
+      // Start a create: show the name field inside the selected folder.
+      function startCreate(kind) {
+        pendingCreate = { kind: kind };
+        if (collapsed[targetDir]) { delete collapsed[targetDir]; }
+        renderFiles();
+        var field = document.querySelector('#files input.new');
+        if (field) { field.focus(); }
+      }
+
+      // Ask the host to create the typed name inside `targetDir`. The
+      // host validates the path against the project root before it
+      // touches the disk — this side only trims and drops empties.
+      function commitCreate(name) {
+        var kind = pendingCreate && pendingCreate.kind;
+        pendingCreate = null;
+        name = (name || '').trim();
+        if (!kind || !name) { renderFiles(); return; }
+        var rel = targetDir ? (targetDir + '/' + name) : name;
+        post({ type: 'create', path: rel, folder: kind === 'folder' });
+      }
+
+      function createRow() {
+        var field = document.createElement('input');
+        field.className = 'new';
+        field.type = 'text';
+        field.placeholder = pendingCreate.kind === 'folder' ? 'folder name' : 'file name';
+        field.onkeydown = function (e) {
+          if (e.key === 'Enter') { commitCreate(field.value); }
+          else if (e.key === 'Escape') { pendingCreate = null; renderFiles(); }
+        };
+        field.onblur = function () { pendingCreate = null; renderFiles(); };
+        return field;
+      }
+
+      // Render the grouped tree as collapsible directories + file rows.
+      function renderNode(box, node, dirPath, depth) {
+        if (pendingCreate && targetDir === dirPath) {
+          box.appendChild(createRow());
+        }
+        Object.keys(node.dirs).sort().forEach(function (name) {
+          var childPath = dirPath ? (dirPath + '/' + name) : name;
+          var isCollapsed = !!collapsed[childPath];
+          var row = document.createElement('div');
+          row.className = 'row dir' + (childPath === targetDir ? ' target' : '');
+          row.style.paddingLeft = (10 + depth * 12) + 'px';
+          row.textContent = (isCollapsed ? '\u25b8 ' : '\u25be ') + name;
+          row.onclick = function () {
+            // One click both selects the folder (so New File lands in
+            // it) and toggles it — selecting without opening would hide
+            // where the new file went.
+            if (targetDir === childPath) {
+              if (isCollapsed) { delete collapsed[childPath]; } else { collapsed[childPath] = true; }
+            }
+            targetDir = childPath;
+            pendingCreate = null;
+            renderFiles();
+          };
+          box.appendChild(row);
+          if (!isCollapsed) { renderNode(box, node.dirs[name], childPath, depth + 1); }
+        });
+        var activeRel = current ? relOf(current) : null;
+        node.files.forEach(function (rel) {
           var f = document.createElement('div');
           f.className = 'row file' + (rel === activeRel ? ' active' : '');
-          f.style.paddingLeft = (10 + (parts.length - 1) * 12) + 'px';
-          f.textContent = parts[parts.length - 1];
+          f.style.paddingLeft = (10 + depth * 12) + 'px';
+          f.textContent = rel.split('/').pop();
           f.onclick = function () { open(rel); };
           box.appendChild(f);
         });
+      }
+
+      function renderFiles() {
+        var box = document.getElementById('files');
+        box.textContent = '';
+
+        var title = document.createElement('div');
+        title.className = 'title';
+        title.textContent = (tree.label || 'Files') + (targetDir ? (' \u203a ' + targetDir) : '');
+        title.onclick = function () { targetDir = ''; pendingCreate = null; renderFiles(); };
+        box.appendChild(title);
+
+        var actions = document.createElement('div');
+        actions.className = 'actions';
+        actions.appendChild(actionButton('+ File', 'New file in the selected folder',
+          function () { startCreate('file'); }));
+        actions.appendChild(actionButton('+ Folder', 'New folder in the selected folder',
+          function () { startCreate('folder'); }));
+        box.appendChild(actions);
+
+        renderNode(box, groupFiles(tree.files), '', 0);
       }
 
       // Open a tree-relative file: focus its tab if already loaded, else

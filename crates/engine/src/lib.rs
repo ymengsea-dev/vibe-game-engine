@@ -35,7 +35,8 @@ pub mod app;
 /// Populated as subsystems are implemented milestone by milestone.
 pub mod prelude {
     pub use crate::app::{
-        Game, GameConfig, GameContext, GameError, SavePolicy, SceneParts, Time, run_game,
+        Game, GameConfig, GameContext, GameError, MAX_FRAME_SECONDS, SavePolicy, SceneParts, Time,
+        run_game,
     };
     pub use engine_ai::{
         GridCoord, NavError, NavGrid, find_path, find_path_world, follow_path, line_of_sight,
@@ -70,13 +71,13 @@ pub mod prelude {
     };
     #[cfg(feature = "studio")]
     pub use engine_editor::{
-        AssetEntry, AssetImporter, AssetIndex, AssetKind, AudioSummary, BottomTab, BuildConfig,
-        ConsoleLayer, ConsoleLine, ConsoleLog, DirtyState, EditorDimension, EditorError,
-        EditorSession, EditorShell, EditorState, ImportOutcome, ImportRecord, ImportStats,
-        ImportedAsset, InspectorTab, MeshSummary, PREFAB_DIR, PanelVisibility, PendingAction,
-        PreviewCache, SESSION_FILE, SESSION_VERSION, ScreenDescriptor, TextureSummary,
-        TransformSpace, Viewport, Workspace, audio_summary, human_bytes, mesh_summary,
-        resolve_asset_ids, scan_assets, texture_summary, waveform_bins, write_prefab,
+        AssetEntry, AssetImporter, AssetIndex, AssetKind, AudioSummary, BottomTab, ConsoleLayer,
+        ConsoleLine, ConsoleLog, DirtyState, EditorDimension, EditorError, EditorSession,
+        EditorShell, EditorState, ImportOutcome, ImportRecord, ImportStats, ImportedAsset,
+        InspectorTab, MeshSummary, PREFAB_DIR, PanelVisibility, PendingAction, PreviewCache,
+        ProjectRequest, RecentProjects, SESSION_FILE, SESSION_VERSION, ScreenDescriptor,
+        TextureSummary, TransformSpace, Viewport, Workspace, audio_summary, human_bytes,
+        mesh_summary, resolve_asset_ids, scan_assets, texture_summary, waveform_bins, write_prefab,
     };
     pub use engine_physics::{
         Aabb2d, CharacterController, CharacterMovement, CharacterMovement2D, Circle2d, Collider2d,
@@ -108,13 +109,17 @@ pub mod prelude {
         scatter, skybox_uniform,
     };
     pub use engine_scene::{
-        AssetRef, CURRENT_SCENE_VERSION, CameraData, InstantiateReport, MeshRendererData,
-        NullResolver, Prefab, ProjectionData, SaveGame, SavedEntity, Scene, SceneEntity,
-        SceneError, SceneResolver, SpriteData, TransformData, WorldSnapshot, capture_renderables,
+        AssetLibrary, AssetRef, AudioEmitterData, BUNDLE_FILE, BodyKind, CURRENT_SCENE_VERSION,
+        CameraData, ColliderData, ColliderShape, EXPORT_SCENE_FILE, ExportContent,
+        InstantiateReport, LoadedSkinnedMesh, MeshRendererData, NavGridData, NullResolver, Prefab,
+        ProjectionData, RuntimeResolver, SaveGame, SavedEntity, Scene, SceneAudioEmitter,
+        SceneCollider, SceneEntity, SceneError, SceneNavGrid, SceneResolver, SpriteData,
+        TransformData, WorldSnapshot, capture_renderables, executable_dir, load_mesh_geometry,
+        load_skinned_mesh, open_export,
     };
     pub use engine_ui::{
-        Anchor, Color as UiColor, DrawCommand, DrawKind, Node as UiNode, NodeId, PointerInput,
-        Rect as UiRect, Style as UiStyle, Ui, Widget as UiWidget,
+        Anchor, Color as UiColor, DrawCommand, DrawKind, FocusDirection, FocusRing, Node as UiNode,
+        NodeId, PointerInput, Rect as UiRect, Style as UiStyle, Ui, Widget as UiWidget,
     };
     pub use engine_utils::{AssetHandle, AssetStore, JobError, JobSystem, Transform};
     pub use glam;
@@ -137,5 +142,61 @@ mod tests {
             .expect("an empty grid always has a path");
         assert_eq!(path.first().copied(), Some(GridCoord::new(0, 0)));
         assert_eq!(path.last().copied(), Some(GridCoord::new(3, 3)));
+    }
+
+    /// A nav grid authored in a scene is the one the pathfinder walks.
+    ///
+    /// This is the seam T-28 exists to close: `engine_ai` knows nothing
+    /// about scenes and `engine_scene` knows nothing about pathfinding,
+    /// so the only place the two meet is here, in the facade both a game
+    /// and the editor use.
+    #[test]
+    fn a_scene_nav_grid_is_what_the_pathfinder_walks() {
+        use crate::prelude::{
+            GridCoord, NavGrid, NavGridData, Scene, SceneNavGrid, World, find_path,
+        };
+
+        // A 5x3 grid with a wall down the middle column, one gap at the
+        // far edge — a path exists but has to go around.
+        let mut data = NavGridData::new(5, 3, 1.0, [0.0, 0.0]);
+        for row in 0..2 {
+            data.blocked[row * 5 + 2] = true;
+        }
+        let scene = Scene {
+            version: crate::scene::CURRENT_SCENE_VERSION,
+            entities: Vec::new(),
+            nav_grid: Some(data),
+        };
+        scene.validate().expect("a well-formed grid validates");
+
+        // Through the world, as a loaded scene puts it there.
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        let authored = world
+            .get_resource::<SceneNavGrid>()
+            .expect("the scene put its grid in the world")
+            .0
+            .clone();
+
+        let grid = NavGrid::from_cells(
+            authored.width,
+            authored.height,
+            authored.cell_size,
+            glam::Vec2::from_array(authored.origin),
+            &authored.blocked,
+        )
+        .expect("authored cells make a valid grid");
+
+        assert!(grid.is_blocked(GridCoord::new(2, 0)), "the wall is there");
+        let path = find_path(&grid, GridCoord::new(0, 0), GridCoord::new(4, 0))
+            .expect("there is a way around the wall");
+        assert!(
+            path.iter().any(|step| step.y == 2),
+            "the path detours through the gap rather than through the wall: {path:?}"
+        );
+        assert!(
+            !path.iter().any(|step| grid.is_blocked(*step)),
+            "no step of the path is a blocked cell"
+        );
     }
 }

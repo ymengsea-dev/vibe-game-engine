@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::assets::AssetView;
 use crate::chrome::{PanelVisibility, Workspace};
 use crate::error::EditorError;
+use crate::overlays::OverlayToggles;
 
 /// On-disk format version for `.studio/session.ron`.
 pub const SESSION_VERSION: u32 = 1;
@@ -36,6 +38,23 @@ pub struct EditorSession {
     /// The scene that was open, relative to the project root. `None`
     /// falls back to the project's `main_scene`.
     pub last_scene: Option<PathBuf>,
+    /// How the Asset Browser was last grouping its rows. Additive, like
+    /// `layouts`: a session written before this field existed loads with
+    /// the default view rather than failing.
+    #[serde(default)]
+    pub asset_view: AssetView,
+    /// Whether the Asset Browser preview strip is visible.
+    #[serde(default = "default_preview_open")]
+    pub preview_open: bool,
+    /// Which build configuration the toolbar had selected, as an index
+    /// into the project's list. Additive; clamped on load, since the
+    /// project's configurations can change under it.
+    #[serde(default)]
+    pub configuration_index: usize,
+    /// Which Scene-view debug overlays were on. Additive; an older
+    /// session loads with them all off.
+    #[serde(default)]
+    pub overlays: OverlayToggles,
 }
 
 impl Default for EditorSession {
@@ -46,8 +65,16 @@ impl Default for EditorSession {
             panels: PanelVisibility::default(),
             layouts: Vec::new(),
             last_scene: None,
+            asset_view: AssetView::default(),
+            preview_open: true,
+            configuration_index: 0,
+            overlays: OverlayToggles::default(),
         }
     }
+}
+
+fn default_preview_open() -> bool {
+    true
 }
 
 impl EditorSession {

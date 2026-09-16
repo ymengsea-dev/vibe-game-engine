@@ -10,7 +10,7 @@
 //! [`EditorShell`] owns the egui context, the `egui-winit` event bridge,
 //! and the `egui-wgpu` renderer, and [`EditorShell::run_frame`] draws
 //! the studio shell: a menu bar, a toolbar (play/pause/stop, [`Workspace`]
-//! switcher, gizmo mode, [`TransformSpace`], [`BuildConfig`]), a status
+//! switcher, gizmo mode, [`TransformSpace`], the project's build configurations), a status
 //! bar, and the panels — each shown per [`PanelVisibility`]. [`Viewport`]
 //! renders a placeholder 3D scene (one lit cube per entity — not the
 //! game demo's full pipeline) off-screen into the central Scene panel.
@@ -29,20 +29,28 @@ mod asset_import;
 mod assets;
 mod chrome;
 mod console;
+pub mod crash;
+pub mod dependencies;
 mod diagnostics;
 mod dirty;
+#[cfg(feature = "dock-shell")]
+pub mod dock;
 mod error;
 pub mod gizmo;
 pub mod hierarchy;
 mod history;
+pub mod i18n;
 mod import;
 pub mod inspect;
 pub mod inspector;
 mod output;
+pub mod overlays;
+pub mod perf_budget;
 pub mod play;
 pub mod prefab;
 mod preview;
 pub mod profiler;
+mod project_swap;
 mod resolve;
 mod search;
 mod session;
@@ -50,6 +58,7 @@ mod shell;
 mod state;
 #[cfg(feature = "terminal")]
 mod terminal;
+pub mod terrain_tools;
 mod theme;
 mod viewport;
 
@@ -58,22 +67,26 @@ pub use asset_import::{
     unique_destination,
 };
 pub use assets::{
-    AssetEntry, AssetIndex, AssetKind, resolve_ids as resolve_asset_ids, scan as scan_assets,
+    AssetBrowser, AssetEntry, AssetFolder, AssetIndex, AssetKind, AssetView,
+    build_tree as build_asset_tree, resolve_ids as resolve_asset_ids, scan as scan_assets,
 };
 pub use chrome::{
-    BottomTab, BuildConfig, EditorDimension, InspectorTab, PanelVisibility, TransformSpace,
-    Workspace,
+    BottomTab, EditorDimension, InspectorTab, PanelVisibility, TransformSpace, Workspace,
 };
 pub use console::{ConsoleFilter, ConsoleLayer, ConsoleLine, ConsoleLog, LevelFilter};
 pub use diagnostics::{Diagnostic, Diagnostics, Severity};
 pub use dirty::{DirtyState, PendingAction};
-pub use import::{AssetImporter, ImportOutcome, ImportRecord, ImportStats, ImportedAsset};
+pub use import::{
+    AssetImporter, ImportOutcome, ImportRecord, ImportStats, ImportedAsset, ReloadReport,
+};
 pub use output::OutputLog;
+pub use overlays::OverlayToggles;
 pub use prefab::{PREFAB_DIR, write_prefab};
 pub use preview::{
     AudioSummary, MeshSummary, PreviewCache, TextureSummary, audio_summary, human_bytes,
     mesh_summary, texture_summary, waveform_bins,
 };
+pub use project_swap::{MAX_RECENT_PROJECTS, ProjectRequest, RecentProjects};
 pub use resolve::{EditorResolver, ResolveReport, resolve_pending};
 pub use search::{
     Jump as SearchJump, MAX_TEXT_HITS, SearchMode, SearchQuery, SearchState, SymbolHit, TextHit,

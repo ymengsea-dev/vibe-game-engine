@@ -13,11 +13,14 @@ egui.workspace = true
 rfd.workspace = true
 egui-winit.workspace = true
 egui-wgpu.workspace = true
+egui_dock = { workspace = true, optional = true }
 wgpu.workspace = true
 bytemuck.workspace = true
 glam.workspace = true
 thiserror.workspace = true
 engine_asset.workspace = true
+editor_ai.workspace = true
+editor_tools.workspace = true
 engine_ecs.workspace = true
 engine_editor_derive.workspace = true
 engine_platform.workspace = true
@@ -43,6 +46,7 @@ image.workspace = true
 
 [features]
 terminal = ["dep:portable-pty", "dep:alacritty_terminal"]
+dock-shell = ["dep:egui_dock"]
 
 [lints]
 workspace = true

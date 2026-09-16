@@ -1,0 +1,145 @@
+{
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 12,
+      "max": [
+        0.8032644987106323,
+        3.4683289527893066,
+        0.6956474781036377
+      ],
+      "min": [
+        -0.8032644987106323,
+        1.218173623085022,
+        -0.6956474781036377
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 12,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 12,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5125,
+      "count": 18,
+      "type": "SCALAR"
+    }
+  ],
+  "asset": {
+    "generator": "RustyEngine engine_asset::export_gltf",
+    "version": "2.0"
+  },
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteLength": 144,
+      "byteOffset": 0,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 144,
+      "byteOffset": 144,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 96,
+      "byteOffset": 288,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 72,
+      "byteOffset": 384,
+      "target": 34963
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 456,
+      "uri": "data:application/octet-stream;base64,vqJNvx3tmz8AAAAAvqJNPx3tmz8AAAAAvqJNPxr5XUAAAAAAvqJNvxr5XUAAAAAAvaLNvh3tmz/0FTK/vaLNPh3tmz/0FTI/vaLNPhr5XUD0FTI/vaLNvhr5XUD0FTK/wKLNPh3tmz/0FTK/wKLNvh3tmz/0FTI/wKLNvhr5XUD0FTI/wKLNPhr5XUD0FTK/AAAAgLAjqT6zoHE/AAAAgLAjqT6zoHE/AAAAgLAjqT6zoHE/AAAAgLAjqT6zoHE/ekFRv7AjqT6yoPE+ekFRv7AjqT6yoPE+ekFRv7AjqT6yoPE+ekFRv7AjqT6yoPE+eUFRv7AjqT61oPG+eUFRv7AjqT61oPG+eUFRv7AjqT61oPG+eUFRv7AjqT61oPG+AAAAAAAAgD8AAIA/AACAPwAAgD8AAAAAAAAAAAAAAAAAAAAAAACAPwAAgD8AAIA/AACAPwAAAAAAAAAAAAAAAAAAAAAAAIA/AACAPwAAgD8AAIA/AAAAAAAAAAAAAAAAAAAAAAEAAAACAAAAAAAAAAIAAAADAAAABAAAAAUAAAAGAAAABAAAAAYAAAAHAAAACAAAAAkAAAAKAAAACAAAAAoAAAALAAAA"
+    }
+  ],
+  "images": [
+    {
+      "name": "leaf",
+      "uri": "../textures/leaf.png"
+    }
+  ],
+  "materials": [
+    {
+      "alphaCutoff": 0.5,
+      "alphaMode": "MASK",
+      "name": "leaf",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "baseColorTexture": {
+          "index": 0
+        },
+        "metallicFactor": 0.0,
+        "roughnessFactor": 1.0
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "name": "canopy_02",
+      "primitives": [
+        {
+          "attributes": {
+            "NORMAL": 1,
+            "POSITION": 0,
+            "TEXCOORD_0": 2
+          },
+          "indices": 3,
+          "material": 0,
+          "mode": 4
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0,
+      "name": "canopy_02"
+    }
+  ],
+  "samplers": [
+    {
+      "magFilter": 9729,
+      "minFilter": 9987,
+      "wrapS": 10497,
+      "wrapT": 10497
+    }
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "textures": [
+    {
+      "sampler": 0,
+      "source": 0
+    }
+  ]
+}

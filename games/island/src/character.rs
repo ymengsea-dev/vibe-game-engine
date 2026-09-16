@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use engine::asset::{
-    ImportedAnimation, ImportedAnimationChannels, ImportedInterpolation, ImportedJoint,
-    ImportedKeyframes, ImportedSkeleton,
+    ImportedAnimation, ImportedAnimationChannels, ImportedAnimationEvent, ImportedInterpolation,
+    ImportedJoint, ImportedKeyframes, ImportedSkeleton,
 };
 use engine::prelude::{SkinnedVertex, Transform};
 use glam::{Quat, Vec3};
@@ -258,6 +258,15 @@ pub fn walk_clip() -> Arc<ImportedAnimation> {
         name: Some("walk".into()),
         duration: WALK_DURATION,
         channels,
+        // The clip carries its own footfalls, so the sound cannot drift
+        // out of sync with the motion when the walk is retimed.
+        events: footstep_times()
+            .into_iter()
+            .map(|time| ImportedAnimationEvent {
+                time,
+                name: "footstep".to_string(),
+            })
+            .collect(),
     })
 }
 

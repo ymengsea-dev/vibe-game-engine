@@ -131,32 +131,6 @@ impl Default for PanelVisibility {
     }
 }
 
-/// The build profile shown in the toolbar's build selector.
-///
-/// Display-only for now — selecting a profile does not yet change how
-/// anything compiles or runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BuildConfig {
-    /// Unoptimised, debug-assertions on.
-    #[default]
-    Debug,
-    /// Optimised release build.
-    Release,
-}
-
-impl BuildConfig {
-    /// Both variants, in toolbar order.
-    pub const ALL: [BuildConfig; 2] = [BuildConfig::Debug, BuildConfig::Release];
-
-    /// Label for the toolbar selector.
-    pub fn label(self) -> &'static str {
-        match self {
-            BuildConfig::Debug => "Debug",
-            BuildConfig::Release => "Release",
-        }
-    }
-}
-
 /// The gizmo coordinate space shown in the toolbar's transform-space
 /// selector.
 ///
@@ -334,7 +308,6 @@ mod tests {
             }
         }
         check(&Workspace::ALL, Workspace::label);
-        check(&BuildConfig::ALL, BuildConfig::label);
         check(&TransformSpace::ALL, TransformSpace::label);
         check(&BottomTab::ALL, BottomTab::label);
         check(&InspectorTab::ALL, InspectorTab::label);
@@ -344,7 +317,6 @@ mod tests {
     #[test]
     fn selector_defaults_are_the_first_variant() {
         assert_eq!(Workspace::default(), Workspace::ALL[0]);
-        assert_eq!(BuildConfig::default(), BuildConfig::ALL[0]);
         assert_eq!(TransformSpace::default(), TransformSpace::ALL[0]);
         assert_eq!(BottomTab::default(), BottomTab::ALL[0]);
         assert_eq!(InspectorTab::default(), InspectorTab::ALL[0]);

@@ -205,6 +205,197 @@ pub struct SpriteData {
     pub z_order: f32,
 }
 
+/// The physics shape a [`SceneEntity`] collides with.
+///
+/// Primitive shapes carry their own dimensions in local space, scaled by
+/// the entity's transform when the body is built.
+/// [`ColliderShape::TriMesh`] instead points at a mesh asset and
+/// collides against its actual triangles — the right choice for terrain,
+/// where an approximation would let the player fall through a hill.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ColliderShape {
+    /// A sphere of `radius`.
+    Ball {
+        /// Radius in local units.
+        radius: f32,
+    },
+    /// A box, given as half-extents on each axis.
+    Cuboid {
+        /// Half-width, half-height, half-depth.
+        half_extents: [f32; 3],
+    },
+    /// A Y-axis cylinder.
+    Cylinder {
+        /// Half the total height.
+        half_height: f32,
+        /// Radius in local units.
+        radius: f32,
+    },
+    /// A Y-axis capsule — a cylinder with hemispherical caps. The usual
+    /// shape for a character.
+    Capsule {
+        /// Half the height of the cylindrical section.
+        half_height: f32,
+        /// Radius in local units.
+        radius: f32,
+    },
+    /// Every triangle of a mesh asset.
+    ///
+    /// The reference is a mesh asset id, normally the same one the
+    /// entity renders, so what you see and what you collide with cannot
+    /// drift apart.
+    TriMesh {
+        /// The mesh asset to collide against.
+        mesh: AssetRef,
+    },
+}
+
+/// How a [`SceneEntity`]'s body behaves in the simulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BodyKind {
+    /// Never moves; the whole static world.
+    #[default]
+    Fixed,
+    /// Moved by forces and collisions.
+    Dynamic,
+    /// Moved by game code, pushing others aside.
+    Kinematic,
+}
+
+/// One entity's physics body: a shape plus how it moves.
+///
+/// The scene format carries this as *data* rather than leaving every
+/// game to rebuild its collision in code. Without it a loaded scene is
+/// scenery you walk through.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ColliderData {
+    /// The collision shape.
+    pub shape: ColliderShape,
+    /// How the body moves.
+    #[serde(default)]
+    pub body: BodyKind,
+}
+
+/// A scene entity's collider, carried on the live entity so the editor
+/// does not lose it.
+///
+/// The same rule as [`engine_ecs::components::MeshSource`]: an editor
+/// world holds no physics, so without a carrier component the collider a
+/// scene file declares would exist only until the next save — 166 bodies
+/// in the island's scene would vanish the first time somebody moved a
+/// rock and pressed Save. A runtime builds real rapier colliders from
+/// this same data and ignores the component.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq)]
+pub struct SceneCollider(pub ColliderData);
+
+/// A sound attached to an entity, as the scene stores it.
+///
+/// The live `AudioEmitter` owns a decoded `StaticSound`, which is not
+/// something a text file can hold — this is the authorable half: which
+/// asset, how loud, how far it carries, whether it starts on its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioEmitterData {
+    /// The sound asset to play.
+    pub sound: AssetRef,
+    /// Start playing as soon as the entity is spawned.
+    #[serde(default = "default_true")]
+    pub autoplay: bool,
+    /// Loop the clip instead of playing it once.
+    #[serde(default)]
+    pub looping: bool,
+    /// Linear gain, `1.0` being the clip's own level.
+    #[serde(default = "default_gain")]
+    pub gain: f32,
+    /// How far the sound carries, in world units — drawn by the
+    /// Scene-view overlay so a sound's reach is visible while placing it.
+    #[serde(default = "default_radius")]
+    pub radius: f32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_gain() -> f32 {
+    1.0
+}
+
+fn default_radius() -> f32 {
+    10.0
+}
+
+impl AudioEmitterData {
+    /// An autoplaying, non-looping emitter for `sound` at unit gain.
+    pub fn new(sound: AssetRef) -> Self {
+        Self {
+            sound,
+            autoplay: true,
+            looping: false,
+            gain: default_gain(),
+            radius: default_radius(),
+        }
+    }
+}
+
+/// An entity's audio emitter, carried on the live entity so the editor
+/// can show, edit and re-save it.
+///
+/// Same carrier rule as [`SceneCollider`]: the live emitter holds a
+/// decoded sound and can only exist where audio can be loaded, so
+/// without this the emitter would vanish from any scene the editor
+/// saved.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq)]
+pub struct SceneAudioEmitter(pub AudioEmitterData);
+
+/// A walkability grid authored with the scene, in the shape
+/// `engine_ai`'s pathfinder wants.
+///
+/// Scene-level rather than per-entity: it describes the *level*, not a
+/// thing in it. Cells are row-major, `width * height`, `true` meaning
+/// blocked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NavGridData {
+    /// Cells along X.
+    pub width: u32,
+    /// Cells along Z.
+    pub height: u32,
+    /// World units per cell.
+    pub cell_size: f32,
+    /// World-space `(x, z)` of cell `(0, 0)`'s minimum corner.
+    pub origin: [f32; 2],
+    /// Row-major blocked flags, `width * height` of them. Any other
+    /// length is a malformed grid — see [`Scene::validate`].
+    pub blocked: Vec<bool>,
+}
+
+impl NavGridData {
+    /// A fully walkable grid.
+    pub fn new(width: u32, height: u32, cell_size: f32, origin: [f32; 2]) -> Self {
+        Self {
+            width,
+            height,
+            cell_size,
+            origin,
+            blocked: vec![false; (width as usize) * (height as usize)],
+        }
+    }
+
+    /// How many cells the grid declares.
+    pub fn cell_count(&self) -> usize {
+        (self.width as usize) * (self.height as usize)
+    }
+
+    /// Whether `blocked` carries exactly one flag per cell.
+    pub fn is_well_formed(&self) -> bool {
+        self.blocked.len() == self.cell_count()
+    }
+}
+
+/// The scene's nav grid, held as a world resource while the scene is
+/// open so the editor can draw it and save it back.
+#[derive(bevy_ecs::resource::Resource, Debug, Clone, PartialEq)]
+pub struct SceneNavGrid(pub NavGridData);
+
 /// One entity's serializable components. Every field is optional — an
 /// entity may carry any subset.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -260,6 +451,12 @@ pub struct SceneEntity {
     /// reparent-drag skip it). Additive and optional, like `disabled`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub locked: bool,
+    /// This entity's physics body, if it has one. Scene format v3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collider: Option<ColliderData>,
+    /// A sound this entity emits, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_emitter: Option<AudioEmitterData>,
 }
 
 /// `#[serde(skip_serializing_if)]` predicate for a `bool` that defaults
@@ -283,6 +480,9 @@ pub struct Scene {
     /// meaning; use [`SceneEntity::parent`] for structure).
     #[serde(default)]
     pub entities: Vec<SceneEntity>,
+    /// The level's walkability grid, if it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nav_grid: Option<NavGridData>,
 }
 
 /// Serde default for [`Scene::version`] when the field is missing from
@@ -300,6 +500,7 @@ impl Default for Scene {
         Self {
             version: crate::CURRENT_SCENE_VERSION,
             entities: Vec::new(),
+            nav_grid: None,
         }
     }
 }

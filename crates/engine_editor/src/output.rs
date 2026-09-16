@@ -1,9 +1,7 @@
 //! The Output tab: a bounded plain-text sink for build and task output.
 //!
-//! Nothing writes to it yet — the build pipeline and the integrated
-//! terminal are later iterations. This is the buffer they will call
-//! [`OutputLog::write_line`] on; the tab renders it now (empty until
-//! then).
+//! Play-mode build and game processes write their stdout/stderr here. Other
+//! tasks can use the same bounded sink through [`OutputLog::write_line`].
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -81,9 +79,7 @@ pub fn show(ui: &mut egui::Ui, output: &OutputLog) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if lines.is_empty() {
-                ui.weak(
-                    "No output. Build and task output appears here once the build pipeline lands.",
-                );
+                ui.weak("No output. Play, build, and task output appears here.");
             }
             for line in &lines {
                 ui.label(egui::RichText::new(line).monospace());

@@ -9,7 +9,8 @@
 //! cargo run -p island
 //! ```
 //!
-//! WASD moves, mouse-drag orbits, Escape exits.
+//! WASD moves, mouse-drag orbits, Escape opens the pause menu
+//! (navigable with the arrow keys, the d-pad, or the left stick).
 //!
 //! ## Why this exists
 //!
@@ -21,25 +22,32 @@
 //! shipped title would, so it can never accidentally depend on the editor
 //! or AI crates (NFR-004).
 //!
+//! ## Where the art comes from
+//!
+//! Everything is procedural, and everything is a **file**. The
+//! generators in [`island::world`] run in the baker
+//! (`cargo run -p island --bin bake`), which writes real `.png`, `.gltf`
+//! and `.wav` assets plus a scene into this project's `assets/` and
+//! `scenes/` folders. Open `games/island` in the studio and they are all
+//! there to browse.
+//!
+//! This binary still builds its world in code at startup (T-23 switches
+//! it over to loading the baked project). The two paths share the same
+//! generators, so they cannot drift apart in the meantime.
+//!
 //! ## Known rough edges, and what fixes each
 //!
-//! These are engine gaps, not oversights here:
-//!
-//! - **Trees are cones, not leaves.** Foliage needs alpha-cutout
-//!   materials — spec task T-15.
-//! - **The player is a capsule and does not animate.** No animation
-//!   component exists yet — T-07.
-//! - **Nothing is written on screen.** No text rendering — T-11/T-12.
-//! - **Keyboard only.** No gamepad — T-09.
-//! - **Nothing persists.** No save/load — T-14.
-
-mod character;
-mod world;
+//! - **The game builds its world at startup** rather than loading the
+//!   project the baker wrote — T-23.
+//! - **The character is built in code**, because the glTF writer does
+//!   not handle skins or animations yet — T-24.
+//! - **Lights, camera and colliders are code**, because the scene format
+//!   carries none of them.
 
 use engine::prelude::*;
+use engine_project::Project;
 use glam::{Vec2, Vec3};
-
-use world::{ISLAND_RADIUS, Placement, Rng};
+use island::world;
 
 /// What the island remembers between runs.
 ///
@@ -71,8 +79,8 @@ enum Action {
     LookX,
     /// Orbit the camera vertically.
     LookY,
-    /// Quit.
-    Quit,
+    /// Open / close the pause menu.
+    Pause,
 }
 
 /// Binds every action to both a keyboard and a gamepad source.
@@ -96,8 +104,8 @@ fn action_map() -> ActionMap<Action> {
     );
     map.bind_axis(Action::LookX, AxisBinding::StickX(Stick::Right));
     map.bind_axis(Action::LookY, AxisBinding::StickY(Stick::Right));
-    map.bind(Action::Quit, Binding::Key(KeyCode::Escape));
-    map.bind(Action::Quit, Binding::GamepadButton(GamepadButton::Start));
+    map.bind(Action::Pause, Binding::Key(KeyCode::Escape));
+    map.bind(Action::Pause, Binding::GamepadButton(GamepadButton::Start));
     map
 }
 
@@ -117,10 +125,6 @@ const ORBIT_SENSITIVITY: f32 = 0.006;
 
 /// Radians of camera orbit per second at full stick deflection.
 const STICK_ORBIT_SPEED: f32 = 2.4;
-
-/// How many trees and boulders to scatter.
-const TREE_COUNT: usize = 110;
-const ROCK_COUNT: usize = 55;
 
 /// The player's capsule dimensions.
 const PLAYER_HALF_HEIGHT: f32 = 0.6;
@@ -157,6 +161,12 @@ struct Island {
     /// HUD labels, rebuilt in place each second.
     hud_position: Option<NodeId>,
     hud_steps: Option<NodeId>,
+    /// Whether the pause menu is open. Gameplay and physics stop while
+    /// it is.
+    paused: bool,
+    /// Pause-menu buttons, valid only while [`Island::paused`].
+    menu_resume: Option<NodeId>,
+    menu_quit: Option<NodeId>,
 }
 
 impl Island {
@@ -177,6 +187,9 @@ impl Island {
             pending_restore: None,
             hud_position: None,
             hud_steps: None,
+            paused: false,
+            menu_resume: None,
+            menu_quit: None,
         }
     }
 
@@ -211,110 +224,61 @@ impl Island {
 
 impl Game for Island {
     fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
-        // --- terrain ----------------------------------------------
-        let (terrain_vertices, terrain_indices) = world::terrain_mesh();
-        let (gw, gh, grass) = world::grass_texture();
-        spawn_prop(
-            ctx,
-            &terrain_vertices,
-            &terrain_indices,
-            (gw, gh, &grass),
-            Transform::IDENTITY,
-            Material {
-                base_color_factor: [1.0, 1.0, 1.0, 1.0],
-                metallic_factor: 0.0,
-                roughness_factor: 0.95,
-                ..Material::DEFAULT
-            },
-        )?;
-
-        // A collider matching the terrain, so the player walks on it
-        // rather than through it. A trimesh built from a coarser sample
-        // of the same height function: exact against what is drawn,
-        // without paying for render-mesh density in every query.
-        let (collider_points, collider_indices) = terrain_collider_mesh();
-        match ColliderBuilder::trimesh(collider_points, collider_indices) {
-            Ok(collider) => {
-                ctx.physics_mut()
-                    .rapier
-                    .insert(RigidBodyBuilder::fixed().translation(Vec3::ZERO), collider);
+        // --- the project ------------------------------------------
+        // Everything the world is made of comes off disk: the scene
+        // names its props, the props name their models, the models name
+        // their textures. Nothing here generates art — that is the
+        // baker's job, and its output is what loads.
+        // Two ways to start, and the shipped one comes first: an
+        // exported folder (an `assets.pak` and a `main.ron` beside this
+        // executable) has no `project.ron` anywhere near it, and a
+        // player's machine has no source tree to fall back to.
+        let (library, scene) = match executable_dir().as_deref().and_then(open_export) {
+            Some(content) => {
+                let content = content
+                    .map_err(|err| GameError::Setup(format!("opening the export: {err}")))?;
+                (content.library, content.scene)
             }
-            Err(err) => {
-                // Degenerate terrain geometry would leave the player
-                // falling forever; better to say so than to ship a
-                // silently bottomless island.
-                return Err(GameError::Setup(format!(
-                    "terrain collision mesh is invalid: {err}"
-                )));
+            None => {
+                let root = project_root();
+                let project = Project::open(&root).map_err(|err| {
+                    GameError::Setup(format!("opening {}: {err}", root.display()))
+                })?;
+                let library = AssetLibrary::index(&project.assets_dir())
+                    .map_err(|err| GameError::Setup(format!("indexing assets: {err}")))?;
+                let scene = Scene::load_from_file(&project.main_scene_path())
+                    .map_err(|err| GameError::Setup(format!("loading the scene: {err}")))?;
+                (library, scene)
             }
-        }
+        };
+        scene
+            .validate()
+            .map_err(|err| GameError::Setup(format!("scene is invalid: {err}")))?;
 
-        // --- scattered props --------------------------------------
-        let (bw, bh, bark) = world::bark_texture();
-        let (fw, fh, foliage) = world::foliage_texture();
-        let (sw, sh, stone) = world::stone_texture();
-
-        let mut rng = Rng::new(0xC0FFEE);
-        for placement in world::scatter(0xA11CE, TREE_COUNT, 0.5, 0.82) {
-            let transform = transform_of(placement);
-
-            // Trunk: opaque bark.
-            let (trunk_vertices, trunk_indices) = world::trunk_mesh(&mut rng);
-            spawn_prop(
-                ctx,
-                &trunk_vertices,
-                &trunk_indices,
-                (bw, bh, &bark),
-                transform,
-                Material {
-                    base_color_factor: [1.0, 1.0, 1.0, 1.0],
-                    metallic_factor: 0.0,
-                    roughness_factor: 0.9,
-                    ..Material::DEFAULT
-                },
-            )?;
-
-            // Canopy: alpha-cut cards. The texture's alpha channel is the
-            // leaf shape; `Material::FOLIAGE` discards everything under
-            // half alpha, which is what makes flat quads read as foliage.
-            let (canopy_vertices, canopy_indices) = world::canopy_mesh(&mut rng);
-            spawn_prop(
-                ctx,
-                &canopy_vertices,
-                &canopy_indices,
-                (fw, fh, &foliage),
-                transform,
-                Material::FOLIAGE,
-            )?;
-
-            // A simple upright cylinder is a good enough collider for a
-            // tree; nobody should be able to walk through the trunk.
-            ctx.physics_mut().rapier.insert(
-                RigidBodyBuilder::fixed().translation(placement.position),
-                ColliderBuilder::cylinder(1.6 * placement.scale, 0.35 * placement.scale),
+        let report = {
+            let parts = ctx.scene_parts();
+            let mut resolver =
+                RuntimeResolver::new(&library, parts.gpu, parts.pipeline, parts.assets);
+            scene.instantiate_with_resolver(parts.world, &mut resolver)
+        };
+        if report.unresolved > 0 {
+            // Not fatal — the rest of the island still loads — but a
+            // silent hole in the world is worse than a loud one.
+            tracing::warn!(
+                unresolved = report.unresolved,
+                "some scene entities could not find their assets"
             );
         }
 
-        for placement in world::scatter(0xB0B, ROCK_COUNT, 0.2, 0.6) {
-            let (vertices, indices) = world::rock_mesh(&mut rng);
-            spawn_prop(
-                ctx,
-                &vertices,
-                &indices,
-                (sw, sh, &stone),
-                transform_of(placement),
-                Material {
-                    base_color_factor: [1.0, 1.0, 1.0, 1.0],
-                    metallic_factor: 0.0,
-                    roughness_factor: 0.8,
-                    ..Material::DEFAULT
-                },
-            )?;
-            ctx.physics_mut().rapier.insert(
-                RigidBodyBuilder::fixed().translation(placement.position),
-                ColliderBuilder::ball(0.55 * placement.scale),
-            );
-        }
+        // Bodies from the same file, so what you collide with is what
+        // you see.
+        let bodies = ctx.spawn_scene_colliders(&scene, &report, &library);
+        tracing::info!(
+            entities = report.spawned.len(),
+            bodies,
+            assets = library.len(),
+            "loaded the island project"
+        );
 
         // --- the player -------------------------------------------
         let spawn_height = world::height_at(0.0, 0.0) + 2.0;
@@ -327,21 +291,53 @@ impl Game for Island {
         self.player_position = spawn;
         self.rig = CameraRig::new(spawn);
 
-        // The player's body: a procedurally-skinned character driven by
-        // the engine's animation system. Its walk clip is paused when
-        // standing still and played while moving (see `update`).
-        let (pw, ph, player_skin) = world::flat_texture([214, 122, 96]);
-        let (skin_vertices, skin_indices) = character::mesh();
-        let skeleton = character::skeleton();
-        let clip = character::walk_clip();
+        // The player's body, loaded from `character.gltf`: skeleton,
+        // skin weights, walk clip and the clip's own footstep events all
+        // come out of the file. Spawned by code rather than placed in
+        // the scene because the scene format has no skinned-mesh field
+        // yet — the asset is data, its placement is not.
+        let character_ref = AssetRef {
+            id: library
+                .id_for_path("models/character.gltf")
+                .ok_or_else(|| GameError::Setup("the project has no character model".to_string()))?
+                .to_string(),
+        };
+        let character = load_skinned_mesh(&library, &character_ref)
+            .map_err(|err| GameError::Setup(format!("loading the character: {err}")))?
+            .ok_or_else(|| GameError::Setup("the character model is missing".to_string()))?;
+        let clip = character
+            .animation("walk")
+            .ok_or_else(|| GameError::Setup("the character has no walk clip".to_string()))?
+            .clone();
+        // Events ride the clip, so they stay in sync with the feet at
+        // any playback speed — and are retimed by re-baking, not by
+        // editing this file.
+        let footsteps: Vec<AnimationEvent> = clip
+            .events
+            .iter()
+            .map(|event| AnimationEvent::new(event.time, event.name.clone()))
+            .collect();
+
+        // Through the library, like the footstep: a packed export has
+        // no `textures/` directory to read from.
+        let skin_path = "textures/skin.png";
+        let skin_bytes = library
+            .read_path(skin_path)
+            .map_err(|err| GameError::Setup(format!("{skin_path}: {err}")))?
+            .ok_or_else(|| GameError::Setup(format!("{skin_path} is missing")))?;
+        let skin_image = engine::asset::import_texture_bytes(&skin_bytes)
+            .map_err(|err| GameError::Setup(format!("{skin_path}: {err}")))?;
 
         let parts = ctx.scene_parts();
-        let skin_texture = parts
-            .gpu
-            .create_texture_from_rgba("player skin", pw, ph, &player_skin);
+        let skin_texture = parts.gpu.create_texture_from_rgba(
+            "player skin",
+            skin_image.width,
+            skin_image.height,
+            skin_image.mip_levels.first().map_or(&[][..], Vec::as_slice),
+        );
         let skinned_mesh = parts
             .gpu
-            .create_skinned_mesh("player", &skin_vertices, &skin_indices)
+            .create_skinned_mesh("player", &character.vertices, &character.indices)
             .map_err(|err| GameError::Setup(err.to_string()))?;
         let renderer = engine::ecs::components::SkinnedMeshRenderer::new(
             parts.gpu,
@@ -358,13 +354,6 @@ impl Game for Island {
             },
         );
 
-        // Footsteps ride the animation, not a timer, so they stay in sync
-        // with the feet at any playback speed.
-        let footsteps = character::footstep_times()
-            .into_iter()
-            .map(|time| AnimationEvent::new(time, "footstep"))
-            .collect();
-
         self.body = Some(
             parts
                 .world
@@ -372,7 +361,7 @@ impl Game for Island {
                     engine::ecs::components::Transform::from(Transform::from_translation(spawn)),
                     engine::ecs::components::GlobalTransform::default(),
                     renderer,
-                    AnimationPlayer::new(skeleton, clip).with_events(footsteps),
+                    AnimationPlayer::new(character.skeleton.clone(), clip).with_events(footsteps),
                     AnimationEvents::default(),
                 ))
                 .id(),
@@ -402,7 +391,7 @@ impl Game for Island {
             engine::ecs::components::GlobalTransform::default(),
             AudioListener::default(),
         ));
-        if let Some(sound) = footstep_sound() {
+        if let Some(sound) = footstep_sound(&library) {
             // Silent until the walk cycle's footstep event triggers it,
             // and parented to nothing — it is moved onto the character
             // each frame so the sound comes from where the feet are.
@@ -418,18 +407,16 @@ impl Game for Island {
 
         // --- HUD --------------------------------------------------
         // The first thing this slice has ever shown without a terminal.
-        build_hud(self, ctx);
+        build_ui(self, ctx);
 
-        tracing::info!(
-            trees = TREE_COUNT,
-            rocks = ROCK_COUNT,
-            radius = ISLAND_RADIUS,
-            "island generated — WASD to walk, drag to orbit, Escape to quit"
-        );
+        tracing::info!("island ready — WASD to walk, drag to orbit, Escape to pause");
         Ok(())
     }
 
     fn fixed_update(&mut self, ctx: &mut GameContext<'_>, step: f32) {
+        if self.paused {
+            return;
+        }
         let Some((body, collider)) = self.player else {
             return;
         };
@@ -508,8 +495,29 @@ impl Game for Island {
             );
         }
 
-        if self.actions.is_pressed(Action::Quit, ctx.input()) {
-            ctx.request_exit();
+        // Escape / Start toggles the menu. Rebuilding the tree is what
+        // shows and hides it: node ids are only stable until the next
+        // `Ui::clear`, so the buttons are re-registered each time rather
+        // than kept around as hidden zero-sized nodes.
+        if self.actions.is_pressed(Action::Pause, ctx.input()) {
+            self.paused = !self.paused;
+            build_ui(self, ctx);
+        }
+
+        if self.paused {
+            // Activation reaches here identically whether the player
+            // clicked the button, pressed Enter, or pressed A — the
+            // engine folds all three into one list.
+            if self.menu_resume.is_some_and(|id| ctx.was_clicked(id)) {
+                self.paused = false;
+                build_ui(self, ctx);
+            } else if self.menu_quit.is_some_and(|id| ctx.was_clicked(id)) {
+                ctx.request_exit();
+            }
+            // Nothing else runs: no camera orbit, no walking, no
+            // footsteps. `fixed_update` bails out too, so physics is
+            // frozen rather than merely unobserved.
+            return;
         }
 
         // Orbit while the left button is held.
@@ -632,6 +640,104 @@ impl Game for Island {
     }
 }
 
+/// Rebuilds the whole UI tree: the HUD always, the pause menu when
+/// [`Island::paused`].
+///
+/// One function rather than two because [`Ui::clear`] invalidates every
+/// node id, so the HUD's ids have to be re-registered whenever the menu
+/// appears or disappears.
+fn build_ui(island: &mut Island, ctx: &mut GameContext<'_>) {
+    build_hud(island, ctx);
+    if island.paused {
+        build_pause_menu(island, ctx);
+    } else {
+        island.menu_resume = None;
+        island.menu_quit = None;
+    }
+    // Laid out here rather than waiting for the engine's own pass, so
+    // directional focus works on the very frame the menu opens —
+    // `focus_direction` scores nodes by their laid-out rectangles.
+    ctx.ui_mut().layout();
+}
+
+/// Builds the pause menu: a dimming backdrop, a title, and two buttons
+/// stacked so the d-pad's up/down maps to the order they are read in.
+///
+/// Focus starts on Resume, so a controller player can press A
+/// immediately without first hunting for the cursor.
+fn build_pause_menu(island: &mut Island, ctx: &mut GameContext<'_>) {
+    let ui = ctx.ui_mut();
+
+    let backdrop = ui.add(
+        None,
+        UiStyle {
+            anchor: Anchor::Center,
+            offset: [0.0, 0.0],
+            size: [320.0, 200.0],
+        },
+        UiWidget::Panel {
+            color: UiColor {
+                r: 0.03,
+                g: 0.04,
+                b: 0.06,
+                a: 0.85,
+            },
+        },
+    );
+
+    ui.add(
+        Some(backdrop),
+        UiStyle {
+            anchor: Anchor::Top,
+            offset: [0.0, 24.0],
+            size: [200.0, 20.0],
+        },
+        UiWidget::Label {
+            text: "PAUSED".to_string(),
+            color: UiColor {
+                r: 0.92,
+                g: 0.95,
+                b: 1.0,
+                a: 1.0,
+            },
+        },
+    );
+
+    let mut button = |slot: &mut Option<NodeId>, y: f32, caption: &str| {
+        let node = ui.add(
+            Some(backdrop),
+            UiStyle {
+                anchor: Anchor::Center,
+                offset: [0.0, y],
+                size: [180.0, 36.0],
+            },
+            UiWidget::Button {
+                text: caption.to_string(),
+                bg: UiColor {
+                    r: 0.16,
+                    g: 0.20,
+                    b: 0.26,
+                    a: 1.0,
+                },
+                hot_bg: UiColor {
+                    r: 0.26,
+                    g: 0.34,
+                    b: 0.44,
+                    a: 1.0,
+                },
+            },
+        );
+        *slot = Some(node);
+    };
+
+    button(&mut island.menu_resume, -8.0, "Resume");
+    button(&mut island.menu_quit, 40.0, "Quit");
+
+    if let Some(resume) = island.menu_resume {
+        ui.set_focus(Some(resume));
+    }
+}
+
 /// Builds the HUD: a translucent panel with two readouts and a hint line.
 fn build_hud(island: &mut Island, ctx: &mut GameContext<'_>) {
     let text = UiColor {
@@ -682,7 +788,7 @@ fn build_hud(island: &mut Island, ctx: &mut GameContext<'_>) {
     // A static hint, so the controls are discoverable in-game rather
     // than only in the crate docs.
     let mut hint = None;
-    label(&mut hint, 56.0, "WASD / stick to walk");
+    label(&mut hint, 56.0, "WASD / stick to walk - Esc to pause");
 }
 
 /// Replaces a label node's text in place.
@@ -699,115 +805,43 @@ fn set_label(ui: &mut Ui, node: NodeId, content: &str) {
     }
 }
 
-/// The world transform for a scattered prop.
-fn transform_of(placement: Placement) -> Transform {
-    Transform {
-        translation: placement.position,
-        rotation: glam::Quat::from_rotation_y(placement.yaw),
-        scale: Vec3::splat(placement.scale),
-    }
-}
-
-/// Spawns a static, textured, lit mesh entity.
-fn spawn_prop(
-    ctx: &mut GameContext<'_>,
-    vertices: &[Vertex],
-    indices: &[u32],
-    texture: (u32, u32, &[u8]),
-    transform: Transform,
-    material: Material,
-) -> Result<(), GameError> {
-    let (width, height, pixels) = texture;
-    let parts = ctx.scene_parts();
-    let renderer = engine::ecs::components::MeshRenderer::from_geometry(
-        parts.gpu,
-        parts.pipeline,
-        parts.assets,
-        vertices,
-        indices,
-        Some((width, height, pixels)),
-        material,
-    )
-    .map_err(|err| GameError::Setup(err.to_string()))?;
-    parts.world.spawn((
-        engine::ecs::components::Transform::from(transform),
-        engine::ecs::components::GlobalTransform::default(),
-        renderer,
-    ));
-    Ok(())
-}
-
-/// Samples the terrain into a collision trimesh.
+/// Where this project lives.
 ///
-/// Coarser than the render mesh — collision needs the shape, not the
-/// silhouette, and a smaller mesh is cheaper to query every frame.
-fn terrain_collider_mesh() -> (Vec<Vec3>, Vec<[u32; 3]>) {
-    const RESOLUTION: usize = 48;
-    let step = (ISLAND_RADIUS * 2.0) / (RESOLUTION - 1) as f32;
-
-    let mut points = Vec::with_capacity(RESOLUTION * RESOLUTION);
-    for row in 0..RESOLUTION {
-        for column in 0..RESOLUTION {
-            let x = -ISLAND_RADIUS + column as f32 * step;
-            let z = -ISLAND_RADIUS + row as f32 * step;
-            points.push(Vec3::new(x, world::height_at(x, z), z));
-        }
-    }
-
-    let mut indices = Vec::with_capacity((RESOLUTION - 1) * (RESOLUTION - 1) * 2);
-    for row in 0..RESOLUTION - 1 {
-        for column in 0..RESOLUTION - 1 {
-            let i = (row * RESOLUTION + column) as u32;
-            let below = i + RESOLUTION as u32;
-            indices.push([i, below, i + 1]);
-            indices.push([i + 1, below, below + 1]);
-        }
-    }
-
-    (points, indices)
+/// First CLI argument, so a packaged build can point at the folder it
+/// ships beside; otherwise the crate's own directory, which is what
+/// makes a bare `cargo run -p island` work during development.
+fn project_root() -> std::path::PathBuf {
+    std::env::args().nth(1).map_or_else(
+        || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        std::path::PathBuf::from,
+    )
 }
 
-/// A short, soft footfall — noise burst with a fast decay.
-fn footstep_sound() -> Option<StaticSound> {
-    const RATE: u32 = 22_050;
-    const SECONDS: f32 = 0.16;
-    let sample_count = (RATE as f32 * SECONDS) as u32;
-
-    // A deterministic pseudo-noise burst: cheap, and it reads as a
-    // footfall rather than a tone.
-    let mut noise = world::Rng::new(0x5EED);
-    let mut samples = Vec::with_capacity(sample_count as usize * 2);
-    for i in 0..sample_count {
-        let t = i as f32 / RATE as f32;
-        let envelope = (1.0 - t / SECONDS).max(0.0).powi(3);
-        // Low-frequency thump under the noise gives it weight.
-        let thump = (t * 70.0 * std::f32::consts::TAU).sin() * 0.5;
-        let hiss = (noise.unit() * 2.0 - 1.0) * 0.35;
-        let value = (thump + hiss) * envelope * 0.5;
-        samples.extend_from_slice(&((value * i16::MAX as f32) as i16).to_le_bytes());
-    }
-
-    let data_len = samples.len() as u32;
-    let mut wav = Vec::with_capacity(44 + samples.len());
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-    wav.extend_from_slice(b"WAVEfmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&RATE.to_le_bytes());
-    wav.extend_from_slice(&(RATE * 2).to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
-    wav.extend_from_slice(&samples);
-
+/// Loads the footfall from the project's own `audio/footstep.wav`.
+///
+/// Through the [`AssetLibrary`], not through a file path: in a shipped
+/// export that file is inside `assets.pak` and there is no directory to
+/// open. The file the baker wrote is still the only source — replacing
+/// that `.wav` and re-baking changes the game without touching a line of
+/// code.
+fn footstep_sound(library: &AssetLibrary) -> Option<StaticSound> {
+    let relative = "audio/footstep.wav";
+    let bytes = match library.read_path(relative) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            tracing::warn!(path = relative, "no footstep sound in this project");
+            return None;
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, path = relative, "could not read the footstep sound");
+            return None;
+        }
+    };
     // One-shot: retriggered per footstep, never looped.
-    match StaticSound::from_bytes(wav, false) {
+    match StaticSound::from_bytes(bytes, false) {
         Ok(sound) => Some(sound),
         Err(err) => {
-            tracing::warn!(error = %err, "could not build the footstep sound");
+            tracing::warn!(error = %err, path = relative, "footstep sound could not be decoded");
             None
         }
     }

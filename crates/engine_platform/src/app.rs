@@ -102,7 +102,12 @@ impl<H: PlatformHandler> ApplicationHandler for Runner<H> {
             .with_inner_size(winit::dpi::LogicalSize::new(
                 self.config.width,
                 self.config.height,
-            ));
+            ))
+            .with_min_inner_size(winit::dpi::LogicalSize::new(
+                self.config.min_width,
+                self.config.min_height,
+            ))
+            .with_maximized(self.config.maximized);
 
         match event_loop.create_window(attributes) {
             Ok(window) => {

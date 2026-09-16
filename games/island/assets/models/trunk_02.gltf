@@ -1,0 +1,144 @@
+{
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 36,
+      "max": [
+        0.1752118468284607,
+        1.4498343467712402,
+        0.15173791348934174
+      ],
+      "min": [
+        -0.1752118468284607,
+        0.0,
+        -0.15173791348934174
+      ],
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 36,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 36,
+      "type": "VEC2"
+    },
+    {
+      "bufferView": 3,
+      "componentType": 5125,
+      "count": 36,
+      "type": "SCALAR"
+    }
+  ],
+  "asset": {
+    "generator": "RustyEngine engine_asset::export_gltf",
+    "version": "2.0"
+  },
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteLength": 432,
+      "byteOffset": 0,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 432,
+      "byteOffset": 432,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 288,
+      "byteOffset": 864,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteLength": 144,
+      "byteOffset": 1152,
+      "target": 34963
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 1296,
+      "uri": "data:application/octet-stream;base64,vGozPgAAAAAAAAAAvGozPiyUuT8AAAAAu2qzPQAAAAAvYRs+u2qzPQAAAAAvYRs+vGozPiyUuT8AAAAAu2qzPSyUuT8vYRs+u2qzPQAAAAAvYRs+u2qzPSyUuT8vYRs+vWqzvQAAAAAvYRs+vWqzvQAAAAAvYRs+u2qzPSyUuT8vYRs+vWqzvSyUuT8vYRs+vWqzvQAAAAAvYRs+vWqzvSyUuT8vYRs+vGozvgAAAACNk4OyvGozvgAAAACNk4OyvWqzvSyUuT8vYRs+vGozviyUuT+Nk4OyvGozvgAAAACNk4OyvGozviyUuT+Nk4OyumqzvQAAAAAvYRu+umqzvQAAAAAvYRu+vGozviyUuT+Nk4OyumqzvSyUuT8vYRu+umqzvQAAAAAvYRu+umqzvSyUuT8vYRu+umqzPQAAAAAvYRu+umqzPQAAAAAvYRu+umqzvSyUuT8vYRu+umqzPSyUuT8vYRu+umqzPQAAAAAvYRu+umqzPSyUuT8vYRu+vGozPgAAAACNkwMzvGozPgAAAACNkwMzumqzPSyUuT8vYRu+vGozPiyUuT+NkwMz17NdPwAAAIAAAAA/17NdPwAAAIAAAAA/17NdPwAAAIAAAAA/17NdPwAAAIAAAAA/17NdPwAAAIAAAAA/17NdPwAAAIAAAAA/AAAAAAAAAIAAAIA/AAAAAAAAAIAAAIA/AAAAAAAAAIAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/2LNdvwAAAAD+//8+2LNdvwAAAAD+//8+2LNdvwAAAAD+//8+2LNdvwAAAAD+//8+2LNdvwAAAAD+//8+2LNdvwAAAAD+//8+17NdvwAAAAACAAC/17NdvwAAAAACAAC/17NdvwAAAAACAAC/17NdvwAAAAACAAC/17NdvwAAAAACAAC/17NdvwAAAAACAAC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/AAAAAAAAAAAAAIC/2LNdPwAAAAAAAAC/2LNdPwAAAAAAAAC/2LNdPwAAAAAAAAC/2LNdPwAAAAAAAAC/2LNdPwAAAAAAAAC/2LNdPwAAAAAAAAC/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAPwAAAAAAAAAAAACAPwAAgD8AAIA/AAAAAAEAAAACAAAAAwAAAAQAAAAFAAAABgAAAAcAAAAIAAAACQAAAAoAAAALAAAADAAAAA0AAAAOAAAADwAAABAAAAARAAAAEgAAABMAAAAUAAAAFQAAABYAAAAXAAAAGAAAABkAAAAaAAAAGwAAABwAAAAdAAAAHgAAAB8AAAAgAAAAIQAAACIAAAAjAAAA"
+    }
+  ],
+  "images": [
+    {
+      "name": "bark",
+      "uri": "../textures/bark.png"
+    }
+  ],
+  "materials": [
+    {
+      "alphaMode": "OPAQUE",
+      "name": "bark",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "baseColorTexture": {
+          "index": 0
+        },
+        "metallicFactor": 0.0,
+        "roughnessFactor": 0.8999999761581421
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "name": "trunk_02",
+      "primitives": [
+        {
+          "attributes": {
+            "NORMAL": 1,
+            "POSITION": 0,
+            "TEXCOORD_0": 2
+          },
+          "indices": 3,
+          "material": 0,
+          "mode": 4
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0,
+      "name": "trunk_02"
+    }
+  ],
+  "samplers": [
+    {
+      "magFilter": 9729,
+      "minFilter": 9987,
+      "wrapS": 10497,
+      "wrapT": 10497
+    }
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "textures": [
+    {
+      "sampler": 0,
+      "source": 0
+    }
+  ]
+}

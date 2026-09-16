@@ -9,14 +9,17 @@ use engine_platform::{Window, WindowEvent};
 use glam::{Vec2, Vec3};
 
 use crate::assets;
-use crate::chrome::{BottomTab, BuildConfig, InspectorTab, TransformSpace, Workspace};
+use crate::chrome::{BottomTab, InspectorTab, TransformSpace, Workspace};
 use crate::console;
 use crate::diagnostics;
 use crate::dirty::PendingAction;
+#[cfg(feature = "dock-shell")]
+use crate::dock;
 use crate::gizmo::{self, Axis, GizmoMode};
 use crate::hierarchy;
 use crate::inspector;
 use crate::output;
+use crate::project_swap::ProjectRequest;
 use crate::state::EditorState;
 use crate::viewport::Viewport;
 
@@ -31,6 +34,8 @@ pub struct EditorShell {
     context: EguiContext,
     winit_state: EguiWinitState,
     renderer: EguiRenderer,
+    #[cfg(feature = "dock-shell")]
+    dock: dock::Host,
 }
 
 impl EditorShell {
@@ -55,6 +60,8 @@ impl EditorShell {
             context,
             winit_state,
             renderer,
+            #[cfg(feature = "dock-shell")]
+            dock: dock::Host::new(),
         }
     }
 
@@ -126,6 +133,7 @@ impl EditorShell {
                     menu_assets(ui, state);
                     menu_gameobject(ui, state);
                     menu_component(ui);
+                    menu_view(ui, state);
                     menu_tools(ui);
                     menu_window(ui, state);
                     menu_help(ui);
@@ -140,6 +148,16 @@ impl EditorShell {
                 .show(ui, |ui| {
                     status_bar(ui, state);
                 });
+            #[cfg(feature = "dock-shell")]
+            {
+                state.code_panel_rect = None;
+                state.code_panel_visible = false;
+                let mut viewer = StudioDockViewer { state, viewport };
+                self.dock.show(ui, &mut viewer);
+            }
+
+            #[cfg(not(feature = "dock-shell"))]
+            {
             // Panel claim order builds the reference layout (see
             // `Dev Documents/prototype.png`):
             //
@@ -191,34 +209,61 @@ impl EditorShell {
                     let mut ab_open = state.panels.asset_browser;
                     egui::Panel::bottom("studio_asset_panel")
                         .resizable(true)
-                        .min_size(90.0)
+                        // Order matters: `default_size` widens the size
+                        // range, so the caps come after it.
                         .default_size(240.0)
+                        .min_size(assets::BROWSER_MIN_HEIGHT)
+                        .max_size(assets::browser_panel_max(ui.available_height()))
                         .show_collapsible(ui, &mut ab_open, |ui| {
                             ui.heading("Asset Browser");
                             ui.separator();
+                            // The preview claims a fixed strip at the
+                            // bottom *before* the file list is drawn, so
+                            // the list's scroll area gets the space that
+                            // is left instead of pushing the preview off
+                            // the panel. Both are bounded: a panel that
+                            // sizes itself to its contents is a panel
+                            // that eats the dock.
+                            if state.asset_browser.preview_open {
+                                let selected_entry = state.selected_asset.as_ref().and_then(|path| {
+                                    state
+                                        .assets
+                                        .iter()
+                                        .find(|entry| &entry.relative_path == path)
+                                });
+                                let (preview_max, preview_default) =
+                                    assets::preview_strip_size(ui.available_height());
+                                egui::Panel::bottom("studio_asset_preview")
+                                    .resizable(true)
+                                    .default_size(preview_default)
+                                    .min_size(assets::PREVIEW_MIN_HEIGHT)
+                                    .max_size(preview_max)
+                                    .show_collapsible(
+                                        ui,
+                                        &mut state.asset_browser.preview_open,
+                                        |ui| {
+                                        egui::ScrollArea::vertical()
+                                            .auto_shrink([false, false])
+                                            .min_scrolled_height(0.0)
+                                            .show(ui, |ui| {
+                                                crate::preview::show(
+                                                    ui,
+                                                    selected_entry,
+                                                    &state.importer,
+                                                    &mut state.preview,
+                                                );
+                                            });
+                                        },
+                                    );
+                            }
                             assets::show(
                                 ui,
                                 &state.assets,
                                 state.importer.stats(),
+                                &mut state.asset_browser,
                                 &mut state.selected_asset,
                                 &mut state.file_open_request,
                             );
-                            let selected_entry = state.selected_asset.as_ref().and_then(|path| {
-                                state
-                                    .assets
-                                    .iter()
-                                    .find(|entry| &entry.relative_path == path)
-                            });
-                            crate::preview::show(
-                                ui,
-                                selected_entry,
-                                &state.importer,
-                                &mut state.preview,
-                            );
-                            // Fill to the panel's edge, else `egui::Panel`
-                            // shrinks to content and won't keep a dragged
-                            // size (it snaps back on release).
-                            ui.allocate_space(ui.available_size());
                         });
                     state.panels.asset_browser = ab_open;
 
@@ -252,10 +297,7 @@ impl EditorShell {
                 .resizable(true)
                 .default_size(280.0)
                 .show_collapsible(ui, &mut ai_open, |ui| {
-                    ui.heading("AI Assistant");
-                    ui.separator();
-                    ui.weak("No provider configured.");
-                    ui.weak("The agent lands with the AI Assistant track.");
+                    ai_panel(ui, state);
                 });
             state.panels.ai = ai_open;
 
@@ -311,14 +353,22 @@ impl EditorShell {
             egui::CentralPanel::default().show(ui, |ui| {
                 scene_view_tabs(ui);
                 ui.separator();
+                egui::CollapsingHeader::new("Terrain & Vegetation Tools")
+                    .default_open(false)
+                    .show(ui, |ui| crate::terrain_tools::show_controls(ui, &mut state.terrain_tools));
                 let (width, height) = viewport.size();
-                let image_response = ui.add(
+                let image_response = ui
+                    .add(
                     egui::Image::new((
                         viewport.texture_id(),
                         egui::vec2(width as f32, height as f32),
                     ))
                     .sense(egui::Sense::click_and_drag()),
-                );
+                    )
+                    // The scene is clickable for gizmos, but idle hovering
+                    // is not a grab operation. Only an active drag should
+                    // request a grabbing cursor.
+                    .on_hover_cursor(egui::CursorIcon::Default);
                 handle_gizmo_interaction(viewport, state, &image_response);
 
                 // An asset row dragged from the Asset Browser and dropped
@@ -345,7 +395,15 @@ impl EditorShell {
                         state.mark_dirty();
                     }
                 }
+                // This image is interactive for gizmo drags, but it is not
+                // itself a movable surface. Keep the idle pointer neutral;
+                // only an actual gizmo drag gets a grabbing cursor.
+                ui.ctx().set_cursor_icon(scene_cursor_icon(
+                    image_response.dragged(),
+                    state.dragging_axis.is_some(),
+                ));
             });
+            }
 
             unsaved_changes_modal(ui, state);
         });
@@ -492,6 +550,18 @@ impl EditorShell {
     }
 }
 
+/// Cursor contract for the Scene image. The image accepts clicks and drags
+/// for gizmos, but must not advertise a grab operation while idle. Keeping
+/// this decision in one pure helper makes the interaction regression-testable
+/// without creating a GPU window in CI.
+fn scene_cursor_icon(image_dragged: bool, gizmo_dragging: bool) -> egui::CursorIcon {
+    if image_dragged && gizmo_dragging {
+        egui::CursorIcon::Grabbing
+    } else {
+        egui::CursorIcon::Default
+    }
+}
+
 /// Drives the translate gizmo's click-and-drag interaction for the Scene
 /// View panel: picks an axis when a drag starts on one of its handles,
 /// moves the selected entity's `Transform` along that axis while
@@ -597,10 +667,50 @@ fn handle_gizmo_interaction(
 // real action are live; the rest are disabled placeholders so the shell
 // matches the canonical UI while the gaps stay visible.
 
-/// File menu: New / Revert / Save scene and Exit. New, Revert, and Exit
-/// route through [`request_guarded`] so unsaved changes prompt first.
+/// File menu: project New / Open / Open Recent, scene New / Revert /
+/// Save, and Exit. Everything that would discard work routes through
+/// [`request_guarded`] so unsaved changes prompt first.
 fn menu_file(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.menu_button("File", |ui| {
+        if ui.button("New Project…").clicked() {
+            if let Some(root) = pick_project_directory("Create project in") {
+                request_guarded(state, PendingAction::NewProject(root));
+            }
+            ui.close();
+        }
+        if ui.button("Open Project…").clicked() {
+            if let Some(root) = pick_project_directory("Open project") {
+                request_guarded(state, PendingAction::OpenProject(root));
+            }
+            ui.close();
+        }
+        ui.menu_button("Open Recent", |ui| {
+            if state.recent_projects.paths.is_empty() {
+                ui.add_enabled(false, egui::Button::new("Nothing yet"));
+                return;
+            }
+            // Cloned because the loop hands `state` to `request_guarded`
+            // while iterating what `state` owns.
+            for root in state.recent_projects.paths.clone() {
+                // The full path as a tooltip: two projects can easily be
+                // called `game`, and the leaf alone would not say which.
+                let label = root
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.display().to_string());
+                let current = root == state.project.root();
+                if ui
+                    .add_enabled(!current, egui::Button::new(label))
+                    .on_hover_text(root.display().to_string())
+                    .on_disabled_hover_text("already open")
+                    .clicked()
+                {
+                    request_guarded(state, PendingAction::OpenProject(root));
+                    ui.close();
+                }
+            }
+        });
+        ui.separator();
         if ui.button("New Scene").clicked() {
             request_guarded(state, PendingAction::NewScene);
             ui.close();
@@ -618,11 +728,40 @@ fn menu_file(ui: &mut egui::Ui, state: &mut EditorState) {
         }
         ui.add_enabled(false, egui::Button::new("Save Scene As…"));
         ui.separator();
+        let configuration = state
+            .selected_configuration()
+            .map(|config| config.name.clone());
+        let label = match &configuration {
+            Some(name) if state.export_running => format!("Building {name}…"),
+            Some(name) => format!("Build & Export ({name})…"),
+            None => "Build & Export…".to_owned(),
+        };
+        let enabled = configuration.is_some() && !state.export_running && !state.play.is_playing();
+        if ui
+            .add_enabled(enabled, egui::Button::new(label))
+            .on_hover_text("Compile the selected configuration and stage a shippable folder")
+            .clicked()
+        {
+            if let Some(dir) = pick_project_directory("Export into") {
+                state.export_request = Some(dir);
+            }
+            ui.close();
+        }
+        ui.separator();
         if ui.button("Exit").clicked() {
             request_guarded(state, PendingAction::Quit);
             ui.close();
         }
     });
+}
+
+/// Asks the OS for a project directory.
+///
+/// A folder picker rather than a file picker: a project *is* a
+/// directory, and asking someone to select `project.ron` inside it would
+/// be asking them to know an implementation detail.
+fn pick_project_directory(title: &str) -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().set_title(title).pick_folder()
 }
 
 /// Runs `action` now if nothing is unsaved; otherwise stashes it in
@@ -648,6 +787,16 @@ fn apply_pending(state: &mut EditorState, action: PendingAction) {
             Ok(()) => tracing::info!(path = %state.scene_path.display(), "scene reverted"),
             Err(err) => tracing::warn!(error = %err, "scene revert failed"),
         },
+        // The swap itself is the shell binary's job — it owns the GPU
+        // resources and the language server that also have to be torn
+        // down. Recording the request here keeps that ordering explicit
+        // rather than half-swapping the project from inside a menu.
+        PendingAction::OpenProject(path) => {
+            state.project_request = Some(ProjectRequest::open(path))
+        }
+        PendingAction::NewProject(path) => {
+            state.project_request = Some(ProjectRequest::create(path))
+        }
     }
 }
 
@@ -655,7 +804,7 @@ fn apply_pending(state: &mut EditorState, action: PendingAction) {
 /// set. Save writes the scene then proceeds; Discard proceeds; Cancel
 /// (button, backdrop, or Esc) clears the pending action.
 fn unsaved_changes_modal(ui: &mut egui::Ui, state: &mut EditorState) {
-    let Some(action) = state.pending_action else {
+    let Some(action) = state.pending_action.clone() else {
         return;
     };
     let summary = state
@@ -790,6 +939,27 @@ fn menu_component(ui: &mut egui::Ui) {
 }
 
 /// Tools menu: placeholder until studio tooling lands.
+/// View menu: the Scene-view debug overlays, one checkbox each.
+///
+/// Each is independent, and all off means the frame's overlay pass adds
+/// no vertices at all — the draw call is skipped, not drawn empty.
+fn menu_view(ui: &mut egui::Ui, state: &mut EditorState) {
+    ui.menu_button("View", |ui| {
+        ui.label("Overlays");
+        ui.checkbox(&mut state.overlays.colliders, "Colliders");
+        ui.checkbox(&mut state.overlays.lights, "Lights");
+        ui.checkbox(&mut state.overlays.cameras, "Cameras");
+        ui.checkbox(&mut state.overlays.grid, "Ground grid");
+        ui.checkbox(&mut state.overlays.audio, "Audio emitters");
+        ui.checkbox(&mut state.overlays.nav, "Nav grid");
+        ui.separator();
+        if ui.button("All off").clicked() {
+            state.overlays = crate::OverlayToggles::default();
+            ui.close();
+        }
+    });
+}
+
 fn menu_tools(ui: &mut egui::Ui) {
     ui.menu_button("Tools", |ui| {
         ui.add_enabled(false, egui::Button::new("No tools yet"));
@@ -803,6 +973,7 @@ fn menu_window(ui: &mut egui::Ui, state: &mut EditorState) {
         ui.checkbox(&mut state.panels.hierarchy, "Hierarchy");
         ui.checkbox(&mut state.panels.inspector, "Inspector / Lighting");
         ui.checkbox(&mut state.panels.asset_browser, "Asset Browser");
+        ui.checkbox(&mut state.asset_browser.preview_open, "Asset Preview");
         ui.checkbox(&mut state.panels.code, "Code");
         ui.checkbox(&mut state.panels.ai, "AI Assistant");
         ui.checkbox(&mut state.panels.console, "Console / Problems / Output");
@@ -850,19 +1021,21 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
                 state.play.start(&mut state.world);
             }
         }
-        let paused = state.play.is_paused();
         if playing {
-            if ui.selectable_label(paused, "⏸ Pause").clicked() {
-                state.play.toggle_pause();
-            }
+            ui.add_enabled(false, egui::Button::new("⏸ Pause"))
+                .on_disabled_hover_text(
+                    "Play runs the project in a separate process; pause needs a runtime protocol",
+                );
         } else {
             ui.add_enabled(false, egui::Button::new("⏸ Pause"));
         }
         if playing {
-            let (tint, text) = if paused {
-                (egui::Color32::from_rgb(150, 170, 210), "PAUSED")
-            } else {
-                (egui::Color32::from_rgb(235, 180, 90), "PLAYING")
+            let (tint, text) = match state.play.mode() {
+                crate::play::EditorMode::Building => {
+                    (egui::Color32::from_rgb(150, 170, 210), "BUILDING")
+                }
+                crate::play::EditorMode::Play => (egui::Color32::from_rgb(235, 180, 90), "PLAYING"),
+                crate::play::EditorMode::Edit => (egui::Color32::GRAY, "EDITING"),
             };
             ui.colored_label(tint, text);
         }
@@ -898,11 +1071,22 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
             });
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // The project's own configurations, by name — not a fixed
+            // Debug/Release pair. A project says how it is built.
+            let selected = state
+                .selected_configuration()
+                .map_or_else(|| "None".to_owned(), |config| config.name.clone());
+            let names: Vec<String> = state
+                .project
+                .configurations()
+                .iter()
+                .map(|config| config.name.clone())
+                .collect();
             egui::ComboBox::from_id_salt("studio_build_config")
-                .selected_text(format!("Build: {}", state.build_config.label()))
+                .selected_text(format!("Build: {selected}"))
                 .show_ui(ui, |ui| {
-                    for cfg in BuildConfig::ALL {
-                        ui.selectable_value(&mut state.build_config, cfg, cfg.label());
+                    for (index, name) in names.iter().enumerate() {
+                        ui.selectable_value(&mut state.configuration_index, index, name);
                     }
                 });
         });
@@ -1034,6 +1218,7 @@ fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
 /// Height reserved at the top of the Code panel for [`code_panel_body`]'s
 /// egui header. The Monaco webview is floated below this band so the
 /// panel's resize handle and the header's close button stay clickable.
+#[cfg_attr(feature = "dock-shell", allow(dead_code))]
 const CODE_HEADER_HEIGHT: f32 = 28.0;
 
 /// Draws the Code panel's egui header — a faux file tab and a close
@@ -1062,6 +1247,50 @@ fn code_panel_body(ui: &mut egui::Ui, close: &mut bool) {
     ui.allocate_space(ui.available_size());
 }
 
+/// Bounded chat surface shared by the stable and docked shells. Provider
+/// transport is intentionally injected by a later host layer; composing and
+/// rendering a transcript never performs network I/O.
+fn ai_panel(ui: &mut egui::Ui, state: &mut EditorState) {
+    ui.heading("AI Assistant");
+    ui.horizontal(|ui| {
+        ui.label("Mode:");
+        for mode in editor_ai::AiMode::ALL {
+            ui.selectable_value(&mut state.ai_mode, mode, mode.label());
+        }
+    });
+    ui.separator();
+    for message in state.ai_chat.messages() {
+        let label = match message.role {
+            editor_ai::ChatRole::User => "You",
+            editor_ai::ChatRole::Assistant => "Assistant",
+            editor_ai::ChatRole::System => "System",
+        };
+        ui.label(format!("{label}: {}", message.content));
+    }
+    if !state.ai_chat.assistant_draft().is_empty() {
+        ui.label(format!("Assistant: {}", state.ai_chat.assistant_draft()));
+    }
+    ui.add(
+        egui::TextEdit::multiline(&mut state.ai_input)
+            .hint_text("Ask about this project…")
+            .desired_rows(3),
+    );
+    if ui.button("Queue prompt").clicked() && !state.ai_input.trim().is_empty() {
+        let prompt = std::mem::take(&mut state.ai_input);
+        state.ai_chat.submit_user(prompt.clone());
+        state.action_log.plan(format!("chat: {prompt}"));
+    }
+    ui.separator();
+    ui.strong("Plan / Action Log");
+    for entry in state.action_log.entries().rev().take(8) {
+        ui.weak(format!(
+            "#{} · {:?} · {}",
+            entry.id, entry.status, entry.action
+        ));
+    }
+    ui.weak("No provider is configured; queued prompts wait for a provider.");
+}
+
 /// The Scene panel's tab strip (Scene / Game / Shaded). Display-only
 /// placeholders — only the editor Scene view is implemented, so the
 /// other tabs are disabled and there is nothing to switch to yet.
@@ -1071,4 +1300,212 @@ fn scene_view_tabs(ui: &mut egui::Ui) {
         ui.add_enabled(false, egui::Button::new("Game").frame(false));
         ui.add_enabled(false, egui::Button::new("Shaded").frame(false));
     });
+}
+
+#[cfg(feature = "dock-shell")]
+struct StudioDockViewer<'a> {
+    state: &'a mut EditorState,
+    viewport: &'a Viewport,
+}
+
+#[cfg(feature = "dock-shell")]
+impl egui_dock::TabViewer for StudioDockViewer<'_> {
+    type Tab = dock::Tab;
+
+    fn id(&mut self, tab: &mut Self::Tab) -> egui::Id {
+        egui::Id::new(*tab)
+    }
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        match tab {
+            dock::Tab::Hierarchy => "Hierarchy",
+            dock::Tab::Scene => "Scene",
+            dock::Tab::Assets => "Asset Browser",
+            dock::Tab::Code => "Code",
+            dock::Tab::Console => "Console",
+            dock::Tab::Inspector => "Inspector",
+            dock::Tab::Ai => "AI Assistant",
+        }
+        .into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        match tab {
+            dock::Tab::Hierarchy => hierarchy::show(
+                ui,
+                &mut self.state.world,
+                &mut self.state.selected_entity,
+                &mut self.state.secondary_selection,
+                &mut self.state.hierarchy,
+            ),
+            dock::Tab::Scene => {
+                scene_view_tabs(ui);
+                ui.separator();
+                let (width, height) = self.viewport.size();
+                let response = ui
+                    .add(
+                        egui::Image::new((
+                            self.viewport.texture_id(),
+                            egui::vec2(width as f32, height as f32),
+                        ))
+                        .sense(egui::Sense::click_and_drag()),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::Default);
+                handle_gizmo_interaction(self.viewport, self.state, &response);
+                if let Some(path) = response.dnd_release_payload::<std::path::PathBuf>() {
+                    let spawned = if path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("prefab"))
+                    {
+                        self.state.spawn_prefab(&path).ok()
+                    } else {
+                        Some(self.state.spawn_asset_entity(&path))
+                    };
+                    if let Some(entity) = spawned {
+                        self.state.select_only(entity);
+                        self.state.mark_dirty();
+                    }
+                }
+                ui.ctx().set_cursor_icon(scene_cursor_icon(
+                    response.dragged(),
+                    self.state.dragging_axis.is_some(),
+                ));
+            }
+            dock::Tab::Assets => assets::show(
+                ui,
+                &self.state.assets,
+                self.state.importer.stats(),
+                &mut self.state.asset_browser,
+                &mut self.state.selected_asset,
+                &mut self.state.file_open_request,
+            ),
+            dock::Tab::Code => {
+                let mut close = false;
+                code_panel_body(ui, &mut close);
+                let rect = ui.min_rect();
+                self.state.code_panel_rect = Some([
+                    rect.min.x,
+                    rect.min.y + CODE_HEADER_HEIGHT,
+                    rect.width(),
+                    (rect.height() - CODE_HEADER_HEIGHT).max(1.0),
+                ]);
+                self.state.code_panel_visible = !close && self.state.pending_action.is_none();
+            }
+            dock::Tab::Console => bottom_tabs_panel(ui, self.state),
+            dock::Tab::Inspector => inspector_tabs_panel(ui, self.state),
+            dock::Tab::Ai => ai_panel(ui, self.state),
+        }
+    }
+
+    fn is_closeable(&self, _tab: &Self::Tab) -> bool {
+        false
+    }
+}
+
+/* impl TabViewer for StudioDockViewer<'_> {
+    type Tab = StudioTab;
+
+    fn id(&mut self, tab: &mut Self::Tab) -> egui::Id {
+        egui::Id::new(*tab)
+    }
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        match tab {
+            StudioTab::Hierarchy => "Hierarchy",
+            StudioTab::Scene => "Scene",
+            StudioTab::AssetBrowser => "Asset Browser",
+            StudioTab::Code => "Code",
+            StudioTab::Console => "Console",
+            StudioTab::Inspector => "Inspector",
+            StudioTab::Ai => "AI Assistant",
+            StudioTab::Profiler => "Profiler",
+        }
+        .into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        match tab {
+            StudioTab::Hierarchy => hierarchy::show(
+                ui,
+                &mut self.state.world,
+                &mut self.state.selected_entity,
+                &mut self.state.secondary_selection,
+                &mut self.state.hierarchy,
+            ),
+            StudioTab::Scene => {
+                scene_view_tabs(ui);
+                ui.separator();
+                let (width, height) = self.viewport.size();
+                let response = ui.add(
+                    egui::Image::new((
+                        self.viewport.texture_id(),
+                        egui::vec2(width as f32, height as f32),
+                    ))
+                    .sense(egui::Sense::click_and_drag()),
+                );
+                handle_gizmo_interaction(self.viewport, self.state, &response);
+                if let Some(path) = response.dnd_release_payload::<std::path::PathBuf>() {
+                    let spawned = if path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("prefab"))
+                    {
+                        self.state.spawn_prefab(&path).ok()
+                    } else {
+                        Some(self.state.spawn_asset_entity(&path))
+                    };
+                    if let Some(entity) = spawned {
+                        self.state.select_only(entity);
+                        self.state.mark_dirty();
+                    }
+                }
+            }
+            StudioTab::AssetBrowser => assets::show(
+                ui,
+                &self.state.assets,
+                self.state.importer.stats(),
+                &mut self.state.asset_browser,
+                &mut self.state.selected_asset,
+                &mut self.state.file_open_request,
+            ),
+            StudioTab::Code => {
+                let mut close = false;
+                code_panel_body(ui, &mut close);
+                let rect = ui.min_rect();
+                self.state.code_panel_rect = Some([
+                    rect.min.x,
+                    rect.min.y + CODE_HEADER_HEIGHT,
+                    rect.width(),
+                    (rect.height() - CODE_HEADER_HEIGHT).max(1.0),
+                ]);
+                self.state.code_panel_visible = !close && self.state.pending_action.is_none();
+            }
+            StudioTab::Console => bottom_tabs_panel(ui, self.state),
+            StudioTab::Inspector => inspector_tabs_panel(ui, self.state),
+            StudioTab::Ai => {
+                ui.heading("AI Assistant");
+                ui.weak("No provider configured.");
+            }
+            StudioTab::Profiler => crate::profiler::show(ui, &self.state.profiler),
+        }
+    }
+
+    fn is_closeable(&self, _tab: &Self::Tab) -> bool {
+        false
+    }
+} */
+
+#[cfg(test)]
+mod ui_tests {
+    use super::scene_cursor_icon;
+
+    #[test]
+    fn scene_is_neutral_until_a_gizmo_drag_is_active() {
+        assert_eq!(scene_cursor_icon(false, false), egui::CursorIcon::Default);
+        assert_eq!(
+            scene_cursor_icon(true, false),
+            egui::CursorIcon::Default,
+            "click-dragging the scene without an axis must not show a grab cursor"
+        );
+        assert_eq!(scene_cursor_icon(true, true), egui::CursorIcon::Grabbing);
+    }
 }
