@@ -208,7 +208,8 @@ impl GameConfig {
     ///
     /// [`GameError::InvalidConfig`] if `title` is empty/whitespace,
     /// `width`/`height` is `0`, `fixed_hz` is not finite and positive, or
-    /// `gravity` is not finite.
+    /// `gravity` is not finite, or a continuous-save interval is not finite
+    /// and positive.
     pub fn validate(&self) -> Result<(), GameError> {
         if self.title.trim().is_empty() {
             return Err(GameError::InvalidConfig("title must not be empty".into()));
@@ -225,6 +226,13 @@ impl GameConfig {
         }
         if !self.gravity.is_finite() {
             return Err(GameError::InvalidConfig("gravity must be finite".into()));
+        }
+        if let SavePolicy::Continuous { interval } = self.save_policy
+            && !(interval.is_finite() && interval > 0.0)
+        {
+            return Err(GameError::InvalidConfig(
+                "continuous save interval must be finite and positive".into(),
+            ));
         }
         Ok(())
     }
@@ -1855,6 +1863,18 @@ mod tests {
         assert!(config.validate().is_err());
         config.fixed_hz = -30.0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn config_rejects_invalid_continuous_save_intervals() {
+        for interval in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let mut config = GameConfig::new("Test", 800, 600);
+            config.save_policy = SavePolicy::Continuous { interval };
+            assert!(
+                config.validate().is_err(),
+                "continuous save interval {interval:?} must be rejected",
+            );
+        }
     }
 
     #[test]

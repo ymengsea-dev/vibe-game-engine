@@ -28,7 +28,7 @@ Engine Runtime
 ```
 
 | Concern | Technology |
-|---|---|
+| --- | --- |
 | Windowing / input | [winit](https://crates.io/crates/winit) |
 | Rendering | [wgpu](https://crates.io/crates/wgpu) + WGSL |
 | ECS | [bevy_ecs](https://crates.io/crates/bevy_ecs) |
@@ -59,7 +59,6 @@ vge/
 │   ├── engine_network/    # Multiplayer (future)
 │   ├── engine_ai/         # MCP server, AI integration
 │   └── engine_utils/      # Shared helpers
-└── game/                  # Example game exercising the engine
 ```
 
 ## Building
@@ -68,7 +67,6 @@ Requires stable Rust (managed by `rust-toolchain.toml`).
 
 ```sh
 cargo build            # build everything
-cargo run -p game      # run the example game
 cargo test             # run all tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check

@@ -20,7 +20,7 @@
 //! single-player game wants, and it means couch co-op needs a per-pad
 //! split that does not exist yet.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// A gamepad button, named by position on a standard layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -231,12 +231,99 @@ pub struct GamepadUpdate {
     pub pressed: HashSet<GamepadButton>,
     /// Buttons that came up this poll.
     pub released: HashSet<GamepadButton>,
+    /// Final buttons held across all connected pads. `None` is accepted for
+    /// caller-built updates that only provide edges.
+    pub held: Option<HashSet<GamepadButton>>,
     /// Current axis values, raw.
     pub axes: GamepadAxes,
     /// How many pads are connected after this poll.
     pub connected: usize,
     /// Whether a pad connected or disconnected during it.
     pub topology_changed: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PadState {
+    buttons: HashSet<GamepadButton>,
+    axes: GamepadAxes,
+}
+
+impl PadState {
+    fn from_gamepad(gamepad: &gilrs::Gamepad<'_>) -> Self {
+        use gilrs::Button;
+
+        let raw_buttons = [
+            Button::South,
+            Button::East,
+            Button::West,
+            Button::North,
+            Button::LeftTrigger,
+            Button::RightTrigger,
+            Button::Select,
+            Button::Start,
+            Button::LeftThumb,
+            Button::RightThumb,
+            Button::DPadUp,
+            Button::DPadDown,
+            Button::DPadLeft,
+            Button::DPadRight,
+        ];
+        let buttons = raw_buttons
+            .into_iter()
+            .filter(|&button| gamepad.is_pressed(button))
+            .filter_map(translate_button)
+            .collect();
+
+        let mut axes = GamepadAxes::default();
+        for raw_axis in [
+            gilrs::Axis::LeftStickX,
+            gilrs::Axis::LeftStickY,
+            gilrs::Axis::RightStickX,
+            gilrs::Axis::RightStickY,
+        ] {
+            if let Some(axis) = translate_axis(raw_axis) {
+                axes.set(axis, gamepad.value(raw_axis));
+            }
+        }
+        if let Some(trigger) = gamepad.button_data(Button::LeftTrigger2) {
+            axes.set(GamepadAxis::LeftTrigger, trigger.value());
+        }
+        if let Some(trigger) = gamepad.button_data(Button::RightTrigger2) {
+            axes.set(GamepadAxis::RightTrigger, trigger.value());
+        }
+
+        Self { buttons, axes }
+    }
+}
+
+fn merge_pad_states<'a>(
+    pads: impl IntoIterator<Item = &'a PadState>,
+) -> (HashSet<GamepadButton>, GamepadAxes) {
+    let mut buttons = HashSet::new();
+    let mut axes = GamepadAxes::default();
+    for pad in pads {
+        buttons.extend(pad.buttons.iter().copied());
+        for axis in GamepadAxis::ALL {
+            let candidate = pad.axes.get(axis);
+            let current = axes.get(axis);
+            if candidate.abs() > current.abs()
+                || (candidate.abs() == current.abs() && candidate > current)
+            {
+                axes.set(axis, candidate);
+            }
+        }
+    }
+    (buttons, axes)
+}
+
+fn record_held_changes(
+    held: &mut HashSet<GamepadButton>,
+    next: HashSet<GamepadButton>,
+    update: &mut GamepadUpdate,
+) {
+    update.pressed.extend(next.difference(held).copied());
+    update.released.extend(held.difference(&next).copied());
+    *held = next;
 }
 
 /// Owns the gamepad backend and turns its events into [`GamepadUpdate`]s.
@@ -247,7 +334,8 @@ pub struct GamepadUpdate {
 /// not at all.
 pub struct Gamepads {
     backend: Option<gilrs::Gilrs>,
-    axes: GamepadAxes,
+    pads: HashMap<gilrs::GamepadId, PadState>,
+    held: HashSet<GamepadButton>,
 }
 
 impl Gamepads {
@@ -259,16 +347,23 @@ impl Gamepads {
                 if connected > 0 {
                     tracing::info!(connected, "gamepad backend ready");
                 }
+                let pads = backend
+                    .gamepads()
+                    .map(|(id, gamepad)| (id, PadState::from_gamepad(&gamepad)))
+                    .collect::<HashMap<_, _>>();
+                let (held, _) = merge_pad_states(pads.values());
                 Self {
                     backend: Some(backend),
-                    axes: GamepadAxes::default(),
+                    pads,
+                    held,
                 }
             }
             Err(err) => {
                 tracing::warn!(error = %err, "no gamepad support; running without");
                 Self {
                     backend: None,
-                    axes: GamepadAxes::default(),
+                    pads: HashMap::new(),
+                    held: HashSet::new(),
                 }
             }
         }
@@ -292,51 +387,74 @@ impl Gamepads {
             match event.event {
                 gilrs::EventType::ButtonPressed(button, _) => {
                     if let Some(button) = translate_button(button) {
-                        update.pressed.insert(button);
+                        self.pads
+                            .entry(event.id)
+                            .or_default()
+                            .buttons
+                            .insert(button);
+                        let (held, _) = merge_pad_states(self.pads.values());
+                        record_held_changes(&mut self.held, held, &mut update);
                     }
                 }
                 gilrs::EventType::ButtonReleased(button, _) => {
                     if let Some(button) = translate_button(button) {
-                        update.released.insert(button);
+                        self.pads
+                            .entry(event.id)
+                            .or_default()
+                            .buttons
+                            .remove(&button);
+                        let (held, _) = merge_pad_states(self.pads.values());
+                        record_held_changes(&mut self.held, held, &mut update);
                     }
                 }
                 gilrs::EventType::AxisChanged(axis, value, _) => {
                     if let Some(axis) = translate_axis(axis) {
-                        self.axes.set(axis, value);
+                        self.pads.entry(event.id).or_default().axes.set(axis, value);
                     }
                 }
                 gilrs::EventType::ButtonChanged(button, value, _) => {
                     // Triggers arrive as analog button changes.
                     match button {
-                        gilrs::Button::LeftTrigger2 => {
-                            self.axes.set(GamepadAxis::LeftTrigger, value)
-                        }
-                        gilrs::Button::RightTrigger2 => {
-                            self.axes.set(GamepadAxis::RightTrigger, value)
-                        }
+                        gilrs::Button::LeftTrigger2 => self
+                            .pads
+                            .entry(event.id)
+                            .or_default()
+                            .axes
+                            .set(GamepadAxis::LeftTrigger, value),
+                        gilrs::Button::RightTrigger2 => self
+                            .pads
+                            .entry(event.id)
+                            .or_default()
+                            .axes
+                            .set(GamepadAxis::RightTrigger, value),
                         _ => {}
                     }
                 }
                 gilrs::EventType::Connected => {
                     update.topology_changed = true;
+                    if let Some(gamepad) = backend.connected_gamepad(event.id) {
+                        self.pads.insert(event.id, PadState::from_gamepad(&gamepad));
+                        let (held, _) = merge_pad_states(self.pads.values());
+                        record_held_changes(&mut self.held, held, &mut update);
+                    }
                     tracing::info!("gamepad connected");
                 }
                 gilrs::EventType::Disconnected => {
                     update.topology_changed = true;
-                    // Whatever was held is no longer held. Without this a
-                    // pad unplugged mid-push leaves the player walking.
-                    self.axes.clear();
+                    self.pads.remove(&event.id);
+                    let (held, _) = merge_pad_states(self.pads.values());
+                    record_held_changes(&mut self.held, held, &mut update);
                     tracing::info!("gamepad disconnected");
                 }
                 _ => {}
             }
         }
 
-        update.connected = backend.gamepads().count();
-        if update.connected == 0 {
-            self.axes.clear();
-        }
-        update.axes = self.axes;
+        update.connected = self.pads.len();
+        let (held, axes) = merge_pad_states(self.pads.values());
+        self.held.clone_from(&held);
+        update.held = Some(held);
+        update.axes = axes;
         update
     }
 }
@@ -454,5 +572,43 @@ mod tests {
             Stick::Right.axes(),
             (GamepadAxis::RightStickX, GamepadAxis::RightStickY)
         );
+    }
+
+    #[test]
+    fn pad_states_merge_buttons_and_strongest_axes() {
+        let mut first = PadState::default();
+        first.buttons.insert(GamepadButton::South);
+        first.axes.set(GamepadAxis::LeftStickX, 0.8);
+
+        let mut second = PadState::default();
+        second.buttons.insert(GamepadButton::East);
+        second.axes.set(GamepadAxis::LeftStickX, -0.9);
+
+        let (buttons, axes) = merge_pad_states([&first, &second]);
+        assert!(buttons.contains(&GamepadButton::South));
+        assert!(buttons.contains(&GamepadButton::East));
+        assert_eq!(axes.get(GamepadAxis::LeftStickX), -0.9);
+
+        let (buttons, axes) = merge_pad_states([&first]);
+        assert!(buttons.contains(&GamepadButton::South));
+        assert!(!buttons.contains(&GamepadButton::East));
+        assert_eq!(axes.get(GamepadAxis::LeftStickX), 0.8);
+    }
+
+    #[test]
+    fn release_then_press_keeps_both_edges_and_final_held_state() {
+        let mut held = [GamepadButton::South].into_iter().collect();
+        let mut update = GamepadUpdate::default();
+
+        record_held_changes(&mut held, HashSet::new(), &mut update);
+        record_held_changes(
+            &mut held,
+            [GamepadButton::South].into_iter().collect(),
+            &mut update,
+        );
+
+        assert!(update.released.contains(&GamepadButton::South));
+        assert!(update.pressed.contains(&GamepadButton::South));
+        assert!(held.contains(&GamepadButton::South));
     }
 }

@@ -32,6 +32,11 @@ pub enum PlatformEvent {
     /// The user requested the window be closed (e.g. clicked the close
     /// button). The event loop exits right after this is delivered.
     CloseRequested,
+    /// Whether the window currently receives keyboard and mouse input.
+    FocusChanged {
+        /// `true` when focused, `false` when focus was lost.
+        focused: bool,
+    },
     /// A keyboard key changed state.
     KeyboardInput {
         /// Which physical key.
@@ -88,10 +93,18 @@ pub(crate) fn map_window_event(event: &winit::event::WindowEvent) -> Option<Plat
             height: size.height,
         }),
         WE::RedrawRequested => Some(PlatformEvent::RedrawRequested),
+        WE::Focused(focused) => Some(PlatformEvent::FocusChanged { focused: *focused }),
         WE::DroppedFile(path) => Some(PlatformEvent::FileDropped { path: path.clone() }),
-        WE::KeyboardInput { event, .. } => {
-            map_physical_key(event.physical_key, event.state.is_pressed(), event.repeat)
-        }
+        WE::KeyboardInput {
+            event,
+            is_synthetic,
+            ..
+        } => map_physical_key(
+            event.physical_key,
+            event.state.is_pressed(),
+            event.repeat,
+            *is_synthetic,
+        ),
         WE::MouseInput { state, button, .. } => Some(PlatformEvent::MouseButtonInput {
             button: *button,
             pressed: state.is_pressed(),
@@ -121,7 +134,11 @@ fn map_physical_key(
     physical_key: winit::keyboard::PhysicalKey,
     pressed: bool,
     repeat: bool,
+    synthetic: bool,
 ) -> Option<PlatformEvent> {
+    if synthetic && pressed {
+        return None;
+    }
     use winit::keyboard::PhysicalKey;
     match physical_key {
         PhysicalKey::Code(key) => Some(PlatformEvent::KeyboardInput {
@@ -170,14 +187,21 @@ mod tests {
     }
 
     #[test]
-    fn unmapped_events_return_none() {
-        assert_eq!(map_window_event(&WE::Focused(true)), None);
+    fn maps_window_focus_changes() {
+        assert_eq!(
+            map_window_event(&WE::Focused(false)),
+            Some(PlatformEvent::FocusChanged { focused: false })
+        );
+        assert_eq!(
+            map_window_event(&WE::Focused(true)),
+            Some(PlatformEvent::FocusChanged { focused: true })
+        );
     }
 
     #[test]
     fn maps_known_physical_key_press() {
         use winit::keyboard::PhysicalKey;
-        let got = map_physical_key(PhysicalKey::Code(KeyCode::KeyW), true, false);
+        let got = map_physical_key(PhysicalKey::Code(KeyCode::KeyW), true, false, false);
         assert_eq!(
             got,
             Some(PlatformEvent::KeyboardInput {
@@ -191,7 +215,7 @@ mod tests {
     #[test]
     fn maps_known_physical_key_repeat_release() {
         use winit::keyboard::PhysicalKey;
-        let got = map_physical_key(PhysicalKey::Code(KeyCode::Space), false, true);
+        let got = map_physical_key(PhysicalKey::Code(KeyCode::Space), false, true, false);
         assert_eq!(
             got,
             Some(PlatformEvent::KeyboardInput {
@@ -203,11 +227,21 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_focus_press_does_not_create_a_fresh_press() {
+        use winit::keyboard::PhysicalKey;
+        assert_eq!(
+            map_physical_key(PhysicalKey::Code(KeyCode::KeyW), true, false, true),
+            None,
+        );
+    }
+
+    #[test]
     fn unidentified_physical_key_maps_to_none() {
         use winit::keyboard::{NativeKeyCode, PhysicalKey};
         let got = map_physical_key(
             PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
             true,
+            false,
             false,
         );
         assert_eq!(got, None);

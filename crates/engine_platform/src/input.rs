@@ -52,11 +52,17 @@ impl InputState {
     pub fn apply_gamepad(&mut self, update: &GamepadUpdate) {
         for &button in &update.pressed {
             self.pressed_gamepad.insert(button);
-            self.held_gamepad.insert(button);
         }
         for &button in &update.released {
-            self.held_gamepad.remove(&button);
             self.released_gamepad.insert(button);
+        }
+        if let Some(held) = &update.held {
+            self.held_gamepad.clone_from(held);
+        } else {
+            self.held_gamepad.extend(update.pressed.iter().copied());
+            for button in &update.released {
+                self.held_gamepad.remove(button);
+            }
         }
         self.gamepad_axes = update.axes;
         self.connected_gamepads = update.connected;
@@ -164,10 +170,15 @@ impl InputState {
                 self.scroll_delta.0 += delta_x;
                 self.scroll_delta.1 += delta_y;
             }
+            PlatformEvent::FocusChanged { focused: false } => {
+                self.released_keys.extend(self.held_keys.drain());
+                self.released_buttons.extend(self.held_buttons.drain());
+            }
             // Nothing here tracks window lifecycle or file drops.
             PlatformEvent::Resized { .. }
             | PlatformEvent::RedrawRequested
             | PlatformEvent::CloseRequested
+            | PlatformEvent::FocusChanged { focused: true }
             | PlatformEvent::FileDropped { .. } => {}
         }
     }
@@ -316,6 +327,28 @@ mod tests {
     }
 
     #[test]
+    fn losing_focus_releases_held_keyboard_and_mouse_input() {
+        let mut input = InputState::new();
+        input.apply_event(&PlatformEvent::KeyboardInput {
+            key: KeyCode::KeyW,
+            pressed: true,
+            repeat: false,
+        });
+        input.apply_event(&PlatformEvent::MouseButtonInput {
+            button: MouseButton::Left,
+            pressed: true,
+        });
+        input.end_frame();
+
+        input.apply_event(&PlatformEvent::FocusChanged { focused: false });
+
+        assert!(!input.is_key_held(KeyCode::KeyW));
+        assert!(input.is_key_released(KeyCode::KeyW));
+        assert!(!input.is_mouse_button_held(MouseButton::Left));
+        assert!(input.is_mouse_button_released(MouseButton::Left));
+    }
+
+    #[test]
     fn cursor_position_tracks_latest() {
         let mut input = InputState::new();
         assert_eq!(input.cursor_position(), None);
@@ -359,6 +392,7 @@ mod tests {
         GamepadUpdate {
             pressed: pressed.iter().copied().collect(),
             released: released.iter().copied().collect(),
+            held: None,
             axes: GamepadAxes::default(),
             connected: 1,
             topology_changed: false,
@@ -393,6 +427,44 @@ mod tests {
 
         assert!(input.is_button_released(GamepadButton::South));
         assert!(!input.is_button_held(GamepadButton::South));
+    }
+
+    #[test]
+    fn release_then_press_in_one_poll_ends_held() {
+        let mut input = InputState::new();
+        input.apply_gamepad(&update_with(&[GamepadButton::South], &[]));
+        input.end_frame();
+
+        input.apply_gamepad(&GamepadUpdate {
+            pressed: [GamepadButton::South].into_iter().collect(),
+            released: [GamepadButton::South].into_iter().collect(),
+            held: Some([GamepadButton::South].into_iter().collect()),
+            connected: 1,
+            ..GamepadUpdate::default()
+        });
+
+        assert!(input.is_button_held(GamepadButton::South));
+    }
+
+    #[test]
+    fn one_pad_releasing_does_not_clear_another_pads_held_button() {
+        let mut input = InputState::new();
+        input.apply_gamepad(&GamepadUpdate {
+            pressed: [GamepadButton::South].into_iter().collect(),
+            held: Some([GamepadButton::South].into_iter().collect()),
+            connected: 2,
+            ..GamepadUpdate::default()
+        });
+        input.end_frame();
+
+        input.apply_gamepad(&GamepadUpdate {
+            held: Some([GamepadButton::South].into_iter().collect()),
+            connected: 2,
+            ..GamepadUpdate::default()
+        });
+
+        assert!(input.is_button_held(GamepadButton::South));
+        assert!(!input.is_button_released(GamepadButton::South));
     }
 
     #[test]

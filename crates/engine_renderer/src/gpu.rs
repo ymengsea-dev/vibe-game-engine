@@ -1,6 +1,6 @@
 //! GPU context: wgpu instance, adapter, device/queue, and window surface.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use engine_platform::Window;
 use wgpu::util::DeviceExt;
@@ -19,12 +19,12 @@ pub const REQUESTED_MSAA_SAMPLE_COUNT: u32 = 4;
 /// Owns the wgpu handles needed to render into a window: the device/queue
 /// pair and the window's presentable surface.
 ///
-/// The `wgpu::Instance` and `Adapter` used to create these are not kept
-/// around — everything needed to submit work and present frames lives on
-/// `Device`/`Queue`/`Surface`, so there's no reason to hold the upstream
-/// handles past initialization.
+/// The instance and window are retained solely to recreate the surface if
+/// the OS invalidates it. The adapter is not needed after initialization.
 pub struct GpuContext {
-    surface: wgpu::Surface<'static>,
+    instance: wgpu::Instance,
+    window: Arc<Window>,
+    surface: RwLock<wgpu::Surface<'static>>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -41,6 +41,27 @@ const DEFAULT_CLEAR_COLOR: wgpu::Color = wgpu::Color {
     b: 0.12,
     a: 1.0,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceRecovery {
+    Ready,
+    Skip,
+    Reconfigure,
+    Recreate,
+}
+
+fn surface_recovery(status: &wgpu::CurrentSurfaceTexture) -> SurfaceRecovery {
+    match status {
+        wgpu::CurrentSurfaceTexture::Success(_) | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+            SurfaceRecovery::Ready
+        }
+        wgpu::CurrentSurfaceTexture::Outdated => SurfaceRecovery::Reconfigure,
+        wgpu::CurrentSurfaceTexture::Lost => SurfaceRecovery::Recreate,
+        wgpu::CurrentSurfaceTexture::Timeout
+        | wgpu::CurrentSurfaceTexture::Occluded
+        | wgpu::CurrentSurfaceTexture::Validation => SurfaceRecovery::Skip,
+    }
+}
 
 impl GpuContext {
     /// Initializes wgpu against `window`: creates an instance, picks an
@@ -97,7 +118,9 @@ impl GpuContext {
         );
 
         Ok(Self {
-            surface,
+            instance,
+            window,
+            surface: RwLock::new(surface),
             device,
             queue,
             config,
@@ -118,8 +141,8 @@ impl GpuContext {
     }
 
     /// The window's presentable surface.
-    pub fn surface(&self) -> &wgpu::Surface<'static> {
-        &self.surface
+    pub fn surface(&self) -> impl std::ops::Deref<Target = wgpu::Surface<'static>> + '_ {
+        self.read_surface()
     }
 
     /// The surface's current configuration.
@@ -159,7 +182,7 @@ impl GpuContext {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.read_surface().configure(&self.device, &self.config);
         Ok(())
     }
 
@@ -184,14 +207,39 @@ impl GpuContext {
     /// Acquires the current surface texture, or `None` if this frame
     /// should be skipped.
     ///
-    /// Transient acquisition failures ([`wgpu::CurrentSurfaceTexture::Timeout`],
-    /// `Occluded`, `Outdated`, `Validation`) are logged and skipped rather
-    /// than treated as errors — callers are expected to try again next
-    /// frame, by which point the condition has often cleared on its own
-    /// (e.g. the window becoming unoccluded). `Lost` is skipped the same
-    /// way for now; full surface/device recreation is future work.
+    /// `Outdated` surfaces are reconfigured and retried once; `Lost`
+    /// surfaces are recreated, configured, and retried once. Transient
+    /// failures (`Timeout`, `Occluded`, `Validation`) are logged and skipped
+    /// so callers can try again next frame.
     pub(crate) fn acquire_frame(&self) -> Option<wgpu::SurfaceTexture> {
-        match self.surface.get_current_texture() {
+        let first = self.read_surface().get_current_texture();
+        match surface_recovery(&first) {
+            SurfaceRecovery::Ready | SurfaceRecovery::Skip => self.finish_acquire(first),
+            SurfaceRecovery::Reconfigure => {
+                tracing::debug!("surface outdated; reconfiguring");
+                self.read_surface().configure(&self.device, &self.config);
+                let retry = self.read_surface().get_current_texture();
+                self.finish_acquire(retry)
+            }
+            SurfaceRecovery::Recreate => {
+                tracing::debug!("surface lost; recreating");
+                let surface = match self.instance.create_surface(Arc::clone(&self.window)) {
+                    Ok(surface) => surface,
+                    Err(err) => {
+                        tracing::error!(error = %err, "could not recreate lost surface");
+                        return None;
+                    }
+                };
+                surface.configure(&self.device, &self.config);
+                *self.write_surface() = surface;
+                let retry = self.read_surface().get_current_texture();
+                self.finish_acquire(retry)
+            }
+        }
+    }
+
+    fn finish_acquire(&self, status: wgpu::CurrentSurfaceTexture) -> Option<wgpu::SurfaceTexture> {
+        match status {
             wgpu::CurrentSurfaceTexture::Success(texture) => Some(texture),
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
                 tracing::debug!("suboptimal surface texture acquired; presenting anyway");
@@ -204,6 +252,26 @@ impl GpuContext {
             | wgpu::CurrentSurfaceTexture::Validation) => {
                 tracing::debug!(?skip, "skipping frame: surface texture unavailable");
                 None
+            }
+        }
+    }
+
+    fn read_surface(&self) -> RwLockReadGuard<'_, wgpu::Surface<'static>> {
+        match self.surface.read() {
+            Ok(surface) => surface,
+            Err(poisoned) => {
+                tracing::warn!("surface lock was poisoned; recovering it");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn write_surface(&self) -> RwLockWriteGuard<'_, wgpu::Surface<'static>> {
+        match self.surface.write() {
+            Ok(surface) => surface,
+            Err(poisoned) => {
+                tracing::warn!("surface lock was poisoned; recovering it");
+                poisoned.into_inner()
             }
         }
     }
@@ -240,10 +308,9 @@ impl GpuContext {
     /// smallest possible "something visibly happened" frame (e.g. for an
     /// app with no scene loaded yet).
     ///
-    /// Transient surface-texture acquisition failures (timeout, occluded,
-    /// outdated, lost, validation error) are logged and skipped rather
-    /// than treated as an error — see the `acquire_frame` internals for
-    /// details.
+    /// `Outdated` and `Lost` surface errors are recovered once before the
+    /// frame is skipped. Other transient acquisition failures are logged
+    /// and skipped — see the `acquire_frame` internals for details.
     ///
     /// # Errors
     ///
@@ -339,5 +406,26 @@ impl GpuContext {
         self.queue.submit(std::iter::once(encoder.finish()));
         self.present(surface_texture);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn surface_failures_choose_the_required_recovery() {
+        assert_eq!(
+            surface_recovery(&wgpu::CurrentSurfaceTexture::Outdated),
+            SurfaceRecovery::Reconfigure,
+        );
+        assert_eq!(
+            surface_recovery(&wgpu::CurrentSurfaceTexture::Lost),
+            SurfaceRecovery::Recreate,
+        );
+        assert_eq!(
+            surface_recovery(&wgpu::CurrentSurfaceTexture::Timeout),
+            SurfaceRecovery::Skip,
+        );
     }
 }

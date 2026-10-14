@@ -1281,7 +1281,8 @@ impl PlatformHandler for EditorHandler {
             PlatformEvent::KeyboardInput { .. }
             | PlatformEvent::MouseButtonInput { .. }
             | PlatformEvent::CursorMoved { .. }
-            | PlatformEvent::MouseWheel { .. } => {}
+            | PlatformEvent::MouseWheel { .. }
+            | PlatformEvent::FocusChanged { .. } => {}
         }
     }
 }
