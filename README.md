@@ -1,89 +1,63 @@
-# Vibe Game Engine (VGE)
+# VGE — RustyEngine Studio
 
-> A lightweight, Rust-first game engine focused on performance, simplicity,
-> and modern tooling.
+VGE is a Rust-first 2D/3D game-engine workspace for Windows, macOS, and Linux. It combines a reusable runtime, a native Studio editor, project/export tooling, and a small standalone player. Games are ordinary Rust programs that depend on the public `engine` facade; the editor is optional and is not linked into shipped runtimes.
 
-VGE is a modular 2D/3D game engine for Windows, macOS, and Linux. Gameplay
-is written entirely in Rust — no proprietary scripting language. The editor
-exists to improve productivity, not to replace code.
+## What is included
 
-## Status
+- A `wgpu` renderer with PBR materials, shadows, HDR post-processing, sprites, UI, terrain, particles, instancing, and GPU skinning.
+- A `winit` platform layer with keyboard, mouse, gamepad, action-map, and window lifecycle support.
+- ECS, physics, audio, scenes/prefabs, asset import and hot reload, saving, navigation, animation, and runtime UI subsystems.
+- RustyEngine Studio: scene authoring, asset browsing/import, project settings, code editing, an integrated terminal, play/export workflows, and diagnostics.
+- An exported-game player and the Island vertical-slice sample.
 
-**Pre-milestone scaffold.** The workspace structure is in place; engine
-implementation begins with Milestone 1 (window + GPU clear color).
+For the code-verified capability list and known limits, see [docs/FEATURES.md](docs/FEATURES.md).
 
-## Architecture
+## Requirements
 
-```
-Game Project
-     │
-┌────┴─────────────┐
-│                  │
-Gameplay (Rust)   Editor (egui)
-│                  │
-└────┬─────────────┘
-     │
-Engine Runtime
-(core · ecs · renderer · physics · audio · asset · scene · animation · ui · platform)
-```
+- The Rust toolchain specified by `rust-toolchain.toml` (install with [rustup](https://rustup.rs)).
+- A graphics driver supported by `wgpu`: Metal on macOS, DirectX 12 on Windows, or Vulkan on Linux.
 
-| Concern | Technology |
-| --- | --- |
-| Windowing / input | [winit](https://crates.io/crates/winit) |
-| Rendering | [wgpu](https://crates.io/crates/wgpu) + WGSL |
-| ECS | [bevy_ecs](https://crates.io/crates/bevy_ecs) |
-| Math | [glam](https://crates.io/crates/glam) |
-| Physics | [rapier](https://rapier.rs) (2D + 3D) |
-| Audio | [kira](https://crates.io/crates/kira) |
-| Editor UI | [egui](https://crates.io/crates/egui) |
-| Assets | glTF 2.0, serde + RON |
+## Build and verify
 
-## Workspace Layout
-
-```
-vge/
-├── crates/
-│   ├── engine/            # Facade — games depend on this single crate
-│   ├── engine_core/       # Startup, main loop, timing, config
-│   ├── engine_platform/   # Window, input, OS integration
-│   ├── engine_renderer/   # wgpu rendering
-│   ├── engine_ecs/        # Entity Component System
-│   ├── engine_scene/      # Scenes, prefabs, hierarchy
-│   ├── engine_asset/      # Import pipeline, hot reload
-│   ├── engine_physics/    # rapier integration
-│   ├── engine_animation/  # Skeletons, blend trees, state machines
-│   ├── engine_audio/      # Music, SFX, spatial audio
-│   ├── engine_ui/         # Runtime game UI
-│   ├── engine_editor/     # egui editor tools
-│   ├── engine_scripting/  # Gameplay-facing API surface
-│   ├── engine_network/    # Multiplayer (future)
-│   ├── engine_ai/         # MCP server, AI integration
-│   └── engine_utils/      # Shared helpers
-```
-
-## Building
-
-Requires stable Rust (managed by `rust-toolchain.toml`).
+Run these commands from the repository root:
 
 ```sh
-cargo build            # build everything
-cargo test             # run all tests
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo build --workspace --all-features
+cargo test --workspace --all-features
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-## Engineering Standards
+For a quicker check while working in one crate, use `cargo test -p engine_platform` or replace the package name with the crate you changed.
 
-No `unwrap`/`expect`/`panic!` in production code (enforced by workspace
-lints), full error handling with `Result` + `thiserror`, tests for every
-feature, and clippy/rustfmt clean builds. `docs/` is reserved for generated
-API documentation.
+## Run locally
+
+```sh
+cargo run -p editor                         # Launch RustyEngine Studio
+cargo run -p island                         # Run the Island sample project
+cargo run -p player -- path/to/export-dir   # Run an exported game folder
+```
+
+The player expects `main.ron` plus either `assets.pak` or a loose `assets/` directory. The Island project is a sample and acceptance target, not required to use the engine.
+
+## Workspace layout
+
+```text
+crates/        Reusable engine, editor, project, and tooling crates
+editor/        RustyEngine Studio desktop application
+apps/player/   Minimal runtime for exported projects
+games/island/  Playable sample and asset-baking tool
+docs/          Feature reference and project documentation
+```
+
+`crates/engine` is the application-facing facade. Runtime projects normally import `engine::prelude::*`; editor-specific functionality stays behind the `studio` feature.
+
+## Development notes
+
+- Format Rust with `cargo fmt`; keep tests beside the code they cover.
+- Production code avoids `unsafe`, `unwrap`, `expect`, and `panic!`; return typed errors instead.
+- Shared dependency versions belong in the workspace manifest. See [AGENTS.md](AGENTS.md) for contributor guidance.
 
 ## License
 
-Dual-licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option.
+Dual-licensed under either [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.
