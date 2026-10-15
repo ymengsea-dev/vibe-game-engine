@@ -56,6 +56,12 @@ pub enum NavError {
         /// The rejected cell size.
         cell_size: f32,
     },
+    /// The grid origin was not finite.
+    #[error("navigation grid origin must be finite (got {origin:?})")]
+    InvalidOrigin {
+        /// The rejected world-space origin.
+        origin: Vec2,
+    },
     /// `width * height` exceeded the internal cell-count limit.
     #[error("navigation grid too large: {cells} cells exceeds the {max} limit")]
     GridTooLarge {
@@ -111,6 +117,9 @@ impl NavGrid {
         }
         if cell_size <= 0.0 || !cell_size.is_finite() {
             return Err(NavError::InvalidCellSize { cell_size });
+        }
+        if !origin.is_finite() {
+            return Err(NavError::InvalidOrigin { origin });
         }
         let cells = u64::from(width) * u64::from(height);
         if cells > MAX_CELLS {
@@ -454,7 +463,7 @@ pub fn line_of_sight(grid: &NavGrid, a: GridCoord, b: GridCoord) -> bool {
         if advance_x && advance_y {
             // Diagonal move — reject if it clips a blocked corner.
             if grid.is_blocked(GridCoord { x: x + step_x, y })
-                && grid.is_blocked(GridCoord { x, y: y + step_y })
+                || grid.is_blocked(GridCoord { x, y: y + step_y })
             {
                 return false;
             }
@@ -560,6 +569,12 @@ mod tests {
         ));
         assert!(NavGrid::new(4, 4, -1.0, Vec2::ZERO).is_err());
         assert!(NavGrid::new(4, 4, f32::NAN, Vec2::ZERO).is_err());
+    }
+
+    #[test]
+    fn new_rejects_a_non_finite_origin() {
+        assert!(NavGrid::new(4, 4, 1.0, Vec2::new(f32::NAN, 0.0)).is_err());
+        assert!(NavGrid::new(4, 4, 1.0, Vec2::new(0.0, f32::INFINITY)).is_err());
     }
 
     #[test]
@@ -729,6 +744,18 @@ mod tests {
             &grid,
             GridCoord::new(0, 0),
             GridCoord::new(8, 4)
+        ));
+    }
+
+    #[test]
+    fn line_of_sight_does_not_cut_past_one_blocked_corner_side() {
+        let mut grid = grid(3, 3);
+        grid.set_blocked(GridCoord::new(1, 0), true);
+
+        assert!(!line_of_sight(
+            &grid,
+            GridCoord::new(0, 0),
+            GridCoord::new(2, 2)
         ));
     }
 

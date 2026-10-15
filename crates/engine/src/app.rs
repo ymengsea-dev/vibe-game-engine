@@ -481,6 +481,10 @@ pub struct GameContext<'a> {
     runtime: &'a mut Runtime,
 }
 
+fn collider_scale(scale: glam::Vec3) -> glam::Vec3 {
+    scale.abs()
+}
+
 impl GameContext<'_> {
     /// The ECS world, for queries.
     /// Disjoint borrows of everything needed to turn a
@@ -606,14 +610,15 @@ impl GameContext<'_> {
             // One number for shapes with a single radius: a sphere
             // scaled 2x on X only is not a sphere, and silently picking
             // the wrong axis would put collision where the art is not.
-            let uniform = transform.scale.max_element();
+            let scale = collider_scale(transform.scale);
+            let uniform = scale.max_element();
 
             let shape = match &collider.shape {
                 ColliderShape::Ball { radius } => {
                     Some(engine_physics::ColliderBuilder::ball(radius * uniform))
                 }
                 ColliderShape::Cuboid { half_extents } => {
-                    let scaled = glam::Vec3::from_array(*half_extents) * transform.scale;
+                    let scaled = glam::Vec3::from_array(*half_extents) * scale;
                     Some(engine_physics::ColliderBuilder::cuboid(
                         scaled.x, scaled.y, scaled.z,
                     ))
@@ -622,14 +627,14 @@ impl GameContext<'_> {
                     half_height,
                     radius,
                 } => Some(engine_physics::ColliderBuilder::cylinder(
-                    half_height * transform.scale.y,
+                    half_height * scale.y,
                     radius * uniform,
                 )),
                 ColliderShape::Capsule {
                     half_height,
                     radius,
                 } => Some(engine_physics::ColliderBuilder::capsule_y(
-                    half_height * transform.scale.y,
+                    half_height * scale.y,
                     radius * uniform,
                 )),
                 ColliderShape::TriMesh { mesh } => {
@@ -637,14 +642,9 @@ impl GameContext<'_> {
                         Ok(Some((vertices, indices))) => {
                             let points: Vec<glam::Vec3> = vertices
                                 .iter()
-                                .map(|vertex| {
-                                    glam::Vec3::from_array(vertex.position) * transform.scale
-                                })
+                                .map(|vertex| glam::Vec3::from_array(vertex.position) * scale)
                                 .collect();
-                            let triangles: Vec<[u32; 3]> = indices
-                                .chunks_exact(3)
-                                .map(|t| [t[0], t[1], t[2]])
-                                .collect();
+                            let triangles: Vec<[u32; 3]> = indices.as_chunks::<3>().0.to_vec();
                             match engine_physics::ColliderBuilder::trimesh(points, triangles) {
                                 Ok(builder) => Some(builder),
                                 Err(err) => {
@@ -1815,6 +1815,14 @@ pub fn run_game(config: GameConfig, game: impl Game + 'static) -> Result<(), Gam
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collider_scale_uses_positive_magnitudes_for_mirrored_entities() {
+        assert_eq!(
+            collider_scale(glam::Vec3::new(-2.0, 3.0, -4.0)),
+            glam::Vec3::new(2.0, 3.0, 4.0)
+        );
+    }
 
     struct TestGame;
 

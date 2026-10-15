@@ -102,6 +102,21 @@ pub struct WorldSnapshot {
 }
 
 impl WorldSnapshot {
+    /// Validates values and hierarchy links before they become live ECS
+    /// components. Save files are untrusted input just like scene files.
+    fn validate(&self) -> Result<(), SceneError> {
+        crate::Scene {
+            version: crate::CURRENT_SCENE_VERSION,
+            entities: self
+                .entities
+                .iter()
+                .map(SavedEntity::as_scene_entity)
+                .collect(),
+            nav_grid: None,
+        }
+        .validate()
+    }
+
     /// Captures **every** entity carrying at least one savable component.
     ///
     /// Named or not — that is the whole difference from
@@ -325,10 +340,14 @@ impl<T: DeserializeOwned> SaveGame<T> {
     ///
     /// [`SceneError::UnsupportedVersion`] if the save is newer than this
     /// engine; [`SceneError::Deserialize`] if the text is not a valid
-    /// save.
+    /// save; [`SceneError::Validation`] if its world has invalid values
+    /// or hierarchy links.
     pub fn from_ron_str(text: &str) -> Result<Self, SceneError> {
         check_version(text)?;
-        ron::from_str(text).map_err(|err| SceneError::Deserialize(err.to_string()))
+        let save: Self =
+            ron::from_str(text).map_err(|err| SceneError::Deserialize(err.to_string()))?;
+        save.world.validate()?;
+        Ok(save)
     }
 
     /// Reads and parses a save from `path`.
@@ -513,6 +532,29 @@ mod tests {
     fn corrupt_save_is_an_error_not_a_panic() {
         let result: Result<SaveGame<()>, _> = SaveGame::from_ron_str("this is not RON {{{");
         assert!(matches!(result, Err(SceneError::Deserialize(_))));
+    }
+
+    #[test]
+    fn save_with_an_invalid_transform_is_rejected() {
+        let save = SaveGame {
+            version: CURRENT_SAVE_VERSION,
+            world: WorldSnapshot {
+                entities: vec![SavedEntity {
+                    transform: Some(TransformData {
+                        translation: [f32::NAN, 0.0, 0.0],
+                        rotation: glam::Quat::IDENTITY.to_array(),
+                        scale: [1.0, 1.0, 1.0],
+                    }),
+                    ..Default::default()
+                }],
+            },
+            game: (),
+        };
+
+        let text = save.to_ron_string().expect("serialize malformed save");
+        let result: Result<SaveGame<()>, _> = SaveGame::from_ron_str(&text);
+
+        assert!(matches!(result, Err(SceneError::Validation(_))));
     }
 
     #[test]

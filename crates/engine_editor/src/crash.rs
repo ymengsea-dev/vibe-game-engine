@@ -29,10 +29,14 @@ fn write_report(path: &Path, report: &str) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let temp: PathBuf = path.with_extension("tmp");
+    let temp: PathBuf = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     let mut bounded = report.to_owned();
     bounded.truncate(MAX_REPORT_BYTES);
     std::fs::write(&temp, bounded)?;
+    #[cfg(windows)]
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
     std::fs::rename(temp, path)
 }
 
@@ -49,6 +53,8 @@ mod tests {
             std::fs::metadata(&path).unwrap().len(),
             MAX_REPORT_BYTES as u64
         );
+        write_report(&path, "second crash").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second crash");
         std::fs::remove_dir_all(dir).ok();
     }
 }

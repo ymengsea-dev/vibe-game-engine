@@ -54,7 +54,11 @@ pub fn sample_looping(
 /// different skeletons by mistake) — a joint present in only one of them
 /// passes through unblended rather than this function panicking.
 pub fn blend_poses(pose_a: &[Transform], pose_b: &[Transform], t: f32) -> Vec<Transform> {
-    let t = t.clamp(0.0, 1.0);
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let len = pose_a.len().max(pose_b.len());
 
     (0..len)
@@ -254,6 +258,14 @@ mod tests {
         let b = vec![Transform::from_translation(Vec3::new(10.0, 0.0, 0.0))];
         assert_eq!(blend_poses(&a, &b, -5.0), a);
         assert_eq!(blend_poses(&a, &b, 5.0), b);
+    }
+
+    #[test]
+    fn blend_poses_uses_pose_a_for_a_non_finite_weight() {
+        let a = vec![Transform::from_translation(Vec3::new(1.0, 0.0, 0.0))];
+        let b = vec![Transform::from_translation(Vec3::new(5.0, 0.0, 0.0))];
+
+        assert_eq!(blend_poses(&a, &b, f32::NAN), a);
     }
 
     #[test]

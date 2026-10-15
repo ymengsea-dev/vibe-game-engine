@@ -402,26 +402,26 @@ impl Ui {
             w: self.screen[0],
             h: self.screen[1],
         };
-        self.layout_node(root, screen);
-    }
-
-    fn layout_node(&mut self, id: NodeId, parent: Rect) {
-        let (style, children) = {
-            let node = &self.nodes[id];
-            (node.style, node.children.clone())
-        };
-        let (fx, fy) = style.anchor.factors();
-        let anchor_x = parent.x + parent.w * fx + style.offset[0];
-        let anchor_y = parent.y + parent.h * fy + style.offset[1];
-        let rect = Rect {
-            x: anchor_x - style.size[0] * fx,
-            y: anchor_y - style.size[1] * fy,
-            w: style.size[0],
-            h: style.size[1],
-        };
-        self.nodes[id].computed = rect;
-        for child in children {
-            self.layout_node(child, rect);
+        let mut pending = vec![(root, screen)];
+        while let Some((id, parent)) = pending.pop() {
+            let style = self.nodes[id].style;
+            let (fx, fy) = style.anchor.factors();
+            let anchor_x = parent.x + parent.w * fx + style.offset[0];
+            let anchor_y = parent.y + parent.h * fy + style.offset[1];
+            let rect = Rect {
+                x: anchor_x - style.size[0] * fx,
+                y: anchor_y - style.size[1] * fy,
+                w: style.size[0],
+                h: style.size[1],
+            };
+            self.nodes[id].computed = rect;
+            pending.extend(
+                self.nodes[id]
+                    .children
+                    .iter()
+                    .rev()
+                    .map(|&child| (child, rect)),
+            );
         }
     }
 
@@ -672,8 +672,9 @@ impl Ui {
     /// or one that draws nothing (`Panel` with `a == 0`), is skipped.
     pub fn draw_list(&self, pointer: [f32; 2]) -> Vec<DrawCommand> {
         let mut out = Vec::new();
+        let hot = self.hit(pointer);
         if let Some(root) = self.root {
-            self.collect_draw(root, pointer, &mut out);
+            self.collect_draw(root, hot, &mut out);
         }
         self.collect_focus_ring(&mut out);
         out
@@ -735,7 +736,7 @@ impl Ui {
         }
     }
 
-    fn collect_draw(&self, id: NodeId, pointer: [f32; 2], out: &mut Vec<DrawCommand>) {
+    fn collect_draw(&self, id: NodeId, hot: Option<NodeId>, out: &mut Vec<DrawCommand>) {
         let node = &self.nodes[id];
         let rect = node.computed;
         if rect.w > 0.0 && rect.h > 0.0 {
@@ -756,11 +757,7 @@ impl Ui {
                     },
                 }),
                 Widget::Button { text, bg, hot_bg } => {
-                    let fill = if self.is_hot(id, pointer) {
-                        *hot_bg
-                    } else {
-                        *bg
-                    };
+                    let fill = if hot == Some(id) { *hot_bg } else { *bg };
                     out.push(DrawCommand {
                         rect,
                         kind: DrawKind::Fill(fill),
@@ -783,7 +780,7 @@ impl Ui {
             }
         }
         for &child in &node.children {
-            self.collect_draw(child, pointer, out);
+            self.collect_draw(child, hot, out);
         }
     }
 }

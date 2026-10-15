@@ -167,13 +167,19 @@ fn project_file_list(root: &std::path::Path) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
             let name = entry.file_name();
             let name = name.to_string_lossy();
             // Dotfiles are tool bookkeeping, not project structure.
             if name.starts_with('.') {
                 continue;
             }
-            if path.is_dir() {
+            if metadata.is_dir() {
                 if CODE_TREE_SKIP_DIRS.contains(&name.as_ref()) {
                     continue;
                 }
@@ -250,6 +256,16 @@ fn create_project_file(state: &mut EditorState, relative: &Path, folder: bool) -
     }
 }
 
+/// Resolves a webview model path inside the active project. Monaco retains
+/// absolute model paths, while its file tree sends project-relative paths.
+fn resolve_code_path(
+    project: &Project,
+    path: &Path,
+) -> Result<PathBuf, engine::project::ProjectError> {
+    let relative = path.strip_prefix(project.root()).unwrap_or(path);
+    project.resolve(relative)
+}
+
 /// Positions the Monaco webview over the Code panel (scaling the panel's
 /// logical-point rect to physical pixels) and forwards its events into
 /// editor state (`DirtyState`, cursor, file writes). On [`CodeEvent::Ready`]
@@ -293,6 +309,10 @@ fn sync_code_editor(
     for event in code.poll() {
         match event {
             CodeEvent::BufferEdited { path, text } => {
+                let Ok(path) = resolve_code_path(&state.project, &path) else {
+                    tracing::warn!(path = %path.display(), "refused code edit outside the project");
+                    continue;
+                };
                 state.dirty.mark_document(&path);
                 if let Some(lsp) = lsp.as_mut() {
                     lsp.did_change(&path, &text);
@@ -302,25 +322,35 @@ fn sync_code_editor(
                 state.cursor_line = line;
                 state.cursor_column = column;
             }
-            CodeEvent::SaveRequested { path, contents } => match std::fs::write(&path, contents) {
-                Ok(()) => {
-                    state.dirty.clear_document(&path);
-                    code.notify_saved(&path);
-                    tracing::info!(path = %path.display(), "file saved");
+            CodeEvent::SaveRequested { path, contents } => {
+                match resolve_code_path(&state.project, &path) {
+                    Ok(path) => match std::fs::write(&path, contents) {
+                        Ok(()) => {
+                            state.dirty.clear_document(&path);
+                            code.notify_saved(&path);
+                            tracing::info!(path = %path.display(), "file saved");
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, path = %path.display(), "file save failed");
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!(error = %err, path = %path.display(), "refused file save outside the project")
+                    }
                 }
+            }
+            CodeEvent::OpenRequested { path } => match resolve_code_path(&state.project, &path) {
+                Ok(absolute) => open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute),
                 Err(err) => {
-                    tracing::warn!(error = %err, path = %path.display(), "file save failed");
+                    tracing::warn!(error = %err, path = %path.display(), "refused code open outside the project")
                 }
             },
-            CodeEvent::OpenRequested { path } => {
-                let absolute = state.project.root().join(&path);
-                open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
-            }
             CodeEvent::Ready => {
                 push_file_tree(code, state);
                 if let Some(rel) = pending_open.take() {
-                    let absolute = state.project.root().join(rel);
-                    open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
+                    if let Ok(absolute) = resolve_code_path(&state.project, &rel) {
+                        open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
+                    }
                 }
             }
             CodeEvent::CreateRequested { path, folder } => {
@@ -332,6 +362,10 @@ fn sync_code_editor(
                 }
             }
             CodeEvent::TabClosed { path } => {
+                let Ok(path) = resolve_code_path(&state.project, &path) else {
+                    tracing::warn!(path = %path.display(), "refused code close outside the project");
+                    continue;
+                };
                 open_docs.remove(&path);
                 if let Some(lsp) = lsp.as_mut() {
                     lsp.did_close(&path);
@@ -348,10 +382,10 @@ fn sync_code_editor(
                 new_name,
             } => {
                 if let Some(lsp) = lsp.as_mut() {
-                    // `path` is tree-root-relative, or already absolute
-                    // for a file opened from the Asset Browser — `join`
-                    // with an absolute path returns it unchanged.
-                    let absolute = state.project.root().join(&path);
+                    let Ok(absolute) = resolve_code_path(&state.project, &path) else {
+                        tracing::warn!(path = %path.display(), "refused LSP request outside the project");
+                        continue;
+                    };
                     let request_id = match kind {
                         LspKind::Completion => lsp.request_completion(&absolute, line, col),
                         LspKind::Hover => lsp.request_hover(&absolute, line, col),
@@ -365,15 +399,19 @@ fn sync_code_editor(
                             new_name.as_deref().unwrap_or_default(),
                         ),
                     };
-                    lsp_waiters.insert(request_id, nonce);
+                    if request_id != 0 && lsp_waiters.len() < 256 {
+                        lsp_waiters.insert(request_id, nonce);
+                    }
                 }
             }
         }
     }
 
     if let Some(relative) = state.file_open_request.take() {
-        let absolute = state.project.assets_dir().join(&relative);
-        open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
+        match state.project.resolve(&Path::new(ASSETS_DIR).join(relative)) {
+            Ok(absolute) => open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute),
+            Err(err) => tracing::warn!(error = %err, "refused asset code open outside the project"),
+        }
     }
 
     // A clicked Problems row: open the file (root-relative) and move the
@@ -381,11 +419,14 @@ fn sync_code_editor(
     if let Some(diagnostic) = state.problem_jump.take()
         && let Some(relative) = diagnostic.file
     {
-        let absolute = state.project.root().join(&relative);
-        if !open_docs.contains(&absolute) {
-            open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
+        if let Ok(absolute) = resolve_code_path(&state.project, &relative) {
+            if !open_docs.contains(&absolute) {
+                open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
+            }
+            code.reveal(&absolute, diagnostic.line.unwrap_or(1), 1);
+        } else {
+            tracing::warn!(path = %relative.display(), "refused problem jump outside the project");
         }
-        code.reveal(&absolute, diagnostic.line.unwrap_or(1), 1);
     }
 
     // Search tab: run a text search, fire a symbol query, or jump to a
@@ -1388,6 +1429,16 @@ impl EditorHandler {
             }
         };
 
+        let scene_path = project.main_scene_path();
+        if let Err(err) = Scene::load_from_file(&scene_path).and_then(|scene| scene.validate()) {
+            tracing::warn!(
+                error = %err,
+                path = %scene_path.display(),
+                "could not load that project's main scene; staying in the current project"
+            );
+            return;
+        }
+
         // The outgoing project's layout, before it stops being current.
         self.save_session();
         if let Err(message) = self.play_process.stop(&self.state.output) {
@@ -1719,6 +1770,15 @@ impl EditorHandler {
     /// which Monaco applies in-buffer (that then flows through
     /// `BufferEdited` → `did_change` + dirty like any edit).
     fn apply_rename(&self, result: &RenameOut) -> String {
+        if result
+            .file_edits
+            .iter()
+            .any(|file| resolve_code_path(&self.state.project, &file.path).is_err())
+        {
+            tracing::warn!("refused rename containing a target outside the project");
+            return rename_json(&[]);
+        }
+
         let mut open_edits: Vec<&editor_lsp::FileEdits> = Vec::new();
         for file in &result.file_edits {
             if self.open_docs.contains(&file.path) {
@@ -1964,6 +2024,18 @@ mod tests {
     }
 
     #[test]
+    fn code_paths_reject_an_absolute_path_outside_the_project() {
+        let root = scratch_project("code-path");
+        let project = Project::create(&root, "Code Path").expect("project creates");
+        let outside = std::env::temp_dir().join("vge-editor-outside.rs");
+
+        assert!(resolve_code_path(&project, &project.root().join("src/main.rs")).is_ok());
+        assert!(resolve_code_path(&project, &outside).is_err());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn the_file_tree_lists_source_scenes_and_config_but_not_build_output() {
         let root = scratch_project("file-tree");
         for (relative, contents) in [
@@ -2000,6 +2072,22 @@ mod tests {
             "config and sources are the tree; build output, assets and editor state are not"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_tree_does_not_follow_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch_project("file-tree-symlink");
+        let outside = scratch_project("file-tree-outside");
+        std::fs::write(outside.join("outside.rs"), "fn outside() {}").unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+
+        assert!(project_file_list(&root).is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
     }
 
     #[test]

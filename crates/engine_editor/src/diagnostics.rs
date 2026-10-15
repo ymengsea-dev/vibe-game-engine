@@ -8,6 +8,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+const MAX_DIAGNOSTICS: usize = 2_000;
+
 /// A diagnostic's severity. Ordered worst-first so a `sort` puts errors
 /// at the top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -75,13 +77,17 @@ impl Diagnostics {
     /// Replaces the whole set (e.g. after a fresh compile).
     pub fn set(&self, items: Vec<Diagnostic>) {
         if let Ok(mut guard) = self.items.lock() {
-            *guard = items;
+            *guard = items.into_iter().rev().take(MAX_DIAGNOSTICS).collect();
+            guard.reverse();
         }
     }
 
     /// Appends one diagnostic.
     pub fn push(&self, item: Diagnostic) {
         if let Ok(mut guard) = self.items.lock() {
+            if guard.len() >= MAX_DIAGNOSTICS {
+                guard.remove(0);
+            }
             guard.push(item);
         }
     }
@@ -249,5 +255,17 @@ mod tests {
         assert_eq!(d.code.as_deref(), Some("E0599"));
         assert_eq!(d.line, Some(42));
         assert_eq!(d.file.unwrap(), PathBuf::from("src/player.rs"));
+    }
+
+    #[test]
+    fn push_evicts_old_diagnostics_at_capacity() {
+        let diagnostics = Diagnostics::new();
+        for index in 0..MAX_DIAGNOSTICS + 1 {
+            diagnostics.push(diag(Severity::Info, &index.to_string()));
+        }
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.len(), MAX_DIAGNOSTICS);
+        assert_eq!(snapshot[0].message, "1");
     }
 }

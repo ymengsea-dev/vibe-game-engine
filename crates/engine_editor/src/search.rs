@@ -29,6 +29,10 @@ const MAX_SEARCH_DEPTH: u32 = 24;
 /// Hard cap on text hits per search — the panel shows a "truncated" note
 /// when it's reached.
 pub const MAX_TEXT_HITS: usize = 1000;
+/// Largest individual source file scanned by literal search.
+const MAX_SEARCH_FILE_BYTES: u64 = 512 * 1024;
+/// Maximum source files inspected by one literal search.
+const MAX_SEARCH_FILES: usize = 4096;
 
 /// Which kind of search the Search tab is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -168,7 +172,17 @@ pub fn run_text_search(root: &Path, query: &SearchQuery, limit: usize) -> TextRe
     } else {
         query.text.to_lowercase()
     };
-    walk(root, root, 0, query, &needle, limit, &mut results);
+    let mut files = 0;
+    walk(
+        root,
+        root,
+        0,
+        query,
+        &needle,
+        limit,
+        &mut files,
+        &mut results,
+    );
     results
 }
 
@@ -179,6 +193,7 @@ fn walk(
     query: &SearchQuery,
     needle: &str,
     limit: usize,
+    files: &mut usize,
     results: &mut TextResults,
 ) {
     if results.truncated || depth >= MAX_SEARCH_DEPTH {
@@ -194,13 +209,19 @@ fn walk(
         if results.truncated {
             return;
         }
-        if path.is_dir() {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
             let skip = path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| SKIP_DIRS.contains(&name));
             if !skip {
-                walk(root, &path, depth + 1, query, needle, limit, results);
+                walk(root, &path, depth + 1, query, needle, limit, files, results);
             }
             continue;
         }
@@ -211,6 +232,14 @@ fn walk(
         if !ext_ok {
             continue;
         }
+        if metadata.len() > MAX_SEARCH_FILE_BYTES {
+            continue;
+        }
+        if *files == MAX_SEARCH_FILES {
+            results.truncated = true;
+            return;
+        }
+        *files += 1;
         let Ok(bytes) = fs::read(&path) else {
             continue;
         };
@@ -470,6 +499,36 @@ mod tests {
         let results = run_text_search(&dir, &query("x"), 10);
         assert_eq!(results.hits.len(), 10);
         assert!(results.truncated);
+    }
+
+    #[test]
+    fn skips_source_files_larger_than_the_search_limit() {
+        let dir = temp_dir("large-file");
+        std::fs::write(
+            dir.join("large.rs"),
+            format!("needle{}", "x".repeat(1024 * 1024)),
+        )
+        .unwrap();
+
+        assert!(run_text_search(&dir, &query("needle"), 100).hits.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_follow_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("symlink-root");
+        let outside = temp_dir("symlink-outside");
+        std::fs::write(outside.join("outside.rs"), "needle").unwrap();
+        symlink(&outside, dir.join("linked")).unwrap();
+
+        assert!(run_text_search(&dir, &query("needle"), 100).hits.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
     }
 
     #[test]

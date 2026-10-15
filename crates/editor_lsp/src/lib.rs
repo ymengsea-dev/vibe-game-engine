@@ -25,6 +25,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+/// Largest LSP JSON-RPC body accepted from the local server.
+const MAX_LSP_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// Outstanding UI requests retained while the server is slow or unavailable.
+const MAX_PENDING_REQUESTS: usize = 256;
+const MAX_QUEUED_RESPONSES: usize = 256;
+const MAX_QUEUED_DIAGNOSTICS: usize = 1024;
+
 /// A diagnostic's severity, mapped from LSP's numeric `DiagnosticSeverity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -492,17 +499,23 @@ impl LspClient {
         include_declaration: bool,
     ) -> i64 {
         let id = self.alloc_request_id(PendingKind::References);
+        if id == 0 {
+            return id;
+        }
         let uri = path_to_uri(path);
-        self.send(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "textDocument/references",
-            "params": {
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": col },
-                "context": { "includeDeclaration": include_declaration }
-            }
-        }));
+        self.send_tracked(
+            id,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "textDocument/references",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": col },
+                    "context": { "includeDeclaration": include_declaration }
+                }
+            }),
+        );
         id
     }
 
@@ -523,12 +536,18 @@ impl LspClient {
     /// fuzzy matching — pass the raw text). Returns the request id.
     pub fn request_workspace_symbols(&mut self, query: &str) -> i64 {
         let id = self.alloc_request_id(PendingKind::WorkspaceSymbol);
-        self.send(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "workspace/symbol",
-            "params": { "query": query }
-        }));
+        if id == 0 {
+            return id;
+        }
+        self.send_tracked(
+            id,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "workspace/symbol",
+                "params": { "query": query }
+            }),
+        );
         id
     }
 
@@ -537,27 +556,38 @@ impl LspClient {
     /// into [`RenameOut`]. Returns the request id.
     pub fn request_rename(&mut self, path: &Path, line: u32, col: u32, new_name: &str) -> i64 {
         let id = self.alloc_request_id(PendingKind::Rename);
+        if id == 0 {
+            return id;
+        }
         let uri = path_to_uri(path);
-        self.send(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "textDocument/rename",
-            "params": {
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": col },
-                "newName": new_name
-            }
-        }));
+        self.send_tracked(
+            id,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": col },
+                    "newName": new_name
+                }
+            }),
+        );
         id
     }
 
     /// Reserves the next request id and records what reply it expects.
     fn alloc_request_id(&mut self, kind: PendingKind) -> i64 {
+        let Ok(mut pending) = self.pending.lock() else {
+            return 0;
+        };
+        if pending.len() >= MAX_PENDING_REQUESTS {
+            tracing::debug!("rust-analyzer request limit reached");
+            return 0;
+        }
         let id = self.next_request_id;
         self.next_request_id += 1;
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.insert(id, kind);
-        }
+        pending.insert(id, kind);
         id
     }
 
@@ -570,41 +600,61 @@ impl LspClient {
         col: u32,
     ) -> i64 {
         let id = self.alloc_request_id(kind);
+        if id == 0 {
+            return id;
+        }
         let uri = path_to_uri(path);
-        self.send(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": {
-                "textDocument": { "uri": uri },
-                "position": { "line": line, "character": col }
-            }
-        }));
+        self.send_tracked(
+            id,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": col }
+                }
+            }),
+        );
         id
     }
 
     fn request(&mut self, method: &str, params: serde_json::Value) {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send(&serde_json::json!({
+        let _ = self.send(&serde_json::json!({
             "jsonrpc": "2.0", "id": id, "method": method, "params": params,
         }));
     }
 
     fn notify(&self, method: &str, params: serde_json::Value) {
-        self.send(&serde_json::json!({
+        let _ = self.send(&serde_json::json!({
             "jsonrpc": "2.0", "method": method, "params": params,
         }));
     }
 
-    fn send(&self, message: &serde_json::Value) {
+    fn send_tracked(&self, id: i64, message: &serde_json::Value) {
+        if !self.send(message)
+            && let Ok(mut pending) = self.pending.lock()
+        {
+            pending.remove(&id);
+        }
+    }
+
+    fn send(&self, message: &serde_json::Value) -> bool {
         match self.stdin.lock() {
             Ok(mut stdin) => {
                 if let Err(err) = write_message(&mut *stdin, message) {
                     tracing::debug!(error = %err, "rust-analyzer write failed (server gone?)");
+                    false
+                } else {
+                    true
                 }
             }
-            Err(_) => tracing::debug!("rust-analyzer stdin lock poisoned"),
+            Err(_) => {
+                tracing::debug!("rust-analyzer stdin lock poisoned");
+                false
+            }
         }
     }
 }
@@ -697,11 +747,17 @@ fn spawn_reader(
                         {
                             // Supersede any pending update for the same file.
                             inbox.retain(|existing| existing.path != file.path);
+                            if inbox.len() == MAX_QUEUED_DIAGNOSTICS {
+                                inbox.remove(0);
+                            }
                             inbox.push(file);
                             queued = true;
                         } else if let Some(response) = response_from(&message, &pending)
                             && let Ok(mut out) = responses.lock()
                         {
+                            if out.len() == MAX_QUEUED_RESPONSES {
+                                out.remove(0);
+                            }
                             out.push(response);
                             queued = true;
                         } else if let Some(reply) = server_request_reply(&message)
@@ -745,6 +801,12 @@ fn read_message(reader: &mut impl BufRead) -> std::io::Result<Option<serde_json:
             "message had no Content-Length",
         )
     })?;
+    if length > MAX_LSP_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "LSP message exceeds size limit",
+        ));
+    }
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body)?;
     serde_json::from_slice(&body)
@@ -1283,6 +1345,14 @@ mod tests {
         let mut reader = std::io::BufReader::new(buffer.as_slice());
         let read = read_message(&mut reader).expect("read").expect("a message");
         assert_eq!(read, message);
+    }
+
+    #[test]
+    fn framing_rejects_oversized_messages_before_allocating() {
+        let frame = b"Content-Length: 8388609\r\n\r\n";
+        let mut reader = std::io::BufReader::new(frame.as_slice());
+        let error = read_message(&mut reader).expect_err("oversized frame rejects");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

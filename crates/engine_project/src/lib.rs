@@ -261,18 +261,20 @@ impl Project {
             std::fs::create_dir_all(&path).map_err(|source| ProjectError::Io { path, source })?;
         }
 
-        let gitkeep = root.join(SRC_DIR).join(".gitkeep");
-        std::fs::write(&gitkeep, b"").map_err(|source| ProjectError::Io {
-            path: gitkeep,
-            source,
-        })?;
-
         let manifest = ProjectManifest {
             version: CURRENT_PROJECT_VERSION,
             name: name.into(),
             main_scene: PathBuf::from(DEFAULT_MAIN_SCENE),
             configurations: default_configurations(),
         };
+        validate_project_paths(&root, &manifest)?;
+
+        let gitkeep = root.join(SRC_DIR).join(".gitkeep");
+        std::fs::write(&gitkeep, b"").map_err(|source| ProjectError::Io {
+            path: gitkeep,
+            source,
+        })?;
+
         let project = Self { root, manifest };
         project.save_manifest()?;
 
@@ -317,18 +319,7 @@ impl Project {
                 max: CURRENT_PROJECT_VERSION,
             });
         }
-        if !is_contained(&manifest.main_scene) {
-            return Err(ProjectError::PathEscapesRoot(manifest.main_scene.clone()));
-        }
-        // A configuration's scene is a path out of a file on disk, so it
-        // gets the same treatment as `main_scene`.
-        for configuration in &manifest.configurations {
-            if let Some(scene) = &configuration.scene
-                && !is_contained(scene)
-            {
-                return Err(ProjectError::PathEscapesRoot(scene.clone()));
-            }
-        }
+        validate_project_paths(&root, &manifest)?;
         let migrated = manifest.migrate();
 
         for dir in STANDARD_DIRS {
@@ -432,17 +423,14 @@ impl Project {
     }
 
     /// Joins `relative` onto the project root, rejecting anything that
-    /// would escape it (absolute, or containing `..`).
+    /// would escape it (absolute, containing `..`, or following an
+    /// existing symlink outside the root).
     ///
     /// # Errors
     ///
     /// [`ProjectError::PathEscapesRoot`] if `relative` is not contained.
     pub fn resolve(&self, relative: &Path) -> Result<PathBuf, ProjectError> {
-        if is_contained(relative) {
-            Ok(self.root.join(relative))
-        } else {
-            Err(ProjectError::PathEscapesRoot(relative.to_path_buf()))
-        }
+        resolve_contained(&self.root, relative)
     }
 
     /// Writes the current manifest back to `project.ron` (pretty RON).
@@ -452,6 +440,7 @@ impl Project {
     /// [`ProjectError::Parse`] if serialization fails (practically
     /// never), [`ProjectError::Io`] if the write fails.
     pub fn save_manifest(&self) -> Result<(), ProjectError> {
+        validate_project_paths(&self.root, &self.manifest)?;
         let path = self.root.join(MANIFEST_FILE);
         let text = ron::ser::to_string_pretty(&self.manifest, ron::ser::PrettyConfig::default())
             .map_err(|err| ProjectError::Parse {
@@ -460,6 +449,43 @@ impl Project {
             })?;
         std::fs::write(&path, text).map_err(|source| ProjectError::Io { path, source })
     }
+}
+
+fn validate_project_paths(root: &Path, manifest: &ProjectManifest) -> Result<(), ProjectError> {
+    for dir in STANDARD_DIRS {
+        resolve_contained(root, Path::new(dir))?;
+    }
+    resolve_contained(root, &manifest.main_scene)?;
+    for configuration in &manifest.configurations {
+        if let Some(scene) = &configuration.scene {
+            resolve_contained(root, scene)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_contained(root: &Path, relative: &Path) -> Result<PathBuf, ProjectError> {
+    if !is_contained(relative) {
+        return Err(ProjectError::PathEscapesRoot(relative.to_path_buf()));
+    }
+
+    let root_canonical = root.canonicalize().map_err(|source| ProjectError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let path = root.join(relative);
+    let existing = path
+        .ancestors()
+        .find(|ancestor| ancestor.exists())
+        .unwrap_or(root);
+    let canonical = existing.canonicalize().map_err(|source| ProjectError::Io {
+        path: existing.to_path_buf(),
+        source,
+    })?;
+    if !canonical.starts_with(&root_canonical) {
+        return Err(ProjectError::PathEscapesRoot(relative.to_path_buf()));
+    }
+    Ok(path)
 }
 
 /// Whether `relative` stays inside a root when joined to it — no root/
@@ -697,6 +723,38 @@ mod tests {
             Err(ProjectError::PathEscapesRoot(_))
         ));
         cleanup(&root);
+    }
+
+    #[test]
+    fn save_manifest_rejects_an_escaping_main_scene() {
+        let root = temp_root("save-escape");
+        let mut project = Project::create(&root, "Save Escape").expect("create");
+        project.manifest_mut().main_scene = PathBuf::from("../outside.ron");
+
+        assert!(matches!(
+            project.save_manifest(),
+            Err(ProjectError::PathEscapesRoot(_))
+        ));
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rejects_a_symlink_that_leaves_the_project() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("symlink-escape");
+        let outside = temp_root("symlink-target");
+        let project = Project::create(&root, "Symlink Escape").expect("create");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        symlink(&outside, project.scenes_dir().join("outside")).expect("scene symlink");
+
+        assert!(matches!(
+            project.resolve(Path::new("scenes/outside/scene.ron")),
+            Err(ProjectError::PathEscapesRoot(_))
+        ));
+        cleanup(&root);
+        cleanup(&outside);
     }
 
     #[test]

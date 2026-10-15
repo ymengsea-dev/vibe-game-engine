@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use engine::prelude::{
     AssetLibrary, EXPORT_SCENE_FILE, Game, GameConfig, GameContext, GameError, RuntimeResolver,
-    Scene, SceneError, open_export, run_game,
+    Scene, SceneError, executable_dir, open_export, run_game,
 };
 
 /// Opens the export's assets: a packed `assets.pak` if there is one,
@@ -165,6 +165,10 @@ fn run(export_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn default_export_dir() -> PathBuf {
+    executable_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -176,7 +180,7 @@ fn main() {
     let export_dir = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(default_export_dir);
     tracing::info!(dir = %export_dir.display(), "loading export");
 
     if let Err(err) = run(&export_dir) {
@@ -194,6 +198,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir
+    }
+
+    #[test]
+    fn default_export_dir_is_next_to_the_executable() {
+        let expected = engine::prelude::executable_dir().unwrap_or_else(|| PathBuf::from("."));
+
+        assert_eq!(default_export_dir(), expected);
     }
 
     #[test]

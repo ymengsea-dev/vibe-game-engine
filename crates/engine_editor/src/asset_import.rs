@@ -103,10 +103,18 @@ pub fn is_importable(path: &Path) -> bool {
 /// Bounded: after a large number of attempts it gives up and returns the
 /// last candidate rather than looping forever on a pathological
 /// directory.
-pub fn unique_destination(directory: &Path, file_name: &Path) -> PathBuf {
+pub fn unique_destination(directory: &Path, file_name: &Path) -> Option<PathBuf> {
+    unique_destination_with_limit(directory, file_name, 9_999)
+}
+
+fn unique_destination_with_limit(
+    directory: &Path,
+    file_name: &Path,
+    limit: u32,
+) -> Option<PathBuf> {
     let candidate = directory.join(file_name);
     if !candidate.exists() {
-        return candidate;
+        return Some(candidate);
     }
 
     let stem = file_name
@@ -117,17 +125,17 @@ pub fn unique_destination(directory: &Path, file_name: &Path) -> PathBuf {
         .extension()
         .map(|extension| extension.to_string_lossy().into_owned());
 
-    for attempt in 1..10_000u32 {
+    for attempt in 1..=limit {
         let name = match &extension {
             Some(extension) => format!("{stem}_{attempt}.{extension}"),
             None => format!("{stem}_{attempt}"),
         };
         let candidate = directory.join(&name);
         if !candidate.exists() {
-            return candidate;
+            return Some(candidate);
         }
     }
-    candidate
+    None
 }
 
 /// Copies `sources` into `assets_dir`, creating it if absent.
@@ -137,10 +145,9 @@ pub fn unique_destination(directory: &Path, file_name: &Path) -> PathBuf {
 /// import, because failing an eight-file drop over one bad file would be
 /// worse than importing seven.
 ///
-/// A sibling `.meta` sidecar is copied alongside its asset when one
-/// exists, so a file brought over from another project keeps its stable
-/// id instead of being assigned a fresh one — which would silently break
-/// every scene already referencing it.
+/// Imported assets receive a new local `.meta` sidecar during the next
+/// import pass. Carrying a source project's sidecar could duplicate an
+/// id that already exists here and make references resolve unpredictably.
 pub fn import_files(assets_dir: &Path, sources: &[PathBuf]) -> Vec<ImportOutcome> {
     let mut outcomes = Vec::with_capacity(sources.len());
 
@@ -168,12 +175,17 @@ pub fn import_files(assets_dir: &Path, sources: &[PathBuf]) -> Vec<ImportOutcome
             continue;
         };
 
-        let destination = unique_destination(assets_dir, file_name);
+        let Some(destination) = unique_destination(assets_dir, file_name) else {
+            outcomes.push(ImportOutcome::Failed {
+                source: source.clone(),
+                reason: "could not find a free asset name".to_string(),
+            });
+            continue;
+        };
         let renamed = destination.file_name() != source.file_name();
 
         match std::fs::copy(source, &destination) {
             Ok(_) => {
-                copy_sidecar(source, &destination);
                 let relative = destination
                     .strip_prefix(assets_dir)
                     .unwrap_or(&destination)
@@ -191,32 +203,6 @@ pub fn import_files(assets_dir: &Path, sources: &[PathBuf]) -> Vec<ImportOutcome
     }
 
     outcomes
-}
-
-/// Copies `source`'s `.meta` sidecar next to `destination`, if it has one.
-///
-/// Best-effort: a missing or unreadable sidecar just means the importer
-/// mints a fresh id, which is correct for a file that never had one.
-fn copy_sidecar(source: &Path, destination: &Path) {
-    let source_meta = sidecar_path(source);
-    if !source_meta.is_file() {
-        return;
-    }
-    let destination_meta = sidecar_path(destination);
-    if let Err(err) = std::fs::copy(&source_meta, &destination_meta) {
-        tracing::warn!(
-            error = %err,
-            path = %source_meta.display(),
-            "could not carry over the asset's .meta id; a new one will be assigned"
-        );
-    }
-}
-
-/// The `.meta` sidecar path for an asset.
-fn sidecar_path(asset: &Path) -> PathBuf {
-    let mut name = asset.as_os_str().to_os_string();
-    name.push(".meta");
-    PathBuf::from(name)
 }
 
 #[cfg(test)]
@@ -264,7 +250,7 @@ mod tests {
     fn unique_destination_keeps_a_free_name() {
         let dir = temp_dir("free");
         let chosen = unique_destination(&dir, Path::new("barrel.gltf"));
-        assert_eq!(chosen, dir.join("barrel.gltf"));
+        assert_eq!(chosen, Some(dir.join("barrel.gltf")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -274,13 +260,23 @@ mod tests {
         write(&dir.join("barrel.gltf"), "existing");
 
         let chosen = unique_destination(&dir, Path::new("barrel.gltf"));
-        assert_eq!(chosen, dir.join("barrel_1.gltf"));
+        assert_eq!(chosen, Some(dir.join("barrel_1.gltf")));
 
         write(&dir.join("barrel_1.gltf"), "also existing");
         assert_eq!(
             unique_destination(&dir, Path::new("barrel.gltf")),
-            dir.join("barrel_2.gltf"),
+            Some(dir.join("barrel_2.gltf")),
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_destination_reports_an_exhausted_name_space() {
+        let dir = temp_dir("exhausted");
+        write(&dir.join("barrel.gltf"), "original");
+        write(&dir.join("barrel_1.gltf"), "original");
+
+        assert!(unique_destination_with_limit(&dir, Path::new("barrel.gltf"), 1).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -352,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn a_meta_sidecar_travels_with_its_asset() {
+    fn a_source_meta_sidecar_is_not_imported() {
         let dir = temp_dir("sidecar");
         let assets = dir.join("assets");
         let source = dir.join("barrel.gltf");
@@ -364,16 +360,9 @@ mod tests {
 
         import_files(&assets, &[source]);
 
-        let carried = assets.join("barrel.gltf.meta");
         assert!(
-            carried.is_file(),
-            "the id must come along, or every scene referencing it breaks",
-        );
-        assert!(
-            std::fs::read_to_string(carried)
-                .expect("read")
-                .contains("b8d5d33b"),
-            "and it must be the same id",
+            !assets.join("barrel.gltf.meta").exists(),
+            "the project importer must mint a local id instead"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -379,7 +379,23 @@ pub fn scoped_path(root: &Path, relative: &Path) -> Result<PathBuf, ToolError> {
     {
         return Err(ToolError::OutsideProject(relative.to_owned()));
     }
-    Ok(root.join(relative))
+    let path = root.join(relative);
+    if root.exists() {
+        let root = root
+            .canonicalize()
+            .map_err(|_| ToolError::OutsideProject(relative.to_owned()))?;
+        let existing = path
+            .ancestors()
+            .find(|ancestor| ancestor.exists())
+            .ok_or_else(|| ToolError::OutsideProject(relative.to_owned()))?;
+        let existing = existing
+            .canonicalize()
+            .map_err(|_| ToolError::OutsideProject(relative.to_owned()))?;
+        if !existing.starts_with(root) {
+            return Err(ToolError::OutsideProject(relative.to_owned()));
+        }
+    }
+    Ok(path)
 }
 
 /// Validates a search query before scanning project files.
@@ -409,6 +425,29 @@ mod tests {
             scoped_path(root, Path::new("/tmp/secret")),
             Err(ToolError::OutsideProject(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_paths_reject_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("editor-tools-root-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("editor-tools-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).expect("root creates");
+        std::fs::create_dir_all(&outside).expect("outside creates");
+        symlink(&outside, root.join("escape")).expect("symlink creates");
+
+        assert!(matches!(
+            scoped_path(&root, Path::new("escape/source.rs")),
+            Err(ToolError::OutsideProject(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
     }
 
     #[test]

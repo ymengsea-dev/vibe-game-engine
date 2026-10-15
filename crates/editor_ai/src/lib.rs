@@ -118,12 +118,18 @@ impl ProjectIndex {
             entries.sort_by_key(|entry| entry.file_name());
             for entry in entries {
                 let path = entry.path();
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
                 if name.starts_with('.') || matches!(name.as_ref(), "target" | "assets") {
                     continue;
                 }
-                if path.is_dir() {
+                if metadata.is_dir() {
                     walk(&path, root, out, bytes);
                     continue;
                 }
@@ -457,5 +463,29 @@ mod tests {
         assert_eq!(index.len(), 1);
         assert_eq!(index.search("Player"), vec!["src/lib.rs"]);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_index_does_not_follow_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("editor-ai-index-root-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("editor-ai-index-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub struct Inside;").unwrap();
+        std::fs::write(outside.join("secret.rs"), "pub struct Outside;").unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+
+        let index = ProjectIndex::build(&root);
+        assert_eq!(index.search("Outside"), Vec::<&str>::new());
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
     }
 }

@@ -27,7 +27,11 @@ pub fn sample_pose(
     animation: &ImportedAnimation,
     time_seconds: f32,
 ) -> Vec<Transform> {
-    let time = time_seconds.clamp(0.0, animation.duration.max(0.0));
+    let time = if time_seconds.is_finite() {
+        time_seconds.clamp(0.0, animation.duration.max(0.0))
+    } else {
+        0.0
+    };
 
     skeleton
         .joints
@@ -388,6 +392,37 @@ mod tests {
 
         let before_the_start = sample_pose(&skeleton, &animation, -5.0);
         assert_eq!(before_the_start[0].translation, Vec3::ZERO);
+    }
+
+    #[test]
+    fn sample_pose_uses_the_first_frame_for_non_finite_time() {
+        let skeleton = ImportedSkeleton {
+            name: None,
+            joints: vec![joint("Root", 0, None, Vec3::ZERO)],
+        };
+        let mut channels = HashMap::new();
+        channels.insert(
+            0,
+            ImportedAnimationChannels {
+                translation: Some(keyframes_vec3(
+                    ImportedInterpolation::Linear,
+                    &[0.0, 1.0],
+                    &[Vec3::ZERO, Vec3::X],
+                )),
+                rotation: None,
+                scale: None,
+            },
+        );
+        let animation = ImportedAnimation {
+            name: None,
+            duration: 1.0,
+            channels,
+            events: Vec::new(),
+        };
+
+        let pose = sample_pose(&skeleton, &animation, f32::NAN);
+
+        assert_eq!(pose[0].translation, Vec3::ZERO);
     }
 
     // --- `compute_skinning_matrices` ---

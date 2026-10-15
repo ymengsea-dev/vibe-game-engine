@@ -151,6 +151,9 @@ impl<'a> StateMachine<'a> {
     /// phase-matching the outgoing one — a simpler, if less seamless,
     /// choice than real engines' optional phase sync).
     pub fn update(&mut self, dt_seconds: f32) {
+        if !dt_seconds.is_finite() {
+            return;
+        }
         self.current_time += dt_seconds;
 
         if let Some(active) = &mut self.transition {
@@ -337,6 +340,21 @@ mod tests {
         machine.update(0.5); // "IsMoving" never set — defaults to false
         assert_eq!(machine.current_state_name(), "Idle");
         assert!(!machine.is_transitioning());
+    }
+
+    #[test]
+    fn update_ignores_a_non_finite_delta() {
+        let idle = constant_translation_clip(0.0);
+        let states = vec![AnimationState {
+            name: "Idle".to_string(),
+            clip: &idle,
+            transitions: vec![],
+        }];
+        let mut machine = StateMachine::new(states, "Idle").unwrap();
+
+        machine.update(f32::NAN);
+
+        assert_eq!(machine.current_time, 0.0);
     }
 
     #[test]

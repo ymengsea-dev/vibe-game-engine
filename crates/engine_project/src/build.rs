@@ -418,7 +418,10 @@ mod tests {
 
         assert!(report.binary.is_file(), "staged binary must exist");
         assert!(report.bundle.is_file(), "asset bundle must exist");
-        assert_eq!(report.scene.as_deref(), Some(project.root().join("export/main.ron").as_path()));
+        assert_eq!(
+            report.scene.as_deref(),
+            Some(project.root().join("export/main.ron").as_path())
+        );
         assert!(report.scene.as_ref().is_some_and(|path| path.is_file()));
 
         // Execute from the staged folder, with no editor or source tree on
@@ -428,7 +431,10 @@ mod tests {
             .output()
             .expect("run staged game");
         assert!(run.status.success(), "staged game failed: {run:?}");
-        assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "standalone game");
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout).trim(),
+            "standalone game"
+        );
         std::fs::remove_dir_all(project.root()).ok();
     }
 }

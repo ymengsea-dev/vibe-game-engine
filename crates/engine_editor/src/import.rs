@@ -236,14 +236,16 @@ impl AssetImporter {
         changed: &[std::path::PathBuf],
     ) -> (AssetIndex, ReloadReport) {
         let before = self.imported_count();
-        for entry in entries.iter().filter(|entry| entry.kind == AssetKind::Mesh) {
-            self.cache.invalidate(&root.join(&entry.relative_path));
-        }
-        let index = self.run(root, entries);
         let changed_set: HashSet<std::path::PathBuf> = changed
             .iter()
             .filter_map(|path| path.strip_prefix(root).ok().map(Path::to_path_buf))
             .collect();
+        for entry in entries.iter().filter(|entry| {
+            entry.kind == AssetKind::Mesh && changed_set.contains(&entry.relative_path)
+        }) {
+            self.cache.invalidate(&root.join(&entry.relative_path));
+        }
+        let index = self.run(root, entries);
         let mut report = ReloadReport {
             changed: changed_set.len(),
             ..ReloadReport::default()
