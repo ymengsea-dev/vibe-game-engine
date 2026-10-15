@@ -208,8 +208,8 @@ impl GameConfig {
     ///
     /// [`GameError::InvalidConfig`] if `title` is empty/whitespace,
     /// `width`/`height` is `0`, `fixed_hz` is not finite and positive, or
-    /// `gravity` is not finite, or a continuous-save interval is not finite
-    /// and positive.
+    /// `gravity` or `camera` is invalid, or a continuous-save interval is
+    /// not finite and positive.
     pub fn validate(&self) -> Result<(), GameError> {
         if self.title.trim().is_empty() {
             return Err(GameError::InvalidConfig("title must not be empty".into()));
@@ -226,6 +226,11 @@ impl GameConfig {
         }
         if !self.gravity.is_finite() {
             return Err(GameError::InvalidConfig("gravity must be finite".into()));
+        }
+        if !self.camera.is_valid() {
+            return Err(GameError::InvalidConfig(
+                "camera must have finite, non-degenerate view and projection values".into(),
+            ));
         }
         if let SavePolicy::Continuous { interval } = self.save_policy
             && !(interval.is_finite() && interval > 0.0)
@@ -427,6 +432,8 @@ struct Runtime {
     /// Whether the "sprites spawned but no atlas set" warning has been
     /// logged. Once per run, not once per frame.
     warned_missing_atlas: bool,
+    /// Whether an invalid runtime camera has already been reported.
+    warned_invalid_camera: bool,
 
     particle_pipelines: ParticlePipelines,
     particle_camera: ParticleCameraBinding,
@@ -860,7 +867,8 @@ impl GameContext<'_> {
     }
 
     /// The active camera. Mutate it here; the engine re-uploads its GPU
-    /// binding after `update` each frame.
+    /// binding after `update` each frame. Invalid values skip rendering
+    /// until the camera is valid again.
     pub fn camera_mut(&mut self) -> &mut Camera {
         &mut self.runtime.camera
     }
@@ -1246,6 +1254,14 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
                 .is_some_and(|runtime| runtime.exit_requested)
     }
 
+    fn redraw_policy(&self) -> engine_platform::RedrawPolicy {
+        if self.should_exit() {
+            engine_platform::RedrawPolicy::Wait
+        } else {
+            engine_platform::RedrawPolicy::Continuous
+        }
+    }
+
     fn on_exit(&mut self) {
         // Last chance to persist. Without this, everything since the last
         // autosave tick is lost on a clean quit — which is most quits.
@@ -1597,6 +1613,7 @@ fn build_runtime(
         sprite_quad,
         sprite_atlas: None,
         warned_missing_atlas: false,
+        warned_invalid_camera: false,
         particle_pipelines,
         particle_camera,
         vegetation_pipeline,
@@ -1643,6 +1660,15 @@ fn update_audio(runtime: &mut Runtime) {
 }
 
 fn render_frame(runtime: &mut Runtime, dt: f32) {
+    if !runtime.camera.is_valid() {
+        if !runtime.warned_invalid_camera {
+            tracing::error!("skipping render: camera has invalid view or projection values");
+            runtime.warned_invalid_camera = true;
+        }
+        return;
+    }
+    runtime.warned_invalid_camera = false;
+
     // Built before the borrow-heavy render call, since it reads the UI
     // tree while that call takes the world mutably.
     let ui_quads = ui_quads(
@@ -1790,6 +1816,35 @@ pub fn run_game(config: GameConfig, game: impl Game + 'static) -> Result<(), Gam
 mod tests {
     use super::*;
 
+    struct TestGame;
+
+    impl Game for TestGame {
+        fn setup(&mut self, _ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+            Ok(())
+        }
+
+        fn update(&mut self, _ctx: &mut GameContext<'_>, _dt: f32) {}
+    }
+
+    #[test]
+    fn game_runner_redraw_policy_is_continuous_until_exit() {
+        let mut runner = GameRunner {
+            config: None,
+            game: TestGame,
+            runtime: None,
+            error_slot: Rc::new(Cell::new(None)),
+            last_frame: None,
+            finished: false,
+        };
+
+        assert_eq!(
+            runner.redraw_policy(),
+            engine_platform::RedrawPolicy::Continuous
+        );
+        runner.finished = true;
+        assert_eq!(runner.redraw_policy(), engine_platform::RedrawPolicy::Wait);
+    }
+
     #[test]
     fn a_held_stick_moves_focus_once() {
         let mut previous = (0, 0);
@@ -1863,6 +1918,17 @@ mod tests {
         assert!(config.validate().is_err());
         config.fixed_hz = -30.0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn config_rejects_a_camera_with_the_eye_at_its_target() {
+        let mut config = GameConfig::new("Test", 800, 600);
+        config.camera.target = config.camera.eye;
+
+        assert!(matches!(
+            config.validate(),
+            Err(GameError::InvalidConfig(_))
+        ));
     }
 
     #[test]

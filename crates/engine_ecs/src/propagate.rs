@@ -9,15 +9,15 @@
 
 use bevy_ecs::entity::Entity;
 use bevy_ecs::hierarchy::{ChildOf, Children};
-use bevy_ecs::query::{With, Without};
+use bevy_ecs::query::{Or, With, Without};
 use bevy_ecs::world::World;
 
 use crate::components::{GlobalTransform, Transform};
 
 /// Recomputes [`GlobalTransform`] for every entity that has a [`Transform`]
 /// (inserting it if missing), by walking the hierarchy from every root
-/// (an entity with [`Transform`] and no [`ChildOf`]) down through its
-/// descendants.
+/// (an entity with no [`ChildOf`] that has either a [`Transform`] or
+/// children) down through its descendants.
 ///
 /// A root's world transform equals its local [`Transform`]. Each child's
 /// world transform is its parent's world transform composed with its own
@@ -31,7 +31,8 @@ use crate::components::{GlobalTransform, Transform};
 /// `ChildOf`-driven traversal) would recurse until the stack overflows;
 /// cycle detection is future work if a path to creating one ever exists.
 pub fn propagate_transforms(world: &mut World) {
-    let mut roots_query = world.query_filtered::<Entity, (With<Transform>, Without<ChildOf>)>();
+    let mut roots_query =
+        world.query_filtered::<Entity, (Without<ChildOf>, Or<(With<Transform>, With<Children>)>)>();
     let roots: Vec<Entity> = roots_query.iter(world).collect();
 
     for root in roots {
@@ -154,6 +155,27 @@ mod tests {
         assert_eq!(
             world.get::<GlobalTransform>(child).unwrap().0.translation,
             Vec3::new(5.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn child_of_a_transformless_root_gets_its_own_global_transform() {
+        let mut world = World::new();
+        let parent = world.spawn_empty().id();
+        let child = world
+            .spawn((
+                Transform(engine_utils::Transform::from_translation(Vec3::new(
+                    3.0, 0.0, 0.0,
+                ))),
+                ChildOf(parent),
+            ))
+            .id();
+
+        propagate_transforms(&mut world);
+
+        assert_eq!(
+            world.get::<GlobalTransform>(child).unwrap().0.translation,
+            Vec3::new(3.0, 0.0, 0.0),
         );
     }
 

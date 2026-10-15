@@ -304,6 +304,12 @@ impl LspClient {
     /// can't be found or won't start; the editor stays fully usable
     /// without it.
     pub fn start(root: &Path) -> Option<Self> {
+        Self::start_with_wake(root, || {})
+    }
+
+    /// Starts rust-analyzer and wakes the supplied UI scheduler after a
+    /// diagnostic or response is queued.
+    pub fn start_with_wake(root: &Path, wake: impl Fn() + Send + Sync + 'static) -> Option<Self> {
         let program = resolve_server()?;
         let mut child = match Command::new(&program)
             .current_dir(root)
@@ -333,6 +339,7 @@ impl LspClient {
             Arc::clone(&pending),
             Arc::clone(&stdin),
             Arc::clone(&alive),
+            Arc::new(wake),
         )
         .ok()?;
 
@@ -675,6 +682,7 @@ fn spawn_reader(
     pending: Arc<Mutex<HashMap<i64, PendingKind>>>,
     stdin: Arc<Mutex<ChildStdin>>,
     alive: Arc<AtomicBool>,
+    wake: Arc<dyn Fn() + Send + Sync>,
 ) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("studio-lsp-reader".to_owned())
@@ -683,20 +691,26 @@ fn spawn_reader(
             while alive.load(Ordering::SeqCst) {
                 match read_message(&mut reader) {
                     Ok(Some(message)) => {
+                        let mut queued = false;
                         if let Some(file) = diagnostics_from(&message)
                             && let Ok(mut inbox) = inbox.lock()
                         {
                             // Supersede any pending update for the same file.
                             inbox.retain(|existing| existing.path != file.path);
                             inbox.push(file);
+                            queued = true;
                         } else if let Some(response) = response_from(&message, &pending)
                             && let Ok(mut out) = responses.lock()
                         {
                             out.push(response);
+                            queued = true;
                         } else if let Some(reply) = server_request_reply(&message)
                             && let Ok(mut stdin) = stdin.lock()
                         {
                             let _ = write_message(&mut *stdin, &reply);
+                        }
+                        if queued {
+                            wake();
                         }
                     }
                     Ok(None) => break, // EOF

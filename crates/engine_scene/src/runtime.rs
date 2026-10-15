@@ -256,7 +256,12 @@ impl AssetLibrary {
     /// [`SceneError::Resolve`] if the file is not importable glTF.
     pub fn import_mesh(&self, id: &str) -> Result<Option<ImportedGltf>, SceneError> {
         if let Some(path) = self.path_for(id) {
-            return import_gltf_file(&path)
+            let AssetStore::Directory(root) = &self.store else {
+                return Err(SceneError::Resolve(
+                    "a path-backed asset must have a directory store".to_owned(),
+                ));
+            };
+            return import_gltf_file(&path, root)
                 .map(Some)
                 .map_err(|err| SceneError::Resolve(format!("{}: {err}", path.display())));
         }
@@ -415,20 +420,21 @@ impl SceneResolver for RuntimeResolver<'_> {
         let Some(gltf) = self.library.import_mesh(&mesh.id)? else {
             return Ok(None);
         };
-        let Some(primitive) = gltf.meshes.first() else {
+        let [primitive] = gltf.meshes.as_slice() else {
             return Err(SceneError::Resolve(format!(
-                "asset {} contains no mesh primitives",
-                mesh.id
+                "asset {} has {} primitives; the runtime renderer supports exactly one",
+                mesh.id,
+                gltf.meshes.len()
             )));
         };
-        let base_color = gltf
-            .images
-            .first()
+        let imported_material = primitive
+            .material
+            .and_then(|index| gltf.materials.get(index));
+        let base_color = imported_material
+            .and_then(|material| material.base_color_image)
+            .and_then(|index| gltf.images.get(index))
             .map(|image| (image.width, image.height, image.rgba8.as_slice()));
-        let material = gltf
-            .materials
-            .first()
-            .map_or(Material::DEFAULT, material_from_imported);
+        let material = imported_material.map_or(Material::DEFAULT, material_from_imported);
 
         let renderer = MeshRenderer::from_geometry(
             self.gpu,

@@ -9,11 +9,8 @@
 //! or containing symlink cycles) rather than assuming it's well-formed —
 //! see [`scan`]'s docs for exactly how each case is handled.
 //!
-//! Lists whatever's on disk — not yet wired to `engine_asset`'s
-//! [`AssetDatabase`](engine_asset::AssetDatabase) (which tracks
-//! *registered* assets by UUID, not files/paths at all) or to the
-//! importers that would actually load a selected file. That wiring —
-//! selecting a file here registers/imports it — is future work.
+//! Lists whatever's on disk. Importing is handled by [`crate::import`]; the
+//! browser itself stays responsible only for scanning and presenting paths.
 
 use std::collections::HashMap;
 use std::fs;

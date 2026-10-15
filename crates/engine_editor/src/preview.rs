@@ -417,6 +417,7 @@ mod tests {
             name: None,
             vertices: vec![Vertex::zeroed(); vertices],
             indices: vec![0; indices],
+            material: None,
             skin_weights: None,
             skeleton: None,
         }

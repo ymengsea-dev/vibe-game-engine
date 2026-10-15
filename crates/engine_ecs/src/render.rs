@@ -429,11 +429,13 @@ pub fn extract_and_render_to(
             },
         );
 
-        shadow_casters.push(Drawable {
-            model: &mesh_renderer.model,
-            material,
-            mesh,
-        });
+        if material.casts_shadow {
+            shadow_casters.push(Drawable {
+                model: &mesh_renderer.model,
+                material,
+                mesh,
+            });
+        }
 
         if is_visible(frustum, &mesh.local_bounds, &world_from_local) {
             // Transparent surfaces sit out the opaque path entirely:

@@ -11,7 +11,8 @@
 //! file bytes: enough to detect edits, not a security boundary.
 
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -19,12 +20,14 @@ use uuid::Uuid;
 
 use crate::error::AssetError;
 
-/// A non-cryptographic 64-bit digest of `bytes`, stable across runs
-/// (`DefaultHasher` is seeded with fixed keys).
+/// A non-cryptographic FNV-1a 64-bit digest of `bytes`, stable across
+/// Rust versions and platforms.
 pub fn hash_bytes(bytes: &[u8]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    bytes.iter().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+    })
 }
 
 fn read_bytes(path: &Path) -> Result<Vec<u8>, AssetError> {
@@ -106,8 +109,13 @@ impl AssetMeta {
     ///
     /// [`AssetError::MetaIo`] on a read/write failure.
     pub fn refresh(&mut self, asset_path: &Path) -> Result<(), AssetError> {
-        self.source_hash = hash_bytes(&read_bytes(asset_path)?);
-        self.write(asset_path)
+        let updated = Self {
+            id: self.id,
+            source_hash: hash_bytes(&read_bytes(asset_path)?),
+        };
+        updated.write(asset_path)?;
+        *self = updated;
+        Ok(())
     }
 
     fn write(&self, asset_path: &Path) -> Result<(), AssetError> {
@@ -119,11 +127,45 @@ impl AssetMeta {
                     reason: err.to_string(),
                 }
             })?;
-        std::fs::write(&sidecar, text).map_err(|err| AssetError::MetaIo {
-            path: sidecar.display().to_string(),
-            message: err.to_string(),
-        })
+        let temporary = temporary_sidecar_path(&sidecar);
+        write_sidecar_atomically(&sidecar, &temporary, text.as_bytes())
     }
+}
+
+fn temporary_sidecar_path(sidecar: &Path) -> PathBuf {
+    let mut temporary = sidecar.as_os_str().to_os_string();
+    temporary.push(format!(".{}.tmp", Uuid::new_v4()));
+    PathBuf::from(temporary)
+}
+
+fn meta_io_error(path: &Path, err: std::io::Error) -> AssetError {
+    AssetError::MetaIo {
+        path: path.display().to_string(),
+        message: err.to_string(),
+    }
+}
+
+/// Replaces a sidecar only after its complete contents reach disk. The
+/// temporary path must be a sibling so the rename is atomic on supported
+/// filesystems.
+fn write_sidecar_atomically(
+    sidecar: &Path,
+    temporary: &Path,
+    bytes: &[u8],
+) -> Result<(), AssetError> {
+    let result = (|| -> Result<(), std::io::Error> {
+        let mut file: File = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(temporary, sidecar)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result.map_err(|err| meta_io_error(sidecar, err))
 }
 
 /// An in-memory index of [`AssetMeta`] sidecars, keyed by source path —
@@ -131,6 +173,8 @@ impl AssetMeta {
 #[derive(Debug, Default)]
 pub struct ImportCache {
     entries: HashMap<PathBuf, AssetMeta>,
+    pending_hashes: HashMap<PathBuf, u64>,
+    forced: std::collections::HashSet<PathBuf>,
 }
 
 impl ImportCache {
@@ -139,37 +183,87 @@ impl ImportCache {
         Self::default()
     }
 
-    /// Ensures `asset_path` has an up-to-date `.meta` sidecar, caching it,
-    /// and reports whether the source needs (re)importing.
+    /// Caches `asset_path`'s sidecar and reports whether the source needs
+    /// (re)importing. A changed hash is not persisted until [`Self::confirm`]
+    /// records a successful importer result.
     ///
     /// Returns `(id, needs_import)`:
-    /// - `needs_import` is `true` if the sidecar was just created, or the
-    ///   source's hash no longer matches it (in which case the sidecar is
-    ///   refreshed);
+    /// - `needs_import` is `true` if the sidecar is absent or the source's
+    ///   hash no longer matches the last successful import;
     /// - `false` if a matching sidecar was already on disk / in the cache.
     ///
     /// # Errors
     ///
     /// Propagates [`AssetError::MetaIo`]/[`AssetError::MetaParse`].
     pub fn ensure(&mut self, asset_path: &Path) -> Result<(Uuid, bool), AssetError> {
-        if let Some(meta) = self.entries.get_mut(asset_path) {
-            if meta.is_stale(asset_path)? {
-                meta.refresh(asset_path)?;
-                return Ok((meta.id, true));
+        let source_hash = hash_bytes(&read_bytes(asset_path)?);
+        let sidecar = AssetMeta::sidecar_path(asset_path);
+        let sidecar_exists = sidecar.exists();
+        let meta = match self.entries.get(asset_path) {
+            Some(meta) => meta.clone(),
+            None => {
+                if sidecar_exists {
+                    let text = std::fs::read_to_string(&sidecar)
+                        .map_err(|err| meta_io_error(&sidecar, err))?;
+                    ron::from_str(&text).map_err(|err| AssetError::MetaParse {
+                        path: sidecar.display().to_string(),
+                        reason: err.to_string(),
+                    })?
+                } else {
+                    AssetMeta {
+                        id: Uuid::new_v4(),
+                        source_hash: 0,
+                    }
+                }
             }
-            return Ok((meta.id, false));
-        }
-
-        let sidecar_existed = AssetMeta::sidecar_path(asset_path).exists();
-        let mut meta = AssetMeta::load_or_create(asset_path)?;
-        let mut needs_import = !sidecar_existed;
-        if sidecar_existed && meta.is_stale(asset_path)? {
-            meta.refresh(asset_path)?;
-            needs_import = true;
+        };
+        let needs_import =
+            self.forced.remove(asset_path) || !sidecar_exists || source_hash != meta.source_hash;
+        if needs_import {
+            self.pending_hashes
+                .insert(asset_path.to_path_buf(), source_hash);
         }
         let id = meta.id;
         self.entries.insert(asset_path.to_path_buf(), meta);
         Ok((id, needs_import))
+    }
+
+    /// Makes the next [`Self::ensure`] request re-import this asset without
+    /// changing its committed sidecar hash.
+    pub fn invalidate(&mut self, asset_path: &Path) {
+        self.forced.insert(asset_path.to_path_buf());
+    }
+
+    /// Persists the hash observed by [`Self::ensure`] after the importer
+    /// successfully decoded those bytes. Returns `false` if the source
+    /// changed while it was being imported, so the next pass retries it.
+    pub fn confirm(&mut self, asset_path: &Path) -> Result<bool, AssetError> {
+        let expected_hash = match self.pending_hashes.get(asset_path) {
+            Some(hash) => *hash,
+            None => return Ok(true),
+        };
+        let current_hash = hash_bytes(&read_bytes(asset_path)?);
+        if current_hash != expected_hash {
+            self.pending_hashes
+                .insert(asset_path.to_path_buf(), current_hash);
+            return Ok(false);
+        }
+
+        let meta = self
+            .entries
+            .get(asset_path)
+            .ok_or_else(|| AssetError::MetaIo {
+                path: asset_path.display().to_string(),
+                message: "asset was not prepared for import".to_string(),
+            })?;
+        let updated = AssetMeta {
+            id: meta.id,
+            source_hash: expected_hash,
+        };
+        updated.write(asset_path)?;
+        self.entries.insert(asset_path.to_path_buf(), updated);
+        self.pending_hashes.remove(asset_path);
+        Ok(true)
     }
 
     /// The cached meta for `asset_path`, if [`ImportCache::ensure`] has
@@ -219,6 +313,12 @@ mod tests {
     fn hash_bytes_is_deterministic_and_content_sensitive() {
         assert_eq!(hash_bytes(b"hello"), hash_bytes(b"hello"));
         assert_ne!(hash_bytes(b"hello"), hash_bytes(b"world"));
+    }
+
+    #[test]
+    fn hash_bytes_matches_fnv1a_reference_vectors() {
+        assert_eq!(hash_bytes(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(hash_bytes(b"hello"), 0xa430_d846_80aa_bd0b);
     }
 
     #[test]
@@ -273,6 +373,7 @@ mod tests {
 
         let (id1, needs1) = cache.ensure(&asset).unwrap();
         assert!(needs1, "first sight of a file needs an import");
+        assert!(cache.confirm(&asset).unwrap());
 
         let (id2, needs2) = cache.ensure(&asset).unwrap();
         assert_eq!(id2, id1, "id is stable");
@@ -282,11 +383,48 @@ mod tests {
         let (id3, needs3) = cache.ensure(&asset).unwrap();
         assert_eq!(id3, id1);
         assert!(needs3, "an edited file needs re-import");
+        assert!(cache.confirm(&asset).unwrap());
 
         // ...and is then considered current again.
         let (_, needs4) = cache.ensure(&asset).unwrap();
         assert!(!needs4);
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn changed_source_stays_stale_until_the_import_is_confirmed() {
+        let dir = TempDir::new();
+        let asset = dir.file("retry.bin", b"first version");
+        let original = AssetMeta::load_or_create(&asset).unwrap();
+        let mut cache = ImportCache::new();
+        assert!(!cache.ensure(&asset).unwrap().1);
+
+        std::fs::write(&asset, b"replacement version").unwrap();
+        assert!(cache.ensure(&asset).unwrap().1);
+        assert!(
+            cache.ensure(&asset).unwrap().1,
+            "a failed import must be retried rather than committed"
+        );
+        assert_eq!(
+            AssetMeta::load_or_create(&asset).unwrap().source_hash,
+            original.source_hash,
+            "the sidecar still describes the last successful import"
+        );
+        assert!(cache.confirm(&asset).unwrap());
+        assert!(!cache.ensure(&asset).unwrap().1);
+    }
+
+    #[test]
+    fn failed_atomic_write_keeps_the_previous_sidecar() {
+        let dir = TempDir::new();
+        let asset = dir.file("atomic.bin", b"bytes");
+        let sidecar = AssetMeta::sidecar_path(&asset);
+        std::fs::write(&sidecar, "old sidecar").unwrap();
+        let blocked_temporary = dir.0.join("blocked");
+        std::fs::create_dir(&blocked_temporary).unwrap();
+
+        assert!(write_sidecar_atomically(&sidecar, &blocked_temporary, b"new sidecar").is_err());
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), "old sidecar");
     }
 
     #[test]

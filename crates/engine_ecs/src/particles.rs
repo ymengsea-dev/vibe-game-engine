@@ -73,8 +73,8 @@ pub struct ParticleEmitterConfig {
     pub start_color: [f32; 4],
     /// Linear RGBA at death (linearly interpolated over life).
     pub end_color: [f32; 4],
-    /// Hard cap on live particles for this emitter — bounds its pool
-    /// allocation and per-frame work.
+    /// Requested live-particle cap. Values above 4,096 are capped to bound
+    /// this emitter's allocation and per-frame work.
     pub max_particles: usize,
     /// Which pipeline draws this emitter's particles.
     pub blend: BlendMode,
@@ -141,6 +141,9 @@ impl Particle {
 /// division is always safe.
 const MIN_LIFETIME: f32 = 1.0e-3;
 
+/// Hard upper bound for one emitter's allocation and per-frame work.
+const MAX_PARTICLES: usize = 4_096;
+
 /// Advances one particle: `velocity += acceleration * dt`, then
 /// `position += velocity * dt`, plus roll and age. Pure; `dt` is assumed
 /// finite and non-negative (callers clamp).
@@ -206,7 +209,7 @@ impl ParticleEmitter {
     pub fn new(config: ParticleEmitterConfig) -> Self {
         Self {
             rng: Rng::new(config.seed),
-            particles: Vec::with_capacity(config.max_particles.min(4096)),
+            particles: Vec::with_capacity(config.max_particles.min(MAX_PARTICLES)),
             spawn_accumulator: 0.0,
             config,
         }
@@ -224,8 +227,8 @@ impl ParticleEmitter {
 
     /// Advances this emitter `dt` seconds with its origin at `origin`:
     /// integrates and ages every live particle, drops the dead ones, then
-    /// spawns new particles at `config.spawn_rate` (never exceeding
-    /// `config.max_particles`).
+    /// spawns new particles at a finite `config.spawn_rate` (never exceeding
+    /// the requested cap or 4,096 particles).
     ///
     /// A non-positive or non-finite `dt` is a no-op — the simulation only
     /// ever moves forward.
@@ -240,7 +243,7 @@ impl ParticleEmitter {
         }
         self.particles.retain(|particle| !particle.is_dead());
 
-        let capacity = self.config.max_particles;
+        let capacity = self.config.max_particles.min(MAX_PARTICLES);
         if self.particles.len() >= capacity {
             // Already full: don't let the accumulator bank a burst for
             // when particles start dying.
@@ -248,7 +251,12 @@ impl ParticleEmitter {
             return;
         }
 
-        self.spawn_accumulator += self.config.spawn_rate.max(0.0) * dt;
+        let spawn_rate = self.config.spawn_rate;
+        if !spawn_rate.is_finite() {
+            self.spawn_accumulator = 0.0;
+            return;
+        }
+        self.spawn_accumulator += spawn_rate.max(0.0) * dt;
         while self.spawn_accumulator >= 1.0 {
             self.spawn_accumulator -= 1.0;
             if self.particles.len() >= capacity {
@@ -451,6 +459,31 @@ mod tests {
         emitter.update(Vec3::ZERO, f32::NAN);
         emitter.update(Vec3::ZERO, f32::INFINITY);
         assert_eq!(emitter.len(), 0);
+    }
+
+    #[test]
+    fn emitter_ignores_a_nonfinite_spawn_rate() {
+        let mut config = test_config();
+        config.spawn_rate = f32::INFINITY;
+        config.max_particles = 1;
+        let mut emitter = ParticleEmitter::new(config);
+
+        emitter.update(Vec3::ZERO, 0.1);
+
+        assert!(emitter.is_empty());
+    }
+
+    #[test]
+    fn emitter_caps_an_oversized_particle_pool() {
+        let mut config = test_config();
+        config.spawn_rate = 5_000.0;
+        config.max_particles = usize::MAX;
+        config.lifetime = 100.0;
+        let mut emitter = ParticleEmitter::new(config);
+
+        emitter.update(Vec3::ZERO, 1.0);
+
+        assert_eq!(emitter.len(), 4_096);
     }
 
     #[test]

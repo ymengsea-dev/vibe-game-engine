@@ -1,18 +1,13 @@
 //! # engine_asset
 //!
-//! Asset pipeline: import, asset database, UUIDs, background loading, and hot reload.
+//! Asset pipeline: import, UUIDs, metadata, bundles, and hot reload.
 //!
 //! ## Status
 //!
-//! Milestone 5 complete: [`AssetId`] (UUID identity), [`AssetDatabase`]
-//! (reference counting, dependency tracking, cycle rejection),
-//! [`AssetLoader`] (background loading via tokio — spawn a future, poll a
-//! [`LoadHandle`] each frame without blocking), [`import_gltf_slice`]
-//! (glTF 2.0 meshes/materials/cameras), [`import_texture_bytes`] (decode
-//! plus mip chain generation), [`import_wav_bytes`] (WAV PCM/float
-//! decode), and [`AssetWatcher`] (poll-based hot reload — watch a path,
-//! drain changed files each frame without blocking, same shape as
-//! [`LoadHandle`]).
+//! The pipeline provides [`AssetId`] UUID identity, [`AssetMeta`] sidecars,
+//! import caching, glTF/texture/WAV import, asset bundles, and polling hot
+//! reload. Reference counting lives with concrete asset stores; loading is
+//! currently synchronous at its editor call sites.
 //!
 //! Milestone 10 in progress: [`import_gltf_slice`] also imports skins as
 //! [`ImportedSkeleton`] (joint hierarchy, inverse bind matrices) plus
@@ -23,18 +18,15 @@
 
 mod audio_import;
 mod bundle;
-mod database;
 mod error;
 mod gltf_export;
 mod gltf_import;
 mod hot_reload;
-mod loader;
 mod meta;
 mod texture_import;
 
 pub use audio_import::{ImportedAudio, import_wav_bytes};
 pub use bundle::{BUNDLE_MAGIC, Bundle, BundleStats, pack_dir};
-pub use database::AssetDatabase;
 /// Re-exported from `engine_utils`, where it lives alongside
 /// [`engine_utils::AssetHandle`]/[`engine_utils::AssetStore`] so that
 /// crate (which sits below both this one and `engine_renderer`) can be the
@@ -55,6 +47,5 @@ pub use gltf_import::{
     import_gltf_slice, import_gltf_slice_with,
 };
 pub use hot_reload::AssetWatcher;
-pub use loader::{AssetLoader, LoadHandle, LoadStatus};
 pub use meta::{AssetMeta, ImportCache, hash_bytes};
 pub use texture_import::{ImportedTexture, generate_mip_chain, import_texture_bytes};

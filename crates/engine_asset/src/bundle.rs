@@ -19,7 +19,9 @@
 //! Bundle files are untrusted input — every parse step is bounds-checked
 //! and returns [`AssetError::Bundle`] rather than panicking.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 use crate::error::AssetError;
 
@@ -98,43 +100,82 @@ fn collect_files(
 pub fn pack_dir(src_dir: &Path, out_path: &Path) -> Result<BundleStats, AssetError> {
     let mut files = Vec::new();
     collect_files(src_dir, src_dir, &mut files)?;
+    let output = out_path.canonicalize().ok();
+    files.retain(|(_, path)| path.canonicalize().ok().as_ref() != output.as_ref());
 
-    // First pass: read every file, assign offsets.
+    // First pass: gather lengths; bytes stream directly into the archive.
     let mut entries: Vec<Entry> = Vec::with_capacity(files.len());
-    let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(files.len());
     let mut offset: u64 = 0;
     for (key, path) in &files {
-        let bytes = std::fs::read(path).map_err(|err| io_err(&path.display().to_string(), &err))?;
-        let length = bytes.len() as u64;
+        let length = std::fs::metadata(path)
+            .map_err(|err| io_err(&path.display().to_string(), &err))?
+            .len();
         entries.push(Entry {
             path: key.clone(),
             offset,
             length,
         });
-        offset += length;
-        blobs.push(bytes);
+        offset = offset
+            .checked_add(length)
+            .ok_or_else(|| AssetError::Bundle("bundle data is too large".into()))?;
     }
 
-    // Serialize: header + index + data.
-    let mut archive = Vec::new();
-    archive.extend_from_slice(BUNDLE_MAGIC);
-    archive.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    let count =
+        u32::try_from(entries.len()).map_err(|_| AssetError::Bundle("too many files".into()))?;
     for entry in &entries {
         let path_bytes = entry.path.as_bytes();
-        archive.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
-        archive.extend_from_slice(path_bytes);
-        archive.extend_from_slice(&entry.offset.to_le_bytes());
-        archive.extend_from_slice(&entry.length.to_le_bytes());
-    }
-    for blob in &blobs {
-        archive.extend_from_slice(blob);
+        u32::try_from(path_bytes.len())
+            .map_err(|_| AssetError::Bundle("archive path is too long".into()))?;
     }
 
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| io_err(&parent.display().to_string(), &err))?;
     }
-    std::fs::write(out_path, &archive)
+    let temporary = out_path.with_extension(format!("pak.{}.tmp", Uuid::new_v4()));
+    let mut archive = std::fs::File::create(&temporary)
+        .map_err(|err| io_err(&temporary.display().to_string(), &err))?;
+    archive
+        .write_all(BUNDLE_MAGIC)
+        .map_err(|err| io_err("writing bundle", &err))?;
+    archive
+        .write_all(&count.to_le_bytes())
+        .map_err(|err| io_err("writing bundle", &err))?;
+    for entry in &entries {
+        let path = entry.path.as_bytes();
+        archive
+            .write_all(
+                &u32::try_from(path.len())
+                    .map_err(|_| AssetError::Bundle("archive path is too long".into()))?
+                    .to_le_bytes(),
+            )
+            .map_err(|err| io_err("writing bundle", &err))?;
+        archive
+            .write_all(path)
+            .and_then(|_| archive.write_all(&entry.offset.to_le_bytes()))
+            .and_then(|_| archive.write_all(&entry.length.to_le_bytes()))
+            .map_err(|err| io_err("writing bundle", &err))?;
+    }
+    let mut buffer = [0u8; 64 * 1024];
+    for (_, path) in &files {
+        let mut input =
+            std::fs::File::open(path).map_err(|err| io_err(&path.display().to_string(), &err))?;
+        loop {
+            let count = input
+                .read(&mut buffer)
+                .map_err(|err| io_err(&path.display().to_string(), &err))?;
+            if count == 0 {
+                break;
+            }
+            archive
+                .write_all(&buffer[..count])
+                .map_err(|err| io_err("writing bundle", &err))?;
+        }
+    }
+    archive
+        .sync_all()
+        .map_err(|err| io_err("writing bundle", &err))?;
+    std::fs::rename(&temporary, out_path)
         .map_err(|err| io_err(&out_path.display().to_string(), &err))?;
 
     Ok(BundleStats {

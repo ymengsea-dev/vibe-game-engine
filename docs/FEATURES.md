@@ -57,13 +57,15 @@ Primary sources: `crates/engine_renderer/src/` and `crates/engine_renderer/src/s
 
 ### Asset pipeline — implemented
 
-`engine_asset` provides stable `.meta` UUIDs, source hashing, import caching, dependency/ref-count bookkeeping, polling-based hot reload, and non-blocking Tokio load handles. Importers support:
+`engine_asset` provides stable `.meta` UUIDs, source hashing, import caching, polling-based hot reload, and asset bundles. Importers support:
 
 - glTF/GLB meshes, PBR materials, embedded or external textures, cameras, skins, joint weights, animation channels, and animation events stored in glTF extras.
 - PNG/JPEG and other `image`-supported textures with CPU mip generation.
 - PCM 8/16/24/32-bit and 32-bit float WAV audio.
 - glTF export for static/skinned meshes, materials, embedded textures, skeletons, animations, and events.
 - Self-contained `.pak` asset bundles with bounds-checked parsing.
+
+Asset imports validate untrusted data and paths: loose glTF references stay within the asset root, malformed declared buffers and WAV frames are rejected, and unsupported multi-primitive or conflicting-skin models fail explicitly. Import sidecars and bundle output are replaced atomically; failed imports retain their last confirmed metadata and retry on the next pass. Hot reload coalesces create, modify, and delete events, evicts removed assets, and refreshes dependent mesh imports after non-metadata changes.
 
 Compressed audio import is not implemented. See `crates/engine_asset/src/`.
 

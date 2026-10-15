@@ -1,6 +1,5 @@
 //! Hot reload: watch asset source files/directories for changes, poll for
-//! what changed without blocking (same non-blocking-poll shape as
-//! [`crate::LoadHandle`]).
+//! what changed without blocking.
 //!
 //! Built on [`notify::PollWatcher`] rather than notify's platform-native
 //! backend (`RecommendedWatcher`, FSEvents/inotify/kqueue): polling is
@@ -8,7 +7,9 @@
 //! permissions/APIs being available, which matters more for a first
 //! implementation than shaving polling latency.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -40,6 +41,15 @@ impl AssetWatcher {
     /// Returns [`AssetError::WatchInit`] if `path` doesn't exist or the
     /// watcher otherwise fails to start.
     pub fn watch(path: &Path, poll_interval: Duration) -> Result<Self, AssetError> {
+        Self::watch_with_wake(path, poll_interval, || {})
+    }
+
+    /// Starts watching and invokes `wake` after queuing a source change.
+    pub fn watch_with_wake(
+        path: &Path,
+        poll_interval: Duration,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self, AssetError> {
         if !path.exists() {
             // `PollWatcher` itself doesn't error on a missing path (it
             // would just poll and never find anything to report) — check
@@ -57,17 +67,23 @@ impl AssetWatcher {
             .with_poll_interval(poll_interval)
             .with_compare_contents(true);
 
+        let wake = Arc::new(wake);
         let mut watcher = PollWatcher::new(
             move |event: notify::Result<Event>| {
                 let Ok(event) = event else { return };
-                if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                if !matches!(
+                    event.kind,
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                ) {
                     return;
                 }
                 for changed_path in event.paths {
                     // A closed/dropped receiver (the `AssetWatcher` was
                     // dropped) just means nobody's listening anymore —
                     // not a condition worth surfacing.
-                    let _ = sender.send(changed_path);
+                    if sender.send(changed_path).is_ok() {
+                        wake();
+                    }
                 }
             },
             config,
@@ -85,13 +101,11 @@ impl AssetWatcher {
     /// blocking. Deduplicated: a path reported multiple times between
     /// polls (e.g. two quick writes) appears once.
     pub fn poll_changes(&self) -> Vec<PathBuf> {
-        let mut changed = Vec::new();
+        let mut changed = HashSet::new();
         while let Ok(path) = self.receiver.try_recv() {
-            if !changed.contains(&path) {
-                changed.push(path);
-            }
+            changed.insert(path);
         }
-        changed
+        changed.into_iter().collect()
     }
 }
 
@@ -161,6 +175,22 @@ mod tests {
 
         let changed = poll_until_nonempty(&watcher);
         assert!(changed.iter().any(|p| p == &file_path));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn detects_a_deleted_file() {
+        let dir = temp_dir("remove");
+        let file_path = dir.join("removed_asset.txt");
+        std::fs::write(&file_path, "before").unwrap();
+
+        let watcher = AssetWatcher::watch(&dir, Duration::from_millis(30)).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::remove_file(&file_path).unwrap();
+
+        let changed = poll_until_nonempty(&watcher);
+        assert!(changed.iter().any(|path| path == &file_path));
 
         std::fs::remove_dir_all(&dir).ok();
     }

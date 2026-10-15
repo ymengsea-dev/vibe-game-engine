@@ -48,12 +48,11 @@ pub mod prelude {
         sample_looping, sample_pose,
     };
     pub use engine_asset::{
-        AssetDatabase, AssetError, AssetId, AssetLoader, AssetWatcher, Bundle as AssetBundle,
-        BundleStats, ImportedAnimation, ImportedAnimationChannels, ImportedAudio, ImportedCamera,
-        ImportedGltf, ImportedImage, ImportedInterpolation, ImportedJoint, ImportedKeyframes,
-        ImportedMaterial, ImportedMesh, ImportedSkeleton, ImportedSkinWeights, ImportedTexture,
-        LoadHandle, LoadStatus, generate_mip_chain, import_gltf_slice, import_texture_bytes,
-        import_wav_bytes, pack_dir,
+        AssetError, AssetId, AssetWatcher, Bundle as AssetBundle, BundleStats, ImportedAnimation,
+        ImportedAnimationChannels, ImportedAudio, ImportedCamera, ImportedGltf, ImportedImage,
+        ImportedInterpolation, ImportedJoint, ImportedKeyframes, ImportedMaterial, ImportedMesh,
+        ImportedSkeleton, ImportedSkinWeights, ImportedTexture, generate_mip_chain,
+        import_gltf_slice, import_texture_bytes, import_wav_bytes, pack_dir,
     };
     pub use engine_audio::{
         AudioContext, AudioError, Bus, ListenerHandle, SpatialTrackHandle, StaticSound,

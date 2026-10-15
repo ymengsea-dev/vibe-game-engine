@@ -101,6 +101,31 @@ impl Camera {
         }
     }
 
+    /// Whether this camera can produce a finite, non-degenerate view and
+    /// projection matrix.
+    pub fn is_valid(&self) -> bool {
+        self.eye.is_finite()
+            && self.target.is_finite()
+            && self.up.is_finite()
+            && (self.target - self.eye).length_squared() > 0.0
+            && self.up.length_squared() > 0.0
+            && (self.target - self.eye).cross(self.up).length_squared() > 0.0
+            && self.aspect_ratio.is_finite()
+            && self.aspect_ratio > 0.0
+            && self.near.is_finite()
+            && self.near > 0.0
+            && self.far.is_finite()
+            && self.far > self.near
+            && match self.projection {
+                Projection::Perspective { fov_y_radians } => {
+                    fov_y_radians.is_finite()
+                        && fov_y_radians > 0.0
+                        && fov_y_radians < core::f32::consts::PI
+                }
+                Projection::Orthographic { height } => height.is_finite() && height > 0.0,
+            }
+    }
+
     /// The view matrix: transforms world space into camera space.
     pub fn view_matrix(&self) -> Mat4 {
         glam::camera::rh::view::look_at_mat4(self.eye, self.target, self.up)
@@ -309,6 +334,24 @@ mod tests {
     fn to_uniform_carries_eye_position() {
         let camera = Camera::new(Vec3::new(1.0, 2.0, 3.0), Vec3::ZERO, 1.0);
         assert_eq!(camera.to_uniform().view_position, [1.0, 2.0, 3.0, 1.0]);
+    }
+
+    #[test]
+    fn camera_validation_rejects_degenerate_and_non_finite_values() {
+        let mut camera = Camera::new(Vec3::new(1.0, 2.0, 3.0), Vec3::ZERO, 1.0);
+        assert!(camera.is_valid());
+
+        camera.target = camera.eye;
+        assert!(!camera.is_valid());
+        camera.target = Vec3::ZERO;
+        camera.up = Vec3::ZERO;
+        assert!(!camera.is_valid());
+        camera.up = Vec3::Y;
+        camera.aspect_ratio = f32::NAN;
+        assert!(!camera.is_valid());
+        camera.aspect_ratio = 1.0;
+        camera.near = camera.far;
+        assert!(!camera.is_valid());
     }
 
     #[test]

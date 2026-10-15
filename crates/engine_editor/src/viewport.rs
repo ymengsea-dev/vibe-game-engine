@@ -390,6 +390,22 @@ impl Viewport {
         stale.len()
     }
 
+    /// Drops every live mesh renderer before a dependency-blind hot reload.
+    /// The next resolution pass recreates them from freshly decoded assets.
+    pub fn invalidate_all_meshes(&mut self, world: &mut World) -> usize {
+        let stale: Vec<Entity> = world
+            .query::<(Entity, &engine_ecs::components::MeshSource)>()
+            .iter(world)
+            .map(|(entity, _)| entity)
+            .collect();
+        for entity in &stale {
+            if let Ok(mut entity_mut) = world.get_entity_mut(*entity) {
+                entity_mut.remove::<engine_ecs::components::MeshRenderer>();
+            }
+        }
+        stale.len()
+    }
+
     /// Renders `world` into this viewport's texture, with the gizmo drawn
     /// at `gizmo_origin` and a wireframe box for every visible entity
     /// that has no resolvable mesh.

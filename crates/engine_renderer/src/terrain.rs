@@ -27,6 +27,8 @@ use glam::{Vec2, Vec3};
 use crate::error::RendererError;
 use crate::mesh::Vertex;
 
+const MAX_HEIGHTMAP_RESOLUTION: u32 = 1024;
+
 /// How a [`Brush`]'s influence fades from its centre (weight `1.0`) to its
 /// rim (weight `0.0`). Input is normalized distance `t = distance /
 /// radius`; anything at or past `t = 1.0` has weight `0.0`.
@@ -109,8 +111,8 @@ impl Heightmap {
     ///
     /// # Errors
     ///
-    /// [`RendererError::InvalidHeightmap`] if `resolution < 2` or `size`
-    /// isn't positive and finite.
+    /// [`RendererError::InvalidHeightmap`] if `resolution` is outside the
+    /// supported single-patch range or `size` isn't positive and finite.
     pub fn new(resolution: u32, size: f32) -> Result<Self, RendererError> {
         Self::validate(resolution, size)?;
         Ok(Self {
@@ -125,9 +127,9 @@ impl Heightmap {
     ///
     /// # Errors
     ///
-    /// [`RendererError::InvalidHeightmap`] if `resolution < 2`, `size`
-    /// isn't positive and finite, or `heights.len() != resolution *
-    /// resolution`.
+    /// [`RendererError::InvalidHeightmap`] if `resolution` is outside the
+    /// supported single-patch range, `size` isn't positive and finite, or
+    /// `heights.len() != resolution * resolution`.
     pub fn from_heights(
         resolution: u32,
         size: f32,
@@ -150,8 +152,8 @@ impl Heightmap {
     ///
     /// # Errors
     ///
-    /// [`RendererError::InvalidHeightmap`] if `resolution < 2` or `size`
-    /// isn't positive and finite.
+    /// [`RendererError::InvalidHeightmap`] if `resolution` is outside the
+    /// supported single-patch range or `size` isn't positive and finite.
     pub fn from_fn(
         resolution: u32,
         size: f32,
@@ -175,6 +177,11 @@ impl Heightmap {
         if resolution < 2 {
             return Err(RendererError::InvalidHeightmap {
                 reason: "resolution must be at least 2",
+            });
+        }
+        if resolution > MAX_HEIGHTMAP_RESOLUTION {
+            return Err(RendererError::InvalidHeightmap {
+                reason: "resolution exceeds the 1024-node single-patch limit",
             });
         }
         if size <= 0.0 || !size.is_finite() {
@@ -477,6 +484,14 @@ mod tests {
         assert!(Heightmap::new(4, -1.0).is_err());
         assert!(Heightmap::new(4, f32::INFINITY).is_err());
         assert!(Heightmap::new(2, 1.0).is_ok());
+    }
+
+    #[test]
+    fn new_rejects_a_resolution_that_exceeds_the_single_patch_limit() {
+        assert!(matches!(
+            Heightmap::new(1025, 10.0),
+            Err(RendererError::InvalidHeightmap { .. })
+        ));
     }
 
     #[test]

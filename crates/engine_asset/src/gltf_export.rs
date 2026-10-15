@@ -837,7 +837,35 @@ pub fn export_gltf_scene(scene: &GltfScene<'_>) -> Result<Vec<u8>, AssetError> {
 /// Rejects geometry that would produce a file this crate's importer, or
 /// any other, would choke on.
 fn validate(meshes: &[ExportMesh<'_>], materials: &[ExportMaterial]) -> Result<(), AssetError> {
+    for material in materials {
+        if !material
+            .base_color_factor
+            .iter()
+            .all(|value| value.is_finite())
+            || !material.metallic_factor.is_finite()
+            || !material.roughness_factor.is_finite()
+            || !material.alpha_cutoff.is_finite()
+        {
+            return Err(AssetError::GltfExport(format!(
+                "material '{}' has a non-finite value",
+                material.name
+            )));
+        }
+    }
     for mesh in meshes {
+        if mesh.vertices.iter().any(|vertex| {
+            !vertex
+                .position
+                .iter()
+                .chain(vertex.normal.iter())
+                .chain(vertex.uv.iter())
+                .all(|value| value.is_finite())
+        }) {
+            return Err(AssetError::GltfExport(format!(
+                "mesh '{}' has a non-finite vertex",
+                mesh.name
+            )));
+        }
         if mesh.vertices.is_empty() {
             return Err(AssetError::GltfExport(format!(
                 "mesh '{}' has no vertices",
@@ -946,6 +974,19 @@ fn validate_skinned(
         // A vertex weighted to a joint that does not exist would sample
         // a garbage matrix and fling the mesh across the world.
         for vertex in mesh.vertices {
+            if !vertex
+                .position
+                .iter()
+                .chain(vertex.normal.iter())
+                .chain(vertex.uv.iter())
+                .chain(vertex.weights.iter())
+                .all(|value| value.is_finite())
+            {
+                return Err(AssetError::GltfExport(format!(
+                    "skinned mesh '{}' has a non-finite vertex",
+                    mesh.name
+                )));
+            }
             for (joint, weight) in vertex.joints.iter().zip(vertex.weights) {
                 if weight != 0.0 && *joint as usize >= skin.joints.len() {
                     return Err(AssetError::GltfExport(format!(
@@ -1013,6 +1054,14 @@ fn validate_animations(
                 return Err(AssetError::GltfExport(format!(
                     "animation '{}': joint {} has no keyframes",
                     animation.name, channel.joint
+                )));
+            }
+            if channel.times.iter().any(|time| !time.is_finite())
+                || channel.times.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(AssetError::GltfExport(format!(
+                    "animation '{}': keyframe times must be finite and strictly ascending",
+                    animation.name
                 )));
             }
         }
@@ -1237,7 +1286,19 @@ fn base64_encode(bytes: &[u8]) -> String {
 /// [`AssetError::TextureExport`] if `pixels` is not exactly
 /// `width * height * 4` bytes, or if PNG encoding fails.
 pub fn encode_png_rgba8(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>, AssetError> {
-    let expected = width as usize * height as usize * 4;
+    let expected = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            AssetError::TextureExport(
+                "image dimensions overflow the host address space".to_string(),
+            )
+        })?;
     if pixels.len() != expected {
         return Err(AssetError::TextureExport(format!(
             "expected {expected} bytes for {width}x{height} RGBA8, got {}",
@@ -1437,7 +1498,7 @@ mod tests {
         let model_path = dir.join("models/tri.gltf");
         std::fs::write(&model_path, &bytes).expect("write model");
 
-        let first = import_gltf_file(&model_path).expect("import with the texture beside it");
+        let first = import_gltf_file(&model_path, &dir).expect("import with the texture beside it");
         assert_eq!(first.images.len(), 1);
         assert_eq!(&first.images[0].rgba8[..4], &[255, 0, 0, 255]);
 
@@ -1447,7 +1508,7 @@ mod tests {
             encode_png_rgba8(1, 1, &[0, 255, 0, 255]).expect("green"),
         )
         .expect("rewrite texture");
-        let second = import_gltf_file(&model_path).expect("import again");
+        let second = import_gltf_file(&model_path, &dir).expect("import again");
         assert_eq!(
             &second.images[0].rgba8[..4],
             &[0, 255, 0, 255],

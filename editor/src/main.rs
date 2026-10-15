@@ -19,6 +19,7 @@ mod play_process;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use editor_code::{CodeEditor, CodeEvent, LspKind, Marker, MarkerSeverity, PanelRect};
 use editor_lsp::{
@@ -32,6 +33,7 @@ use engine::ecs::prelude::{ChildOf, World};
 use engine::editor::{
     Diagnostic, EditorMode, MAX_TEXT_HITS, Severity as ProblemSeverity, SymbolHit,
 };
+use engine::platform::{RedrawPolicy, WakeHandle};
 use engine::prelude::*;
 use engine::project::build::ExportPlan;
 use engine::project::{ASSETS_DIR, MANIFEST_FILE};
@@ -41,6 +43,20 @@ use play_process::{PlayEvent, PlayProcess};
 /// argument — created on first run, reopened afterwards. Relative to the
 /// working directory; git-ignored.
 const DEFAULT_PROJECT_DIR: &str = "RustyEngineProject";
+
+fn editor_redraw_policy(
+    playing: bool,
+    repaint_deadline: Option<Instant>,
+    now: Instant,
+) -> RedrawPolicy {
+    if playing || repaint_deadline.is_some_and(|deadline| deadline <= now) {
+        RedrawPolicy::Continuous
+    } else if let Some(deadline) = repaint_deadline {
+        RedrawPolicy::WaitUntil(deadline)
+    } else {
+        RedrawPolicy::Wait
+    }
+}
 
 /// Starter `src/main.rs` written into a freshly created project.
 const STARTER_MAIN: &str = "//! Entry point for your RustyEngine game.\n\nfn main() {\n    println!(\"Hello from RustyEngine Studio.\");\n}\n";
@@ -631,6 +647,7 @@ fn handle_asset_changes(state: &mut EditorState, watcher: Option<&AssetWatcher>)
         imported = report.reimported,
         failed = report.failed,
         evicted = report.evicted,
+        meshes_reloaded = report.meshes_reloaded,
         "re-imported changed assets"
     );
     changed
@@ -981,6 +998,7 @@ struct EditorHandler {
     /// an edited/added/removed asset is re-imported without a restart.
     /// `None` if the directory couldn't be watched.
     asset_watcher: Option<AssetWatcher>,
+    wake: Option<WakeHandle>,
     /// Receives the result of the running export build, if one was
     /// started. The build itself runs on its own thread — `cargo build`
     /// takes minutes, and the studio has to keep drawing.
@@ -1082,6 +1100,7 @@ impl EditorHandler {
             let project = self.state.project.clone();
             let plan = ExportPlan::for_configuration(&project, &configuration, &export_dir);
             let (sender, receiver) = std::sync::mpsc::channel();
+            let wake = self.wake.clone();
             tracing::info!(
                 configuration = %configuration.name,
                 crate_name = %plan.crate_name,
@@ -1099,6 +1118,9 @@ impl EditorHandler {
                         .map_err(|err| err.to_string());
                     // The receiver is gone only if the studio is closing.
                     let _ = sender.send(result);
+                    if let Some(wake) = wake {
+                        let _ = wake.wake();
+                    }
                 }) {
                 Ok(_) => {
                     self.state.export_running = true;
@@ -1175,7 +1197,11 @@ impl PlatformHandler for EditorHandler {
                 return;
             }
         };
-        let mut shell = EditorShell::new(&window, gpu.device(), gpu.config().format);
+        let Some(wake) = self.wake.clone() else {
+            tracing::error!("editor window started without an event-loop wake handle");
+            return;
+        };
+        let mut shell = EditorShell::new(&window, gpu.device(), gpu.config().format, wake);
         let viewport = match Viewport::new(&gpu, &mut shell, 640, 480) {
             Ok(viewport) => viewport,
             Err(err) => {
@@ -1205,7 +1231,30 @@ impl PlatformHandler for EditorHandler {
 
         // rust-analyzer for the project. `None` (not installed / no
         // Cargo.toml) just means no completion or inline errors.
-        self.lsp = LspClient::start(self.state.project.root());
+        self.lsp = match &self.wake {
+            Some(wake) => {
+                let wake = wake.clone();
+                LspClient::start_with_wake(self.state.project.root(), move || {
+                    let _ = wake.wake();
+                })
+            }
+            None => LspClient::start(self.state.project.root()),
+        };
+
+        let assets_dir = self.state.project.assets_dir();
+        self.asset_watcher = match &self.wake {
+            Some(wake) => {
+                let wake = wake.clone();
+                AssetWatcher::watch_with_wake(&assets_dir, Duration::from_millis(500), move || {
+                    let _ = wake.wake();
+                })
+            }
+            None => AssetWatcher::watch(&assets_dir, Duration::from_millis(500)),
+        }
+        .map_err(|err| {
+            tracing::warn!(error = %err, dir = %assets_dir.display(), "asset hot-reload disabled");
+        })
+        .ok();
 
         self.gpu = Some(gpu);
         self.shell = Some(shell);
@@ -1230,6 +1279,19 @@ impl PlatformHandler for EditorHandler {
         } else {
             false
         }
+    }
+
+    fn set_wake_handle(&mut self, wake: WakeHandle) {
+        self.play_process.set_wake_handle(wake.clone());
+        self.wake = Some(wake);
+    }
+
+    fn redraw_policy(&self) -> RedrawPolicy {
+        editor_redraw_policy(
+            self.state.play.is_playing(),
+            self.shell.as_ref().and_then(EditorShell::repaint_deadline),
+            Instant::now(),
+        )
     }
 
     fn on_close_requested(&mut self) -> bool {
@@ -1409,16 +1471,7 @@ impl EditorHandler {
             };
 
             if !changed_paths.is_empty() {
-                let changed_ids: std::collections::HashSet<_> = changed_paths
-                    .iter()
-                    .filter_map(|path| {
-                        path.strip_prefix(self.state.project.assets_dir())
-                            .ok()
-                            .and_then(|relative| self.state.asset_index.id_for(relative))
-                    })
-                    .collect();
-                let invalidated =
-                    viewport.invalidate_changed_assets(&mut self.state.world, &changed_ids);
+                let invalidated = viewport.invalidate_all_meshes(&mut self.state.world);
                 if invalidated > 0 {
                     tracing::info!(invalidated, "invalidated live renderers after asset reload");
                 }
@@ -1453,6 +1506,7 @@ impl EditorHandler {
             self.state.profiler.record_span("viewport", span.elapsed());
 
             let span = std::time::Instant::now();
+            shell.clear_repaint_deadline();
             let mut full_output = shell.run_frame(window, viewport, &mut self.state);
             self.state.profiler.record_span("ui", span.elapsed());
 
@@ -1831,17 +1885,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Watch the assets directory so an edited/added/removed source file
     // is re-imported live. Non-fatal if it can't start (e.g. the dir
     // doesn't exist yet) — the editor just won't hot-reload assets.
-    let asset_watcher = match AssetWatcher::watch(
-        &assets_dir,
-        std::time::Duration::from_millis(500),
-    ) {
-        Ok(watcher) => Some(watcher),
-        Err(err) => {
-            tracing::warn!(error = %err, dir = %assets_dir.display(), "asset hot-reload disabled");
-            None
-        }
-    };
-
     let window_config = WindowConfig::new(app.config().app_name.clone(), 1280, 720)
         .min_size(900, 600)
         .maximized(true);
@@ -1868,7 +1911,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             lsp_symbol_request: None,
             lsp_script_request: None,
             open_docs: HashSet::new(),
-            asset_watcher,
+            asset_watcher: None,
+            wake: None,
         },
     )?;
 
@@ -1880,6 +1924,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use editor_lsp::RangeOut;
+
+    #[test]
+    fn redraw_policy_waits_until_editor_work_is_needed() {
+        let now = Instant::now();
+        assert_eq!(editor_redraw_policy(false, None, now), RedrawPolicy::Wait);
+        assert_eq!(
+            editor_redraw_policy(true, None, now),
+            RedrawPolicy::Continuous
+        );
+        assert_eq!(
+            editor_redraw_policy(false, Some(now), now),
+            RedrawPolicy::Continuous
+        );
+        let deadline = now + Duration::from_millis(10);
+        assert_eq!(
+            editor_redraw_policy(false, Some(deadline), now),
+            RedrawPolicy::WaitUntil(deadline)
+        );
+    }
 
     fn edit(sl: u32, sc: u32, el: u32, ec: u32, new_text: &str) -> TextEditOut {
         TextEditOut {

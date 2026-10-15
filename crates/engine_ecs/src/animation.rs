@@ -140,13 +140,12 @@ impl AnimationPlayer {
         self.previous_time = self.time;
         let advanced = self.time + dt * self.speed;
 
-        let mut wrapped = false;
         if self.looping {
             // `rem_euclid` handles negative speed too: playing backwards
             // past zero wraps to the end rather than going negative.
             let wrapped_time = advanced.rem_euclid(duration);
-            wrapped = advanced >= duration || advanced < 0.0;
             self.time = wrapped_time;
+            return self.crossed_looping_events(self.previous_time, dt * self.speed, duration);
         } else if advanced >= duration {
             self.time = duration;
             self.playing = false;
@@ -157,7 +156,53 @@ impl AnimationPlayer {
             self.time = advanced;
         }
 
-        self.crossed_events(self.previous_time, self.time, wrapped, duration)
+        self.crossed_events(self.previous_time, self.time, false, duration)
+    }
+
+    fn crossed_looping_events(&self, from: f32, travelled: f32, duration: f32) -> Vec<String> {
+        let forwards = travelled >= 0.0;
+        let mut position = from;
+        let mut remaining = travelled.abs();
+        let mut fired = Vec::new();
+
+        while remaining > f32::EPSILON {
+            let to_boundary = if forwards {
+                duration - position
+            } else {
+                position
+            };
+            if to_boundary <= f32::EPSILON {
+                position = if forwards { 0.0 } else { duration };
+                continue;
+            }
+            let step = remaining.min(to_boundary);
+            let next = if forwards {
+                position + step
+            } else {
+                position - step
+            };
+            fired.extend(
+                self.events
+                    .iter()
+                    .filter(|event| {
+                        event.time >= 0.0
+                            && event.time <= duration
+                            && if forwards {
+                                event.time > position && event.time <= next
+                            } else {
+                                event.time < position && event.time >= next
+                            }
+                    })
+                    .map(|event| event.name.clone()),
+            );
+
+            remaining -= step;
+            if remaining <= f32::EPSILON {
+                break;
+            }
+            position = if forwards { 0.0 } else { duration };
+        }
+        fired
     }
 
     /// Which events lie in the interval actually travelled this frame.
@@ -347,6 +392,15 @@ mod tests {
     }
 
     #[test]
+    fn negative_speed_wraps_backwards_from_the_exact_start() {
+        let mut player = AnimationPlayer::new(skeleton(), clip(1.0));
+        player.speed = -1.0;
+        player.advance(0.2);
+
+        assert!((player.time - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
     fn event_fires_once_when_dt_overshoots_it() {
         let mut player = player_with_events(vec![AnimationEvent::new(0.5, "footstep")]);
         // One big step straight past the event.
@@ -370,6 +424,14 @@ mod tests {
         assert_eq!(player.advance(0.6), vec!["footstep".to_string()]);
         // Wrap around and pass it again.
         assert_eq!(player.advance(1.0), vec!["footstep".to_string()]);
+    }
+
+    #[test]
+    fn events_fire_for_each_loop_crossed_in_one_update() {
+        let mut player = player_with_events(vec![AnimationEvent::new(0.25, "footstep")]);
+        let fired = player.advance(2.3);
+
+        assert_eq!(fired, vec!["footstep", "footstep", "footstep"]);
     }
 
     #[test]

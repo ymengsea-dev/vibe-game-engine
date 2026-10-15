@@ -145,8 +145,7 @@ struct Entry<T> {
 /// [`release`](Self::release) is the inverse — call it once per owner that
 /// stops referencing a handle (e.g. on entity despawn); the entry is
 /// dropped the moment the count reaches zero, the same lifecycle shape as
-/// `engine_asset::AssetDatabase`, just holding the data itself rather than
-/// bookkeeping a separate registry.
+/// a separate registry, just holding the data itself.
 ///
 /// Not thread-safe (plain `HashMap`, no interior mutability) — matches
 /// every other GPU-resource owner in this engine (`GpuContext`,

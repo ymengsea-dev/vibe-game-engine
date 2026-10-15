@@ -541,7 +541,7 @@ mod tests {
             if path.extension().is_none_or(|ext| ext != "gltf") {
                 continue;
             }
-            let imported = engine::asset::import_gltf_file(&path)
+            let imported = engine::asset::import_gltf_file(&path, &root.join("assets"))
                 .unwrap_or_else(|err| panic!("{} must import: {err}", path.display()));
             assert!(
                 !imported.meshes.is_empty(),
@@ -695,7 +695,8 @@ mod tests {
 
         // It must still import — through the path-aware importer, which
         // is what can follow that reference.
-        let imported = engine::asset::import_gltf_file(&model).expect("import");
+        let imported =
+            engine::asset::import_gltf_file(&model, &root.join("assets")).expect("import");
         assert_eq!(imported.images.len(), 1, "the texture must resolve");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -778,7 +779,8 @@ mod tests {
         // character either does not move or moves silently.
         let (root, _) = bake_into_temp("character");
         let path = root.join("assets/models/character.gltf");
-        let imported = engine::asset::import_gltf_file(&path).expect("character imports");
+        let imported = engine::asset::import_gltf_file(&path, &root.join("assets"))
+            .expect("character imports");
 
         let skeleton = imported.skeletons.first().expect("a skeleton");
         assert_eq!(skeleton.joints.len(), character::skeleton().joints.len());

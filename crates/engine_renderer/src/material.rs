@@ -180,6 +180,12 @@ impl Default for MaterialUniform {
     }
 }
 
+impl MaterialUniform {
+    pub(crate) fn casts_shadow(&self) -> bool {
+        self.alpha_mode != 2
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +260,20 @@ mod tests {
             "cutout stays in the opaque pass — that is the whole point of it",
         );
         assert!(!AlphaMode::Opaque.is_transparent());
+    }
+
+    #[test]
+    fn blended_materials_do_not_cast_shadows() {
+        let opaque = MaterialUniform::from(Material::DEFAULT);
+        let masked = MaterialUniform::from(Material::FOLIAGE);
+        let blended = MaterialUniform::from(Material {
+            alpha_mode: AlphaMode::Blend,
+            ..Material::DEFAULT
+        });
+
+        assert!(opaque.casts_shadow());
+        assert!(masked.casts_shadow());
+        assert!(!blended.casts_shadow());
     }
 
     #[test]

@@ -20,7 +20,7 @@ mod gamepad;
 mod input;
 
 pub use actions::{ActionMap, AxisBinding, Binding};
-pub use app::{PlatformHandler, Window, run_windowed};
+pub use app::{PlatformHandler, RedrawPolicy, WakeHandle, Window, run_windowed};
 pub use config::WindowConfig;
 pub use error::PlatformError;
 pub use event::{KeyCode, MouseButton, PlatformEvent};

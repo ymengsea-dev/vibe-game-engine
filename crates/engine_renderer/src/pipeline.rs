@@ -172,6 +172,9 @@ pub struct MaterialBinding {
     /// render path cannot read back, and the split has to happen during
     /// extraction.
     pub transparent: bool,
+    /// Whether this material contributes to the shadow map. Alpha-masked
+    /// materials do; alpha-blended materials do not.
+    pub casts_shadow: bool,
     /// The GPU buffer backing the factors uniform. Kept around so callers
     /// can update it (e.g. after editing a material) via
     /// [`GpuContext::write_uniform_buffer`].
@@ -722,6 +725,7 @@ impl GpuContext {
             bind_group,
             // `2` is `AlphaMode::Blend`; see `MaterialUniform::alpha_mode`.
             transparent: material.alpha_mode == 2,
+            casts_shadow: material.casts_shadow(),
         }
     }
 
@@ -780,8 +784,8 @@ impl GpuContext {
     }
 
     /// Compiles `shadow.wgsl` into a [`ShadowPipeline`], reusing
-    /// `pipeline`'s model bind group layout so [`ModelBinding`]s work
-    /// unmodified in both the shadow and main color passes.
+    /// `pipeline`'s material and model bind group layouts so masked
+    /// materials and [`ModelBinding`]s work unchanged in both passes.
     pub fn create_shadow_pipeline(&self, pipeline: &Pipeline, label: &str) -> ShadowPipeline {
         let device = self.device();
 
@@ -809,6 +813,7 @@ impl GpuContext {
             label: Some(&format!("{label} layout")),
             bind_group_layouts: &[
                 Some(&light_bind_group_layout),
+                Some(&pipeline.material_bind_group_layout),
                 Some(&pipeline.model_bind_group_layout),
             ],
             immediate_size: 0,
@@ -823,7 +828,12 @@ impl GpuContext {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[Some(Vertex::layout())],
             },
-            fragment: None,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[],
+            }),
             primitive: wgpu::PrimitiveState {
                 // Cull front faces (not back, unlike the main pipeline):
                 // writing the *back*-face depth of each occluder reduces
@@ -1367,7 +1377,8 @@ impl GpuContext {
             shadow_pass.set_pipeline(&shadow_pipeline.render_pipeline);
             shadow_pass.set_bind_group(0, &shadow_map.light_bind_group, &[]);
             for drawable in shadow_casters {
-                shadow_pass.set_bind_group(1, &drawable.model.bind_group, &[]);
+                shadow_pass.set_bind_group(1, &drawable.material.bind_group, &[]);
+                shadow_pass.set_bind_group(2, &drawable.model.bind_group, &[]);
                 shadow_pass.set_vertex_buffer(0, drawable.mesh.vertex_buffer.slice(..));
                 shadow_pass.set_index_buffer(
                     drawable.mesh.index_buffer.slice(..),

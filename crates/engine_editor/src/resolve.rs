@@ -124,9 +124,10 @@ impl SceneResolver for EditorResolver<'_> {
             )));
         };
 
-        let Some(primitive) = gltf.meshes.first() else {
+        let [primitive] = gltf.meshes.as_slice() else {
             return Err(SceneError::Resolve(format!(
-                "glTF asset {id} contains no mesh primitives"
+                "glTF asset {id} has {} primitives; the editor renderer supports exactly one",
+                gltf.meshes.len()
             )));
         };
 
@@ -134,10 +135,17 @@ impl SceneResolver for EditorResolver<'_> {
         // `from_geometry` fall back to white, so an untextured model still
         // renders lit. Shared with the standalone player's resolver so the
         // editor and a shipped build agree on what an asset looks like.
-        let base_color = gltf
-            .images
-            .first()
+        let imported_material = primitive
+            .material
+            .and_then(|index| gltf.materials.get(index));
+        let base_color = imported_material
+            .and_then(|material| material.base_color_image)
+            .and_then(|index| gltf.images.get(index))
             .map(|image| (image.width, image.height, image.rgba8.as_slice()));
+        let material = imported_material.map_or(Material::DEFAULT, |material| Material {
+            base_color_factor: material.base_color_factor,
+            ..Material::DEFAULT
+        });
 
         let renderer = MeshRenderer::from_geometry(
             self.gpu,
@@ -146,7 +154,7 @@ impl SceneResolver for EditorResolver<'_> {
             &primitive.vertices,
             &primitive.indices,
             base_color,
-            Material::default(),
+            material,
         )
         .map_err(|err| SceneError::Resolve(err.to_string()))?;
 

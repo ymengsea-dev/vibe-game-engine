@@ -18,8 +18,8 @@
 //! - No GPU upload and no viewport rendering of imported meshes/textures
 //!   — the imported data is in-memory bookkeeping only (that wiring is
 //!   the Runtime & build track).
-//! - No background threading — importers run synchronously on the
-//!   startup path; an [`engine_asset::AssetLoader`] integration is later.
+//! - No background threading — importers run synchronously on the startup
+//!   path.
 //! - No per-row status badges in the browser — only a one-line summary
 //!   (see [`AssetImporter::stats`]).
 //! - A `.gltf` is imported **by path**
@@ -103,6 +103,10 @@ pub struct ReloadReport {
     pub failed: usize,
     /// Cached assets removed because their source disappeared.
     pub evicted: usize,
+    /// Whether mesh imports were refreshed. A glTF may reference an
+    /// external texture or buffer, so the editor refreshes models after
+    /// any non-meta file change instead of maintaining a dependency graph.
+    pub meshes_reloaded: bool,
 }
 
 /// Owns the [`ImportCache`], the in-memory imported-data map, and the
@@ -175,10 +179,26 @@ impl AssetImporter {
             // from an earlier run but no decoded data in memory yet.
             let must_import = source_changed || !self.imported.contains_key(&id);
             let outcome = if must_import {
-                match import_one(entry.kind, &absolute) {
+                match import_one(entry.kind, &absolute, root) {
                     Ok(asset) => {
                         self.imported.insert(id, asset);
-                        ImportOutcome::Imported
+                        match self.cache.confirm(&absolute) {
+                            Ok(true) => ImportOutcome::Imported,
+                            Ok(false) => {
+                                tracing::warn!(
+                                    path = %absolute.display(),
+                                    "asset changed while it was importing; it will be retried"
+                                );
+                                ImportOutcome::Imported
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    path = %absolute.display(), error = %err,
+                                    "asset imported but its sidecar could not be updated"
+                                );
+                                ImportOutcome::Failed(err.to_string())
+                            }
+                        }
                     }
                     Err(message) => {
                         tracing::warn!(
@@ -216,6 +236,9 @@ impl AssetImporter {
         changed: &[std::path::PathBuf],
     ) -> (AssetIndex, ReloadReport) {
         let before = self.imported_count();
+        for entry in entries.iter().filter(|entry| entry.kind == AssetKind::Mesh) {
+            self.cache.invalidate(&root.join(&entry.relative_path));
+        }
         let index = self.run(root, entries);
         let changed_set: HashSet<std::path::PathBuf> = changed
             .iter()
@@ -231,7 +254,10 @@ impl AssetImporter {
             .filter(|record| changed_set.contains(&record.relative_path))
         {
             match record.outcome {
-                ImportOutcome::Imported => report.reimported += 1,
+                ImportOutcome::Imported => {
+                    report.reimported += 1;
+                    report.meshes_reloaded |= record.kind == AssetKind::Mesh;
+                }
                 ImportOutcome::Failed(_) => report.failed += 1,
                 ImportOutcome::Cached => {}
             }
@@ -283,11 +309,15 @@ impl AssetImporter {
 /// Reads `absolute` and runs the importer for `kind`. `kind` is always
 /// one of the [`AssetKind::is_referenceable`] variants — `run` filters
 /// the rest out before calling this.
-fn import_one(kind: AssetKind, absolute: &Path) -> Result<ImportedAsset, String> {
+fn import_one(
+    kind: AssetKind,
+    absolute: &Path,
+    asset_root: &Path,
+) -> Result<ImportedAsset, String> {
     // Meshes go by path so external references resolve; everything else
     // is self-contained and reads faster as bytes.
     if kind == AssetKind::Mesh {
-        return import_gltf_file(absolute)
+        return import_gltf_file(absolute, asset_root)
             .map(|gltf| ImportedAsset::Mesh(Box::new(gltf)))
             .map_err(|err| err.to_string());
     }

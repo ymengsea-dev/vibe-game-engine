@@ -30,6 +30,8 @@ pub struct ImportedMesh {
     pub vertices: Vec<Vertex>,
     /// Triangle-list indices into `vertices`.
     pub indices: Vec<u32>,
+    /// The glTF material assigned to this primitive, if any.
+    pub material: Option<usize>,
     /// Per-vertex joint indices/weights, parallel to `vertices`, if the
     /// glTF primitive had both `JOINTS_0` and `WEIGHTS_0` attributes.
     /// `None` for an unskinned mesh.
@@ -304,10 +306,39 @@ pub fn import_gltf_slice(bytes: &[u8]) -> Result<ImportedGltf, AssetError> {
 /// [`AssetError::GltfImport`] for everything [`import_gltf_slice`]
 /// reports, plus a file that cannot be read and an external reference
 /// that does not resolve.
-pub fn import_gltf_file(path: &std::path::Path) -> Result<ImportedGltf, AssetError> {
-    let (document, buffers, images) = gltf::import(path)
+pub fn import_gltf_file(
+    path: &std::path::Path,
+    asset_root: &std::path::Path,
+) -> Result<ImportedGltf, AssetError> {
+    let root = std::fs::canonicalize(asset_root)
+        .map_err(|err| AssetError::GltfImport(format!("{}: {err}", asset_root.display())))?;
+    let model = std::fs::canonicalize(path)
         .map_err(|err| AssetError::GltfImport(format!("{}: {err}", path.display())))?;
-    convert(&document, &buffers, &images)
+    if !model.starts_with(&root) {
+        return Err(AssetError::GltfImport(format!(
+            "model is outside asset root: {}",
+            model.display()
+        )));
+    }
+    let base = model.parent().ok_or_else(|| {
+        AssetError::GltfImport(format!(
+            "model has no parent directory: {}",
+            model.display()
+        ))
+    })?;
+    let bytes = std::fs::read(&model)
+        .map_err(|err| AssetError::GltfImport(format!("{}: {err}", model.display())))?;
+    import_gltf_slice_with(&bytes, &|uri| {
+        let candidate = std::path::Path::new(uri);
+        if uri.contains(':') || candidate.is_absolute() {
+            return None;
+        }
+        let resource = std::fs::canonicalize(base.join(candidate)).ok()?;
+        resource
+            .starts_with(&root)
+            .then(|| std::fs::read(resource).ok())
+            .flatten()
+    })
 }
 
 /// Imports a glTF or GLB from bytes, resolving anything it references
@@ -364,16 +395,17 @@ fn resolve_buffers(
 ) -> Result<Vec<gltf::buffer::Data>, AssetError> {
     let mut out = Vec::with_capacity(document.buffers().len());
     for buffer in document.buffers() {
-        let mut bytes = match buffer.source() {
+        let bytes = match buffer.source() {
             gltf::buffer::Source::Bin => blob
                 .take()
                 .ok_or_else(|| AssetError::GltfImport("GLB has no binary chunk".to_owned()))?,
             gltf::buffer::Source::Uri(uri) => fetch_uri(uri, resolve)?,
         };
-        // glTF allows the stored blob to be padded shorter than the
-        // declared length; readers index up to `length`.
         if bytes.len() < buffer.length() {
-            bytes.resize(buffer.length(), 0);
+            return Err(AssetError::GltfImport(format!(
+                "buffer {} is shorter than its declared length",
+                buffer.index()
+            )));
         }
         out.push(gltf::buffer::Data(bytes));
     }
@@ -395,7 +427,9 @@ fn resolve_images(
                     AssetError::GltfImport("image view points at a missing buffer".to_owned())
                 })?;
                 let start = view.offset();
-                let end = start + view.length();
+                let end = start.checked_add(view.length()).ok_or_else(|| {
+                    AssetError::GltfImport("image view length overflows".to_owned())
+                })?;
                 buffer
                     .0
                     .get(start..end)
@@ -580,6 +614,7 @@ fn convert(
                 name: mesh.name().map(String::from),
                 vertices,
                 indices,
+                material: primitive.material().index(),
                 skin_weights,
                 skeleton: None,
             });
@@ -726,7 +761,15 @@ fn convert(
                 skeletons.len() - 1
             });
 
-        skeleton_index_by_mesh_index.insert(mesh_ref.index(), skeleton_index);
+        if let Some(previous) =
+            skeleton_index_by_mesh_index.insert(mesh_ref.index(), skeleton_index)
+            && previous != skeleton_index
+        {
+            return Err(AssetError::GltfImport(format!(
+                "mesh {} is bound to multiple skins; one-renderer import is ambiguous",
+                mesh_ref.index()
+            )));
+        }
     }
 
     for (mesh, owner_index) in meshes.iter_mut().zip(&owning_mesh_index) {
@@ -847,7 +890,9 @@ fn convert_image(image: &gltf::image::Data) -> Result<ImportedImage, AssetError>
         gltf::image::Format::R8G8B8A8 => image.pixels.clone(),
         gltf::image::Format::R8G8B8 => image
             .pixels
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
             .collect(),
         other => {
@@ -866,6 +911,7 @@ fn convert_image(image: &gltf::image::Data) -> Result<ImportedImage, AssetError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     /// Packs a GLB (binary glTF) file from a JSON chunk and a binary
     /// chunk, per the GLB container spec: 12-byte header, then each
@@ -974,6 +1020,35 @@ mod tests {
     }
 
     #[test]
+    fn loose_import_rejects_traversal_and_file_uris() {
+        let root = std::env::temp_dir().join(format!("vge-gltf-root-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for uri in ["../outside.bin", "file:///tmp/outside.bin"] {
+            let model = root.join("model.gltf");
+            std::fs::write(
+                &model,
+                format!(r#"{{"asset":{{"version":"2.0"}},"buffers":[{{"uri":"{uri}","byteLength":1}}]}}"#),
+            )
+            .unwrap();
+            assert!(matches!(
+                import_gltf_file(&model, &root),
+                Err(AssetError::GltfImport(_))
+            ));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_a_buffer_shorter_than_its_declared_length() {
+        let bytes =
+            br#"{"asset":{"version":"2.0"},"buffers":[{"uri":"short.bin","byteLength":8}]}"#;
+        assert!(matches!(
+            import_gltf_slice_with(bytes, &|_| Some(vec![0; 1])),
+            Err(AssetError::GltfImport(_))
+        ));
+    }
+
+    #[test]
     fn imports_one_triangle_mesh() {
         let imported = import_gltf_slice(&fixture_glb()).unwrap();
         assert_eq!(imported.meshes.len(), 1);
@@ -982,6 +1057,7 @@ mod tests {
         assert_eq!(mesh.name.as_deref(), Some("TriangleMesh"));
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.indices, vec![0, 1, 2]);
+        assert_eq!(mesh.material, Some(0));
         assert_eq!(mesh.vertices[1].position, [1.0, 0.0, 0.0]);
         assert_eq!(mesh.vertices[0].normal, [0.0, 0.0, 1.0]);
         assert_eq!(mesh.vertices[2].uv, [0.0, 1.0]);

@@ -6,6 +6,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 
 use engine::editor::OutputLog;
+use engine::platform::WakeHandle;
 use engine::project::build::ExportPlan;
 use engine::project::{BuildConfiguration, Project};
 
@@ -51,6 +52,7 @@ pub(crate) struct PlayProcess {
     phase: Phase,
     sender: Option<SyncSender<ProcessMessage>>,
     receiver: Option<Receiver<ProcessMessage>>,
+    wake: Option<WakeHandle>,
 }
 
 impl Default for PlayProcess {
@@ -59,11 +61,15 @@ impl Default for PlayProcess {
             phase: Phase::Idle,
             sender: None,
             receiver: None,
+            wake: None,
         }
     }
 }
 
 impl PlayProcess {
+    pub(crate) fn set_wake_handle(&mut self, wake: WakeHandle) {
+        self.wake = Some(wake);
+    }
     /// Whether no build or game child is owned.
     pub(crate) fn is_idle(&self) -> bool {
         matches!(self.phase, Phase::Idle)
@@ -95,7 +101,7 @@ impl PlayProcess {
             plan.crate_name,
             configuration.profile.label()
         ));
-        let child = spawn_captured(&mut command, &sender, "build")?;
+        let child = spawn_captured(&mut command, &sender, "build", self.wake.clone())?;
         self.phase = Phase::Building {
             child,
             binary: plan.compiled_binary(),
@@ -148,7 +154,7 @@ impl PlayProcess {
                 };
                 let mut command = Command::new(&binary);
                 command.current_dir(root).env("RUST_BACKTRACE", "1");
-                match spawn_captured(&mut command, sender, "game") {
+                match spawn_captured(&mut command, sender, "game", self.wake.clone()) {
                     Ok(child) => {
                         output.write_line(format!("[play] launched {}", binary.display()));
                         self.phase = Phase::Running(child);
@@ -217,7 +223,7 @@ impl PlayProcess {
     #[cfg(test)]
     fn start_test_command(&mut self, command: &mut Command) -> Result<(), String> {
         let (sender, receiver) = mpsc::sync_channel(OUTPUT_CAPACITY);
-        let child = spawn_captured(command, &sender, "test")?;
+        let child = spawn_captured(command, &sender, "test", self.wake.clone())?;
         self.phase = Phase::Running(child);
         self.sender = Some(sender);
         self.receiver = Some(receiver);
@@ -235,6 +241,7 @@ fn spawn_captured(
     command: &mut Command,
     sender: &SyncSender<ProcessMessage>,
     label: &'static str,
+    wake: Option<WakeHandle>,
 ) -> Result<Child, String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
@@ -242,10 +249,10 @@ fn spawn_captured(
         .map_err(|err| format!("could not start {label}: {err}"))?;
 
     if let Some(stdout) = child.stdout.take() {
-        spawn_reader(stdout, sender.clone(), label, "stdout");
+        spawn_reader(stdout, sender.clone(), label, "stdout", wake.clone());
     }
     if let Some(stderr) = child.stderr.take() {
-        spawn_reader(stderr, sender.clone(), label, "stderr");
+        spawn_reader(stderr, sender.clone(), label, "stderr", wake);
     }
     Ok(child)
 }
@@ -255,6 +262,7 @@ fn spawn_reader(
     sender: SyncSender<ProcessMessage>,
     label: &'static str,
     stream_name: &'static str,
+    wake: Option<WakeHandle>,
 ) {
     let thread_name = format!("studio-{label}-{stream_name}");
     let spawn = std::thread::Builder::new()
@@ -267,6 +275,9 @@ fn spawn_reader(
                 };
                 if sender.send(ProcessMessage::Output(text)).is_err() {
                     break;
+                }
+                if let Some(wake) = &wake {
+                    let _ = wake.wake();
                 }
             }
         });

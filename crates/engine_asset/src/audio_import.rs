@@ -187,6 +187,11 @@ fn parse_fmt_chunk(bytes: &[u8]) -> Result<FmtChunk, AssetError> {
             "'fmt ' chunk declares 0 channels".to_string(),
         ));
     }
+    if sample_rate == 0 {
+        return Err(AssetError::AudioImport(
+            "'fmt ' chunk declares a 0 sample rate".to_string(),
+        ));
+    }
 
     Ok(FmtChunk {
         audio_format,
@@ -197,20 +202,33 @@ fn parse_fmt_chunk(bytes: &[u8]) -> Result<FmtChunk, AssetError> {
 }
 
 fn decode_samples(fmt: &FmtChunk, data: &[u8]) -> Result<Vec<f32>, AssetError> {
+    let bytes_per_sample = usize::from(fmt.bits_per_sample / 8);
+    let frame_size = usize::from(fmt.channels)
+        .checked_mul(bytes_per_sample)
+        .ok_or_else(|| AssetError::AudioImport("WAV frame size overflows".to_string()))?;
+    if frame_size == 0 || !data.len().is_multiple_of(frame_size) {
+        return Err(AssetError::AudioImport(
+            "WAV data ends in a partial sample frame".to_string(),
+        ));
+    }
     match (fmt.audio_format, fmt.bits_per_sample) {
         (FORMAT_PCM, 8) => Ok(data
             .iter()
             .map(|&b| (f32::from(b) - 128.0) / 128.0)
             .collect()),
         (FORMAT_PCM, 16) => data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| {
                 let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                Ok(f32::from(sample) / f32::from(i16::MAX))
+                Ok((f32::from(sample) / f32::from(i16::MAX)).max(-1.0))
             })
             .collect(),
         (FORMAT_PCM, 24) => data
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|chunk| {
                 let mut padded = [0u8; 4];
                 padded[1..4].copy_from_slice(chunk);
@@ -221,15 +239,24 @@ fn decode_samples(fmt: &FmtChunk, data: &[u8]) -> Result<Vec<f32>, AssetError> {
             })
             .collect(),
         (FORMAT_PCM, 32) => data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|chunk| {
                 let sample = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                Ok(sample as f32 / i32::MAX as f32)
+                Ok((sample as f32 / i32::MAX as f32).max(-1.0))
             })
             .collect(),
         (FORMAT_IEEE_FLOAT, 32) => data
-            .chunks_exact(4)
-            .map(|chunk| Ok(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| {
+                let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                sample.is_finite().then_some(sample).ok_or_else(|| {
+                    AssetError::AudioImport("WAV float sample is not finite".to_string())
+                })
+            })
             .collect(),
         (format, bits) => Err(AssetError::AudioImport(format!(
             "unsupported WAV format (tag {format}, {bits}-bit) — only PCM 8/16/24/32-bit and 32-bit float are converted"

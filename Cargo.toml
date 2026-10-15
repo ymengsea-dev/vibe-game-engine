@@ -85,11 +85,10 @@ ron = "0.12"
 # event track, and `extras` is where a format puts what it does not model.
 gltf = { version = "1", features = ["extras"] }
 image = "0.25"
-# Concurrency / async
+# Concurrency
 rayon = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # One-shot blocking on wgpu's async init calls (adapter/device request) at
-# startup; tokio is reserved for background tasks (asset loading, network).
+# startup.
 pollster = "1"
 # Diagnostics
 tracing = "0.1"

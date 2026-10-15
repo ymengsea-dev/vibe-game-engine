@@ -62,8 +62,8 @@ pub fn generate_mip_chain(base: &RgbaImage) -> Vec<Vec<u8>> {
 /// last row/column twice rather than reading out of bounds).
 fn downsample_half(image: &RgbaImage) -> RgbaImage {
     let (src_width, src_height) = image.dimensions();
-    let dst_width = (src_width / 2).max(1);
-    let dst_height = (src_height / 2).max(1);
+    let dst_width = src_width.div_ceil(2);
+    let dst_height = src_height.div_ceil(2);
     let mut out = RgbaImage::new(dst_width, dst_height);
 
     for y in 0..dst_height {
@@ -74,12 +74,16 @@ fn downsample_half(image: &RgbaImage) -> RgbaImage {
             let y1 = (y * 2 + 1).min(src_height - 1);
 
             let mut sum = [0u32; 4];
-            for (sx, sy) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
-                for (channel, value) in sum.iter_mut().zip(image.get_pixel(sx, sy).0) {
-                    *channel += u32::from(value);
+            let mut samples = 0u32;
+            for sy in y0..=y1 {
+                for sx in x0..=x1 {
+                    for (channel, value) in sum.iter_mut().zip(image.get_pixel(sx, sy).0) {
+                        *channel += u32::from(value);
+                    }
+                    samples += 1;
                 }
             }
-            let average = sum.map(|channel| (channel / 4) as u8);
+            let average = sum.map(|channel| (channel / samples) as u8);
             out.put_pixel(x, y, image::Rgba(average));
         }
     }
@@ -133,8 +137,8 @@ mod tests {
         let base = solid(8, 8, [100, 150, 200, 255]);
         let levels = generate_mip_chain(&base);
         for level in &levels {
-            for chunk in level.chunks_exact(4) {
-                assert_eq!(chunk, [100, 150, 200, 255]);
+            for chunk in level.as_chunks::<4>().0 {
+                assert_eq!(*chunk, [100, 150, 200, 255]);
             }
         }
     }
@@ -157,8 +161,8 @@ mod tests {
     fn odd_dimension_downsample_does_not_panic_and_terminates() {
         let base = solid(3, 5, [7, 7, 7, 7]);
         let levels = generate_mip_chain(&base);
-        // 3x5 -> 1x2 -> 1x1
-        assert_eq!(levels.len(), 3);
+        // Ceiling halving preserves the right/bottom edge: 3x5 -> 2x3 -> 1x2 -> 1x1.
+        assert_eq!(levels.len(), 4);
     }
 
     #[test]

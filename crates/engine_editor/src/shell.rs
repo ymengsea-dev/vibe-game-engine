@@ -7,6 +7,8 @@ use egui_wgpu::{Renderer as EguiRenderer, RendererOptions, ScreenDescriptor};
 use egui_winit::State as EguiWinitState;
 use engine_platform::{Window, WindowEvent};
 use glam::{Vec2, Vec3};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::assets;
 use crate::chrome::{BottomTab, InspectorTab, TransformSpace, Workspace};
@@ -34,6 +36,7 @@ pub struct EditorShell {
     context: EguiContext,
     winit_state: EguiWinitState,
     renderer: EguiRenderer,
+    repaint_deadline: Arc<Mutex<Option<Instant>>>,
     #[cfg(feature = "dock-shell")]
     dock: dock::Host,
 }
@@ -50,8 +53,20 @@ impl EditorShell {
         window: &Window,
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
+        wake: engine_platform::WakeHandle,
     ) -> Self {
         let context = EguiContext::default();
+        let repaint_deadline = Arc::new(Mutex::new(None));
+        let deadline = Arc::clone(&repaint_deadline);
+        context.set_request_repaint_callback(move |info| {
+            if let Ok(mut current) = deadline.lock() {
+                let requested = Instant::now() + info.delay;
+                if current.is_none_or(|existing| requested < existing) {
+                    *current = Some(requested);
+                }
+            }
+            let _ = wake.wake();
+        });
         crate::theme::install(&context);
         let winit_state =
             EguiWinitState::new(context.clone(), ViewportId::ROOT, window, None, None, None);
@@ -60,8 +75,24 @@ impl EditorShell {
             context,
             winit_state,
             renderer,
+            repaint_deadline,
             #[cfg(feature = "dock-shell")]
             dock: dock::Host::new(),
+        }
+    }
+
+    /// Returns the next repaint requested by egui.
+    pub fn repaint_deadline(&self) -> Option<Instant> {
+        self.repaint_deadline
+            .lock()
+            .ok()
+            .and_then(|deadline| *deadline)
+    }
+
+    /// Clears the request consumed by the frame about to be run.
+    pub fn clear_repaint_deadline(&self) {
+        if let Ok(mut deadline) = self.repaint_deadline.lock() {
+            *deadline = None;
         }
     }
 

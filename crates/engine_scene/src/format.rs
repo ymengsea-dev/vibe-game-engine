@@ -13,8 +13,8 @@
 //! here yet — it owns live GPU handles, not describable data — but
 //! [`MeshRendererData`] carries the part that *is* describable: which mesh
 //! and material asset it should resolve to. `engine_scene` deliberately
-//! doesn't depend on `engine_asset` for this (a much heavier crate: tokio,
-//! gltf, image, notify, for what would only be a 16-byte identity type
+//! doesn't depend on `engine_asset` for this (a much heavier crate: gltf,
+//! image, notify, for what would only be a 16-byte identity type
 //! here); [`AssetRef`] stores the same UUID identity space as
 //! `engine_asset::AssetId` as plain text. Turning a `MeshRendererData`
 //! into a live `MeshRenderer` needs Stage 3's asset-handle work — this is

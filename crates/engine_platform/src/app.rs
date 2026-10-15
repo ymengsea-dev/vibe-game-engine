@@ -6,10 +6,11 @@
 //! [`PlatformHandler`] supplied by the caller.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::WindowId;
 
 use crate::config::WindowConfig;
@@ -21,11 +22,47 @@ use crate::event::map_window_event;
 /// `engine_platform::Window` instead of depending on `winit` directly.
 pub use winit::window::Window;
 
+/// Controls when the platform event loop requests another redraw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedrawPolicy {
+    /// Sleep until the OS or a background producer wakes the event loop.
+    Wait,
+    /// Sleep until a UI timer needs a frame.
+    WaitUntil(Instant),
+    /// Request another frame as soon as this event-loop turn ends.
+    Continuous,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UserEvent {
+    Wake,
+}
+
+/// Signals that background work has queued visible state for the window.
+#[derive(Clone)]
+pub struct WakeHandle(Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl WakeHandle {
+    fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
+        Self(Arc::new(move || proxy.send_event(UserEvent::Wake).is_ok()))
+    }
+
+    /// Wakes the event loop so it renders the queued state once.
+    ///
+    /// Returns `false` only after the event loop has stopped.
+    pub fn wake(&self) -> bool {
+        (self.0)()
+    }
+}
+
 /// Receives platform events for the engine's single window.
 ///
 /// Implemented by whatever owns the running application (today: the
 /// example `game` binary directly; later: `engine_core::App`).
 pub trait PlatformHandler {
+    /// Receives a handle background work can use to wake the event loop.
+    fn set_wake_handle(&mut self, _wake: WakeHandle) {}
+
     /// Called once the OS window has been created and is ready to render
     /// into. `window` is cheaply cloneable ([`Arc`]) so the handler can
     /// hand it to a renderer without borrowing issues.
@@ -55,6 +92,12 @@ pub trait PlatformHandler {
         false
     }
 
+    /// Selects whether the event loop waits, schedules a timer, or draws
+    /// another frame after the current turn.
+    fn redraw_policy(&self) -> RedrawPolicy {
+        RedrawPolicy::Wait
+    }
+
     /// Called when the OS asks the window to close (title-bar close
     /// button, `Cmd`/`Alt`+`F4`, ...). Return `true` to let the event
     /// loop exit now, `false` to keep running — e.g. to show an "unsaved
@@ -82,6 +125,7 @@ pub trait PlatformHandler {
 struct Runner<H: PlatformHandler> {
     config: WindowConfig,
     window: Option<Arc<Window>>,
+    wake: WakeHandle,
     handler: H,
     /// Set when `resumed` fails to create the window. `resumed` has no way
     /// to return a `Result` to the caller, so it exits the loop and stashes
@@ -89,7 +133,7 @@ struct Runner<H: PlatformHandler> {
     pending_error: Option<PlatformError>,
 }
 
-impl<H: PlatformHandler> ApplicationHandler for Runner<H> {
+impl<H: PlatformHandler> ApplicationHandler<UserEvent> for Runner<H> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             // Already created (e.g. resumed fired again after a suspend on
@@ -112,7 +156,9 @@ impl<H: PlatformHandler> ApplicationHandler for Runner<H> {
         match event_loop.create_window(attributes) {
             Ok(window) => {
                 let window = Arc::new(window);
+                self.handler.set_wake_handle(self.wake.clone());
                 self.handler.on_window_ready(Arc::clone(&window));
+                window.request_redraw();
                 self.window = Some(window);
             }
             Err(err) => {
@@ -126,6 +172,9 @@ impl<H: PlatformHandler> ApplicationHandler for Runner<H> {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         if let Some(window) = &self.window {
             self.handler.on_raw_window_event(window, &event);
+            if !matches!(event, WindowEvent::RedrawRequested) {
+                window.request_redraw();
+            }
         }
 
         let Some(mapped) = map_window_event(&event) else {
@@ -144,6 +193,16 @@ impl<H: PlatformHandler> ApplicationHandler for Runner<H> {
         self.handler.on_event(mapped);
     }
 
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Wake => {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // A handler that has decided it's done (e.g. a game calling
         // `request_exit`) — the only programmatic way out of the loop.
@@ -152,11 +211,17 @@ impl<H: PlatformHandler> ApplicationHandler for Runner<H> {
             event_loop.exit();
             return;
         }
-        // Drives a continuous render loop: ask for another redraw as soon
-        // as the event queue is drained. Presentation pacing (vsync) comes
-        // from the surface's present mode, not from throttling here.
-        if let Some(window) = &self.window {
-            window.request_redraw();
+        match self.handler.redraw_policy() {
+            RedrawPolicy::Wait => event_loop.set_control_flow(ControlFlow::Wait),
+            RedrawPolicy::WaitUntil(deadline) => {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            }
+            RedrawPolicy::Continuous => {
+                event_loop.set_control_flow(ControlFlow::Poll);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
         }
     }
 }
@@ -196,12 +261,16 @@ pub fn run_windowed(
     config: WindowConfig,
     handler: impl PlatformHandler + 'static,
 ) -> Result<(), PlatformError> {
-    let event_loop = EventLoop::new().map_err(|err| PlatformError::EventLoop(err.to_string()))?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .map_err(|err| PlatformError::EventLoop(err.to_string()))?;
+    let wake = WakeHandle::new(event_loop.create_proxy());
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut runner = Runner {
         config,
         window: None,
+        wake,
         handler,
         pending_error: None,
     };
@@ -234,5 +303,39 @@ mod tests {
             handler.on_close_requested(),
             "the default must let the OS close the window"
         );
+    }
+
+    #[test]
+    fn default_redraw_policy_waits_for_events() {
+        let handler = StubHandler;
+        assert_eq!(handler.redraw_policy(), RedrawPolicy::Wait);
+    }
+
+    #[test]
+    fn continuous_redraw_policy_requests_the_next_frame() {
+        struct ContinuousHandler;
+        impl PlatformHandler for ContinuousHandler {
+            fn on_window_ready(&mut self, _window: Arc<Window>) {}
+
+            fn on_event(&mut self, _event: crate::event::PlatformEvent) {}
+
+            fn redraw_policy(&self) -> RedrawPolicy {
+                RedrawPolicy::Continuous
+            }
+        }
+
+        assert_eq!(ContinuousHandler.redraw_policy(), RedrawPolicy::Continuous);
+    }
+
+    #[test]
+    fn wake_handle_redraw_policy_queues_a_redraw_event() {
+        let woke = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let expected = Arc::clone(&woke);
+        let wake = WakeHandle(Arc::new(move || {
+            expected.store(true, std::sync::atomic::Ordering::Relaxed);
+            true
+        }));
+        assert!(wake.wake());
+        assert!(woke.load(std::sync::atomic::Ordering::Relaxed));
     }
 }
