@@ -371,9 +371,11 @@ impl EditorShell {
             // pointer button is held. The host hides the webview for that
             // frame so the native view doesn't lag/overhang the edge.
             let pointer_down = ui.input(|i| i.pointer.any_down());
-            state.code_panel_resizing = pointer_down
-                && state.prev_code_panel_rect.is_some()
-                && state.code_panel_rect != state.prev_code_panel_rect;
+            state.code_panel_resizing = code_panel_is_resizing(
+                state.prev_code_panel_rect,
+                state.code_panel_rect,
+                pointer_down,
+            );
             state.prev_code_panel_rect = state.code_panel_rect;
 
             // Ctrl/Cmd+S with the Code panel up saves the active file
@@ -1374,6 +1376,12 @@ fn show_code_workspace(ui: &mut egui::Ui, viewport: &Viewport, state: &mut Edito
         [rect.min.x, top, rect.width(), (rect.max.y - top).max(1.0)]
     });
     state.code_panel_visible = state.code_panel_rect.is_some() && state.pending_action.is_none();
+    let pointer_down = ui.input(|input| input.pointer.any_down());
+    state.code_panel_resizing = code_panel_is_resizing(
+        state.prev_code_panel_rect,
+        state.code_panel_rect,
+        pointer_down,
+    );
     state.prev_code_panel_rect = state.code_panel_rect;
 
     if state.panels.code
@@ -1444,6 +1452,14 @@ fn shell_layout(workspace: Workspace) -> ShellLayout {
         Workspace::Code => ShellLayout::Code,
         Workspace::Ai | Workspace::Debug => ShellLayout::Auxiliary,
     }
+}
+
+fn code_panel_is_resizing(
+    previous: Option<[f32; 4]>,
+    current: Option<[f32; 4]>,
+    pointer_down: bool,
+) -> bool {
+    pointer_down && previous.is_some() && current != previous
 }
 
 /// The Scene viewport header exposes only controls backed by the editor.
@@ -1671,7 +1687,7 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
 
 #[cfg(test)]
 mod ui_tests {
-    use super::{ShellLayout, scene_cursor_icon, shell_layout};
+    use super::{ShellLayout, code_panel_is_resizing, scene_cursor_icon, shell_layout};
     use crate::chrome::Workspace;
 
     #[test]
@@ -1680,6 +1696,23 @@ mod ui_tests {
         assert_eq!(shell_layout(Workspace::Code), ShellLayout::Code);
         assert_eq!(shell_layout(Workspace::Ai), ShellLayout::Auxiliary);
         assert_eq!(shell_layout(Workspace::Debug), ShellLayout::Auxiliary);
+    }
+
+    #[test]
+    fn code_panel_resizes_only_during_a_pointer_drag_that_changes_its_rect() {
+        let previous = Some([10.0, 20.0, 300.0, 400.0]);
+        assert!(!code_panel_is_resizing(None, previous, true));
+        assert!(!code_panel_is_resizing(previous, previous, true));
+        assert!(!code_panel_is_resizing(
+            previous,
+            Some([10.0, 20.0, 320.0, 400.0]),
+            false
+        ));
+        assert!(code_panel_is_resizing(
+            previous,
+            Some([10.0, 20.0, 320.0, 400.0]),
+            true
+        ));
     }
 
     #[test]
