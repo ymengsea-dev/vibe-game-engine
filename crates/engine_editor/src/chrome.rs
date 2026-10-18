@@ -19,12 +19,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Workspace {
     /// Full scene-authoring layout: Hierarchy, Scene, Asset Browser,
-    /// Code, Console, and Inspector. The default, matching the UI
-    /// reference.
+    /// Console, and Inspector. The default, matching the UI reference.
     #[default]
     World,
-    /// Code-focused: drops the Inspector, keeps Hierarchy, Asset
-    /// Browser, Code, and Console.
+    /// Code-focused: project browser, code editor, viewport, and Console.
     Code,
     /// AI-focused: `World` plus the AI Assistant dock.
     Ai,
@@ -40,13 +38,16 @@ impl Workspace {
         Self::ALL.iter().position(|w| *w == self).unwrap_or(0)
     }
 
-    /// Every variant, in the order the toolbar switcher shows them.
+    /// Every persisted workspace variant, including auxiliary layouts.
     pub const ALL: [Workspace; 4] = [
         Workspace::World,
         Workspace::Code,
         Workspace::Ai,
         Workspace::Debug,
     ];
+
+    /// The two focused layouts exposed by the primary editor switcher.
+    pub const PRIMARY: [Workspace; 2] = [Workspace::World, Workspace::Code];
 
     /// Short label for the toolbar switcher.
     pub fn label(self) -> &'static str {
@@ -58,6 +59,15 @@ impl Workspace {
         }
     }
 
+    /// Label for the focused Scene / Code switcher.
+    pub fn primary_label(self) -> &'static str {
+        match self {
+            Workspace::World => "Scene",
+            Workspace::Code => "Code",
+            Workspace::Ai | Workspace::Debug => self.label(),
+        }
+    }
+
     /// The panel-visibility preset this workspace applies.
     pub fn visibility(self) -> PanelVisibility {
         match self {
@@ -65,7 +75,7 @@ impl Workspace {
                 hierarchy: true,
                 inspector: true,
                 asset_browser: true,
-                code: true,
+                code: false,
                 ai: false,
                 console: true,
                 profiler: false,
@@ -81,7 +91,7 @@ impl Workspace {
                 profiler: false,
             },
             Workspace::Code => PanelVisibility {
-                hierarchy: true,
+                hierarchy: false,
                 inspector: false,
                 asset_browser: true,
                 code: true,
@@ -256,9 +266,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn world_workspace_shows_the_wired_panels() {
-        let v = Workspace::World.visibility();
-        assert!(v.hierarchy && v.inspector && v.asset_browser && v.code && v.console);
+    fn primary_modes_match_the_scene_and_code_layouts() {
+        assert_eq!(Workspace::PRIMARY, [Workspace::World, Workspace::Code]);
+        assert_eq!(Workspace::World.primary_label(), "Scene");
+        assert_eq!(Workspace::Code.primary_label(), "Code");
+
+        let scene = Workspace::World.visibility();
+        assert!(scene.hierarchy && scene.inspector && scene.asset_browser && scene.console);
+        assert!(!scene.code);
+
+        let code = Workspace::Code.visibility();
+        assert!(code.asset_browser && code.code && code.console);
+        assert!(!code.hierarchy && !code.inspector);
     }
 
     #[test]
@@ -286,7 +305,8 @@ mod tests {
     fn workspace_presets_match_their_documented_shape() {
         let code = Workspace::Code.visibility();
         assert!(!code.inspector);
-        assert!(code.code && code.console && code.hierarchy);
+        assert!(code.code && code.console && code.asset_browser);
+        assert!(!code.hierarchy);
 
         let ai = Workspace::Ai.visibility();
         assert!(ai.ai && ai.hierarchy && ai.inspector && ai.code);
