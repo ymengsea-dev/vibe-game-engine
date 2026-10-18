@@ -193,51 +193,75 @@ pub fn trunk_mesh(rng: &mut Rng) -> (Vec<Vertex>, Vec<u32>) {
     (vertices, indices)
 }
 
-/// A tree's canopy as intersecting alpha-cut cards.
-///
-/// Three quads crossed through the trunk axis, each textured with a leaf
-/// cluster whose alpha does the shaping. This is how real-time foliage is
-/// actually built, and it is what [`crate::world::foliage_texture`]'s
-/// alpha channel exists for — before T-15 the renderer had no alpha-mask
-/// material, so the canopy had to be solid cones instead.
-///
-/// The cards are unlit-looking from edge-on, which is normal: the fix is
-/// two-sided lighting, not more geometry.
+/// A low-poly crown made from separate, faceted leaf clusters.
 pub fn canopy_mesh(rng: &mut Rng) -> (Vec<Vertex>, Vec<u32>) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
-
-    let cards = 3;
-    let height = rng.range(2.0, 3.0);
-    let width = rng.range(1.6, 2.4);
-    let base_y = rng.range(1.0, 1.5);
-
-    for card in 0..cards {
-        let angle = card as f32 / cards as f32 * std::f32::consts::PI;
-        let (s, c) = angle.sin_cos();
-        let half = Vec3::new(c * width * 0.5, 0.0, s * width * 0.5);
-        let bottom = Vec3::Y * base_y;
-        let top = Vec3::Y * (base_y + height);
-
-        let base = vertices.len() as u32;
-        // Normal faces outward along the card; both faces are drawn
-        // because the transparent/cutout path disables back-face culling.
-        let normal = Vec3::new(-s, 0.35, c).normalize().to_array();
-        for (position, uv) in [
-            (bottom - half, [0.0, 1.0]),
-            (bottom + half, [1.0, 1.0]),
-            (top + half, [1.0, 0.0]),
-            (top - half, [0.0, 0.0]),
-        ] {
-            vertices.push(Vertex {
-                position: position.to_array(),
-                normal,
-                uv,
-            });
+    for (cluster, (offset, radius)) in [
+        (Vec3::new(0.0, 2.65, 0.0), 0.50),
+        (Vec3::new(0.42, 2.35, 0.08), 0.48),
+        (Vec3::new(-0.40, 2.32, -0.10), 0.50),
+        (Vec3::new(0.04, 2.25, 0.46), 0.48),
+        (Vec3::new(-0.08, 2.25, -0.45), 0.48),
+        (Vec3::new(0.68, 1.98, 0.04), 0.45),
+        (Vec3::new(-0.65, 1.98, -0.08), 0.46),
+        (Vec3::new(0.03, 1.92, 0.68), 0.44),
+        (Vec3::new(-0.04, 1.92, -0.66), 0.45),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rings = 4;
+        let sectors = 8;
+        let cluster_scale = rng.range(0.92, 1.08);
+        for ring in 0..rings {
+            for sector in 0..sectors {
+                let point = |ring: usize, sector: usize| {
+                    let phi = ring as f32 / rings as f32 * std::f32::consts::PI;
+                    let theta = sector as f32 / sectors as f32 * std::f32::consts::TAU;
+                    let wobble = 0.88
+                        + value_noise(Vec2::new(
+                            cluster as f32 * 11.0 + sector as f32,
+                            ring as f32,
+                        )) * 0.24;
+                    offset
+                        + Vec3::new(
+                            phi.sin() * theta.cos() * radius * cluster_scale * wobble,
+                            phi.cos() * radius * cluster_scale * 0.85,
+                            phi.sin() * theta.sin() * radius * cluster_scale * wobble,
+                        )
+                };
+                let a = point(ring, sector);
+                let b = point(ring + 1, sector);
+                let c = point(ring, sector + 1);
+                let d = point(ring + 1, sector + 1);
+                push_triangle(&mut vertices, &mut indices, a, b, c);
+                push_triangle(&mut vertices, &mut indices, c, b, d);
+            }
         }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
+    (vertices, indices)
+}
 
+/// Thick, short limbs that stay inside the crown silhouette.
+pub fn tree_branch_mesh(rng: &mut Rng) -> (Vec<Vertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let root = Vec3::new(0.0, rng.range(1.25, 1.65), 0.0);
+    for angle in [0.2_f32, 1.3, 2.3, 3.4, 4.4, 5.5] {
+        let (sin, cos) = angle.sin_cos();
+        let end = root + Vec3::new(cos * 0.62, 0.42, sin * 0.62);
+        let side = Vec3::new(-sin, 0.0, cos) * 0.11;
+        let up = Vec3::Y * 0.11;
+        for (a, b) in [
+            (root - side - up, root + side - up),
+            (root + side - up, root + side + up),
+            (root + side + up, root - side + up),
+            (root - side + up, root - side - up),
+        ] {
+            push_triangle(&mut vertices, &mut indices, a, b, end);
+        }
+    }
     (vertices, indices)
 }
 
@@ -273,8 +297,8 @@ pub fn rock_mesh(rng: &mut Rng) -> (Vec<Vertex>, Vec<u32>) {
             let b = at(ring + 1, sector, &radii);
             let c = at(ring, sector + 1, &radii);
             let d = at(ring + 1, sector + 1, &radii);
-            push_triangle(&mut vertices, &mut indices, a, b, c);
-            push_triangle(&mut vertices, &mut indices, c, b, d);
+            push_triangle(&mut vertices, &mut indices, a, c, b);
+            push_triangle(&mut vertices, &mut indices, c, d, b);
         }
     }
 
@@ -290,6 +314,89 @@ pub struct Placement {
     pub yaw: f32,
     /// Uniform scale.
     pub scale: f32,
+}
+
+/// Authored region used to keep deterministic prop scatter composed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Biome {
+    /// Open starting grassland.
+    Meadow,
+    /// Dense shaded woodland.
+    Grove,
+    /// Sparse, elevated final approach.
+    Heights,
+}
+
+/// Radius that keeps props away from the authored walk route.
+pub const ROUTE_CLEARANCE: f32 = 3.6;
+
+/// Centre of the sheltered grove pond.
+pub const POND_CENTER: Vec3 = Vec3::new(-23.0, 0.0, -3.0);
+/// Horizontal pond bounds, shared by lilies and the runtime water surface.
+pub const POND_HALF_EXTENT: Vec2 = Vec2::new(3.2, 2.4);
+
+/// Still-water level for the shallow grove pond.
+pub fn pond_surface_height() -> f32 {
+    height_at(POND_CENTER.x, POND_CENTER.z) + 0.08
+}
+
+fn biome_bounds(biome: Biome) -> (Vec2, Vec2) {
+    match biome {
+        Biome::Meadow => (Vec2::new(-14.0, -4.0), Vec2::new(3.0, 15.0)),
+        Biome::Grove => (Vec2::new(-27.0, -19.0), Vec2::new(-5.0, 5.0)),
+        Biome::Heights => (Vec2::new(3.0, -28.0), Vec2::new(27.0, -11.0)),
+    }
+}
+
+/// Ground-level route samples, including every objective clearing.
+pub fn route_points() -> Vec<Vec3> {
+    let mut points = vec![
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(-5.0, 0.0, 4.0),
+        Vec3::new(-14.0, 0.0, 0.0),
+        Vec3::new(-12.0, 0.0, -8.0),
+        Vec3::new(-7.0, 0.0, -15.0),
+        Vec3::new(2.0, 0.0, -18.0),
+        Vec3::new(15.0, 0.0, -19.0),
+    ];
+    points.extend(crate::journey::landmarks().map(|landmark| landmark.position));
+    points.push(crate::journey::summit_position());
+    for point in &mut points {
+        point.y = height_at(point.x, point.z);
+    }
+    points
+}
+
+/// Deterministically scatters props within one biome without blocking route clearings.
+pub fn scatter_biome(biome: Biome, seed: u64, count: usize) -> Vec<Placement> {
+    let mut rng = Rng::new(seed);
+    let mut placements = Vec::with_capacity(count);
+    let (min, max) = biome_bounds(biome);
+    let route = route_points();
+    for _ in 0..count.saturating_mul(60) {
+        if placements.len() == count {
+            break;
+        }
+        let x = rng.range(min.x, max.x);
+        let z = rng.range(min.y, max.y);
+        let height = height_at(x, z);
+        if height < 0.35 || normal_at(x, z).y < 0.72 {
+            continue;
+        }
+        let position = Vec3::new(x, height, z);
+        if route.iter().any(|point| {
+            let delta = position - *point;
+            delta.x * delta.x + delta.z * delta.z < ROUTE_CLEARANCE * ROUTE_CLEARANCE
+        }) {
+            continue;
+        }
+        placements.push(Placement {
+            position,
+            yaw: rng.range(0.0, std::f32::consts::TAU),
+            scale: rng.range(0.75, 1.35),
+        });
+    }
+    placements
 }
 
 /// Scatters `count` props across the island, rejecting anywhere too steep
@@ -326,6 +433,347 @@ pub fn scatter(seed: u64, count: usize, min_height: f32, max_slope: f32) -> Vec<
     }
 
     placements
+}
+
+fn box_mesh(centre: Vec3, half: Vec3) -> (Vec<Vertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let corners = [
+        Vec3::new(-1.0, -1.0, -1.0),
+        Vec3::new(1.0, -1.0, -1.0),
+        Vec3::new(1.0, 1.0, -1.0),
+        Vec3::new(-1.0, 1.0, -1.0),
+        Vec3::new(-1.0, -1.0, 1.0),
+        Vec3::new(1.0, -1.0, 1.0),
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(-1.0, 1.0, 1.0),
+    ];
+    for [a, b, c, d] in [
+        [0, 1, 2, 3],
+        [5, 4, 7, 6],
+        [4, 0, 3, 7],
+        [1, 5, 6, 2],
+        [3, 2, 6, 7],
+        [4, 5, 1, 0],
+    ] {
+        let a = centre + corners[a] * half;
+        let b = centre + corners[b] * half;
+        let c = centre + corners[c] * half;
+        let d = centre + corners[d] * half;
+        push_triangle(&mut vertices, &mut indices, a, b, c);
+        push_triangle(&mut vertices, &mut indices, a, c, d);
+    }
+    (vertices, indices)
+}
+
+fn joined_mesh(
+    parts: impl IntoIterator<Item = (Vec<Vertex>, Vec<u32>)>,
+) -> (Vec<Vertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for (part_vertices, part_indices) in parts {
+        let offset = vertices.len() as u32;
+        vertices.extend(part_vertices);
+        indices.extend(part_indices.into_iter().map(|index| index + offset));
+    }
+    (vertices, indices)
+}
+
+fn pitched_roof_mesh(
+    half_width: f32,
+    half_depth: f32,
+    eave_y: f32,
+    ridge_y: f32,
+) -> (Vec<Vertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let left_front = Vec3::new(-half_width, eave_y, -half_depth);
+    let right_front = Vec3::new(half_width, eave_y, -half_depth);
+    let left_back = Vec3::new(-half_width, eave_y, half_depth);
+    let right_back = Vec3::new(half_width, eave_y, half_depth);
+    let ridge_front = Vec3::new(0.0, ridge_y, -half_depth);
+    let ridge_back = Vec3::new(0.0, ridge_y, half_depth);
+    for [a, b, c] in [
+        [left_front, ridge_front, ridge_back],
+        [left_front, ridge_back, left_back],
+        [ridge_front, right_front, right_back],
+        [ridge_front, right_back, ridge_back],
+        [left_front, right_front, ridge_front],
+        [left_back, ridge_back, right_back],
+    ] {
+        push_triangle(&mut vertices, &mut indices, a, b, c);
+    }
+    (vertices, indices)
+}
+
+/// Low, rounded-looking foliage cluster for meadow and grove layering.
+pub fn shrub_mesh(rng: &mut Rng) -> (Vec<Vertex>, Vec<u32>) {
+    let mut mesh = rock_mesh(rng);
+    for vertex in &mut mesh.0 {
+        vertex.position[1] = vertex.position[1].max(-0.25) * 0.7 + 0.55;
+    }
+    mesh
+}
+
+/// A fallen log that gains its horizontal orientation from its scene transform.
+pub fn log_mesh(rng: &mut Rng) -> (Vec<Vertex>, Vec<u32>) {
+    trunk_mesh(rng)
+}
+
+/// A crossed-card flower cluster with a small readable silhouette.
+pub fn flower_mesh(_rng: &mut Rng) -> (Vec<Vertex>, Vec<u32>) {
+    joined_mesh([flower_stem_mesh(), flower_leaf_mesh(), flower_petal_mesh()])
+}
+
+/// A small cluster of upright grass blades with several viewing angles.
+pub fn grass_clump_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for (angle, height) in [(0.0_f32, 0.42), (1.1, 0.56), (2.3, 0.48), (3.5, 0.62)] {
+        let (sin, cos) = angle.sin_cos();
+        let width = Vec3::new(cos * 0.07, 0.0, sin * 0.07);
+        let base = Vec3::new(sin * 0.11, 0.0, cos * 0.11);
+        let tip = base + Vec3::new(sin * 0.09, height, cos * 0.09);
+        push_triangle(&mut vertices, &mut indices, base - width, base + width, tip);
+        push_triangle(
+            &mut vertices,
+            &mut indices,
+            base + width * 0.4,
+            base - width * 0.4 + Vec3::new(sin * 0.06, 0.0, cos * 0.06),
+            tip,
+        );
+    }
+    (vertices, indices)
+}
+
+/// One solid, faceted leaf cluster. Scene composition places several around
+/// every tree so foliage retains gaps, branches, and a readable silhouette.
+pub fn tree_leaf_cluster_mesh(rng: &mut Rng) -> (Vec<Vertex>, Vec<u32>) {
+    let (mut vertices, indices) = rock_mesh(rng);
+    for vertex in &mut vertices {
+        let position = Vec3::from_array(vertex.position);
+        vertex.position = (position * Vec3::new(0.72, 0.56, 0.72)).to_array();
+    }
+    (vertices, indices)
+}
+
+/// Narrow solid stem for a flower, exported independently from its petals.
+pub fn flower_stem_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    box_mesh(Vec3::new(0.0, 0.28, 0.0), Vec3::new(0.035, 0.28, 0.035))
+}
+
+/// Four thick petals around the flower head, not a flat card.
+pub fn flower_petal_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    let mut parts = Vec::new();
+    for angle in [0.0_f32, std::f32::consts::FRAC_PI_2] {
+        let (sin, cos) = angle.sin_cos();
+        let offset = Vec3::new(cos * 0.13, 0.58, sin * 0.13);
+        parts.push(box_mesh(
+            offset,
+            Vec3::new(0.18 * cos.abs() + 0.04, 0.05, 0.18 * sin.abs() + 0.04),
+        ));
+    }
+    joined_mesh(parts)
+}
+
+/// Small angled leaves that give flower clusters visible depth near ground.
+pub fn flower_leaf_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    joined_mesh([
+        box_mesh(Vec3::new(0.10, 0.20, 0.0), Vec3::new(0.13, 0.025, 0.055)),
+        box_mesh(Vec3::new(-0.09, 0.28, 0.04), Vec3::new(0.11, 0.025, 0.05)),
+    ])
+}
+
+/// A simple lantern post with a cube light housing.
+pub fn lantern_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    box_mesh(Vec3::new(0.0, 0.65, 0.0), Vec3::new(0.16, 0.65, 0.16))
+}
+
+/// A reusable stone marker for arches, shrines, and lookouts.
+pub fn landmark_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    box_mesh(Vec3::new(0.0, 0.7, 0.0), Vec3::new(0.65, 0.7, 0.28))
+}
+
+/// Compact timber cottage silhouette: stone base, walls, steep roof, and chimney.
+pub fn cottage_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    joined_mesh([
+        cottage_foundation_mesh(),
+        cottage_walls_mesh(),
+        cottage_roof_mesh(),
+        cottage_chimney_mesh(),
+        cottage_window_mesh(),
+    ])
+}
+
+/// Stone foundation of the cottage.
+pub fn cottage_foundation_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    box_mesh(Vec3::new(0.0, 0.22, 0.0), Vec3::new(1.8, 0.22, 1.45))
+}
+
+/// Timber cottage wall volume.
+pub fn cottage_walls_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    box_mesh(Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.55, 0.58, 1.2))
+}
+
+/// Steep clay cottage roof.
+pub fn cottage_roof_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    pitched_roof_mesh(1.9, 1.48, 1.55, 2.75)
+}
+
+/// Stone cottage chimney.
+pub fn cottage_chimney_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    box_mesh(Vec3::new(0.92, 2.15, 0.35), Vec3::new(0.18, 0.60, 0.18))
+}
+
+/// Recessed front cottage windows.
+pub fn cottage_window_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    joined_mesh([
+        box_mesh(Vec3::new(-0.72, 1.03, -1.23), Vec3::new(0.30, 0.28, 0.04)),
+        box_mesh(Vec3::new(0.72, 1.03, -1.23), Vec3::new(0.30, 0.28, 0.04)),
+    ])
+}
+
+/// Short timber footbridge spanning the pond edge.
+pub fn bridge_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    joined_mesh([bridge_deck_mesh(), bridge_rail_mesh()])
+}
+
+/// Timber deck of the pond bridge.
+pub fn bridge_deck_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    box_mesh(Vec3::new(0.0, 0.16, 0.0), Vec3::new(1.65, 0.16, 0.72))
+}
+
+/// Raised timber rails of the pond bridge.
+pub fn bridge_rail_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    joined_mesh([
+        box_mesh(Vec3::new(0.0, 0.57, -0.62), Vec3::new(1.72, 0.08, 0.08)),
+        box_mesh(Vec3::new(0.0, 0.57, 0.62), Vec3::new(1.72, 0.08, 0.08)),
+    ])
+}
+
+/// Low garden fence section, placed in repeated authored rows.
+pub fn fence_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    joined_mesh([fence_post_mesh(), fence_rail_mesh()])
+}
+
+/// Upright posts of one garden fence section.
+pub fn fence_post_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    joined_mesh([
+        box_mesh(Vec3::new(-0.8, 0.42, 0.0), Vec3::new(0.08, 0.42, 0.08)),
+        box_mesh(Vec3::new(0.8, 0.42, 0.0), Vec3::new(0.08, 0.42, 0.08)),
+    ])
+}
+
+/// Horizontal rail of one garden fence section.
+pub fn fence_rail_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    box_mesh(Vec3::new(0.0, 0.48, 0.0), Vec3::new(0.9, 0.07, 0.06))
+}
+
+/// Flat lily pad cluster for the calm grove pond.
+pub fn lily_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    joined_mesh([lily_pad_mesh(), lily_blossom_mesh()])
+}
+
+/// Floating pad of a pond lily.
+pub fn lily_pad_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    box_mesh(Vec3::new(0.0, 0.025, 0.0), Vec3::new(0.48, 0.025, 0.40))
+}
+
+/// Raised blossom of a pond lily.
+pub fn lily_blossom_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    box_mesh(Vec3::new(0.0, 0.10, 0.0), Vec3::new(0.13, 0.10, 0.13))
+}
+
+/// Weathered stone ruin used at the windward lookout.
+pub fn ruin_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    joined_mesh([ruin_pillar_mesh(), ruin_lintel_mesh()])
+}
+
+/// Weathered upright stones and base of the lookout ruin.
+pub fn ruin_pillar_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    joined_mesh([
+        box_mesh(Vec3::new(-0.88, 0.72, 0.0), Vec3::new(0.34, 0.72, 0.34)),
+        box_mesh(Vec3::new(0.88, 0.95, 0.0), Vec3::new(0.34, 0.95, 0.34)),
+        box_mesh(Vec3::new(0.0, 0.28, 0.0), Vec3::new(1.35, 0.28, 0.48)),
+    ])
+}
+
+/// Crosspiece of the lookout ruin.
+pub fn ruin_lintel_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    box_mesh(Vec3::new(0.0, 1.55, 0.0), Vec3::new(1.3, 0.22, 0.34))
+}
+
+/// Static lily positions inside the pond. They have no colliders.
+pub fn lily_placements() -> Vec<Placement> {
+    [
+        (-1.4, -0.7),
+        (-0.4, 0.65),
+        (0.8, -0.25),
+        (1.6, 0.85),
+        (0.25, -1.15),
+    ]
+    .into_iter()
+    .map(|(x, z)| Placement {
+        position: Vec3::new(
+            POND_CENTER.x + x,
+            pond_surface_height() + 0.03,
+            POND_CENTER.z + z,
+        ),
+        yaw: 0.0,
+        scale: 1.0,
+    })
+    .collect()
+}
+
+/// Landmark-adjacent scenery placed outside all route clearings.
+pub fn storybook_prop_placements() -> Vec<Placement> {
+    [(-1.0, 10.5), (-3.0, 12.7), (-23.0, -0.2), (11.0, -26.5)]
+        .into_iter()
+        .map(|(x, z)| Placement {
+            position: Vec3::new(x, height_at(x, z), z),
+            yaw: 0.0,
+            scale: 1.0,
+        })
+        .collect()
+}
+
+fn authored_placements(points: &[(f32, f32)]) -> Vec<Placement> {
+    points
+        .iter()
+        .map(|&(x, z)| Placement {
+            position: Vec3::new(x, height_at(x, z), z),
+            yaw: 0.0,
+            scale: 1.0,
+        })
+        .collect()
+}
+
+/// Route-safe foreground locations around the meadow cottage and garden.
+pub fn meadow_placements() -> Vec<Placement> {
+    authored_placements(&[
+        (-4.6, 14.0),
+        (-3.8, 11.4),
+        (-2.4, 13.5),
+        (-0.2, 12.8),
+        (1.4, 10.8),
+        (0.8, 14.2),
+    ])
+}
+
+/// Route-safe perimeter locations framing the pond without filling its view.
+pub fn grove_placements() -> Vec<Placement> {
+    authored_placements(&[
+        (-26.1, -0.8),
+        (-25.6, -5.0),
+        (-20.1, -1.0),
+        (-20.6, -5.2),
+        (-24.7, 0.4),
+    ])
+}
+
+/// Route-safe sparse locations for the windward lookout.
+pub fn heights_placements() -> Vec<Placement> {
+    authored_placements(&[(11.0, -26.5), (17.5, -25.5), (24.0, -13.0), (8.0, -24.0)])
 }
 
 /// Generates an RGBA8 texture by evaluating `shade` per texel.
@@ -410,6 +858,55 @@ pub fn stone_texture() -> (u32, u32, Vec<u8>) {
             (132.0 * shade) as u8,
             (130.0 * shade) as u8,
             (126.0 * shade) as u8,
+            255,
+        ]
+    })
+}
+
+/// Warm earth texture for path props and landmark bases.
+pub fn path_texture() -> (u32, u32, Vec<u8>) {
+    texture(96, |u, v| {
+        let coarse = value_noise(Vec2::new(u * 12.0, v * 12.0));
+        let fine = value_noise(Vec2::new(u * 48.0, v * 48.0));
+        let shade = 0.68 + coarse * 0.22 + fine * 0.10;
+        [
+            (150.0 * shade) as u8,
+            (104.0 * shade) as u8,
+            (67.0 * shade) as u8,
+            255,
+        ]
+    })
+}
+
+/// Petal-pink texture for the small flower card mesh.
+pub fn flower_texture() -> (u32, u32, Vec<u8>) {
+    texture(64, |u, v| {
+        let dx = (u - 0.5) * 2.0;
+        let dy = (v - 0.62) * 2.0;
+        let petal = 1.0 - (dx * dx + dy * dy).sqrt();
+        let centre = 1.0 - ((u - 0.5).abs() + (v - 0.58).abs()) * 3.0;
+        if petal > 0.0 {
+            if centre > 0.0 {
+                [226, 188, 112, 255]
+            } else {
+                [211, 142, 160, 255]
+            }
+        } else {
+            [0, 0, 0, 0]
+        }
+    })
+}
+
+/// Amber lantern texture with a soft central glow.
+pub fn lantern_texture() -> (u32, u32, Vec<u8>) {
+    texture(32, |u, v| {
+        let dx = u - 0.5;
+        let dy = v - 0.5;
+        let glow = (1.0 - (dx * dx + dy * dy).sqrt() * 1.7).clamp(0.0, 1.0);
+        [
+            (155.0 + 100.0 * glow) as u8,
+            (72.0 + 150.0 * glow) as u8,
+            (22.0 + 70.0 * glow) as u8,
             255,
         ]
     })
@@ -585,6 +1082,58 @@ mod tests {
     }
 
     #[test]
+    fn canopy_is_a_real_three_dimensional_crown() {
+        let (vertices, indices) = canopy_mesh(&mut Rng::new(9));
+        assert!(
+            vertices.len() >= 60,
+            "a canopy needs volume, not crossed cards"
+        );
+        assert!(indices.len() >= 120);
+    }
+
+    #[test]
+    fn canopy_uses_many_small_leaf_clusters_not_giant_facets() {
+        let (vertices, indices) = canopy_mesh(&mut Rng::new(9));
+        assert!(
+            vertices.len() >= 1_500,
+            "leaf clusters need fine silhouettes"
+        );
+        assert!(indices.len() >= 1_500);
+    }
+
+    #[test]
+    fn storybook_trees_have_branches_and_leaf_volume() {
+        let (branches, branch_indices) = tree_branch_mesh(&mut Rng::new(4));
+        let (leaves, leaf_indices) = canopy_mesh(&mut Rng::new(4));
+        assert!(branches.len() >= 36, "trees need visible branch geometry");
+        assert!(leaves.iter().any(|vertex| vertex.position[1] > 2.0));
+        assert!(
+            branch_indices
+                .iter()
+                .all(|&i| (i as usize) < branches.len())
+        );
+        assert!(leaf_indices.iter().all(|&i| (i as usize) < leaves.len()));
+    }
+
+    #[test]
+    fn grass_and_flowers_have_real_three_dimensional_extent() {
+        for (vertices, indices) in [grass_clump_mesh(), flower_mesh(&mut Rng::new(8))] {
+            let min = vertices
+                .iter()
+                .fold(Vec3::splat(f32::INFINITY), |min, vertex| {
+                    min.min(Vec3::from_array(vertex.position))
+                });
+            let max = vertices
+                .iter()
+                .fold(Vec3::splat(f32::NEG_INFINITY), |max, vertex| {
+                    max.max(Vec3::from_array(vertex.position))
+                });
+            assert!((max - min).min_element() > 0.01);
+            assert!(indices.iter().all(|&i| (i as usize) < vertices.len()));
+        }
+    }
+
+    #[test]
     fn scatter_respects_height_and_slope_limits() {
         let placements = scatter(11, 60, 0.4, 0.75);
         assert!(!placements.is_empty(), "some spots should qualify");
@@ -625,6 +1174,189 @@ mod tests {
                 "pixel buffer must be exactly RGBA8",
             );
             assert!(pixels.iter().any(|&b| b > 0), "texture should not be black");
+        }
+    }
+
+    #[test]
+    fn route_landmarks_and_path_are_walkable() {
+        let points = route_points();
+        assert!(points.len() >= 6, "the journey needs a visible route");
+        for point in points {
+            assert!(
+                height_at(point.x, point.z) > 0.0,
+                "route is underwater at {point:?}"
+            );
+            assert!(
+                normal_at(point.x, point.z).y > 0.72,
+                "route is too steep at {point:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn biome_scatter_is_reproducible_and_keeps_objectives_clear() {
+        let placements = scatter_biome(Biome::Grove, 42, 80);
+        assert_eq!(placements, scatter_biome(Biome::Grove, 42, 80));
+        assert!(!placements.is_empty());
+        for placement in placements {
+            for point in route_points() {
+                assert!(
+                    placement.position.distance_squared(point) > ROUTE_CLEARANCE * ROUTE_CLEARANCE,
+                    "prop blocks route at {:?}",
+                    placement.position
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn showcase_prop_meshes_are_well_formed() {
+        let mut rng = Rng::new(77);
+        for (vertices, indices) in [
+            shrub_mesh(&mut rng),
+            log_mesh(&mut rng),
+            flower_mesh(&mut rng),
+            lantern_mesh(),
+            landmark_mesh(),
+        ] {
+            assert!(!vertices.is_empty());
+            assert_eq!(indices.len() % 3, 0);
+            assert!(
+                indices
+                    .iter()
+                    .all(|&index| (index as usize) < vertices.len())
+            );
+        }
+    }
+
+    #[test]
+    fn storybook_prop_meshes_are_well_formed() {
+        for (vertices, indices) in [
+            cottage_mesh(),
+            bridge_mesh(),
+            fence_mesh(),
+            lily_mesh(),
+            ruin_mesh(),
+        ] {
+            assert!(!vertices.is_empty());
+            assert_eq!(indices.len() % 3, 0);
+            assert!(
+                indices
+                    .iter()
+                    .all(|&index| (index as usize) < vertices.len())
+            );
+        }
+    }
+
+    #[test]
+    fn cottage_has_a_pitched_roof_silhouette() {
+        let (vertices, _) = cottage_mesh();
+        let highest = vertices
+            .iter()
+            .map(|vertex| vertex.position[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(highest > 2.5, "cottage needs a steep roof above its walls");
+    }
+
+    #[test]
+    fn lilies_stay_inside_the_authored_pond() {
+        for placement in lily_placements() {
+            let local = Vec2::new(
+                placement.position.x - POND_CENTER.x,
+                placement.position.z - POND_CENTER.z,
+            );
+            assert!(local.x.abs() <= POND_HALF_EXTENT.x);
+            assert!(local.y.abs() <= POND_HALF_EXTENT.y);
+            assert!(
+                route_points().iter().all(|point| {
+                    placement.position.distance_squared(*point) >= ROUTE_CLEARANCE.powi(2)
+                }),
+                "lily blocks route at {:?}",
+                placement.position
+            );
+        }
+    }
+
+    #[test]
+    fn authored_storybook_props_keep_route_clearings_walkable() {
+        for placement in storybook_prop_placements() {
+            assert!(
+                route_points().iter().all(|point| {
+                    placement.position.distance_squared(*point) >= ROUTE_CLEARANCE.powi(2)
+                }),
+                "authored prop blocks route at {:?}",
+                placement.position
+            );
+        }
+    }
+
+    #[test]
+    fn showcase_textures_are_rgba8() {
+        for (width, height, pixels) in [path_texture(), flower_texture(), lantern_texture()] {
+            assert_eq!(pixels.len(), (width * height * 4) as usize);
+            assert!(pixels.iter().any(|&value| value > 0));
+        }
+    }
+
+    #[test]
+    fn storybook_tree_has_branch_and_leaf_geometry() {
+        let mut rng = Rng::new(73);
+        for (vertices, indices) in [
+            trunk_mesh(&mut rng),
+            tree_branch_mesh(&mut rng),
+            tree_leaf_cluster_mesh(&mut rng),
+        ] {
+            assert!(!vertices.is_empty());
+            assert!(
+                indices
+                    .iter()
+                    .all(|&index| (index as usize) < vertices.len())
+            );
+        }
+    }
+
+    #[test]
+    fn grass_and_flower_clusters_have_three_dimensional_extent() {
+        for (vertices, indices) in [
+            grass_clump_mesh(),
+            flower_stem_mesh(),
+            flower_petal_mesh(),
+            flower_leaf_mesh(),
+        ] {
+            let (min, max) = vertices.iter().fold(
+                (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+                |(min, max), vertex| {
+                    let position = Vec3::from_array(vertex.position);
+                    (min.min(position), max.max(position))
+                },
+            );
+            assert!((max - min).min_element() > 0.01);
+            assert!(
+                indices
+                    .iter()
+                    .all(|&index| (index as usize) < vertices.len())
+            );
+        }
+    }
+
+    #[test]
+    fn authored_zones_are_reproducible_and_keep_the_route_clear() {
+        for placements in [
+            meadow_placements(),
+            grove_placements(),
+            heights_placements(),
+        ] {
+            let repeated = match placements.first().map(|placement| placement.position.x) {
+                Some(x) if x < -15.0 => grove_placements(),
+                Some(x) if x > 2.0 => heights_placements(),
+                _ => meadow_placements(),
+            };
+            assert_eq!(placements, repeated);
+            for placement in placements {
+                assert!(route_points().iter().all(|point| {
+                    placement.position.distance_squared(*point) >= ROUTE_CLEARANCE.powi(2)
+                }));
+            }
         }
     }
 }

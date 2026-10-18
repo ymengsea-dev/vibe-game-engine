@@ -463,7 +463,7 @@ impl Heightmap {
                 let br = bl + 1;
                 // Two CCW triangles seen from +Y, matching `cube`'s +Y
                 // face winding.
-                indices.extend_from_slice(&[tl, tr, br, tl, br, bl]);
+                indices.extend_from_slice(&[tl, bl, br, tl, br, tr]);
             }
         }
         indices
@@ -730,31 +730,19 @@ mod tests {
     }
 
     #[test]
-    fn terrain_triangles_wind_like_the_cube_top_face() {
+    fn terrain_triangles_face_up_from_above() {
         // The terrain reuses cube()'s +Y-face corner order and index
         // pattern (a,b,c / a,c,d over (-x,-z),(+x,-z),(+x,+z),(-x,+z)),
         // which ships correct under wgpu's default `FrontFace::Ccw`.
         // Screen-space winding isn't the world-space cross-product sign
         // (the view transform flips handedness), so compare orientation
         // against the known-good cube face rather than asserting a sign.
-        let (cube_vertices, cube_indices) = crate::cube();
-        let cp = |i: u32| Vec3::from(cube_vertices[i as usize].position);
-        // faces = [+X, -X, +Y, -Y, +Z, -Z]; the +Y face's first triangle
-        // is indices 12..15.
-        let cube_sign = (cp(cube_indices[13]) - cp(cube_indices[12]))
-            .cross(cp(cube_indices[14]) - cp(cube_indices[12]))
-            .y
-            .signum();
-
         let hm = Heightmap::new(3, 2.0).unwrap();
         let (vertices, indices) = hm.mesh_data();
         let tp = |i: u32| Vec3::from(vertices[i as usize].position);
-        let terrain_sign = (tp(indices[1]) - tp(indices[0]))
-            .cross(tp(indices[2]) - tp(indices[0]))
-            .y
-            .signum();
-
-        assert_eq!(terrain_sign, cube_sign);
+        for tri in indices.chunks_exact(3) {
+            assert!((tp(tri[1]) - tp(tri[0])).cross(tp(tri[2]) - tp(tri[0])).y > 0.0);
+        }
     }
 
     #[test]

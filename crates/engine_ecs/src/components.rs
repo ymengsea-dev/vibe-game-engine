@@ -143,9 +143,9 @@ impl MeshRenderer {
         let mesh = gpu.create_mesh(LABEL, vertices, indices)?;
         let texture = match base_color {
             Some((width, height, rgba8)) => {
-                gpu.create_texture_from_rgba(LABEL, width, height, rgba8)
+                gpu.create_texture_from_rgba_tiled(LABEL, width, height, rgba8)
             }
-            None => gpu.create_texture_from_rgba(LABEL, 1, 1, &[255, 255, 255, 255]),
+            None => gpu.create_texture_from_rgba_tiled(LABEL, 1, 1, &[255, 255, 255, 255]),
         };
         Ok(Self::new(gpu, pipeline, assets, mesh, &texture, material))
     }

@@ -20,6 +20,31 @@ pub struct Texture {
     pub sampler: wgpu::Sampler,
 }
 
+#[derive(Clone, Copy)]
+enum Wrap {
+    Clamp,
+    Tile,
+}
+
+fn sampler_descriptor(wrap: Wrap) -> wgpu::SamplerDescriptor<'static> {
+    match wrap {
+        Wrap::Clamp => wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        },
+        Wrap::Tile => wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        },
+    }
+}
+
 /// Decodes `bytes` (any format the `image` crate supports: PNG, JPEG,
 /// GIF, BMP, ...) into raw RGBA8 pixel data.
 ///
@@ -68,6 +93,28 @@ impl GpuContext {
         height: u32,
         rgba: &[u8],
     ) -> Texture {
+        self.create_texture_from_rgba_with_wrap(label, width, height, rgba, Wrap::Clamp)
+    }
+
+    /// Uploads RGBA8 pixel data with repeat addressing for material UVs.
+    pub fn create_texture_from_rgba_tiled(
+        &self,
+        label: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Texture {
+        self.create_texture_from_rgba_with_wrap(label, width, height, rgba, Wrap::Tile)
+    }
+
+    fn create_texture_from_rgba_with_wrap(
+        &self,
+        label: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        wrap: Wrap,
+    ) -> Texture {
         let size = wgpu::Extent3d {
             width,
             height,
@@ -91,11 +138,10 @@ impl GpuContext {
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler_label = format!("{label} sampler");
         let sampler = self.device().create_sampler(&wgpu::SamplerDescriptor {
-            label: Some(&format!("{label} sampler")),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
+            label: Some(&sampler_label),
+            ..sampler_descriptor(wrap)
         });
 
         Texture {
@@ -145,12 +191,10 @@ impl GpuContext {
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler_label = format!("{label} sampler");
         let sampler = self.device().create_sampler(&wgpu::SamplerDescriptor {
-            label: Some(&format!("{label} sampler")),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            ..Default::default()
+            label: Some(&sampler_label),
+            ..sampler_descriptor(Wrap::Tile)
         });
 
         Texture {
@@ -200,5 +244,14 @@ mod tests {
     fn decode_rgba8_rejects_empty_input() {
         let err = decode_rgba8(&[]).unwrap_err();
         assert!(matches!(err, RendererError::ImageDecode(_)));
+    }
+
+    #[test]
+    fn tiled_sampler_repeats_and_uses_linear_filters() {
+        let sampler = sampler_descriptor(Wrap::Tile);
+        assert_eq!(sampler.address_mode_u, wgpu::AddressMode::Repeat);
+        assert_eq!(sampler.address_mode_v, wgpu::AddressMode::Repeat);
+        assert_eq!(sampler.anisotropy_clamp, 8);
+        assert_eq!(sampler.mipmap_filter, wgpu::MipmapFilterMode::Linear);
     }
 }

@@ -197,34 +197,34 @@ pub fn cube() -> (Vec<Vertex>, Vec<u32>) {
     const FACES: [Face; 6] = [
         // +X
         (
-            [0.5, -0.5, -0.5],
             [0.5, -0.5, 0.5],
-            [0.5, 0.5, 0.5],
+            [0.5, -0.5, -0.5],
             [0.5, 0.5, -0.5],
+            [0.5, 0.5, 0.5],
             [1.0, 0.0, 0.0],
         ),
         // -X
         (
-            [-0.5, -0.5, 0.5],
             [-0.5, -0.5, -0.5],
-            [-0.5, 0.5, -0.5],
+            [-0.5, -0.5, 0.5],
             [-0.5, 0.5, 0.5],
+            [-0.5, 0.5, -0.5],
             [-1.0, 0.0, 0.0],
         ),
         // +Y
         (
-            [-0.5, 0.5, -0.5],
-            [0.5, 0.5, -0.5],
-            [0.5, 0.5, 0.5],
             [-0.5, 0.5, 0.5],
+            [0.5, 0.5, 0.5],
+            [0.5, 0.5, -0.5],
+            [-0.5, 0.5, -0.5],
             [0.0, 1.0, 0.0],
         ),
         // -Y
         (
-            [-0.5, -0.5, 0.5],
-            [0.5, -0.5, 0.5],
-            [0.5, -0.5, -0.5],
             [-0.5, -0.5, -0.5],
+            [0.5, -0.5, -0.5],
+            [0.5, -0.5, 0.5],
+            [-0.5, -0.5, 0.5],
             [0.0, -1.0, 0.0],
         ),
         // +Z
@@ -345,6 +345,17 @@ mod tests {
     fn cube_indices_are_all_in_bounds() {
         let (vertices, indices) = cube();
         assert!(indices.iter().all(|&i| (i as usize) < vertices.len()));
+    }
+
+    #[test]
+    fn cube_faces_wind_counter_clockwise_from_outside() {
+        let (vertices, indices) = cube();
+        for tri in indices.chunks_exact(3) {
+            let p = |i: u32| glam::Vec3::from(vertices[i as usize].position);
+            let geometric = (p(tri[1]) - p(tri[0])).cross(p(tri[2]) - p(tri[0]));
+            let stored = glam::Vec3::from(vertices[tri[0] as usize].normal);
+            assert!(geometric.dot(stored) > 0.0);
+        }
     }
 
     #[test]
