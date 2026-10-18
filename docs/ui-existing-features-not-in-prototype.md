@@ -5,18 +5,37 @@ Code layouts. The UI replacement must retain them in menus or auxiliary panels,
 or deliberately keep them out of the two primary modes; it must not silently
 remove their behavior.
 
-| Existing capability | Current location/behavior | UI treatment in this change |
-| --- | --- | --- |
-| AI Assistant workspace/panel | `Workspace::Ai`; the panel is currently a placeholder. | Hide from primary mode switch; retain no new affordance. |
-| Debug workspace and CPU profiler | `Workspace::Debug` shows the profiler strip. | Hide from primary mode switch; retain Window/layout recovery. |
-| Asset preview strip | Asset Browser has a resizable selected-asset preview. | Keep in Scene Assets panel. |
-| Terrain and vegetation authoring | Collapsible tools in the Scene view. | Keep in Scene mode, visually compact. |
-| View overlays | Colliders, lights, cameras, ground grid, audio emitters, nav grid. | Keep under Scene View/viewport controls. |
-| Build configuration and Build & Export | Toolbar selector and project actions. | Keep in shared chrome/menu. |
-| Search output tab | Bottom panel tab alongside Console/Problems/Output/Terminal. | Keep in bottom panel. |
-| Terminal feature gate | Terminal tab shows a notice without the feature. | Keep it; do not promise a terminal where unavailable. |
-| Lighting inspector tab | Inspector secondary tab is currently a placeholder. | Do not add a prototype control; preserve current behavior. |
-| Asset import, folder creation, context actions | Asset menu/browser actions. | Keep in Scene Assets panel and menus. |
-| Undo/redo, multi-selection, prefab actions | Existing menu/hierarchy/history behavior. | Retain through existing menus and hierarchy. |
-| Panel collapse, layout reset, session persistence | Current shell/session behavior. | Preserve as recovery and personalization behavior. |
+## Auxiliary workspaces
+
+- **AI Assistant:** the existing `Workspace::Ai` panel is a placeholder. Hide
+  it from the primary mode switch; add no replacement control.
+- **Debug workspace and CPU profiler:** `Workspace::Debug` exposes the
+  profiler strip. Hide it from the primary switch but preserve Window/layout
+  recovery.
+- **Lighting inspector tab:** this secondary Inspector tab is a placeholder.
+  Preserve its current behavior without adding a prototype control.
+
+## Scene authoring and assets
+
+- **Asset preview strip:** retain the Asset Browser's resizable selected-asset
+  preview in Scene mode.
+- **Terrain and vegetation authoring:** retain the existing collapsible Scene
+  tools in a compact treatment.
+- **View overlays:** retain colliders, lights, cameras, ground grid, audio
+  emitters, and nav grid under Scene View or viewport controls.
+- **Asset import, folder creation, and context actions:** retain them in the
+  Scene Assets panel and menus.
+- **Undo/redo, multi-selection, and prefab actions:** retain them through the
+  existing menus and hierarchy.
+
+## Project and layout tools
+
+- **Build configuration and Build & Export:** retain the current toolbar
+  selector and project actions in shared chrome or its menus.
+- **Search output tab:** retain it beside Console, Problems, Output, and
+  Terminal.
+- **Terminal feature gate:** retain the tab and its unavailable-feature notice;
+  do not promise a terminal where it is not compiled.
+- **Panel collapse, layout reset, and session persistence:** preserve these as
+  recovery and personalization behavior.
 
