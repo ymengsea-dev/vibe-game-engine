@@ -37,6 +37,125 @@ fn read_bytes(path: &Path) -> Result<Vec<u8>, AssetError> {
     })
 }
 
+/// The project-local location for asset metadata. Source files live below
+/// `assets_root`; their matching records live below `metadata_root`.
+#[derive(Debug, Clone)]
+pub struct AssetMetadataStore {
+    assets_root: PathBuf,
+    metadata_root: PathBuf,
+}
+
+impl AssetMetadataStore {
+    /// Creates a store whose metadata records mirror paths beneath `assets_root`.
+    pub fn new(assets_root: impl Into<PathBuf>, metadata_root: impl Into<PathBuf>) -> Self {
+        Self {
+            assets_root: assets_root.into(),
+            metadata_root: metadata_root.into(),
+        }
+    }
+
+    /// Returns the central metadata path for `asset_path`.
+    pub fn metadata_path(&self, asset_path: &Path) -> Result<PathBuf, AssetError> {
+        let relative =
+            asset_path
+                .strip_prefix(&self.assets_root)
+                .map_err(|_| AssetError::MetaIo {
+                    path: asset_path.display().to_string(),
+                    message: "asset path is outside the asset root".to_string(),
+                })?;
+        if relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        }) {
+            return Err(AssetError::MetaIo {
+                path: asset_path.display().to_string(),
+                message: "asset path escapes the asset root".to_string(),
+            });
+        }
+        let mut path = self.metadata_root.join(relative).into_os_string();
+        path.push(".meta");
+        Ok(PathBuf::from(path))
+    }
+
+    /// Loads or creates central metadata, migrating an adjacent legacy record
+    /// when present without changing its identity.
+    pub fn load_or_create(&self, asset_path: &Path) -> Result<AssetMeta, AssetError> {
+        let central = self.metadata_path(asset_path)?;
+        if central.exists() {
+            let meta = read_meta(&central)?;
+            let legacy = AssetMeta::sidecar_path(asset_path);
+            if legacy.exists() && read_meta(&legacy).ok().as_ref() == Some(&meta) {
+                std::fs::remove_file(&legacy).map_err(|err| meta_io_error(&legacy, err))?;
+            }
+            return Ok(meta);
+        }
+
+        let legacy = AssetMeta::sidecar_path(asset_path);
+        if legacy.exists() {
+            let meta = read_meta(&legacy)?;
+            self.write(&central, &meta)?;
+            let verified = read_meta(&central)?;
+            std::fs::remove_file(&legacy).map_err(|err| meta_io_error(&legacy, err))?;
+            return Ok(verified);
+        }
+
+        let meta = AssetMeta {
+            id: Uuid::new_v4(),
+            source_hash: hash_bytes(&read_bytes(asset_path)?),
+        };
+        self.write(&central, &meta)?;
+        Ok(meta)
+    }
+
+    /// Updates a central record after an asset's contents were imported.
+    pub fn refresh(&self, asset_path: &Path, meta: &mut AssetMeta) -> Result<(), AssetError> {
+        let updated = AssetMeta {
+            id: meta.id,
+            source_hash: hash_bytes(&read_bytes(asset_path)?),
+        };
+        self.write(&self.metadata_path(asset_path)?, &updated)?;
+        *meta = updated;
+        Ok(())
+    }
+
+    /// Removes the central record for `asset_path`, if it exists.
+    pub fn remove(&self, asset_path: &Path) -> Result<(), AssetError> {
+        let path = self.metadata_path(asset_path)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(meta_io_error(&path, err)),
+        }
+    }
+
+    fn write(&self, path: &Path, meta: &AssetMeta) -> Result<(), AssetError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| meta_io_error(path, err))?;
+        }
+        let text =
+            ron::ser::to_string_pretty(meta, ron::ser::PrettyConfig::default()).map_err(|err| {
+                AssetError::MetaParse {
+                    path: path.display().to_string(),
+                    reason: err.to_string(),
+                }
+            })?;
+        let temporary = temporary_sidecar_path(path);
+        write_sidecar_atomically(path, &temporary, text.as_bytes())
+    }
+}
+
+fn read_meta(path: &Path) -> Result<AssetMeta, AssetError> {
+    let text = std::fs::read_to_string(path).map_err(|err| meta_io_error(path, err))?;
+    ron::from_str(&text).map_err(|err| AssetError::MetaParse {
+        path: path.display().to_string(),
+        reason: err.to_string(),
+    })
+}
+
 /// The `.meta` sidecar for one source asset: a stable identity and the
 /// content hash recorded at the last import.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +291,7 @@ fn write_sidecar_atomically(
 /// the import step consults it to skip work for unchanged files.
 #[derive(Debug, Default)]
 pub struct ImportCache {
+    store: Option<AssetMetadataStore>,
     entries: HashMap<PathBuf, AssetMeta>,
     pending_hashes: HashMap<PathBuf, u64>,
     forced: std::collections::HashSet<PathBuf>,
@@ -181,6 +301,12 @@ impl ImportCache {
     /// An empty cache.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Stores future records in `store`; cached records remain valid because
+    /// they are keyed by the source path.
+    pub fn set_store(&mut self, store: AssetMetadataStore) {
+        self.store = Some(store);
     }
 
     /// Caches `asset_path`'s sidecar and reports whether the source needs
@@ -197,12 +323,17 @@ impl ImportCache {
     /// Propagates [`AssetError::MetaIo`]/[`AssetError::MetaParse`].
     pub fn ensure(&mut self, asset_path: &Path) -> Result<(Uuid, bool), AssetError> {
         let source_hash = hash_bytes(&read_bytes(asset_path)?);
-        let sidecar = AssetMeta::sidecar_path(asset_path);
+        let sidecar = match &self.store {
+            Some(store) => store.metadata_path(asset_path)?,
+            None => AssetMeta::sidecar_path(asset_path),
+        };
         let sidecar_exists = sidecar.exists();
         let meta = match self.entries.get(asset_path) {
             Some(meta) => meta.clone(),
             None => {
-                if sidecar_exists {
+                if let Some(store) = &self.store {
+                    store.load_or_create(asset_path)?
+                } else if sidecar_exists {
                     let text = std::fs::read_to_string(&sidecar)
                         .map_err(|err| meta_io_error(&sidecar, err))?;
                     ron::from_str(&text).map_err(|err| AssetError::MetaParse {
@@ -260,7 +391,11 @@ impl ImportCache {
             id: meta.id,
             source_hash: expected_hash,
         };
-        updated.write(asset_path)?;
+        if let Some(store) = &self.store {
+            store.write(&store.metadata_path(asset_path)?, &updated)?;
+        } else {
+            updated.write(asset_path)?;
+        }
         self.entries.insert(asset_path.to_path_buf(), updated);
         self.pending_hashes.remove(asset_path);
         Ok(true)
@@ -327,6 +462,73 @@ mod tests {
             AssetMeta::sidecar_path(Path::new("art/sprite.png")),
             PathBuf::from("art/sprite.png.meta")
         );
+    }
+
+    #[test]
+    fn metadata_store_writes_nested_records_outside_assets() {
+        let dir = TempDir::new();
+        let assets = dir.0.join("assets");
+        let asset = assets.join("textures/grass.png");
+        std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        std::fs::write(&asset, b"pixels").unwrap();
+        let store = AssetMetadataStore::new(&assets, dir.0.join(".studio/assets"));
+
+        let meta = store.load_or_create(&asset).unwrap();
+
+        assert_eq!(meta.source_hash, hash_bytes(b"pixels"));
+        assert!(store.metadata_path(&asset).unwrap().is_file());
+        assert!(!AssetMeta::sidecar_path(&asset).exists());
+    }
+
+    #[test]
+    fn metadata_store_migrates_legacy_sidecar_without_changing_identity() {
+        let dir = TempDir::new();
+        let assets = dir.0.join("assets");
+        let asset = assets.join("sprite.png");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(&asset, b"pixels").unwrap();
+        let legacy = AssetMeta::load_or_create(&asset).unwrap();
+        let store = AssetMetadataStore::new(&assets, dir.0.join(".studio/assets"));
+
+        let migrated = store.load_or_create(&asset).unwrap();
+
+        assert_eq!(migrated, legacy);
+        assert!(store.metadata_path(&asset).unwrap().is_file());
+        assert!(!AssetMeta::sidecar_path(&asset).exists());
+    }
+
+    #[test]
+    fn metadata_store_removes_matching_legacy_file_after_interrupted_cleanup() {
+        let dir = TempDir::new();
+        let assets = dir.0.join("assets");
+        let asset = assets.join("sprite.png");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(&asset, b"pixels").unwrap();
+        let legacy = AssetMeta::load_or_create(&asset).unwrap();
+        let store = AssetMetadataStore::new(&assets, dir.0.join(".studio/assets"));
+        store
+            .write(&store.metadata_path(&asset).unwrap(), &legacy)
+            .unwrap();
+
+        assert_eq!(store.load_or_create(&asset).unwrap(), legacy);
+        assert!(!AssetMeta::sidecar_path(&asset).exists());
+    }
+
+    #[test]
+    fn metadata_store_rejects_malformed_legacy_metadata_without_new_id() {
+        let dir = TempDir::new();
+        let assets = dir.0.join("assets");
+        let asset = assets.join("sprite.png");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(&asset, b"pixels").unwrap();
+        std::fs::write(AssetMeta::sidecar_path(&asset), "bad metadata").unwrap();
+        let store = AssetMetadataStore::new(&assets, dir.0.join(".studio/assets"));
+
+        assert!(matches!(
+            store.load_or_create(&asset),
+            Err(AssetError::MetaParse { .. })
+        ));
+        assert!(!store.metadata_path(&asset).unwrap().exists());
     }
 
     #[test]

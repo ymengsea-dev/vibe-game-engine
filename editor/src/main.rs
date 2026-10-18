@@ -347,10 +347,10 @@ fn sync_code_editor(
             },
             CodeEvent::Ready => {
                 push_file_tree(code, state);
-                if let Some(rel) = pending_open.take() {
-                    if let Ok(absolute) = resolve_code_path(&state.project, &rel) {
-                        open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
-                    }
+                if let Some(rel) = pending_open.take()
+                    && let Ok(absolute) = resolve_code_path(&state.project, &rel)
+                {
+                    open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
                 }
             }
             CodeEvent::CreateRequested { path, folder } => {
@@ -1409,7 +1409,7 @@ impl EditorHandler {
         };
 
         let opened = if request.create {
-            Project::create(&request.root, directory_name(&request.root))
+            Project::create_new(&request.root, directory_name(&request.root))
         } else {
             Project::open(&request.root)
         };

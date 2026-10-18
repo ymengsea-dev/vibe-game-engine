@@ -56,6 +56,7 @@
 //! ```
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -63,6 +64,14 @@ use std::time::Instant;
 /// systems. A stalled/resumed window must not teleport entities or trigger an
 /// unbounded burst of work in one frame.
 pub const MAX_FRAME_SECONDS: f32 = 0.1;
+/// Whether a game needs another presentation frame after current events settle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameDemand {
+    /// Sleep until a platform or background wake requests a redraw.
+    Idle,
+    /// Wake and present at this deadline for visible simulation or animation.
+    AnimateUntil(Instant),
+}
 
 fn clamp_frame_seconds(seconds: f32) -> f32 {
     if seconds.is_finite() && seconds >= 0.0 {
@@ -83,11 +92,12 @@ use engine_renderer::{
     LightsBinding, Material, Mesh, ParticleCameraBinding, ParticleFrame, ParticlePipelines,
     Pipeline, PostProcessStack, PostSettings, RenderAssets, RendererError, ShadowMap,
     ShadowPipeline, SkinnedMesh, SkinnedPipeline, SkyboxBinding, SkyboxPipeline, Texture,
-    VegetationPipeline, Vertex, Wind, WindBinding, directional_light_view_projection,
+    VegetationPipeline, Vertex, WaterBinding, WaterDraw, WaterFrame, WaterGpuUniform, WaterImpulse,
+    WaterImpulseQueue, WaterPipeline, Wind, WindBinding, directional_light_view_projection,
     skybox_uniform,
 };
 use engine_utils::{AssetHandle, Transform};
-use glam::Vec3;
+use glam::{Mat4, Quat, Vec3};
 
 /// Errors from [`run_game`] and its setup.
 #[derive(Debug, thiserror::Error)]
@@ -335,6 +345,11 @@ pub trait Game {
         let _ = (ctx, event);
     }
 
+    /// Presentation work required after current events settle.
+    fn frame_demand(&self, _now: Instant) -> FrameDemand {
+        FrameDemand::Idle
+    }
+
     /// This game's own state, serialized, for the engine to persist.
     ///
     /// Score, inventory, quest flags, clock — whatever the world snapshot
@@ -441,6 +456,10 @@ struct Runtime {
     wind: Wind,
     wind_binding: WindBinding,
     wind_time: f32,
+    water_pipeline: WaterPipeline,
+    water_bindings: HashMap<Entity, WaterBinding>,
+    water_impulses: HashMap<Entity, WaterImpulseQueue>,
+    render_stats: engine_ecs::RenderStats,
 
     camera: Camera,
     lights: LightSet,
@@ -516,6 +535,11 @@ impl GameContext<'_> {
     /// specific moment.
     pub fn request_save(&mut self) {
         self.runtime.save_requested = true;
+    }
+
+    /// Statistics from the latest submitted scene frame.
+    pub fn render_stats(&self) -> engine_ecs::RenderStats {
+        self.runtime.render_stats
     }
 
     /// The world snapshot read from the save at launch, if there was one.
@@ -1258,7 +1282,12 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
         if self.should_exit() {
             engine_platform::RedrawPolicy::Wait
         } else {
-            engine_platform::RedrawPolicy::Continuous
+            match self.game.frame_demand(Instant::now()) {
+                FrameDemand::Idle => engine_platform::RedrawPolicy::Wait,
+                FrameDemand::AnimateUntil(deadline) => {
+                    engine_platform::RedrawPolicy::WaitUntil(deadline)
+                }
+            }
         }
     }
 
@@ -1324,6 +1353,12 @@ fn load_save(path: &std::path::Path) -> Option<engine_scene::SaveGame<String>> {
 /// positive, so this is a guard against future callers, not an expected
 /// path. Never panics.
 fn step_physics(runtime: &mut Runtime, step_seconds: f32) {
+    engine_ecs::update_water(
+        runtime.ecs.world_mut(),
+        &mut runtime.physics,
+        runtime.time.elapsed,
+        step_seconds,
+    );
     if let Err(err) = runtime.physics.step(step_seconds) {
         tracing::error!(error = %err, "physics step rejected; simulation did not advance");
         return;
@@ -1553,6 +1588,7 @@ fn build_runtime(
     let vegetation_pipeline = gpu.create_vegetation_pipeline(&pipeline, "vegetation");
     let wind = Wind::BREEZE;
     let wind_binding = gpu.create_wind_binding(&vegetation_pipeline, &wind, 0.0);
+    let water_pipeline = gpu.create_water_pipeline(&pipeline, "water")?;
 
     // The UI atlas is the glyph sheet with one opaque white texel
     // appended, so solid fills and text share a single pipeline and
@@ -1620,6 +1656,10 @@ fn build_runtime(
         wind,
         wind_binding,
         wind_time: 0.0,
+        water_pipeline,
+        water_bindings: HashMap::new(),
+        water_impulses: HashMap::new(),
+        render_stats: engine_ecs::RenderStats::default(),
         camera,
         lights,
     })
@@ -1646,10 +1686,9 @@ fn update_shadow_fit(runtime: &mut Runtime) {
     let (sun_direction, _) = runtime.sun();
     let light_space =
         directional_light_view_projection(sun_direction, runtime.camera.target, SHADOW_RADIUS);
-    runtime.gpu.write_uniform_buffer(
-        &runtime.shadow_map.buffer,
-        &engine_renderer::ShadowUniform::from(light_space),
-    );
+    runtime
+        .gpu
+        .update_shadow_map(&mut runtime.shadow_map, light_space);
 }
 
 fn update_audio(runtime: &mut Runtime) {
@@ -1657,6 +1696,111 @@ fn update_audio(runtime: &mut Runtime) {
         return;
     };
     engine_ecs::update_audio(runtime.ecs.world_mut(), audio, &mut runtime.buses);
+}
+
+fn update_water_render_data(runtime: &mut Runtime, delta: f32) {
+    let surfaces: Vec<_> = {
+        let world = runtime.ecs.world_mut();
+        world
+            .query::<(Entity, &engine_ecs::components::WaterVolume)>()
+            .iter(world)
+            .map(|(entity, volume)| (entity, volume.surface))
+            .collect()
+    };
+
+    for queue in runtime.water_impulses.values_mut() {
+        queue.advance(delta, 4.0);
+    }
+    if let Some(mut events) = runtime
+        .ecs
+        .world_mut()
+        .get_resource_mut::<engine_ecs::WaterEvents>()
+    {
+        for event in events.0.drain(..) {
+            let (surface, position, radius, strength) = match event {
+                engine_ecs::WaterInteractionEvent::Entered {
+                    surface, position, ..
+                } => (surface, position, 0.8, 0.14),
+                engine_ecs::WaterInteractionEvent::Exited {
+                    surface, position, ..
+                } => (surface, position, 0.6, 0.09),
+                engine_ecs::WaterInteractionEvent::Moved {
+                    surface,
+                    position,
+                    speed,
+                    ..
+                } => (
+                    surface,
+                    position,
+                    0.5 + speed.min(3.0) * 0.15,
+                    (speed * 0.06).clamp(0.03, 0.2),
+                ),
+            };
+            runtime
+                .water_impulses
+                .entry(surface)
+                .or_insert_with(|| WaterImpulseQueue::new(surface.to_bits()))
+                .push(WaterImpulse::new(position, radius, strength, 0.0));
+        }
+    }
+
+    runtime
+        .water_bindings
+        .retain(|entity, _| surfaces.iter().any(|(live, _)| live == entity));
+    runtime
+        .water_impulses
+        .retain(|entity, _| surfaces.iter().any(|(live, _)| live == entity));
+
+    for (entity, surface) in &surfaces {
+        if !runtime.water_bindings.contains_key(entity) {
+            let uniform = WaterGpuUniform::new(
+                Vec3::new(surface.center.x, surface.base_height, surface.center.z),
+                surface.half_extent,
+                surface.wave.direction,
+                surface.wave.amplitude,
+                surface.wave.length,
+                surface.wave.speed,
+                runtime.time.elapsed,
+            );
+            let binding = runtime.gpu.create_water_binding(
+                &runtime.water_pipeline,
+                &runtime.pipeline,
+                &uniform,
+            );
+            runtime.water_bindings.insert(*entity, binding);
+        }
+        let Some(binding) = runtime.water_bindings.get(entity) else {
+            continue;
+        };
+        let uniform = WaterGpuUniform::new(
+            Vec3::new(surface.center.x, surface.base_height, surface.center.z),
+            surface.half_extent,
+            surface.wave.direction,
+            surface.wave.amplitude,
+            surface.wave.length,
+            surface.wave.speed,
+            runtime.time.elapsed,
+        );
+        runtime.gpu.write_water_binding(
+            binding,
+            &uniform,
+            runtime
+                .water_impulses
+                .get(entity)
+                .map_or(&[], WaterImpulseQueue::as_slice),
+        );
+        let model = Mat4::from_scale_rotation_translation(
+            Vec3::new(surface.half_extent.x, 1.0, surface.half_extent.y),
+            Quat::IDENTITY,
+            Vec3::new(surface.center.x, surface.base_height, surface.center.z),
+        );
+        runtime.gpu.write_uniform_buffer(
+            &binding.model.buffer,
+            &engine_renderer::ModelUniform {
+                model: model.to_cols_array_2d(),
+            },
+        );
+    }
 }
 
 fn render_frame(runtime: &mut Runtime, dt: f32) {
@@ -1707,6 +1851,8 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
         .gpu
         .write_particle_camera_binding(&runtime.particle_camera, &runtime.camera);
 
+    update_water_render_data(runtime, dt);
+
     // Owned here so the slices outlive the render call that uploads them.
     let (alpha_particles, additive_particles) =
         engine_ecs::extract_particles(runtime.ecs.world_mut());
@@ -1717,7 +1863,6 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
         additive: &additive_particles,
     };
     let particles = (!particle_frame.is_empty()).then_some(particle_frame);
-
     // Sprites need an atlas the game supplies; without one there is
     // nothing to sample, so the draw is skipped. Warn once — a game that
     // spawned sprites and forgot the atlas would otherwise just see an
@@ -1749,7 +1894,16 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
     };
 
     let frustum = runtime.camera.frustum();
-    if let Err(err) = engine_ecs::extract_and_render(
+    let water_draws: Vec<_> = runtime
+        .water_bindings
+        .values()
+        .map(|binding| WaterDraw { binding })
+        .collect();
+    let water = (!water_draws.is_empty()).then_some(WaterFrame {
+        pipeline: &runtime.water_pipeline,
+        draws: &water_draws,
+    });
+    match engine_ecs::extract_and_render(
         runtime.ecs.world_mut(),
         &runtime.assets,
         &runtime.gpu,
@@ -1769,9 +1923,11 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
         sprites,
         particles,
         Some((&runtime.vegetation_pipeline, &runtime.wind_binding)),
+        water,
         (!ui_quads.is_empty()).then_some((&runtime.ui_pipeline, ui_quads.as_slice())),
     ) {
-        tracing::error!(error = %err, "frame render failed");
+        Ok(stats) => runtime.render_stats = stats,
+        Err(err) => tracing::error!(error = %err, "frame render failed"),
     }
 }
 
@@ -1835,7 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn game_runner_redraw_policy_is_continuous_until_exit() {
+    fn game_runner_redraw_policy_waits_when_game_is_idle() {
         let mut runner = GameRunner {
             config: None,
             game: TestGame,
@@ -1845,12 +2001,30 @@ mod tests {
             finished: false,
         };
 
-        assert_eq!(
-            runner.redraw_policy(),
-            engine_platform::RedrawPolicy::Continuous
-        );
+        assert_eq!(runner.redraw_policy(), engine_platform::RedrawPolicy::Wait);
         runner.finished = true;
         assert_eq!(runner.redraw_policy(), engine_platform::RedrawPolicy::Wait);
+    }
+
+    #[test]
+    fn frame_demand_controls_redraw_policy() {
+        struct IdleGame;
+        impl Game for IdleGame {
+            fn setup(&mut self, _ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+                Ok(())
+            }
+            fn update(&mut self, _ctx: &mut GameContext<'_>, _dt: f32) {}
+        }
+        let runner = GameRunner {
+            config: None,
+            game: IdleGame,
+            runtime: None,
+            error_slot: Rc::new(Cell::new(None)),
+            last_frame: None,
+            finished: false,
+        };
+        assert_eq!(runner.redraw_policy(), engine_platform::RedrawPolicy::Wait);
+        assert_eq!(FrameDemand::Idle, FrameDemand::Idle);
     }
 
     #[test]

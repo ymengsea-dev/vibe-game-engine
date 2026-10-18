@@ -35,8 +35,8 @@ pub mod app;
 /// Populated as subsystems are implemented milestone by milestone.
 pub mod prelude {
     pub use crate::app::{
-        Game, GameConfig, GameContext, GameError, MAX_FRAME_SECONDS, SavePolicy, SceneParts, Time,
-        run_game,
+        FrameDemand, Game, GameConfig, GameContext, GameError, MAX_FRAME_SECONDS, SavePolicy,
+        SceneParts, Time, run_game,
     };
     pub use engine_ai::{
         GridCoord, NavError, NavGrid, find_path, find_path_world, follow_path, line_of_sight,
@@ -60,13 +60,14 @@ pub mod prelude {
     };
     pub use engine_core::logging;
     pub use engine_core::{App, AppState, EngineConfig, EngineError, FixedTimestep};
-    pub use engine_ecs::prelude::{Bundle, ChildOf, Children, Entity, World};
+    pub use engine_ecs::prelude::{Bundle, ChildOf, Children, Entity, WaterVolume, World};
     pub use engine_ecs::{
         AnimationEvent, AnimationEvents, AnimationPlayer, AudioEmitter, AudioListener, BlendMode,
-        Ecs, ParticleEmitter, ParticleEmitterConfig, RenderStats, Rng, SpriteTarget,
-        despawn_instanced_mesh_renderer, despawn_mesh_renderer, despawn_skinned_mesh_renderer,
-        despawn_vegetation_renderer, extract_and_render, extract_particles, extract_sprites,
-        sync_rigid_bodies, update_audio, update_particles,
+        BuoyantBody, Ecs, ParticleEmitter, ParticleEmitterConfig, RenderStats, Rng, SpriteTarget,
+        WaterEvents, WaterInteractionEvent, WaterInteractor, despawn_instanced_mesh_renderer,
+        despawn_mesh_renderer, despawn_skinned_mesh_renderer, despawn_vegetation_renderer,
+        extract_and_render, extract_particles, extract_sprites, sync_rigid_bodies, update_audio,
+        update_particles, update_water,
     };
     #[cfg(feature = "studio")]
     pub use engine_editor::{
@@ -79,11 +80,11 @@ pub mod prelude {
         mesh_summary, resolve_asset_ids, scan_assets, texture_summary, waveform_bins, write_prefab,
     };
     pub use engine_physics::{
-        Aabb2d, CharacterController, CharacterMovement, CharacterMovement2D, Circle2d, Collider2d,
-        ColliderBuilder, ColliderHandle, DebugLine, DebugRenderMode, DebugRenderStyle,
-        PhysicsError, PhysicsWorld, RayHit, RigidBodyBuilder, RigidBodyHandle, aabb_vs_aabb,
-        aabb_vs_circle, cast_ray, circle_vs_circle, debug_render_lines, move_character,
-        move_character_2d,
+        Aabb2d, BuoyancySettings, CharacterController, CharacterMovement, CharacterMovement2D,
+        Circle2d, Collider2d, ColliderBuilder, ColliderHandle, DebugLine, DebugRenderMode,
+        DebugRenderStyle, PhysicsError, PhysicsWorld, RayHit, RigidBodyBuilder, RigidBodyHandle,
+        WaterSample, WaterSurface, WaterWave, aabb_vs_aabb, aabb_vs_circle, buoyancy_force,
+        cast_ray, circle_vs_circle, debug_render_lines, move_character, move_character_2d,
     };
     pub use engine_platform::{
         ActionMap, AxisBinding, Binding, DEFAULT_DEADZONE, GamepadAxis, GamepadButton, Gamepads,
@@ -103,9 +104,10 @@ pub mod prelude {
         RendererError, ScatterArea, ScatterConfig, ScatterError, ShadowMap, ShadowPipeline,
         SkinnedBinding, SkinnedDrawable, SkinnedMesh, SkinnedPipeline, SkinnedVertex,
         SkyboxBinding, SkyboxPipeline, SpriteAtlasBinding, SpriteBatch, SpriteInstance,
-        SpritePipeline, Texture, TextureAtlas, UvRect, VegetationPipeline, Vertex, Wind,
-        WindBinding, WindUniform, cube, decode_rgba8, directional_light_view_projection, quad,
-        scatter, skybox_uniform,
+        SpritePipeline, Texture, TextureAtlas, UvRect, VegetationPipeline, Vertex, WaterBinding,
+        WaterDraw, WaterFrame, WaterGpuUniform, WaterImpulse, WaterImpulseQueue, WaterPipeline,
+        WaterUniform, Wind, WindBinding, WindUniform, cube, decode_rgba8,
+        directional_light_view_projection, quad, scatter, skybox_uniform,
     };
     pub use engine_scene::{
         AssetLibrary, AssetRef, AudioEmitterData, BUNDLE_FILE, BodyKind, CURRENT_SCENE_VERSION,

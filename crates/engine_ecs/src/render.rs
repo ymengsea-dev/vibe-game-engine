@@ -24,8 +24,8 @@ use crate::propagate::propagate_transforms;
 ///
 /// `meshes_total - meshes_drawn` is the number of meshes frustum culling
 /// removed from the scene pass. Every resolved mesh — culled or not —
-/// still renders into the shadow map, so `meshes_total` is also the
-/// shadow-caster count.
+/// may be culled separately by the directional light's frustum before the
+/// shadow pass.
 ///
 /// Of the `meshes_drawn` visible meshes, `auto_batched_drawn` were folded
 /// into `auto_batches` instanced draws (see [`extract_and_render`]'s GPU
@@ -70,6 +70,12 @@ pub struct RenderStats {
     /// sprite pipeline/atlas, and `0` means the sprite draw was skipped
     /// entirely — no instance buffer, no pipeline switch.
     pub sprites_drawn: u32,
+    /// Casters inside the directional light's frustum this frame.
+    pub shadow_casters_visible: u32,
+    /// Submitted depth draw calls, after shadow batching.
+    pub shadow_draws: u32,
+    /// Submitted scene-pass draw calls, after batching.
+    pub main_draws: u32,
 }
 
 /// Whether a mesh whose object-space extent is `local_bounds`, positioned
@@ -180,10 +186,50 @@ fn plan_auto_batches(keys: &[(engine_utils::AssetId, engine_utils::AssetId)]) ->
     plan
 }
 
+/// Plans shadow draws from light-frustum-visible opaque casters. The
+/// returned indices refer to `casters`, not to camera-visible meshes, so a
+/// mesh outside the camera can still cast into its view.
+fn plan_shadow_batches(
+    light_frustum: &Frustum,
+    casters: &[((engine_utils::AssetId, engine_utils::AssetId), Aabb, Mat4)],
+) -> BatchPlan {
+    let visible: Vec<_> = casters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (key, bounds, world))| {
+            is_visible(light_frustum, bounds, world).then_some((*key, index))
+        })
+        .collect();
+    let plan = plan_auto_batches(&visible.iter().map(|(key, _)| *key).collect::<Vec<_>>());
+    BatchPlan {
+        individuals: plan
+            .individuals
+            .into_iter()
+            .map(|index| visible[index].1)
+            .collect(),
+        batches: plan
+            .batches
+            .into_iter()
+            .map(|batch| batch.into_iter().map(|index| visible[index].1).collect())
+            .collect(),
+    }
+}
+
 /// One frustum-visible `MeshRenderer`, captured with its asset-handle
 /// identities so [`plan_auto_batches`] can group the ones that share a
 /// mesh+material before any GPU work.
 struct VisibleMesh<'a> {
+    mesh_handle: engine_utils::AssetHandle<Mesh>,
+    material_handle: engine_utils::AssetHandle<engine_renderer::MaterialBinding>,
+    mesh: &'a Mesh,
+    material: &'a engine_renderer::MaterialBinding,
+    model: &'a engine_renderer::ModelBinding,
+    world: Mat4,
+}
+
+/// One opaque shadow candidate. Kept separate from [`VisibleMesh`] because
+/// shadow visibility is defined by the directional light, not the camera.
+struct ShadowMesh<'a> {
     mesh_handle: engine_utils::AssetHandle<Mesh>,
     material_handle: engine_utils::AssetHandle<engine_renderer::MaterialBinding>,
     mesh: &'a Mesh,
@@ -212,8 +258,8 @@ struct VisibleMesh<'a> {
 /// buffer. The rest are drawn one `Drawable` each. This cuts scene-pass
 /// draw calls and bind-group churn for repeated props with no API change;
 /// [`RenderStats::auto_batches`]/[`RenderStats::auto_batched_drawn`]
-/// report it. The shadow pass is unaffected — every mesh is still drawn
-/// individually into the shadow map (no instanced shadow shader yet).
+/// report it. The shadow pass uses the same grouping after directional-light
+/// frustum culling.
 ///
 /// `(GlobalTransform, SkinnedMeshRenderer)` entities are also drawn, with
 /// `skinned_pipeline`, after the unskinned geometry. Their model matrix is
@@ -306,6 +352,7 @@ pub fn extract_and_render(
     sprites: Option<SpriteTarget<'_>>,
     particles: Option<ParticleFrame<'_>>,
     vegetation: Option<(&VegetationPipeline, &WindBinding)>,
+    water: Option<engine_renderer::WaterFrame<'_>>,
     ui: Option<(&engine_renderer::UiPipeline, &[engine_renderer::UiQuad])>,
 ) -> Result<RenderStats, RendererError> {
     extract_and_render_to(
@@ -329,6 +376,7 @@ pub fn extract_and_render(
         sprites,
         particles,
         vegetation,
+        water,
         ui,
     )
 }
@@ -373,6 +421,7 @@ pub fn extract_and_render_to(
     sprites: Option<SpriteTarget<'_>>,
     particles: Option<ParticleFrame<'_>>,
     vegetation: Option<(&VegetationPipeline, &WindBinding)>,
+    water: Option<engine_renderer::WaterFrame<'_>>,
     ui: Option<(&engine_renderer::UiPipeline, &[engine_renderer::UiQuad])>,
 ) -> Result<RenderStats, RendererError> {
     propagate_transforms(world);
@@ -391,11 +440,11 @@ pub fn extract_and_render_to(
     let mut instanced_query = world.query::<&InstancedMeshRenderer>();
     let mut vegetation_query = world.query::<&VegetationRenderer>();
 
-    // Every resolved mesh is a shadow caster; `visible` is the subset
-    // inside `frustum` that the scene pass draws — either individually or,
+    // `visible` is the subset inside `frustum` that the scene pass draws — either individually or,
     // where several share a mesh+material, folded into one instanced draw
     // (GPU batching, planned below).
-    let mut shadow_casters = Vec::new();
+    let mut shadow_meshes = Vec::new();
+    let mut resolved_meshes = 0u32;
     // `(view depth, drawable)` so the sort key survives the borrow.
     let mut transparent: Vec<(f32, Drawable<'_>)> = Vec::new();
     let mut visible: Vec<VisibleMesh<'_>> = Vec::new();
@@ -420,20 +469,16 @@ pub fn extract_and_render_to(
         // space) rather than recomputing it in each.
         let world_from_local = transform.0.to_matrix();
 
-        // Written for every caster (not just the visible ones) so a
-        // culled mesh still casts its shadow with an up-to-date matrix.
-        gpu.write_uniform_buffer(
-            &mesh_renderer.model.buffer,
-            &ModelUniform {
-                model: world_from_local.to_cols_array_2d(),
-            },
-        );
+        resolved_meshes += 1;
 
-        if material.casts_shadow {
-            shadow_casters.push(Drawable {
-                model: &mesh_renderer.model,
-                material,
+        if material.casts_shadow && !material.transparent {
+            shadow_meshes.push(ShadowMesh {
+                mesh_handle: mesh_renderer.mesh,
+                material_handle: mesh_renderer.material,
                 mesh,
+                material,
+                model: &mesh_renderer.model,
+                world: world_from_local,
             });
         }
 
@@ -442,6 +487,12 @@ pub fn extract_and_render_to(
             // they must not be batched (batching reorders) and they need
             // their own back-to-front sort below.
             if material.transparent {
+                gpu.write_uniform_buffer(
+                    &mesh_renderer.model.buffer,
+                    &ModelUniform {
+                        model: world_from_local.to_cols_array_2d(),
+                    },
+                );
                 transparent.push((
                     view_depth(frustum, world_from_local.w_axis.truncate()),
                     Drawable {
@@ -505,13 +556,58 @@ pub fn extract_and_render_to(
 
     // Instanced meshes: one draw call per entity. Each instance is
     // frustum-culled individually against the mesh's bounds; the visible
-    // ones are packed into a per-frame instance buffer. Not shadow casters
-    // (no instanced shadow shader).
+    // ones are packed into a per-frame instance buffer. Opaque casters also
+    // get a light-frustum-culled instanced shadow draw.
     struct PendingInstanced<'a> {
         material: &'a engine_renderer::MaterialBinding,
         mesh: &'a Mesh,
         raws: Vec<InstanceRaw>,
     }
+
+    let shadow_keys: Vec<_> = shadow_meshes
+        .iter()
+        .map(|mesh| {
+            (
+                (mesh.mesh_handle.id(), mesh.material_handle.id()),
+                mesh.mesh.local_bounds,
+                mesh.world,
+            )
+        })
+        .collect();
+    let shadow_plan = plan_shadow_batches(shadow_map.light_frustum(), &shadow_keys);
+    let mut shadow_casters = Vec::with_capacity(shadow_plan.individuals.len());
+    for &index in &shadow_plan.individuals {
+        let mesh = &shadow_meshes[index];
+        gpu.write_uniform_buffer(
+            &mesh.model.buffer,
+            &ModelUniform {
+                model: mesh.world.to_cols_array_2d(),
+            },
+        );
+        shadow_casters.push(Drawable {
+            model: mesh.model,
+            material: mesh.material,
+            mesh: mesh.mesh,
+        });
+    }
+    let mut pending_shadow: Vec<PendingInstanced<'_>> = shadow_plan
+        .batches
+        .iter()
+        .map(|group| {
+            let first = &shadow_meshes[group[0]];
+            PendingInstanced {
+                material: first.material,
+                mesh: first.mesh,
+                raws: group
+                    .iter()
+                    .map(|&index| InstanceRaw {
+                        model: shadow_meshes[index].world.to_cols_array_2d(),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
     let mut instances_total = 0u32;
     let mut pending_instanced: Vec<PendingInstanced<'_>> = Vec::new();
     for instanced in instanced_query.iter(&*world) {
@@ -531,6 +627,21 @@ pub fn extract_and_render_to(
         };
 
         instances_total += instanced.instances.len() as u32;
+        if material.casts_shadow {
+            let shadow_raws = visible_instances(
+                shadow_map.light_frustum(),
+                &mesh.local_bounds,
+                &instanced.instances,
+            );
+            if !shadow_raws.is_empty() {
+                pending_shadow.push(PendingInstanced {
+                    material,
+                    mesh,
+                    raws: shadow_raws,
+                });
+            }
+        }
+
         let raws = visible_instances(frustum, &mesh.local_bounds, &instanced.instances);
 
         if !raws.is_empty() {
@@ -545,8 +656,7 @@ pub fn extract_and_render_to(
     // GPU batching: fold groups of visible `MeshRenderer`s that share a
     // mesh+material into instanced draws, through the exact path the
     // explicit `InstancedMeshRenderer`s above use. Every one of them is
-    // still in `shadow_casters`, drawn individually into the shadow map —
-    // there's no instanced shadow shader yet.
+    // also plans one instanced shadow draw per light-visible shared group.
     let batch_keys: Vec<(engine_utils::AssetId, engine_utils::AssetId)> = visible
         .iter()
         .map(|mesh| (mesh.mesh_handle.id(), mesh.material_handle.id()))
@@ -563,6 +673,12 @@ pub fn extract_and_render_to(
     let mut drawables: Vec<Drawable<'_>> = Vec::with_capacity(plan.individuals.len());
     for &index in &plan.individuals {
         let mesh = &visible[index];
+        gpu.write_uniform_buffer(
+            &mesh.model.buffer,
+            &ModelUniform {
+                model: mesh.world.to_cols_array_2d(),
+            },
+        );
         drawables.push(Drawable {
             model: mesh.model,
             material: mesh.material,
@@ -598,6 +714,21 @@ pub fn extract_and_render_to(
     let instanced_drawables: Vec<InstancedDrawable<'_>> = pending_instanced
         .iter()
         .zip(&instance_buffers)
+        .map(|(pending, buffer)| InstancedDrawable {
+            material: pending.material,
+            mesh: pending.mesh,
+            instance_buffer: buffer,
+            instance_count: pending.raws.len() as u32,
+        })
+        .collect();
+
+    let shadow_instance_buffers: Vec<InstanceBuffer> = pending_shadow
+        .iter()
+        .map(|pending| gpu.create_instance_buffer("instanced shadow casters", &pending.raws))
+        .collect();
+    let instanced_shadow_casters: Vec<InstancedDrawable<'_>> = pending_shadow
+        .iter()
+        .zip(&shadow_instance_buffers)
         .map(|(pending, buffer)| InstancedDrawable {
             material: pending.material,
             mesh: pending.mesh,
@@ -671,7 +802,7 @@ pub fn extract_and_render_to(
     };
 
     let stats = RenderStats {
-        meshes_total: shadow_casters.len() as u32,
+        meshes_total: resolved_meshes,
         meshes_drawn: visible.len() as u32,
         skinned_drawn: skinned_drawables.len() as u32,
         instances_total,
@@ -681,6 +812,18 @@ pub fn extract_and_render_to(
         vegetation_total,
         vegetation_drawn,
         sprites_drawn: sprite_frame.map_or(0, |frame| frame.instances.len() as u32),
+        shadow_casters_visible: (shadow_casters.len()
+            + instanced_shadow_casters
+                .iter()
+                .map(|drawable| drawable.instance_count as usize)
+                .sum::<usize>()) as u32,
+        shadow_draws: (shadow_casters.len() + instanced_shadow_casters.len()) as u32,
+        main_draws: (drawables.len()
+            + transparent.len()
+            + skinned_drawables.len()
+            + instanced_drawables.len()
+            + vegetation_drawables.len()
+            + usize::from(sprite_frame.is_some())) as u32,
     };
 
     let vegetation_frame =
@@ -700,6 +843,7 @@ pub fn extract_and_render_to(
             lights,
             &drawables,
             &shadow_casters,
+            &instanced_shadow_casters,
             &transparent,
             skinned_pipeline,
             &skinned_drawables,
@@ -709,6 +853,7 @@ pub fn extract_and_render_to(
             sprite_frame,
             particles,
             vegetation_frame,
+            water,
             ui,
         )?,
         None => gpu.render_scene(
@@ -723,6 +868,7 @@ pub fn extract_and_render_to(
             lights,
             &drawables,
             &shadow_casters,
+            &instanced_shadow_casters,
             &transparent,
             skinned_pipeline,
             &skinned_drawables,
@@ -732,6 +878,7 @@ pub fn extract_and_render_to(
             sprite_frame,
             particles,
             vegetation_frame,
+            water,
             ui,
         )?,
     }
@@ -1183,6 +1330,43 @@ mod tests {
     }
 
     #[test]
+    fn plan_shadow_batches_groups_visible_matches_and_drops_outside_light() {
+        let [
+            mesh,
+            material,
+            unique_mesh,
+            unique_material,
+            outside_mesh,
+            outside_material,
+        ] = fresh_ids();
+        let light = Frustum::from_view_projection(&Mat4::IDENTITY);
+        let plans = plan_shadow_batches(
+            &light,
+            &[
+                ((mesh, material), unit_bounds(), Mat4::IDENTITY),
+                (
+                    (mesh, material),
+                    unit_bounds(),
+                    Mat4::from_translation(Vec3::new(0.25, 0.0, 0.0)),
+                ),
+                (
+                    (unique_mesh, unique_material),
+                    unit_bounds(),
+                    Mat4::IDENTITY,
+                ),
+                (
+                    (outside_mesh, outside_material),
+                    unit_bounds(),
+                    Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)),
+                ),
+            ],
+        );
+
+        assert_eq!(plans.individuals, vec![2]);
+        assert_eq!(plans.batches, vec![vec![0, 1]]);
+    }
+
+    #[test]
     fn plan_auto_batches_keeps_first_seen_order_for_groups_and_members() {
         let [a, b, c, d] = fresh_ids();
         let crate_key = (a, b);
@@ -1256,6 +1440,9 @@ mod tests {
         let stats = RenderStats::default();
         assert_eq!(stats.vegetation_total, 0);
         assert_eq!(stats.vegetation_drawn, 0);
+        assert_eq!(stats.shadow_casters_visible, 0);
+        assert_eq!(stats.shadow_draws, 0);
+        assert_eq!(stats.main_draws, 0);
         // Copy + Eq still hold with the new fields.
         let copy = stats;
         assert_eq!(stats, copy);

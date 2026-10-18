@@ -53,6 +53,7 @@ pub mod physics;
 pub mod propagate;
 pub mod render;
 pub mod stages;
+pub mod water;
 
 pub use animation::{AnimationEvent, AnimationEvents, AnimationPlayer, update_animations};
 pub use audio::{AudioEmitter, AudioListener, update_audio};
@@ -67,6 +68,7 @@ pub use render::{
     despawn_skinned_mesh_renderer, despawn_vegetation_renderer, extract_and_render,
     extract_and_render_to, extract_sprites,
 };
+pub use water::{BuoyantBody, WaterEvents, WaterInteractionEvent, WaterInteractor, update_water};
 
 /// Re-exports the `bevy_ecs` prelude, plus [`Ecs`], the core components,
 /// and the frame stage labels.
@@ -77,7 +79,7 @@ pub mod prelude {
     pub use crate::components::{
         AssetSource, Camera, Collider, Disabled, GlobalTransform, InstancedMeshRenderer, Lock,
         MeshRenderer, Name, RigidBody, Script, SkinnedMeshRenderer, Sprite, Static, Transform,
-        VegetationRenderer,
+        VegetationRenderer, WaterVolume,
     };
     pub use crate::despawn_instanced_mesh_renderer;
     pub use crate::despawn_mesh_renderer;
@@ -88,6 +90,9 @@ pub mod prelude {
     pub use crate::propagate_transforms;
     pub use crate::stages::{RenderExtract, Update};
     pub use crate::sync_rigid_bodies;
+    pub use crate::{
+        BuoyantBody, WaterEvents, WaterInteractionEvent, WaterInteractor, update_water,
+    };
 }
 
 /// Owns the ECS `World` (entities, components, resources) and its named

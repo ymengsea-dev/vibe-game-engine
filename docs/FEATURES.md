@@ -25,11 +25,12 @@ Primary sources: `crates/engine_core/src/`, `crates/engine_platform/src/`, and `
 
 - Parent/child relationships with propagated world transforms.
 - Physics-to-transform synchronization.
-- Asset-handle resolution, frustum culling, render statistics, and explicit handle cleanup on despawn.
+- Asset-handle resolution, camera/light-frustum culling, event-driven presentation demand, instanced opaque and shadow draws, render statistics, and explicit handle cleanup on despawn.
 - Batched sprite extraction and opaque/transparent mesh ordering.
 - Per-entity skeletal animation with shared clips, GPU matrix uploads, looping/one-shot playback, and authored events.
 - Transform-driven listeners and spatial emitters, including autoplay and mixer-bus routing.
 - Deterministic CPU particle emitters with alpha/additive extraction.
+- Bounded horizontal `WaterVolume` surfaces with deterministic wave sampling, buoyancy, and enter/exit/movement events for game-owned swimming and audio rules.
 
 Primary sources: `crates/engine_ecs/src/components.rs`, `render.rs`, `animation.rs`, `audio.rs`, `particles.rs`, and `propagate.rs`.
 
@@ -47,9 +48,10 @@ Primary sources: `crates/engine_ecs/src/components.rs`, `render.rs`, `animation.
 - CPU-simulated/GPU-instanced billboard particles with alpha or additive blending.
 - Editable heightmap terrain with raise/lower, smooth, and flatten brushes.
 - Deterministic terrain-aware scattering and instanced wind-bent vegetation.
+- Dedicated analytic water surfaces with per-surface wave settings, shallow/deep colour, foam, and capped splash/ripple uploads. Water writes depth after opaque terrain and before transparent particles.
 - Immediate debug lines for boxes, spheres, capsules, frusta, grids, axes, arrows, and other overlays.
 
-Current limits: only the first directional light casts shadows; there are no point-light shadows or HDRI cubemaps. Toon outlines use scene luminance rather than depth/normals. Particles are untextured and CPU simulated. Runtime UI images currently render as tinted rectangles until an image asset registry is connected.
+Current limits: only the first directional light casts shadows; there are no point-light shadows or HDRI cubemaps. Toon outlines use scene luminance rather than depth/normals. Particles are untextured and CPU simulated. Water has no reflection/refraction, terrain-depth shoreline foam, caustics, fluid simulation, voxel water, arbitrary shores, or replication. Runtime UI images currently render as tinted rectangles until an image asset registry is connected.
 
 Primary sources: `crates/engine_renderer/src/` and `crates/engine_renderer/src/shaders/`.
 
@@ -84,6 +86,15 @@ Primary sources: `crates/engine_scene/src/format.rs`, `validate.rs`, `world.rs`,
 ### Physics — implemented
 
 `engine_physics` wraps Rapier 3D with rigid bodies, colliders, gravity, fixed-step simulation, raycasts, debug geometry, and a slope/step-aware character controller. The facade can create bodies and build scene-authored ball, cuboid, cylinder, capsule, and triangle-mesh colliders. A separate pure 2D layer provides AABB/circle intersection tests and an axis-separated platformer controller; it is not a Rapier 2D world.
+
+Water surfaces are reusable across games: add `WaterVolume` to the lake entity, `BuoyantBody` beside a dynamic boat `RigidBody`, and `WaterInteractor` beside a character. Games consume `WaterInteractionEvent` for swimming, sounds, damage, and particles; the engine does not impose those policies.
+
+```rust
+world.spawn(WaterVolume { surface: lake });
+world.spawn((boat_body, BuoyantBody { settings: boat_buoyancy }));
+world.spawn((character_transform, WaterInteractor::default()));
+```
+
 
 ### Animation — implemented, with integration limits
 
@@ -164,7 +175,7 @@ These layers are partial rather than a finished assistant:
 Primary sources: `crates/editor_ai/src/lib.rs`, `crates/editor_tools/src/lib.rs`, and `crates/engine_editor/src/state.rs`.
 
 ## Sample Project
-- `games/island`: playable procedural island, asset baker, generated glTF/PNG/WAV files, scene metadata, third-person controls, physics, animation events, pause UI, and positional ambience. The current game still builds its world and character in code; loading the baked project and importing the skinned character are documented gaps in `games/island/src/main.rs`.
+- `games/island`: playable storybook exploration showcase with separately baked trunks, branches, leaf clusters, flower parts, cottage pieces, bridge, lilies, ruin, landmark route, generated glTF/PNG/WAV files, third-person controls, physics, animation events, pause UI, and positional ambience. The runtime loads the baked project, including the skinned character model and walk clip, then adds reusable animated ocean and pond `WaterVolume` surfaces. Pond precedes ocean for local-water precedence. Island's kinematic walker does not opt into water interaction or buoyancy. Lighting, camera, player placement, and controller physics are configured by Island code; scenes already support cameras, transforms, and colliders, but not light components or skinned-mesh renderers.
 
 ## Stubs and Explicit Gaps
 

@@ -43,4 +43,14 @@ pub enum PhysicsError {
     /// `desired_translation` (a `NaN`/infinite component).
     #[error("invalid 2D character movement translation: {0:?} (all components must be finite)")]
     InvalidTranslation2D(Vec2),
+
+    /// Water surface or buoyancy settings included a non-finite or
+    /// out-of-range scalar. `field` identifies the rejected setting.
+    #[error("invalid water setting {field}: {value}")]
+    InvalidWaterSettings {
+        /// Name of the rejected setting.
+        field: &'static str,
+        /// Rejected scalar value.
+        value: f32,
+    },
 }

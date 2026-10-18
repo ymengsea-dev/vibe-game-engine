@@ -472,6 +472,7 @@ impl Viewport {
             None,
             None,
             None,
+            None,
             // The editor draws its own chrome through egui; the runtime
             // UI pass is for shipped games.
             None,

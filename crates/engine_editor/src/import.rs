@@ -34,8 +34,8 @@ use std::fs;
 use std::path::Path;
 
 use engine_asset::{
-    AssetId, ImportCache, ImportedAudio, ImportedGltf, ImportedTexture, import_gltf_file,
-    import_texture_bytes, import_wav_bytes,
+    AssetId, AssetMetadataStore, ImportCache, ImportedAudio, ImportedGltf, ImportedTexture,
+    import_gltf_file, import_texture_bytes, import_wav_bytes,
 };
 
 use crate::assets::{AssetEntry, AssetIndex, AssetKind};
@@ -143,6 +143,12 @@ impl AssetImporter {
     /// source file was deleted between passes) is dropped — so a
     /// re-`run` after a hot-reload change also acts as eviction.
     pub fn run(&mut self, root: &Path, entries: &mut [AssetEntry]) -> AssetIndex {
+        let metadata_root = root.parent().map_or_else(
+            || Path::new(".studio/assets").to_path_buf(),
+            |project| project.join(".studio/assets"),
+        );
+        self.cache
+            .set_store(AssetMetadataStore::new(root, metadata_root));
         let mut index = AssetIndex::new();
         self.records.clear();
         self.pass_id = self.pass_id.wrapping_add(1);

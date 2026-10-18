@@ -62,6 +62,18 @@ impl ProjectRequest {
     }
 }
 
+/// Builds the directory a newly named project will own.
+///
+/// A name containing only whitespace cannot identify a project. The name
+/// otherwise stays unchanged, so the folder and manifest name agree.
+pub(crate) fn project_creation_target(parent: &Path, name: &str) -> Option<PathBuf> {
+    let mut components = Path::new(name).components();
+    let single_component = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+        && !name.contains(['/', '\\']);
+    (!name.trim().is_empty() && single_component).then(|| parent.join(name))
+}
+
 /// The most recently opened projects, newest first.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentProjects {
@@ -170,6 +182,43 @@ impl RecentProjects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_creation_target_joins_parent_and_name() {
+        assert_eq!(
+            project_creation_target(Path::new("/tmp/projects"), "Sky Garden"),
+            Some(PathBuf::from("/tmp/projects/Sky Garden")),
+        );
+    }
+
+    #[test]
+    fn project_creation_target_rejects_blank_name() {
+        assert_eq!(
+            project_creation_target(Path::new("/tmp/projects"), ""),
+            None
+        );
+        assert_eq!(
+            project_creation_target(Path::new("/tmp/projects"), "   \t"),
+            None
+        );
+    }
+
+    #[test]
+    fn project_creation_target_rejects_paths_that_escape_or_nest() {
+        let parent = Path::new("/tmp/projects");
+        for name in [
+            "../Sibling",
+            "/tmp/Elsewhere",
+            "nested/game",
+            r"nested\game",
+        ] {
+            assert_eq!(
+                project_creation_target(parent, name),
+                None,
+                "{name:?} is not a project name"
+            );
+        }
+    }
 
     #[test]
     fn push_moves_a_repeat_to_the_front_without_duplicating() {

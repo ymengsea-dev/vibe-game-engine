@@ -172,6 +172,7 @@ mod text;
 mod texture;
 mod ui_pass;
 mod vegetation;
+mod water;
 
 pub use bounds::{Aabb, Frustum, Plane};
 pub use camera::{Camera, CameraUniform, Projection};
@@ -225,3 +226,7 @@ pub use text::{
 pub use texture::{Texture, decode_rgba8};
 pub use ui_pass::{ScreenUniform, UiPipeline, UiQuad};
 pub use vegetation::{VegetationPipeline, Wind, WindBinding, WindUniform};
+pub use water::{
+    MAX_WATER_IMPULSES, WaterBinding, WaterDraw, WaterFrame, WaterGpuUniform, WaterImpulse,
+    WaterImpulseQueue, WaterPipeline, WaterUniform,
+};

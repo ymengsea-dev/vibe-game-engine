@@ -33,6 +33,10 @@ pub enum RedrawPolicy {
     Continuous,
 }
 
+fn deadline_needs_redraw(now: Instant, policy: RedrawPolicy) -> bool {
+    matches!(policy, RedrawPolicy::WaitUntil(deadline) if deadline <= now)
+}
+
 #[derive(Debug, Clone, Copy)]
 enum UserEvent {
     Wake,
@@ -211,7 +215,13 @@ impl<H: PlatformHandler> ApplicationHandler<UserEvent> for Runner<H> {
             event_loop.exit();
             return;
         }
-        match self.handler.redraw_policy() {
+        let policy = self.handler.redraw_policy();
+        if deadline_needs_redraw(Instant::now(), policy)
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
+        match policy {
             RedrawPolicy::Wait => event_loop.set_control_flow(ControlFlow::Wait),
             RedrawPolicy::WaitUntil(deadline) => {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
@@ -337,5 +347,14 @@ mod tests {
         }));
         assert!(wake.wake());
         assert!(woke.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn expired_deadline_requests_one_redraw() {
+        assert!(deadline_needs_redraw(
+            Instant::now(),
+            RedrawPolicy::WaitUntil(Instant::now() - std::time::Duration::from_millis(1))
+        ));
+        assert!(!deadline_needs_redraw(Instant::now(), RedrawPolicy::Wait));
     }
 }

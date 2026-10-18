@@ -21,7 +21,7 @@ use crate::gizmo::{self, Axis, GizmoMode};
 use crate::hierarchy;
 use crate::inspector;
 use crate::output;
-use crate::project_swap::ProjectRequest;
+use crate::project_swap::{ProjectRequest, project_creation_target};
 use crate::state::EditorState;
 use crate::viewport::Viewport;
 
@@ -37,8 +37,15 @@ pub struct EditorShell {
     winit_state: EguiWinitState,
     renderer: EguiRenderer,
     repaint_deadline: Arc<Mutex<Option<Instant>>>,
+    new_project: Option<NewProjectDialog>,
     #[cfg(feature = "dock-shell")]
     dock: dock::Host,
+}
+
+#[derive(Default)]
+struct NewProjectDialog {
+    name: String,
+    error: Option<String>,
 }
 
 impl EditorShell {
@@ -76,6 +83,7 @@ impl EditorShell {
             winit_state,
             renderer,
             repaint_deadline,
+            new_project: None,
             #[cfg(feature = "dock-shell")]
             dock: dock::Host::new(),
         }
@@ -159,7 +167,7 @@ impl EditorShell {
         let output = self.context.run_ui(raw_input, |ui| {
             egui::Panel::top("studio_menu_bar").show(ui, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
-                    menu_file(ui, state);
+                    menu_file(ui, state, &mut self.new_project);
                     menu_edit(ui, state);
                     menu_assets(ui, state);
                     menu_gameobject(ui, state);
@@ -437,6 +445,7 @@ impl EditorShell {
             }
 
             unsaved_changes_modal(ui, state);
+            new_project_modal(ui, state, &mut self.new_project);
         });
 
         // Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redo.
@@ -701,12 +710,14 @@ fn handle_gizmo_interaction(
 /// File menu: project New / Open / Open Recent, scene New / Revert /
 /// Save, and Exit. Everything that would discard work routes through
 /// [`request_guarded`] so unsaved changes prompt first.
-fn menu_file(ui: &mut egui::Ui, state: &mut EditorState) {
+fn menu_file(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    new_project: &mut Option<NewProjectDialog>,
+) {
     ui.menu_button("File", |ui| {
         if ui.button("New Project…").clicked() {
-            if let Some(root) = pick_project_directory("Create project in") {
-                request_guarded(state, PendingAction::NewProject(root));
-            }
+            *new_project = Some(NewProjectDialog::default());
             ui.close();
         }
         if ui.button("Open Project…").clicked() {
@@ -784,6 +795,68 @@ fn menu_file(ui: &mut egui::Ui, state: &mut EditorState) {
             ui.close();
         }
     });
+}
+
+fn new_project_modal(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    dialog: &mut Option<NewProjectDialog>,
+) {
+    let Some(dialog_state) = dialog.as_mut() else {
+        return;
+    };
+
+    let mut close = false;
+    egui::Modal::new(egui::Id::new("studio_new_project_modal")).show(ui.ctx(), |ui| {
+        ui.set_width(360.0);
+        ui.heading("Create Project");
+        ui.add_space(4.0);
+        ui.label("Project name");
+        let name = ui.add(
+            egui::TextEdit::singleline(&mut dialog_state.name)
+                .hint_text("My Game")
+                .desired_width(f32::INFINITY),
+        );
+        if name.changed() {
+            dialog_state.error = None;
+        }
+        if let Some(error) = &dialog_state.error {
+            ui.colored_label(egui::Color32::from_rgb(236, 104, 104), error);
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() {
+                close = true;
+            }
+            let valid_name = !dialog_state.name.trim().is_empty();
+            if ui
+                .add_enabled(valid_name, egui::Button::new("Choose Location…"))
+                .clicked()
+                && let Some(parent) = pick_project_directory("Choose project location")
+                && let Some(target) = project_creation_target(&parent, &dialog_state.name)
+            {
+                match target.try_exists() {
+                    Ok(true) => {
+                        dialog_state.error = Some(format!(
+                            "{} already exists. Choose a different project name or location.",
+                            target.display()
+                        ));
+                    }
+                    Ok(false) => {
+                        request_guarded(state, PendingAction::NewProject(target));
+                        close = true;
+                    }
+                    Err(err) => {
+                        dialog_state.error =
+                            Some(format!("Cannot inspect the project location: {err}"));
+                    }
+                }
+            }
+        });
+    });
+    if close {
+        *dialog = None;
+    }
 }
 
 /// Asks the OS for a project directory.

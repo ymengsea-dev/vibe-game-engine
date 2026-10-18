@@ -44,6 +44,7 @@ mod collision2d;
 mod debug;
 mod error;
 mod raycast;
+mod water;
 mod world;
 
 pub use character::{CharacterController, CharacterMovement, move_character};
@@ -54,6 +55,7 @@ pub use collision2d::{
 pub use debug::{DebugLine, DebugRenderMode, DebugRenderStyle, debug_render_lines};
 pub use error::PhysicsError;
 pub use raycast::{RayHit, cast_ray};
+pub use water::{BuoyancySettings, WaterSample, WaterSurface, WaterWave, buoyancy_force};
 pub use world::PhysicsWorld;
 
 // Re-exported so downstream crates (e.g. engine_ecs's rigid-body/collider

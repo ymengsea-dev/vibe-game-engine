@@ -20,7 +20,7 @@
 
 use bevy_ecs::prelude::Component;
 use engine_physics::{
-    ColliderBuilder, ColliderHandle, PhysicsWorld, RigidBodyBuilder, RigidBodyHandle,
+    ColliderBuilder, ColliderHandle, PhysicsWorld, RigidBodyBuilder, RigidBodyHandle, WaterSurface,
 };
 
 /// An entity's position, rotation, and scale.
@@ -385,6 +385,22 @@ impl InstancedMeshRenderer {
             instances,
         }
     }
+
+    /// Reuses registered geometry and material for an instanced group.
+    pub fn from_handles(
+        assets: &mut engine_renderer::RenderAssets,
+        mesh: engine_utils::AssetHandle<engine_renderer::Mesh>,
+        material: engine_utils::AssetHandle<engine_renderer::MaterialBinding>,
+        instances: Vec<engine_utils::Transform>,
+    ) -> Self {
+        assets.meshes.retain(mesh);
+        assets.materials.retain(material);
+        Self {
+            mesh,
+            material,
+            instances,
+        }
+    }
 }
 
 /// An entity that renders many wind-animated plants in one instanced draw:
@@ -698,6 +714,13 @@ pub struct RigidBody(pub RigidBodyHandle);
 /// this holds a handle rather than the collider itself.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Collider(pub ColliderHandle);
+
+/// A bounded horizontal water surface authored in the ECS world.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct WaterVolume {
+    /// Validated water query and physical settings.
+    pub surface: WaterSurface,
+}
 
 impl RigidBody {
     /// Inserts `rigid_body` and `collider` into `physics` as one attached

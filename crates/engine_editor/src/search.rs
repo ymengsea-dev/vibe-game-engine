@@ -172,96 +172,96 @@ pub fn run_text_search(root: &Path, query: &SearchQuery, limit: usize) -> TextRe
     } else {
         query.text.to_lowercase()
     };
-    let mut files = 0;
-    walk(
+    SearchWalk {
         root,
-        root,
-        0,
         query,
-        &needle,
+        needle: &needle,
         limit,
-        &mut files,
-        &mut results,
-    );
+        files: 0,
+        results: &mut results,
+    }
+    .walk(root, 0);
     results
 }
 
-fn walk(
-    root: &Path,
-    dir: &Path,
-    depth: u32,
-    query: &SearchQuery,
-    needle: &str,
+struct SearchWalk<'a> {
+    root: &'a Path,
+    query: &'a SearchQuery,
+    needle: &'a str,
     limit: usize,
-    files: &mut usize,
-    results: &mut TextResults,
-) {
-    if results.truncated || depth >= MAX_SEARCH_DEPTH {
-        return;
-    }
-    let Ok(read_dir) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut paths: Vec<PathBuf> = read_dir.flatten().map(|entry| entry.path()).collect();
-    paths.sort();
+    files: usize,
+    results: &'a mut TextResults,
+}
 
-    for path in paths {
-        if results.truncated {
+impl SearchWalk<'_> {
+    fn walk(&mut self, dir: &Path, depth: u32) {
+        if self.results.truncated || depth >= MAX_SEARCH_DEPTH {
             return;
         }
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
+        let Ok(read_dir) = fs::read_dir(dir) else {
+            return;
         };
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            let skip = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| SKIP_DIRS.contains(&name));
-            if !skip {
-                walk(root, &path, depth + 1, query, needle, limit, files, results);
+        let mut paths: Vec<PathBuf> = read_dir.flatten().map(|entry| entry.path()).collect();
+        paths.sort();
+
+        for path in paths {
+            if self.results.truncated {
+                return;
             }
-            continue;
-        }
-        let ext_ok = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| SEARCH_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
-        if !ext_ok {
-            continue;
-        }
-        if metadata.len() > MAX_SEARCH_FILE_BYTES {
-            continue;
-        }
-        if *files == MAX_SEARCH_FILES {
-            results.truncated = true;
-            return;
-        }
-        *files += 1;
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        if bytes.iter().take(1024).any(|&byte| byte == 0) {
-            continue;
-        }
-        let Ok(text) = String::from_utf8(bytes) else {
-            continue;
-        };
-        let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                let skip = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| SKIP_DIRS.contains(&name));
+                if !skip {
+                    self.walk(&path, depth + 1);
+                }
+                continue;
+            }
+            let ext_ok = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| SEARCH_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
+            if !ext_ok {
+                continue;
+            }
+            if metadata.len() > MAX_SEARCH_FILE_BYTES {
+                continue;
+            }
+            if self.files == MAX_SEARCH_FILES {
+                self.results.truncated = true;
+                return;
+            }
+            self.files += 1;
+            let Ok(bytes) = fs::read(&path) else {
+                continue;
+            };
+            if bytes.iter().take(1024).any(|&byte| byte == 0) {
+                continue;
+            }
+            let Ok(text) = String::from_utf8(bytes) else {
+                continue;
+            };
+            let relative = path.strip_prefix(self.root).unwrap_or(&path).to_path_buf();
 
-        for (index, line) in text.lines().enumerate() {
-            if let Some(col) = match_line(line, query, needle) {
-                results.hits.push(TextHit {
-                    path: relative.clone(),
-                    line: index as u32 + 1,
-                    col: col as u32,
-                    preview: line.trim_start().chars().take(200).collect(),
-                });
-                if results.hits.len() >= limit {
-                    results.truncated = true;
-                    return;
+            for (index, line) in text.lines().enumerate() {
+                if let Some(col) = match_line(line, self.query, self.needle) {
+                    self.results.hits.push(TextHit {
+                        path: relative.clone(),
+                        line: index as u32 + 1,
+                        col: col as u32,
+                        preview: line.trim_start().chars().take(200).collect(),
+                    });
+                    if self.results.hits.len() >= self.limit {
+                        self.results.truncated = true;
+                        return;
+                    }
                 }
             }
         }

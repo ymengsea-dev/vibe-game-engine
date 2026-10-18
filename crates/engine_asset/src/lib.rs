@@ -47,5 +47,5 @@ pub use gltf_import::{
     import_gltf_slice, import_gltf_slice_with,
 };
 pub use hot_reload::AssetWatcher;
-pub use meta::{AssetMeta, ImportCache, hash_bytes};
+pub use meta::{AssetMeta, AssetMetadataStore, ImportCache, hash_bytes};
 pub use texture_import::{ImportedTexture, generate_mip_chain, import_texture_bytes};

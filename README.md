@@ -40,6 +40,30 @@ cargo run -p player -- path/to/export-dir   # Run an exported game folder
 
 The player expects `main.ron` plus either `assets.pak` or a loose `assets/` directory. The Island project is a sample and acceptance target, not required to use the engine.
 
+## Create, run, and export a project
+
+1. Start Studio with `cargo run -p editor`.
+2. Choose **File > New Project…**, enter a project name, then choose its parent location. Studio creates `<location>/<project-name>` with `src/`, `assets/`, `scenes/`, and `project.ron`.
+3. Build a scene, add assets, then use the toolbar Play control to run the selected configuration.
+4. Choose **File > Build & Export…** and select an empty export directory to stage a distributable game folder.
+
+## Island sample
+
+Run the included third-person sample with:
+
+```sh
+cargo run -p island
+```
+
+Use WASD to move, hold the left mouse button and drag to orbit the camera, and press Escape for the pause menu. After changing Island's procedural generators, regenerate its checked-in assets with:
+
+```sh
+cargo run -p island --bin bake
+```
+
+See the [Island developer guide](games/island/README.md) for the showcase
+route, project layout, Studio workflow, and focused verification commands.
+
 ## Workspace layout
 
 ```text

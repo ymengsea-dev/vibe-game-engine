@@ -240,6 +240,25 @@ pub struct Project {
 }
 
 impl Project {
+    /// Scaffolds a fresh project in a directory that does not yet exist.
+    ///
+    /// Unlike [`Project::create`], this reserves the project root before
+    /// writing any project files. It is for user-selected destinations,
+    /// where replacing an intervening directory would risk data loss.
+    pub fn create_new(
+        root: impl Into<PathBuf>,
+        name: impl Into<String>,
+    ) -> Result<Self, ProjectError> {
+        let root = absolute_root(root.into());
+        match std::fs::create_dir(&root) {
+            Ok(()) => Self::create(root, name),
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(ProjectError::AlreadyExists(root))
+            }
+            Err(source) => Err(ProjectError::Io { path: root, source }),
+        }
+    }
+
     /// Scaffolds a fresh project at `root`: creates `src/`, `assets/`,
     /// `scenes/`, and `.studio/`, writes `project.ron`, drops a
     /// `src/.gitkeep`, and writes an empty `scenes/main.ron`.
@@ -543,6 +562,24 @@ mod tests {
         Project::create(&root, "One").expect("first create");
         let err = Project::create(&root, "Two").expect_err("second create must fail");
         assert!(matches!(err, ProjectError::AlreadyExists(_)));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn create_new_refuses_an_existing_directory_without_touching_it() {
+        let root = temp_root("existing-directory");
+        std::fs::create_dir_all(&root).expect("existing directory");
+        let sentinel = root.join("keep.txt");
+        std::fs::write(&sentinel, "keep").expect("sentinel");
+
+        let err = Project::create_new(&root, "Demo").expect_err("existing root is rejected");
+        assert!(matches!(err, ProjectError::AlreadyExists(_)));
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).expect("sentinel survives"),
+            "keep"
+        );
+        assert!(!root.join(MANIFEST_FILE).exists());
+
         cleanup(&root);
     }
 

@@ -4,6 +4,7 @@
 use glam::Mat4;
 use wgpu::util::DeviceExt;
 
+use crate::bounds::Frustum;
 use crate::camera::CameraUniform;
 use crate::gpu::GpuContext;
 use crate::light::LightsUniform;
@@ -21,6 +22,7 @@ use crate::texture::Texture;
 pub(crate) const PBR_COMMON_SOURCE: &str = include_str!("shaders/pbr_common.wgsl");
 const PBR_VS_SOURCE: &str = include_str!("shaders/pbr_vs.wgsl");
 const SHADOW_SHADER_SOURCE: &str = include_str!("shaders/shadow.wgsl");
+const INSTANCED_SHADOW_SHADER_SOURCE: &str = include_str!("shaders/instanced_shadow.wgsl");
 const SKYBOX_SHADER_SOURCE: &str = include_str!("shaders/skybox.wgsl");
 const DEBUG_LINE_SHADER_SOURCE: &str = include_str!("shaders/debug_line.wgsl");
 const SHADOW_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -43,6 +45,22 @@ pub(crate) fn opaque_depth_state() -> wgpu::DepthStencilState {
         depth_compare: Some(wgpu::CompareFunction::Less),
         stencil: wgpu::StencilState::default(),
         bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::INSTANCED_SHADOW_SHADER_SOURCE;
+
+    #[test]
+    fn instanced_shadow_shader_uses_the_instance_matrix_layout() {
+        for location in 3..=6 {
+            assert!(
+                INSTANCED_SHADOW_SHADER_SOURCE.contains(&format!("@location({location})")),
+                "instance matrix column {location} is missing"
+            );
+        }
+        assert!(INSTANCED_SHADOW_SHADER_SOURCE.contains("shadow.light_space_matrix * model"));
     }
 }
 
@@ -136,6 +154,10 @@ impl Pipeline {
         &self.material_bind_group_layout
     }
 
+    pub(crate) fn model_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.model_bind_group_layout
+    }
+
     /// The lights (`@group(3)`) bind group layout — reused unchanged by
     /// [`crate::SkinnedPipeline`].
     pub(crate) fn lights_layout(&self) -> &wgpu::BindGroupLayout {
@@ -193,7 +215,7 @@ pub struct ModelBinding {
     /// update it (e.g. once per frame, from an entity's current
     /// `Transform`) via [`GpuContext::write_uniform_buffer`].
     pub buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    pub(crate) bind_group: wgpu::BindGroup,
 }
 
 /// The scene's lights uniform buffer, its shadow map's texture/sampler/
@@ -216,6 +238,7 @@ pub struct LightsBinding {
 /// unmodified in both passes.
 pub struct ShadowPipeline {
     render_pipeline: wgpu::RenderPipeline,
+    instanced_render_pipeline: wgpu::RenderPipeline,
     light_bind_group_layout: wgpu::BindGroupLayout,
 }
 
@@ -230,6 +253,15 @@ pub struct ShadowMap {
     /// via [`GpuContext::write_uniform_buffer`].
     pub buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
+    light_frustum: Frustum,
+}
+
+impl ShadowMap {
+    /// Directional-light volume matching the matrix currently bound to the
+    /// shadow pass. ECS uses it to cull casters independently of the camera.
+    pub fn light_frustum(&self) -> &Frustum {
+        &self.light_frustum
+    }
 }
 
 /// A pipeline that draws a procedural sky as a full-screen triangle, no
@@ -389,7 +421,6 @@ impl GpuContext {
                 format!("{PBR_COMMON_SOURCE}\n{PBR_VS_SOURCE}").into(),
             ),
         });
-
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("camera bind group layout"),
@@ -793,6 +824,10 @@ impl GpuContext {
             label: Some(&format!("{label} shader")),
             source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER_SOURCE.into()),
         });
+        let instanced_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(&format!("{label} instanced shader")),
+            source: wgpu::ShaderSource::Wgsl(INSTANCED_SHADOW_SHADER_SOURCE.into()),
+        });
 
         let light_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -858,8 +893,54 @@ impl GpuContext {
             cache: None,
         });
 
+        let instanced_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(&format!("{label} instanced layout")),
+                bind_group_layouts: &[
+                    Some(&light_bind_group_layout),
+                    Some(&pipeline.material_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
+        let instanced_render_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(&format!("{label} instanced")),
+                layout: Some(&instanced_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &instanced_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[Some(Vertex::layout()), Some(crate::InstanceRaw::layout())],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &instanced_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Front),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: SHADOW_DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 2,
+                        slope_scale: 2.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
         ShadowPipeline {
             render_pipeline,
+            instanced_render_pipeline,
             light_bind_group_layout,
         }
     }
@@ -918,7 +999,14 @@ impl GpuContext {
             sampler,
             buffer,
             light_bind_group,
+            light_frustum: Frustum::from_view_projection(&light_space_matrix),
         }
+    }
+
+    /// Updates the shadow matrix and its CPU culling volume together.
+    pub fn update_shadow_map(&self, shadow_map: &mut ShadowMap, light_space_matrix: Mat4) {
+        self.write_uniform_buffer(&shadow_map.buffer, &ShadowUniform::from(light_space_matrix));
+        shadow_map.light_frustum = Frustum::from_view_projection(&light_space_matrix);
     }
 
     /// Compiles `skybox.wgsl` into a [`SkyboxPipeline`] targeting this
@@ -1209,6 +1297,7 @@ impl GpuContext {
         lights: &LightsBinding,
         drawables: &[Drawable<'_>],
         shadow_casters: &[Drawable<'_>],
+        instanced_shadow_casters: &[crate::InstancedDrawable<'_>],
         transparent: &[Drawable<'_>],
         skinned_pipeline: &crate::SkinnedPipeline,
         skinned_drawables: &[crate::SkinnedDrawable<'_>],
@@ -1222,6 +1311,7 @@ impl GpuContext {
             &crate::WindBinding,
             &[crate::InstancedDrawable<'_>],
         )>,
+        water: Option<crate::WaterFrame<'_>>,
         ui: Option<(&crate::UiPipeline, &[crate::UiQuad])>,
     ) -> Result<(), crate::error::RendererError> {
         let Some(surface_texture) = self.acquire_frame() else {
@@ -1245,6 +1335,7 @@ impl GpuContext {
             lights,
             drawables,
             shadow_casters,
+            instanced_shadow_casters,
             transparent,
             skinned_pipeline,
             skinned_drawables,
@@ -1254,6 +1345,7 @@ impl GpuContext {
             sprites,
             particles,
             vegetation,
+            water,
             ui,
         )?;
 
@@ -1295,6 +1387,7 @@ impl GpuContext {
         lights: &LightsBinding,
         drawables: &[Drawable<'_>],
         shadow_casters: &[Drawable<'_>],
+        instanced_shadow_casters: &[crate::InstancedDrawable<'_>],
         transparent: &[Drawable<'_>],
         skinned_pipeline: &crate::SkinnedPipeline,
         skinned_drawables: &[crate::SkinnedDrawable<'_>],
@@ -1308,6 +1401,7 @@ impl GpuContext {
             &crate::WindBinding,
             &[crate::InstancedDrawable<'_>],
         )>,
+        water: Option<crate::WaterFrame<'_>>,
         ui: Option<(&crate::UiPipeline, &[crate::UiQuad])>,
     ) -> Result<(), crate::error::RendererError> {
         let mut encoder = self
@@ -1385,6 +1479,24 @@ impl GpuContext {
                     wgpu::IndexFormat::Uint32,
                 );
                 shadow_pass.draw_indexed(0..drawable.mesh.index_count, 0, 0..1);
+            }
+            if !instanced_shadow_casters.is_empty() {
+                shadow_pass.set_pipeline(&shadow_pipeline.instanced_render_pipeline);
+                shadow_pass.set_bind_group(0, &shadow_map.light_bind_group, &[]);
+                for drawable in instanced_shadow_casters {
+                    shadow_pass.set_bind_group(1, &drawable.material.bind_group, &[]);
+                    shadow_pass.set_vertex_buffer(0, drawable.mesh.vertex_buffer.slice(..));
+                    shadow_pass.set_vertex_buffer(1, drawable.instance_buffer.buffer.slice(..));
+                    shadow_pass.set_index_buffer(
+                        drawable.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    shadow_pass.draw_indexed(
+                        0..drawable.mesh.index_count,
+                        0,
+                        0..drawable.instance_count,
+                    );
+                }
             }
         });
 
@@ -1470,8 +1582,7 @@ impl GpuContext {
 
             // Instanced geometry: one draw call per mesh/material group,
             // the model matrix coming from the instance-step buffer at
-            // vertex slot 1. Same camera/lights; no `@group(2)`. Also no
-            // shadow-map contribution yet.
+            // vertex slot 1. Same camera/lights; no `@group(2)`.
             if !instanced_drawables.is_empty() {
                 render_pass.set_pipeline(&instanced_pipeline.render_pipeline);
                 render_pass.set_bind_group(0, &camera.bind_group, &[]);
@@ -1518,6 +1629,21 @@ impl GpuContext {
                         0,
                         0..vegetation_drawable.instance_count,
                     );
+                }
+            }
+
+            if let Some(frame) = water {
+                render_pass.set_pipeline(&frame.pipeline.pipeline);
+                render_pass.set_bind_group(0, &camera.bind_group, &[]);
+                for draw in frame.draws {
+                    render_pass.set_bind_group(1, &draw.binding.bind_group, &[]);
+                    render_pass.set_bind_group(2, &draw.binding.model.bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, frame.pipeline.mesh.vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(
+                        frame.pipeline.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    render_pass.draw_indexed(0..frame.pipeline.mesh.index_count, 0, 0..1);
                 }
             }
 
