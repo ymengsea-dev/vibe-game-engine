@@ -197,6 +197,12 @@ impl EditorShell {
 
             #[cfg(not(feature = "dock-shell"))]
             {
+            state.code_panel_rect = None;
+            state.code_panel_visible = false;
+            state.code_panel_resizing = false;
+            match shell_layout(state.workspace) {
+                ShellLayout::Code => show_code_workspace(ui, viewport, state),
+                ShellLayout::Scene | ShellLayout::Auxiliary => {
             // Panel claim order builds the reference layout (see
             // `Dev Documents/prototype.png`):
             //
@@ -390,7 +396,7 @@ impl EditorShell {
             }
 
             egui::CentralPanel::default().show(ui, |ui| {
-                scene_view_tabs(ui);
+                scene_view_toolbar(ui, state);
                 ui.separator();
                 egui::CollapsingHeader::new("Terrain & Vegetation Tools")
                     .default_open(false)
@@ -442,7 +448,9 @@ impl EditorShell {
                     state.dragging_axis.is_some(),
                 ));
             });
+                }
             }
+	            }
 
             unsaved_changes_modal(ui, state);
             new_project_modal(ui, state, &mut self.new_project);
@@ -1109,29 +1117,20 @@ fn menu_help(ui: &mut egui::Ui) {
 
 // --- Toolbar / status bar ------------------------------------------------
 
-/// The toolbar row: play/pause/stop, workspace switcher, gizmo mode,
-/// transform space, and (right-aligned) the build configuration.
+/// The shared toolbar row: play/stop, Scene/Code switcher, and build
+/// configuration. Scene-specific controls live above the viewport.
 fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.horizontal(|ui| {
         let playing = state.play.is_playing();
-        if ui
-            .button(if playing { "⏹ Stop" } else { "▶ Play" })
-            .clicked()
-        {
-            if playing {
-                state.play.stop(&mut state.world);
-                state.selected_entity = None;
-            } else {
+        if !playing {
+            if ui.button("▶ Play").clicked() {
                 state.play.start(&mut state.world);
             }
-        }
-        if playing {
-            ui.add_enabled(false, egui::Button::new("⏸ Pause"))
-                .on_disabled_hover_text(
-                    "Play runs the project in a separate process; pause needs a runtime protocol",
-                );
         } else {
-            ui.add_enabled(false, egui::Button::new("⏸ Pause"));
+            if ui.button("⏹ Stop").clicked() {
+                state.play.stop(&mut state.world);
+                state.selected_entity = None;
+            }
         }
         if playing {
             let (tint, text) = match state.play.mode() {
@@ -1145,34 +1144,14 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
         }
 
         ui.separator();
-        for workspace in Workspace::ALL {
+        for workspace in Workspace::PRIMARY {
             if ui
-                .selectable_label(state.workspace == workspace, workspace.label())
+                .selectable_label(state.workspace == workspace, workspace.primary_label())
                 .clicked()
             {
                 state.set_workspace(workspace);
             }
         }
-
-        ui.separator();
-        for dimension in crate::chrome::EditorDimension::ALL {
-            ui.selectable_value(&mut state.dimension, dimension, dimension.label());
-        }
-
-        ui.separator();
-        ui.label("Gizmo:");
-        for mode in GizmoMode::ALL {
-            ui.selectable_value(&mut state.gizmo_mode, mode, mode.label());
-        }
-
-        ui.separator();
-        egui::ComboBox::from_id_salt("studio_transform_space")
-            .selected_text(state.transform_space.label())
-            .show_ui(ui, |ui| {
-                for space in TransformSpace::ALL {
-                    ui.selectable_value(&mut state.transform_space, space, space.label());
-                }
-            });
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // The project's own configurations, by name — not a fixed
@@ -1351,6 +1330,78 @@ fn code_panel_body(ui: &mut egui::Ui, close: &mut bool) {
     ui.allocate_space(ui.available_size());
 }
 
+/// Code mode: project Explorer, Monaco, rendered editor viewport, and output.
+#[cfg_attr(feature = "dock-shell", allow(dead_code))]
+fn show_code_workspace(ui: &mut egui::Ui, viewport: &Viewport, state: &mut EditorState) {
+    let mut console_open = state.panels.console;
+    egui::Panel::bottom("code_console_panel")
+        .resizable(true)
+        .default_size(190.0)
+        .show_collapsible(ui, &mut console_open, |ui| bottom_tabs_panel(ui, state));
+    state.panels.console = console_open;
+
+    let mut explorer_open = state.panels.asset_browser;
+    egui::Panel::left("code_explorer_panel")
+        .resizable(true)
+        .default_size(250.0)
+        .min_size(170.0)
+        .show_collapsible(ui, &mut explorer_open, |ui| {
+            ui.heading("Explorer");
+            ui.separator();
+            assets::show(
+                ui,
+                &state.assets,
+                state.importer.stats(),
+                &mut state.asset_browser,
+                &mut state.selected_asset,
+                &mut state.file_open_request,
+            );
+        });
+    state.panels.asset_browser = explorer_open;
+
+    egui::Panel::right("code_viewport_panel")
+        .resizable(true)
+        .default_size(300.0)
+        .min_size(220.0)
+        .show(ui, |ui| {
+            ui.heading("Viewport");
+            ui.separator();
+            let (width, height) = viewport.size();
+            ui.add(
+                egui::Image::new((
+                    viewport.texture_id(),
+                    egui::vec2(width as f32, height as f32),
+                ))
+                .max_size(ui.available_size()),
+            );
+        });
+
+    let mut close_code = false;
+    let code_shown = egui::CentralPanel::default().show(ui, |ui| {
+        if state.panels.code {
+            code_panel_body(ui, &mut close_code);
+        } else {
+            ui.weak("The Code panel is hidden. Reopen it from Window.");
+        }
+    });
+    state.panels.code &= !close_code;
+    state.code_panel_rect = state.panels.code.then(|| {
+        let rect = code_shown.response.rect;
+        let top = rect.min.y + CODE_HEADER_HEIGHT;
+        [rect.min.x, top, rect.width(), (rect.max.y - top).max(1.0)]
+    });
+    state.code_panel_visible = state.code_panel_rect.is_some() && state.pending_action.is_none();
+    state.prev_code_panel_rect = state.code_panel_rect;
+
+    if state.panels.code
+        && ui.input(|input| {
+            (input.modifiers.command || input.modifiers.ctrl) && input.key_pressed(egui::Key::S)
+        })
+    {
+        state.code_save_requested = true;
+    }
+}
+
 /// Bounded chat surface shared by the stable and docked shells. Provider
 /// transport is intentionally injected by a later host layer; composing and
 /// rendering a transcript never performs network I/O.
@@ -1395,14 +1446,50 @@ fn ai_panel(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.weak("No provider is configured; queued prompts wait for a provider.");
 }
 
-/// The Scene panel's tab strip (Scene / Game / Shaded). Display-only
-/// placeholders — only the editor Scene view is implemented, so the
-/// other tabs are disabled and there is nothing to switch to yet.
-fn scene_view_tabs(ui: &mut egui::Ui) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "dock-shell", allow(dead_code))]
+enum ShellLayout {
+    Scene,
+    Code,
+    Auxiliary,
+}
+
+#[cfg_attr(feature = "dock-shell", allow(dead_code))]
+fn shell_layout(workspace: Workspace) -> ShellLayout {
+    match workspace {
+        Workspace::World => ShellLayout::Scene,
+        Workspace::Code => ShellLayout::Code,
+        Workspace::Ai | Workspace::Debug => ShellLayout::Auxiliary,
+    }
+}
+
+/// The Scene viewport header exposes only controls backed by the editor.
+fn scene_view_toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.horizontal(|ui| {
-        let _ = ui.selectable_label(true, "Scene");
-        ui.add_enabled(false, egui::Button::new("Game").frame(false));
-        ui.add_enabled(false, egui::Button::new("Shaded").frame(false));
+        ui.strong("Scene");
+        ui.separator();
+        for mode in GizmoMode::ALL {
+            ui.selectable_value(&mut state.gizmo_mode, mode, mode.label());
+        }
+        ui.separator();
+        for dimension in crate::chrome::EditorDimension::ALL {
+            ui.selectable_value(&mut state.dimension, dimension, dimension.label());
+        }
+        egui::ComboBox::from_id_salt("studio_transform_space")
+            .selected_text(state.transform_space.label())
+            .show_ui(ui, |ui| {
+                for space in TransformSpace::ALL {
+                    ui.selectable_value(&mut state.transform_space, space, space.label());
+                }
+            });
+        ui.menu_button("Overlays", |ui| {
+            ui.checkbox(&mut state.overlays.colliders, "Colliders");
+            ui.checkbox(&mut state.overlays.lights, "Lights");
+            ui.checkbox(&mut state.overlays.cameras, "Cameras");
+            ui.checkbox(&mut state.overlays.grid, "Ground grid");
+            ui.checkbox(&mut state.overlays.audio, "Audio emitters");
+            ui.checkbox(&mut state.overlays.nav, "Nav grid");
+        });
     });
 }
 
@@ -1443,7 +1530,7 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
                 &mut self.state.hierarchy,
             ),
             dock::Tab::Scene => {
-                scene_view_tabs(ui);
+                scene_view_toolbar(ui, self.state);
                 ui.separator();
                 let (width, height) = self.viewport.size();
                 let response = ui
@@ -1600,7 +1687,16 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
 
 #[cfg(test)]
 mod ui_tests {
-    use super::scene_cursor_icon;
+    use super::{ShellLayout, scene_cursor_icon, shell_layout};
+    use crate::chrome::Workspace;
+
+    #[test]
+    fn primary_toolbar_maps_to_only_scene_and_code_layouts() {
+        assert_eq!(shell_layout(Workspace::World), ShellLayout::Scene);
+        assert_eq!(shell_layout(Workspace::Code), ShellLayout::Code);
+        assert_eq!(shell_layout(Workspace::Ai), ShellLayout::Auxiliary);
+        assert_eq!(shell_layout(Workspace::Debug), ShellLayout::Auxiliary);
+    }
 
     #[test]
     fn scene_is_neutral_until_a_gizmo_drag_is_active() {

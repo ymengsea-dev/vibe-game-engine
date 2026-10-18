@@ -43,10 +43,10 @@ fn install_style(ctx: &Context) {
                 TextStyle::Heading,
                 FontId::new(16.0, FontFamily::Proportional),
             ),
-            (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
+            (TextStyle::Body, FontId::new(12.5, FontFamily::Proportional)),
             (
                 TextStyle::Button,
-                FontId::new(13.5, FontFamily::Proportional),
+                FontId::new(12.5, FontFamily::Proportional),
             ),
             (
                 TextStyle::Small,
@@ -58,9 +58,9 @@ fn install_style(ctx: &Context) {
             ),
         ]
         .into();
-        style.spacing.item_spacing = egui::vec2(7.0, 5.0);
-        style.spacing.button_padding = egui::vec2(7.0, 3.0);
-        style.spacing.interact_size.y = 26.0;
+        style.spacing.item_spacing = egui::vec2(5.0, 4.0);
+        style.spacing.button_padding = egui::vec2(6.0, 3.0);
+        style.spacing.interact_size.y = 24.0;
         style.visuals.panel_fill = egui::Color32::from_rgb(22, 25, 31);
         style.visuals.window_fill = egui::Color32::from_rgb(28, 32, 39);
         style.visuals.faint_bg_color = egui::Color32::from_rgb(33, 38, 47);
@@ -84,9 +84,10 @@ mod tests {
         install_style(&ctx);
         let style = ctx.style_of(egui::Theme::Dark);
         let body = &style.text_styles[&TextStyle::Body];
-        assert_eq!(body.size, 13.5);
+        assert_eq!(body.size, 12.5);
         assert_eq!(body.family, FontFamily::Proportional);
-        assert_eq!(style.spacing.item_spacing, egui::vec2(7.0, 5.0));
+        assert_eq!(style.spacing.item_spacing, egui::vec2(5.0, 4.0));
+        assert_eq!(style.spacing.interact_size.y, 24.0);
     }
 
     #[test]
