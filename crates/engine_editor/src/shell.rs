@@ -171,7 +171,6 @@ impl EditorShell {
                     menu_edit(ui, state);
                     menu_assets(ui, state);
                     menu_gameobject(ui, state);
-                    menu_component(ui);
                     menu_view(ui, state);
                     menu_tools(ui);
                     menu_window(ui, state);
@@ -188,15 +187,8 @@ impl EditorShell {
                     status_bar(ui, state);
                 });
             #[cfg(feature = "dock-shell")]
-            {
-                state.code_panel_rect = None;
-                state.code_panel_visible = false;
-                let mut viewer = StudioDockViewer { state, viewport };
-                self.dock.show(ui, &mut viewer);
-            }
+            let _ = &mut self.dock;
 
-            #[cfg(not(feature = "dock-shell"))]
-            {
             state.code_panel_rect = None;
             state.code_panel_visible = false;
             state.code_panel_resizing = false;
@@ -450,8 +442,6 @@ impl EditorShell {
             });
                 }
             }
-	            }
-
             unsaved_changes_modal(ui, state);
             new_project_modal(ui, state, &mut self.new_project);
         });
@@ -1043,13 +1033,6 @@ fn menu_gameobject(ui: &mut egui::Ui, state: &mut EditorState) {
     });
 }
 
-/// Component menu: add-component, pending the component registry.
-fn menu_component(ui: &mut egui::Ui) {
-    ui.menu_button("Component", |ui| {
-        ui.add_enabled(false, egui::Button::new("Add Component…"));
-    });
-}
-
 /// Tools menu: placeholder until studio tooling lands.
 /// View menu: the Scene-view debug overlays, one checkbox each.
 ///
@@ -1494,6 +1477,7 @@ fn scene_view_toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
 }
 
 #[cfg(feature = "dock-shell")]
+#[allow(dead_code)]
 struct StudioDockViewer<'a> {
     state: &'a mut EditorState,
     viewport: &'a Viewport,
