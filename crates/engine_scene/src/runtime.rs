@@ -10,7 +10,7 @@
 //! ## Two pieces
 //!
 //! [`AssetLibrary`] answers *where* — it walks a project's `assets/`
-//! folder, reads the `.meta` sidecars, and maps each asset id to its
+//! folder, reads central or legacy `.meta` records, and maps each asset id to its
 //! file. [`RuntimeResolver`] answers *what* — it implements
 //! [`crate::SceneResolver`] by importing that file and uploading it,
 //! caching uploads so a scene placing one model 110 times pays for one.
@@ -26,8 +26,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use engine_asset::{
-    AssetId, AssetMeta, Bundle, ImportedGltf, ImportedMaterial, import_gltf_file,
-    import_gltf_slice_with, import_texture_bytes,
+    AssetId, AssetMeta, AssetMetadataStore, Bundle, ImportedGltf, ImportedMaterial,
+    import_gltf_file, import_gltf_slice_with, import_texture_bytes,
 };
 use engine_ecs::components::MeshRenderer;
 use engine_renderer::{
@@ -48,11 +48,10 @@ enum AssetStore {
     Bundle(Box<Bundle>),
 }
 
-/// Every asset in a project, indexed by the stable id in its `.meta`
-/// sidecar.
+/// Every asset in a project, indexed by the stable id in its `.meta` record.
 ///
 /// Built once at load and then read-only: a game asks for an id and gets
-/// bytes. Sidecars are only *read* here, never created — a shipped game
+/// bytes. Metadata is only *read* here, never created — a shipped game
 /// must not write into its own installation directory just by starting.
 ///
 /// ## Loose files and packed bundles
@@ -69,13 +68,13 @@ pub struct AssetLibrary {
 }
 
 impl AssetLibrary {
-    /// Walks `assets_dir` and indexes every asset that has a `.meta`
-    /// sidecar.
+    /// Walks `assets_dir` and indexes assets with central `.studio/assets`
+    /// metadata or a legacy adjacent `.meta` sidecar.
     ///
-    /// A file with no sidecar is skipped rather than rejected: it is
+    /// A file with no metadata is skipped rather than rejected: it is
     /// simply not referenceable by id yet (nothing has imported it), and
     /// a stray `notes.txt` in an assets folder must not stop a game from
-    /// starting. A malformed sidecar is logged and skipped for the same
+    /// starting. A malformed record is logged and skipped for the same
     /// reason.
     ///
     /// # Errors
@@ -89,6 +88,11 @@ impl AssetLibrary {
             )));
         }
 
+        let metadata_root = assets_dir.parent().map_or_else(
+            || PathBuf::from(".studio/assets"),
+            |project| project.join(".studio/assets"),
+        );
+        let metadata = AssetMetadataStore::new(assets_dir, metadata_root);
         let mut by_id = HashMap::new();
         let mut stack = vec![assets_dir.to_path_buf()];
         while let Some(dir) = stack.pop() {
@@ -100,24 +104,32 @@ impl AssetLibrary {
                     stack.push(path);
                     continue;
                 }
-                // Sidecars name their asset; assets are found through
-                // them, so a file without one is simply not indexed.
                 if path
                     .extension()
-                    .is_none_or(|ext| ext != AssetMeta::EXTENSION)
+                    .is_some_and(|ext| ext == AssetMeta::EXTENSION)
                 {
                     continue;
                 }
-                let asset_path = path.with_extension("");
-                let Ok(relative) = asset_path.strip_prefix(assets_dir) else {
+                let Ok(relative) = path.strip_prefix(assets_dir) else {
                     continue;
                 };
-                match read_meta_id(&path) {
+                let Ok(central) = metadata.metadata_path(&path) else {
+                    continue;
+                };
+                let sidecar = if central.is_file() {
+                    central
+                } else {
+                    AssetMeta::sidecar_path(&path)
+                };
+                if !sidecar.is_file() {
+                    continue;
+                }
+                match read_meta_id(&sidecar) {
                     Some(id) => {
                         by_id.insert(id, relative.to_string_lossy().replace('\\', "/"));
                     }
                     None => tracing::warn!(
-                        path = %path.display(),
+                        path = %sidecar.display(),
                         "skipping unreadable .meta sidecar"
                     ),
                 }
@@ -809,6 +821,37 @@ mod tests {
         assert!(path.ends_with("models/tree.gltf"));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn index_finds_assets_with_central_project_metadata() {
+        let project = temp_project("central-index");
+        let assets = project.join("assets");
+        let model = assets.join("models/character.gltf");
+        let metadata = project.join(".studio/assets/models/character.gltf.meta");
+        std::fs::create_dir_all(model.parent().expect("model parent")).expect("model directory");
+        std::fs::create_dir_all(metadata.parent().expect("metadata parent"))
+            .expect("metadata directory");
+        std::fs::write(&model, b"character model").expect("model");
+        std::fs::write(
+            &metadata,
+            "(id: \"f2672902-8436-4652-a937-b8eaf99f3091\", source_hash: 0)",
+        )
+        .expect("metadata");
+
+        let library = AssetLibrary::index(&assets).expect("index");
+        assert_eq!(
+            library.id_for_path("models/character.gltf"),
+            Some("f2672902-8436-4652-a937-b8eaf99f3091")
+        );
+        assert_eq!(
+            library
+                .read("f2672902-8436-4652-a937-b8eaf99f3091")
+                .expect("read indexed model"),
+            Some(b"character model".to_vec())
+        );
+
+        let _ = std::fs::remove_dir_all(&project);
     }
 
     #[test]

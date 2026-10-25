@@ -205,6 +205,9 @@ pub struct EditorState {
     /// `[min_x, min_y, width, height]`, written every frame. The editor
     /// binary scales this to physical pixels to position the webview.
     pub code_panel_rect: Option<[f32; 4]>,
+    /// Render-target size requested by the visible viewport panel this
+    /// frame, in physical pixels. The host applies it after presenting.
+    pub viewport_size_request: Option<(u32, u32)>,
     /// Whether the code-editor webview should be shown this frame — false
     /// when the Code panel is hidden or a modal is open (egui can't draw
     /// over a native view).
@@ -232,7 +235,7 @@ pub struct EditorState {
     pub terminal: Option<crate::terminal::Terminal>,
     /// The hierarchy panel's search text and in-progress inline rename.
     pub hierarchy: HierarchyState,
-    /// The Search tab's query, results, and pending jump.
+    /// Project search query, results, and pending jump.
     pub search: crate::search::SearchState,
     /// A component type name whose "Open Script" button was clicked in
     /// the Inspector; the host resolves it to a source location and
@@ -338,6 +341,7 @@ impl EditorState {
             problem_jump: None,
             problem_selected: None,
             code_panel_rect: None,
+            viewport_size_request: None,
             code_panel_visible: false,
             prev_code_panel_rect: None,
             code_panel_resizing: false,
@@ -436,6 +440,11 @@ impl EditorState {
         // The import cache is keyed by path, and paths from the old
         // project mean nothing here.
         self.assets = Vec::new();
+        let view = self.asset_browser.view;
+        let preview_open = self.asset_browser.preview_open;
+        self.asset_browser = AssetBrowser::default();
+        self.asset_browser.view = view;
+        self.asset_browser.preview_open = preview_open;
         self.asset_index = AssetIndex::new();
         self.importer = AssetImporter::new();
         self.selected_asset = None;
@@ -685,10 +694,10 @@ impl EditorState {
     /// Re-points every [`AssetSource`] in the world at the current path
     /// for its stable id (via [`EditorState::asset_index`]), and
     /// backfills a missing id from the path. Called right after loading a
-    /// scene so a reference to a renamed/moved asset still points at the
-    /// right file. Marks the scene dirty when it changes anything, so a
+    /// scene or after an asset move so a reference to a renamed/moved asset
+    /// still points at the right file. Marks the scene dirty when it changes anything, so a
     /// save persists the healed reference.
-    fn heal_asset_sources(&mut self) {
+    pub fn heal_asset_sources(&mut self) {
         let mut healed = 0u32;
         let mut query = self.world.query::<&mut AssetSource>();
         for mut source in query.iter_mut(&mut self.world) {
@@ -933,6 +942,15 @@ mod tests {
             id: None,
         });
         state.selected_asset = Some(PathBuf::from("old.png"));
+        state.asset_browser.folders.push(PathBuf::from("old"));
+        state.asset_browser.target_dir = PathBuf::from("old");
+        state.asset_browser.new_folder = Some("draft".to_owned());
+        state.asset_browser.new_folder_request = Some(PathBuf::from("old/draft"));
+        state.asset_browser.drop_position = Some((10, 20));
+        state.asset_browser.operation_request = Some(crate::AssetOperation::Delete {
+            path: PathBuf::from("old.png"),
+        });
+        state.asset_browser.operation_error = Some("old project error".to_owned());
         state.dirty.mark_scene();
         state.pending_action = Some(PendingAction::Quit);
 
@@ -955,6 +973,13 @@ mod tests {
             "asset list belonged to the old project"
         );
         assert!(state.selected_asset.is_none());
+        assert!(state.asset_browser.folders.is_empty());
+        assert!(state.asset_browser.target_dir.as_os_str().is_empty());
+        assert!(state.asset_browser.new_folder.is_none());
+        assert!(state.asset_browser.new_folder_request.is_none());
+        assert!(state.asset_browser.drop_position.is_none());
+        assert!(state.asset_browser.operation_request.is_none());
+        assert!(state.asset_browser.operation_error.is_none());
         assert!(!state.history.can_undo(), "undo must not cross projects");
         assert!(
             !state.dirty.any(),

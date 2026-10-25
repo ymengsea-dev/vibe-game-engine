@@ -4,59 +4,72 @@
   <meta charset="utf-8" />
   <title>RustyEngine Studio — Code</title>
   <style>
-    html, body { margin: 0; height: 100%; overflow: hidden; background: #1e1e1e;
-      font-family: -apple-system, "Segoe UI", system-ui, sans-serif; color: #ccc; }
+    @font-face { font-family: 'Roboto'; src: url('monaco://localhost/fonts/Roboto-Variable.ttf') format('truetype'); font-weight: 400; }
+    :root { --explorer-width: 205px; --panel: #151d29; --raised: #1b2533; --hover: #233044;
+      --border: #2b3b50; --border-soft: #253346; --text: #e4eaf3; --muted: #91a0b4; --accent: #83b5ff; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--panel);
+      font-family: 'Roboto', system-ui, sans-serif; font-weight: 400; color: var(--text); }
 
-    #tabs { position: absolute; top: 0; left: 0; right: 0; height: 30px;
-      display: flex; align-items: stretch; background: #252526;
-      border-bottom: 1px solid #333; font-size: 12px; overflow-x: auto; }
-    .tab { display: flex; align-items: center; gap: 6px; padding: 0 8px 0 12px;
-      border-right: 1px solid #333; white-space: nowrap; cursor: pointer; color: #bbb; }
-    .tab.active { background: #1e1e1e; color: #fff; }
-    .tab.drop-before { box-shadow: inset 2px 0 0 #4a9eff; }
-    .tab .dot { width: 7px; height: 7px; border-radius: 50%; background: #e6b45a; visibility: hidden; }
+    #tabs { position: absolute; top: 0; left: var(--explorer-width); right: 0; height: 34px;
+      display: flex; align-items: stretch; background: #111a27;
+      border-bottom: 1px solid var(--border-soft); font-size: 12px; overflow-x: auto; }
+    .tab { display: flex; align-items: center; gap: 7px; padding: 0 14px;
+      border-right: 1px solid var(--border-soft); white-space: nowrap; cursor: pointer; color: var(--muted); }
+    .tab.active { background: #192434; color: var(--text); box-shadow: inset 0 -1px var(--accent); }
+    .tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
+    .tab .dot { width: 7px; height: 7px; border-radius: 50%; background: #e1bc7d; visibility: hidden; }
     .tab.dirty .dot { visibility: visible; }
     .tab .close { width: 16px; height: 16px; line-height: 16px; text-align: center;
-      border-radius: 3px; color: #888; visibility: hidden; font-size: 14px; }
+      border-radius: 4px; color: var(--muted); visibility: hidden; font-size: 14px; }
     .tab:hover .close, .tab.active .close { visibility: visible; }
-    .tab.dirty .close { visibility: visible; color: #e6b45a; }
-    .tab .close:hover { background: #444; color: #fff; }
+    .tab.dirty .close { visibility: visible; color: #e1bc7d; }
+    .tab .close:hover { background: var(--hover); color: var(--text); }
 
-    #body { position: absolute; top: 30px; left: 0; right: 0; bottom: 0; display: flex; }
+    #body { position: absolute; top: 34px; left: var(--explorer-width); right: 0; bottom: 0; display: flex; }
 
-    #files { width: 190px; flex: 0 0 190px; background: #202020;
-      border-right: 1px solid #333; overflow: auto; font-size: 12px;
-      padding: 6px 0; user-select: none; }
-    #files .title { padding: 2px 10px 6px; color: #888; text-transform: uppercase;
-      letter-spacing: .04em; font-size: 10px; }
-    #files .row { padding: 2px 10px; white-space: nowrap; cursor: default; }
-    #files .row.dir { color: #9aa; cursor: pointer; }
-    #files .row.dir:hover { background: #2a2d2e; }
-    #files .row.dir.target { background: #2f3b46; color: #cfe3f0; }
-    #files .actions { display: flex; gap: 4px; padding: 0 8px 6px; }
-    #files .actions button { flex: 1 1 auto; background: #2d2d2d; color: #bbb;
-      border: 1px solid #3a3a3a; border-radius: 3px; font-size: 10px;
-      padding: 2px 0; cursor: pointer; font-family: inherit; }
-    #files .actions button:hover { background: #383838; color: #fff; }
-    #files input.new { width: calc(100% - 24px); margin: 2px 10px; background: #1e1e1e;
-      border: 1px solid #4a9eff; border-radius: 2px; color: #eee;
+    #files { position: absolute; top: 0; bottom: 0; left: 0; width: var(--explorer-width); background: #131d29;
+      border-right: 1px solid var(--border-soft); overflow: auto; font-size: 12px;
+      padding: 10px 6px; box-sizing: border-box; user-select: none; }
+    #files .title { padding: 0 9px 8px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: .04em; font-size: 11px; }
+    #files .search { display: block; width: calc(100% - 12px); margin: 0 6px 8px;
+      padding: 6px 8px; box-sizing: border-box; background: #101824;
+      border: 1px solid var(--border-soft); border-radius: 6px; color: var(--text); font: inherit; }
+    #files .row { min-height: 27px; padding: 5px 9px; border-radius: 5px; box-sizing: border-box;
+      white-space: nowrap; cursor: default; }
+    #files .row.dir { color: #a9bed6; cursor: pointer; }
+    #files .row.dir:hover { background: var(--hover); }
+    #files .row.dir.target { background: #284b7d; color: var(--text); }
+    #files .actions { display: flex; gap: 4px; padding: 0 6px 6px; }
+    #files .actions button { flex: 1 1 auto; background: var(--raised); color: var(--muted);
+      border: 1px solid var(--border); border-radius: 5px; font-size: 10px;
+      padding: 3px 0; cursor: pointer; font-family: inherit; font-weight: 400; }
+    #files .actions button:hover { background: var(--hover); color: var(--text); }
+    #files input.new { width: calc(100% - 24px); margin: 2px 10px; background: #111b28;
+      border: 1px solid var(--accent); border-radius: 5px; color: var(--text);
       font-family: inherit; font-size: 12px; padding: 1px 4px; }
-    #files .row.file { color: #cfcfcf; cursor: pointer; }
-    #files .row.file:hover { background: #2a2d2e; }
-    #files .row.file.active { background: #37373d; color: #fff; }
+    #files .row.file { color: var(--muted); cursor: pointer; }
+    #files .row.file:hover { background: var(--hover); }
+    #files .row.file.active { background: #284b7d; color: var(--text); }
 
     #editor { flex: 1 1 auto; min-width: 0; }
+    #explorer-resize { position: absolute; top: 0; bottom: 0; left: calc(var(--explorer-width) - 4px);
+      width: 8px; z-index: 5; cursor: col-resize; touch-action: none; }
+    #explorer-resize:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   </style>
 </head>
 <body>
+  <div id="files"><div class="title">Files</div></div>
   <div id="tabs"></div>
   <div id="body">
-    <div id="files"><div class="title">Files</div></div>
     <div id="editor"></div>
   </div>
+  <div id="explorer-resize" role="separator" aria-label="Resize file explorer" aria-orientation="vertical" tabindex="0"></div>
 
+  <script src="monaco://localhost/layout.js"></script>
   <script src="monaco://localhost/vs/loader.js"></script>
   <script>
+    StudioLayout.installExplorerSplitter(document.getElementById('explorer-resize'));
     // No web workers — single-threaded is fine for highlighting + editing.
     self.MonacoEnvironment = {
       getWorker: function () {
@@ -78,6 +91,14 @@
 
     require.config({ paths: { vs: 'monaco://localhost/vs' } });
     require(['vs/editor/editor.main'], function () {
+      monaco.editor.defineTheme('vge-dark', {
+        base: 'vs-dark', inherit: true, rules: [],
+        colors: {
+          'editor.background': '#111a27', 'editorGutter.background': '#111a27',
+          'editor.foreground': '#bdc9d9', 'editorLineNumber.foreground': '#536279',
+          'editor.lineHighlightBackground': '#192434', 'editor.selectionBackground': '#284b7d'
+        }
+      });
       var editor = monaco.editor.create(document.getElementById('editor'), {
         value: [
           '// RustyEngine Studio',
@@ -86,8 +107,10 @@
           '// Ctrl/Cmd+S saves the active file.',
           ''
         ].join('\n'),
-        language: 'rust', theme: 'vs-dark',
-        automaticLayout: true, fontSize: 13, minimap: { enabled: true },
+        language: 'rust', theme: 'vge-dark',
+        automaticLayout: true, fontSize: 12, lineHeight: 20,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        minimap: { enabled: false },
         readOnly: true, scrollBeyondLastLine: false
       });
       var showingWelcome = true;
@@ -98,6 +121,7 @@
       var current = null;  // absolute path of the active model
       var dragPath = null; // tab being dragged, during a reorder
       var tree = { label: 'src', root: '', files: [] };
+      var fileQuery = '';
 
       // Absolute path for a tree-relative entry, and the reverse.
       function absOf(rel) { return tree.root ? (tree.root + '/' + rel) : rel; }
@@ -300,6 +324,13 @@
         title.onclick = function () { targetDir = ''; pendingCreate = null; renderFiles(); };
         box.appendChild(title);
 
+        var search = document.createElement('input');
+        search.className = 'search';
+        search.placeholder = 'Search files…';
+        search.value = fileQuery;
+        search.oninput = function () { fileQuery = search.value; renderFileList(); };
+        box.appendChild(search);
+
         var actions = document.createElement('div');
         actions.className = 'actions';
         actions.appendChild(actionButton('+ File', 'New file in the selected folder',
@@ -308,7 +339,26 @@
           function () { startCreate('folder'); }));
         box.appendChild(actions);
 
-        renderNode(box, groupFiles(tree.files), '', 0);
+        var list = document.createElement('div');
+        list.id = 'file-list';
+        box.appendChild(list);
+        renderFileList();
+      }
+
+      function renderFileList() {
+        var list = document.getElementById('file-list');
+        list.textContent = '';
+        var query = fileQuery.trim().toLowerCase();
+        var files = query ? tree.files.filter(function (path) {
+          return path.toLowerCase().indexOf(query) !== -1;
+        }) : tree.files;
+        if (query && !files.length) {
+          var empty = document.createElement('div');
+          empty.className = 'row';
+          empty.textContent = 'No matching files.';
+          list.appendChild(empty);
+        }
+        renderNode(list, groupFiles(files), '', 0);
       }
 
       // Open a tree-relative file: focus its tab if already loaded, else

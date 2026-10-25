@@ -1,14 +1,11 @@
-//! Project-wide search: the bottom panel's **Search** tab.
+//! Project-wide text and symbol search data and queries.
 //!
 //! Two modes. *Text* is a literal substring scan over the project's
 //! source files ([`run_text_search`], pure and testable — the walk skips
 //! `target/`, VCS, and binary-looking files). *Symbols* forwards the
-//! query to rust-analyzer's `workspace/symbol` and lists what comes
-//! back; the host owns that round-trip and drops the results into
+//! query to rust-analyzer's `workspace/symbol`; the host owns that
+//! round-trip and drops the results into
 //! [`SearchState::symbol_results`].
-//!
-//! Clicking a result sets [`SearchState::jump`]; the host opens the file
-//! and reveals the location (reusing the code editor's `reveal`).
 //!
 //! Text search reports **one hit per matching line** (the first match on
 //! it), like `grep` without `-o` — enough to navigate to the line.
@@ -26,15 +23,14 @@ const SKIP_DIRS: [&str; 3] = ["target", ".git", ".studio"];
 /// cycles (the walk follows symlinks, so this is the only cycle guard).
 const MAX_SEARCH_DEPTH: u32 = 24;
 
-/// Hard cap on text hits per search — the panel shows a "truncated" note
-/// when it's reached.
+/// Hard cap on text hits per search.
 pub const MAX_TEXT_HITS: usize = 1000;
 /// Largest individual source file scanned by literal search.
 const MAX_SEARCH_FILE_BYTES: u64 = 512 * 1024;
 /// Maximum source files inspected by one literal search.
 const MAX_SEARCH_FILES: usize = 4096;
 
-/// Which kind of search the Search tab is showing.
+/// Which kind of project search is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchMode {
     /// Literal substring over source files.
@@ -107,8 +103,7 @@ pub struct Jump {
     pub col: u32,
 }
 
-/// Everything the Search tab reads and writes. On [`EditorState`]
-/// (`state.search`).
+/// Project search state on [`EditorState`] (`state.search`).
 ///
 /// [`EditorState`]: crate::EditorState
 #[derive(Debug, Clone, Default)]
@@ -293,121 +288,6 @@ fn word_bounded(text: &str, start: usize, end: usize) -> bool {
     let before_ok = start == 0 || !text[..start].chars().next_back().is_some_and(is_word);
     let after_ok = end >= text.len() || !text[end..].chars().next().is_some_and(is_word);
     before_ok && after_ok
-}
-
-/// Draws the Search tab. Sets [`SearchState::run_text_requested`] /
-/// [`SearchState::symbol_query_dirty`] on submit and
-/// [`SearchState::jump`] on a result click — the host acts on those.
-pub fn show(ui: &mut egui::Ui, state: &mut SearchState) {
-    ui.horizontal(|ui| {
-        ui.selectable_value(&mut state.mode, SearchMode::Text, "Text");
-        ui.selectable_value(&mut state.mode, SearchMode::Symbols, "Symbols");
-    });
-
-    let text_mode = state.mode == SearchMode::Text;
-    let submit = ui
-        .horizontal(|ui| {
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut state.query.text)
-                    .hint_text("Search project…")
-                    .desired_width(240.0),
-            );
-            let entered = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let clicked = ui.button("Search").clicked();
-            if text_mode {
-                ui.checkbox(&mut state.query.case_sensitive, "Aa")
-                    .on_hover_text("Match case");
-                ui.checkbox(&mut state.query.whole_word, "W")
-                    .on_hover_text("Whole word");
-            } else if response.changed() {
-                state.symbol_query_dirty = true;
-            }
-            entered || clicked
-        })
-        .inner;
-
-    if submit {
-        if text_mode {
-            state.run_text_requested = true;
-        } else {
-            state.symbol_query_dirty = true;
-        }
-    }
-
-    ui.separator();
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if text_mode {
-                show_text_results(ui, state);
-            } else {
-                show_symbol_results(ui, state);
-            }
-        });
-}
-
-fn show_text_results(ui: &mut egui::Ui, state: &mut SearchState) {
-    let results = &state.text_results;
-    ui.horizontal(|ui| {
-        ui.label(format!("{} results", results.hits.len()));
-        if results.truncated {
-            ui.weak(format!("(showing the first {MAX_TEXT_HITS})"));
-        }
-    });
-    if results.hits.is_empty() {
-        ui.weak("No matches. Type a query and press Enter.");
-        return;
-    }
-
-    let mut jump = None;
-    let mut current_file: Option<&Path> = None;
-    for hit in &results.hits {
-        if current_file != Some(hit.path.as_path()) {
-            current_file = Some(hit.path.as_path());
-            ui.add_space(4.0);
-            ui.strong(hit.path.display().to_string());
-        }
-        let label = format!("{:>5}  {}", hit.line, hit.preview);
-        if ui.selectable_label(false, label).clicked() {
-            jump = Some(Jump {
-                path: hit.path.clone(),
-                line: hit.line,
-                col: hit.col,
-            });
-        }
-    }
-    if jump.is_some() {
-        state.jump = jump;
-    }
-}
-
-fn show_symbol_results(ui: &mut egui::Ui, state: &mut SearchState) {
-    ui.label(format!("{} symbols", state.symbol_results.len()));
-    if state.symbol_results.is_empty() {
-        ui.weak("No symbols. Type a name (rust-analyzer must be running).");
-        return;
-    }
-
-    let mut jump = None;
-    for symbol in &state.symbol_results {
-        let mut label = format!("{:<8} {}", symbol_kind_label(symbol.kind), symbol.name);
-        if let Some(container) = &symbol.container
-            && !container.is_empty()
-        {
-            label.push_str(&format!("   ({container})"));
-        }
-        label.push_str(&format!("   {}", symbol.path.display()));
-        if ui.selectable_label(false, label).clicked() {
-            jump = Some(Jump {
-                path: symbol.path.clone(),
-                line: symbol.line,
-                col: symbol.col,
-            });
-        }
-    }
-    if jump.is_some() {
-        state.jump = jump;
-    }
 }
 
 #[cfg(test)]

@@ -26,7 +26,7 @@ mod meta;
 mod texture_import;
 
 pub use audio_import::{ImportedAudio, import_wav_bytes};
-pub use bundle::{BUNDLE_MAGIC, Bundle, BundleStats, pack_dir};
+pub use bundle::{BUNDLE_MAGIC, Bundle, BundleStats, pack_dir, pack_dir_with_metadata};
 /// Re-exported from `engine_utils`, where it lives alongside
 /// [`engine_utils::AssetHandle`]/[`engine_utils::AssetStore`] so that
 /// crate (which sits below both this one and `engine_renderer`) can be the

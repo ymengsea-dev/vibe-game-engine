@@ -19,6 +19,7 @@
 //! Bundle files are untrusted input — every parse step is bounds-checked
 //! and returns [`AssetError::Bundle`] rather than panicking.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -100,6 +101,46 @@ fn collect_files(
 pub fn pack_dir(src_dir: &Path, out_path: &Path) -> Result<BundleStats, AssetError> {
     let mut files = Vec::new();
     collect_files(src_dir, src_dir, &mut files)?;
+    pack_files(files, out_path)
+}
+
+/// Packs assets with their centrally stored project metadata as virtual
+/// adjacent `.meta` entries, while still accepting legacy sidecars.
+/// Metadata for missing assets is not shipped.
+///
+/// # Errors
+///
+/// [`AssetError::Bundle`] if either directory cannot be read or the archive
+/// cannot be written.
+pub fn pack_dir_with_metadata(
+    src_dir: &Path,
+    metadata_dir: &Path,
+    out_path: &Path,
+) -> Result<BundleStats, AssetError> {
+    let mut files = Vec::new();
+    collect_files(src_dir, src_dir, &mut files)?;
+    if metadata_dir.is_dir() {
+        let assets: HashSet<String> = files.iter().map(|(key, _)| key.clone()).collect();
+        let mut records = Vec::new();
+        collect_files(metadata_dir, metadata_dir, &mut records)?;
+        for (key, path) in records {
+            if key
+                .strip_suffix(".meta")
+                .is_some_and(|asset| assets.contains(asset))
+            {
+                files.retain(|(existing, _)| existing != &key);
+                files.push((key, path));
+            }
+        }
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+    }
+    pack_files(files, out_path)
+}
+
+fn pack_files(
+    mut files: Vec<(String, PathBuf)>,
+    out_path: &Path,
+) -> Result<BundleStats, AssetError> {
     let output = out_path.canonicalize().ok();
     files.retain(|(_, path)| path.canonicalize().ok().as_ref() != output.as_ref());
 
@@ -356,6 +397,29 @@ mod tests {
         assert_eq!(paths, vec!["empty.bin", "scene.ron", "textures/brick.png"]);
 
         std::fs::remove_dir_all(&src).ok();
+    }
+
+    #[test]
+    fn project_pack_prefers_central_metadata_and_skips_orphans() {
+        let project = temp_dir("central-metadata");
+        let assets = project.join("assets");
+        let metadata = project.join(".studio/assets");
+        std::fs::create_dir_all(assets.join("models")).unwrap();
+        std::fs::create_dir_all(metadata.join("models")).unwrap();
+        std::fs::write(assets.join("models/hero.gltf"), b"model").unwrap();
+        std::fs::write(assets.join("models/hero.gltf.meta"), b"old id").unwrap();
+        std::fs::write(metadata.join("models/hero.gltf.meta"), b"stable id").unwrap();
+        std::fs::write(metadata.join("models/deleted.gltf.meta"), b"orphan").unwrap();
+
+        let pak = project.join("assets.pak");
+        let stats = pack_dir_with_metadata(&assets, &metadata, &pak).unwrap();
+        let bundle = Bundle::open(&pak).unwrap();
+        assert_eq!(stats.files, 2);
+        assert_eq!(bundle.get("models/hero.gltf"), Some(&b"model"[..]));
+        assert_eq!(bundle.get("models/hero.gltf.meta"), Some(&b"stable id"[..]));
+        assert_eq!(bundle.get("models/deleted.gltf.meta"), None);
+
+        std::fs::remove_dir_all(project).ok();
     }
 
     #[test]

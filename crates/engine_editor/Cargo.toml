@@ -19,6 +19,8 @@ bytemuck.workspace = true
 glam.workspace = true
 thiserror.workspace = true
 engine_asset.workspace = true
+engine_audio.workspace = true
+kira.workspace = true
 editor_ai.workspace = true
 editor_tools.workspace = true
 engine_ecs.workspace = true
@@ -43,6 +45,7 @@ alacritty_terminal = { workspace = true, optional = true }
 # Encode a real PNG for the asset-import tests; test-only, never linked
 # into the editor or a shipped game.
 image.workspace = true
+ab_glyph.workspace = true
 
 [features]
 terminal = ["dep:portable-pty", "dep:alacritty_terminal"]

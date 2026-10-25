@@ -14,6 +14,10 @@
 //! panel), AI Assistant (placeholder), Console/Problems/Output,
 //! Profiler, and the central Scene panel.
 
+#[cfg(target_os = "macos")]
+mod mac_app;
+#[cfg(target_os = "macos")]
+mod native_menu;
 mod play_process;
 
 use std::collections::{HashMap, HashSet};
@@ -429,8 +433,7 @@ fn sync_code_editor(
         }
     }
 
-    // Search tab: run a text search, fire a symbol query, or jump to a
-    // clicked result.
+    // Process project-search requests and pending jumps.
     if std::mem::take(&mut state.search.run_text_requested) {
         let root = state.project.root().to_path_buf();
         state.search.text_results =
@@ -477,8 +480,11 @@ fn handle_prefab_request(state: &mut EditorState) {
     let assets_dir = state.project.assets_dir();
     match engine::editor::write_prefab(&state.world, entity, &assets_dir) {
         Ok(path) => {
-            match scan_assets(&assets_dir) {
-                Ok(assets) => state.assets = assets,
+            match engine_editor::scan_assets_with_folders(&assets_dir) {
+                Ok((assets, folders)) => {
+                    state.assets = assets;
+                    state.asset_browser.folders = folders;
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, "asset rescan after prefab save failed");
                 }
@@ -504,21 +510,43 @@ fn is_meta_path(path: &Path) -> bool {
 /// The directory an import writes into: the Asset Browser's target
 /// folder, or the assets root if the target has gone missing or does not
 /// resolve inside the project.
-fn import_destination(state: &EditorState) -> PathBuf {
-    let assets_dir = state.project.assets_dir();
+fn import_destination(state: &EditorState) -> Option<PathBuf> {
+    let Ok(assets_dir) = state.project.resolve(Path::new(ASSETS_DIR)) else {
+        tracing::warn!("asset root escapes the project; refusing the import");
+        return None;
+    };
     let target = &state.asset_browser.target_dir;
     if target.as_os_str().is_empty() {
-        return assets_dir;
+        return Some(assets_dir);
     }
     let Ok(absolute) = state.project.resolve(&Path::new(ASSETS_DIR).join(target)) else {
         tracing::warn!(target = %target.display(), "import target escapes the project; using the assets root");
-        return assets_dir;
+        return Some(assets_dir);
     };
     if absolute.is_dir() {
-        absolute
+        Some(absolute)
     } else {
         tracing::warn!(target = %target.display(), "import target no longer exists; using the assets root");
-        assets_dir
+        Some(assets_dir)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_drop_position(window: &Window) -> Option<(i32, i32)> {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
+    let cursor = CGEvent::new(source).ok()?.location();
+    let scale = window.scale_factor();
+    let origin = window.inner_position().ok()?.to_logical::<f64>(scale);
+    let size = window.inner_size().to_logical::<f64>(scale);
+    let x = cursor.x - origin.x;
+    let y = cursor.y - origin.y;
+    if (0.0..size.width).contains(&x) && (0.0..size.height).contains(&y) {
+        Some((x.round() as i32, y.round() as i32))
+    } else {
+        None
     }
 }
 
@@ -528,23 +556,414 @@ fn import_destination(state: &EditorState) -> PathBuf {
 /// `relative` is typed by the user, so it is checked against the project
 /// root before anything is created; a name that escapes, or a path that
 /// already exists, is a warning and nothing else.
-fn create_asset_folder(state: &mut EditorState, relative: &Path) {
+fn create_asset_folder(state: &mut EditorState, relative: &Path) -> bool {
     let inside_project = Path::new(ASSETS_DIR).join(relative);
     let Ok(absolute) = state.project.resolve(&inside_project) else {
         tracing::warn!(path = %relative.display(), "refused to create a folder outside the project");
-        return;
+        return false;
     };
     if absolute.exists() {
         tracing::warn!(path = %absolute.display(), "not creating: something is already there");
-        return;
+        return false;
     }
     match std::fs::create_dir_all(&absolute) {
         Ok(()) => {
             tracing::info!(path = %absolute.display(), "created asset folder");
             state.asset_browser.target_dir = relative.to_path_buf();
+            true
         }
         Err(err) => {
             tracing::warn!(error = %err, path = %absolute.display(), "could not create asset folder");
+            false
+        }
+    }
+}
+
+fn asset_operation_path(project: &Project, relative: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+
+    if relative.as_os_str().is_empty()
+        || !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        || relative
+            .components()
+            .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
+        || is_meta_path(relative)
+    {
+        return Err(format!("invalid asset path: {}", relative.display()));
+    }
+    project
+        .resolve(&Path::new(ASSETS_DIR).join(relative))
+        .map_err(|err| err.to_string())
+}
+
+fn asset_metadata_path(
+    project: &Project,
+    relative: &Path,
+    is_dir: bool,
+) -> Result<PathBuf, String> {
+    let relative = Path::new(".studio/assets").join(relative);
+    let relative = if is_dir {
+        relative
+    } else {
+        engine::asset::AssetMeta::sidecar_path(&relative)
+    };
+    project.resolve(&relative).map_err(|err| err.to_string())
+}
+
+fn asset_path_exists(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Relocates a source and its stable-ID metadata together. Never replaces a
+/// destination; if a metadata rename fails, restore the source path.
+fn relocate_asset(project: &Project, from: &Path, to: &Path) -> Result<(), String> {
+    let source = asset_operation_path(project, from)?;
+    let destination = asset_operation_path(project, to)?;
+    let metadata = std::fs::symlink_metadata(&source).map_err(|err| err.to_string())?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err("symlinked assets cannot be moved".to_owned());
+    }
+    if from == to || (metadata.is_dir() && to.starts_with(from)) {
+        return Err("cannot move a folder into itself".to_owned());
+    }
+    if asset_path_exists(&destination)? {
+        return Err(format!(
+            "An item named {} already exists in that folder.",
+            to.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
+    if !destination.parent().is_some_and(Path::is_dir) {
+        return Err("destination folder does not exist".to_owned());
+    }
+
+    let old_meta = asset_metadata_path(project, from, metadata.is_dir())?;
+    let new_meta = asset_metadata_path(project, to, metadata.is_dir())?;
+    let has_meta = asset_path_exists(&old_meta)?;
+    if asset_path_exists(&new_meta)? {
+        return Err("destination metadata already exists".to_owned());
+    }
+    if has_meta && let Some(parent) = new_meta.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let old_legacy = engine::asset::AssetMeta::sidecar_path(&source);
+    let new_legacy = engine::asset::AssetMeta::sidecar_path(&destination);
+    let has_legacy = metadata.is_file() && asset_path_exists(&old_legacy)?;
+    if metadata.is_file() && asset_path_exists(&new_legacy)? {
+        return Err("destination sidecar already exists".to_owned());
+    }
+
+    std::fs::rename(&source, &destination).map_err(|err| err.to_string())?;
+    if has_meta && let Err(err) = std::fs::rename(&old_meta, &new_meta) {
+        let rollback = std::fs::rename(&destination, &source);
+        return Err(format!(
+            "could not move asset metadata: {err}; source rollback: {rollback:?}"
+        ));
+    }
+    if has_legacy && let Err(err) = std::fs::rename(&old_legacy, &new_legacy) {
+        let meta_rollback = if has_meta {
+            std::fs::rename(&new_meta, &old_meta)
+        } else {
+            Ok(())
+        };
+        let source_rollback = std::fs::rename(&destination, &source);
+        return Err(format!(
+            "could not move legacy sidecar: {err}; metadata rollback: {meta_rollback:?}; source rollback: {source_rollback:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn copy_asset_file(source: &Path, destination: &Path) -> Result<(), String> {
+    let mut input = std::fs::File::open(source).map_err(|err| err.to_string())?;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|err| err.to_string())?;
+    std::io::copy(&mut input, &mut output).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn copy_asset_tree_contents(source: &Path, destination: &Path, depth: u32) -> Result<(), String> {
+    if depth >= 32 {
+        return Err("Folder is too deeply nested to copy".to_owned());
+    }
+    for entry in std::fs::read_dir(source).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        if is_meta_path(&path) {
+            continue;
+        }
+        let destination = destination.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&path).map_err(|err| err.to_string())?;
+        if metadata.is_dir() {
+            std::fs::create_dir(&destination).map_err(|err| err.to_string())?;
+            copy_asset_tree_contents(&path, &destination, depth + 1)?;
+        } else if metadata.is_file() {
+            copy_asset_file(&path, &destination)?;
+        } else {
+            return Err("Cannot copy a folder containing symlinks or special files".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Copies visible assets without their stable-ID metadata; the next import pass
+/// gives the duplicate its own IDs. A partial destination is removed on error.
+fn copy_asset(project: &Project, from: &Path, into: &Path) -> Result<PathBuf, String> {
+    let source = asset_operation_path(project, from)?;
+    let metadata = std::fs::symlink_metadata(&source).map_err(|err| err.to_string())?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err("Symlinked assets cannot be copied".to_owned());
+    }
+    if metadata.is_dir() && (into == from || into.starts_with(from)) {
+        return Err("Cannot copy a folder into itself".to_owned());
+    }
+    let name = from.file_name().ok_or("Asset has no file name")?;
+    let requested = asset_operation_path(project, &into.join(name))?;
+    let parent = requested
+        .parent()
+        .ok_or("Destination has no parent folder")?;
+    if !parent.is_dir() {
+        return Err("Destination folder does not exist".to_owned());
+    }
+    let destination = engine_editor::unique_destination(parent, Path::new(name))
+        .ok_or("Could not find a free asset name")?;
+    if asset_path_exists(&destination)? {
+        return Err("Destination already exists".to_owned());
+    }
+    let relative = destination
+        .strip_prefix(project.assets_dir())
+        .map_err(|err| err.to_string())?
+        .to_path_buf();
+    let central = asset_metadata_path(project, &relative, metadata.is_dir())?;
+    if asset_path_exists(&central)?
+        || (metadata.is_file()
+            && asset_path_exists(&engine::asset::AssetMeta::sidecar_path(&destination))?)
+    {
+        return Err("Destination metadata already exists".to_owned());
+    }
+    if metadata.is_dir() {
+        std::fs::create_dir(&destination).map_err(|err| err.to_string())?;
+        if let Err(error) = copy_asset_tree_contents(&source, &destination, 0) {
+            let cleanup = std::fs::remove_dir_all(&destination);
+            return Err(format!("{error}; cleanup: {cleanup:?}"));
+        }
+    } else {
+        let mut input = std::fs::File::open(&source).map_err(|err| err.to_string())?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .map_err(|err| err.to_string())?;
+        if let Err(error) = std::io::copy(&mut input, &mut output) {
+            let cleanup = std::fs::remove_file(&destination);
+            return Err(format!("{error}; cleanup: {cleanup:?}"));
+        }
+    }
+    Ok(relative)
+}
+
+fn delete_asset(project: &Project, relative: &Path) -> Result<(), String> {
+    let source = asset_operation_path(project, relative)?;
+    let metadata = std::fs::symlink_metadata(&source).map_err(|err| err.to_string())?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err("symlinked assets cannot be deleted from the browser".to_owned());
+    }
+    let central = asset_metadata_path(project, relative, metadata.is_dir())?;
+    let legacy = engine::asset::AssetMeta::sidecar_path(&source);
+    let sidecars: &[&Path] = if metadata.is_dir() {
+        &[&central]
+    } else {
+        &[&central, &legacy]
+    };
+    for sidecar in sidecars {
+        match std::fs::symlink_metadata(sidecar) {
+            Ok(info)
+                if (metadata.is_dir() && info.is_dir())
+                    || (metadata.is_file() && info.is_file()) => {}
+            Ok(_) => return Err(format!("unexpected metadata type: {}", sidecar.display())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(&source).map_err(|err| err.to_string())?;
+        if asset_path_exists(&central)? {
+            std::fs::remove_dir_all(&central).map_err(|err| err.to_string())?;
+        }
+    } else {
+        std::fs::remove_file(&source).map_err(|err| err.to_string())?;
+        for sidecar in [central, legacy] {
+            if asset_path_exists(&sidecar)? {
+                std::fs::remove_file(&sidecar).map_err(|err| err.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reveal_asset(project: &Project, relative: &Path) -> Result<(), String> {
+    let path = asset_operation_path(project, relative)?;
+    let metadata = std::fs::symlink_metadata(&path).map_err(|err| err.to_string())?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err("Symlinked assets cannot be revealed".to_owned());
+    }
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .arg("-R")
+        .arg(&path)
+        .status();
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .status();
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("xdg-open")
+        .arg(path.parent().ok_or("Asset has no parent folder")?)
+        .status();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    return Err("Reveal is unavailable on this platform".to_owned());
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    match status.map_err(|err| err.to_string())? {
+        status if status.success() => Ok(()),
+        status => Err(format!("File manager exited with {status}")),
+    }
+}
+
+fn handle_asset_reveal(state: &mut EditorState) {
+    let Some(relative) = state.asset_browser.reveal_request.take() else {
+        return;
+    };
+    if let Err(error) = reveal_asset(&state.project, &relative) {
+        tracing::warn!(path = %relative.display(), %error, "could not reveal asset");
+        state.asset_browser.operation_error = Some(error);
+    }
+}
+
+/// A move changes paths, not bytes: reuse the already-imported assets so the
+/// new tree can be painted without hashing every source file first.
+fn refresh_relocated_asset_paths(state: &mut EditorState, from: &Path, to: &Path) -> bool {
+    let listed = state.assets.iter().any(|entry| entry.relative_path == from)
+        || state
+            .asset_browser
+            .folders
+            .iter()
+            .any(|folder| folder == from);
+    if !listed {
+        return false;
+    }
+    for entry in &mut state.assets {
+        if let Ok(suffix) = entry.relative_path.strip_prefix(from) {
+            entry.relative_path = to.join(suffix);
+        }
+    }
+    state
+        .assets
+        .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    for folder in &mut state.asset_browser.folders {
+        if let Ok(suffix) = folder.strip_prefix(from) {
+            *folder = to.join(suffix);
+        }
+    }
+    state.asset_browser.folders.sort();
+    state.asset_index.relocate_paths(from, to);
+    state.importer.relocate_paths(from, to);
+    true
+}
+
+fn handle_asset_operation(state: &mut EditorState, open_docs: &HashSet<PathBuf>) {
+    use engine_editor::AssetOperation;
+
+    let Some(operation) = state.asset_browser.operation_request.take() else {
+        return;
+    };
+    let from = match &operation {
+        AssetOperation::Copy { from, .. } => from,
+        AssetOperation::Relocate { from, .. } => from,
+        AssetOperation::Delete { path } => path,
+    };
+    let source = match asset_operation_path(&state.project, from) {
+        Ok(path) => path,
+        Err(error) => {
+            state.asset_browser.operation_error = Some(error);
+            return;
+        }
+    };
+    if !matches!(operation, AssetOperation::Copy { .. })
+        && open_docs
+            .iter()
+            .any(|document| document.starts_with(&source))
+    {
+        state.asset_browser.operation_error = Some(format!(
+            "Close the open code tab before changing {}",
+            from.display()
+        ));
+        return;
+    }
+
+    let result = match &operation {
+        AssetOperation::Copy { from, into } => copy_asset(&state.project, from, into).map(Some),
+        AssetOperation::Relocate { from, to } => {
+            relocate_asset(&state.project, from, to).map(|()| Some(to.clone()))
+        }
+        AssetOperation::Delete { path } => delete_asset(&state.project, path).map(|()| None),
+    };
+    let succeeded = result.is_ok();
+    match result {
+        Ok(destination) => {
+            if matches!(operation, AssetOperation::Copy { .. }) {
+                state.selected_asset = destination;
+            } else {
+                let remap = |path: &Path| {
+                    path.strip_prefix(from)
+                        .ok()
+                        .map(|suffix| destination.as_deref().map(|to| to.join(suffix)))
+                };
+                if let Some(selected) = state.selected_asset.as_deref()
+                    && let Some(mapped) = remap(selected)
+                {
+                    state.selected_asset = mapped;
+                }
+                if let Some(requested) = state.file_open_request.as_deref()
+                    && let Some(mapped) = remap(requested)
+                {
+                    state.file_open_request = mapped;
+                }
+                if let Some(mapped) = remap(&state.asset_browser.target_dir) {
+                    state.asset_browser.target_dir = mapped
+                        .unwrap_or_else(|| from.parent().unwrap_or(Path::new("")).to_path_buf());
+                }
+            }
+            state.asset_browser.new_folder = None;
+            state.asset_browser.operation_error = None;
+            tracing::info!(source = %from.display(), "asset operation completed");
+        }
+        Err(error) => {
+            tracing::warn!(source = %from.display(), %error, "asset operation failed");
+            state.asset_browser.operation_error = Some(error);
+        }
+    }
+    if succeeded {
+        match &operation {
+            AssetOperation::Copy { .. } => {
+                rescan_assets(state);
+            }
+            AssetOperation::Relocate { from, to } => {
+                state.asset_browser.asset_moved(from, to);
+                if refresh_relocated_asset_paths(state, from, to) || rescan_assets(state) {
+                    state.heal_asset_sources();
+                }
+            }
+            AssetOperation::Delete { .. } => {
+                rescan_assets(state);
+            }
         }
     }
 }
@@ -555,17 +974,39 @@ fn create_asset_folder(state: &mut EditorState, relative: &Path) {
 /// Every path ends in the same rescan + re-import, so an asset reaches
 /// the browser identically however it arrived.
 fn handle_asset_requests(state: &mut EditorState) {
-    if let Some(relative) = state.asset_browser.new_folder_request.take() {
-        create_asset_folder(state, &relative);
-    }
+    state.asset_browser.drop_position = None;
+    let folder_created = state
+        .asset_browser
+        .new_folder_request
+        .take()
+        .is_some_and(|relative| create_asset_folder(state, &relative));
 
     let dropped = std::mem::take(&mut state.dropped_files);
+    let import_requested = std::mem::take(&mut state.import_request);
+    let explicit_rescan = std::mem::take(&mut state.rescan_request);
+    if dropped.is_empty() && !import_requested && !explicit_rescan && !folder_created {
+        return;
+    }
+    let Some(assets_dir) = import_destination(state) else {
+        return;
+    };
     let mut sources = Vec::new();
+    let mut dropped_folder = false;
     for path in dropped {
-        collect_drop_sources(&path, &mut sources, 0);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => sources.push(path),
+            Ok(metadata) if metadata.is_dir() => {
+                dropped_folder = true;
+                import_dropped_folder(&path, &assets_dir);
+            }
+            Ok(_) => tracing::warn!(path = %path.display(), "ignored a non-file drop"),
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "dropped path is no longer readable")
+            }
+        }
     }
 
-    if std::mem::take(&mut state.import_request) {
+    if import_requested {
         // Blocking, so the editor freezes while the dialog is open. That
         // is what a native file dialog does everywhere; making it async
         // would need a channel and a state machine for no visible gain.
@@ -578,8 +1019,7 @@ fn handle_asset_requests(state: &mut EditorState) {
         }
     }
 
-    let explicit_rescan = std::mem::take(&mut state.rescan_request);
-    if sources.is_empty() && !explicit_rescan {
+    if sources.is_empty() && !dropped_folder && !explicit_rescan && !folder_created {
         return;
     }
 
@@ -587,7 +1027,6 @@ fn handle_asset_requests(state: &mut EditorState) {
         // Imports land in the folder the browser is aimed at, so a
         // project can keep `textures/` and `audio/` apart instead of
         // piling everything into the assets root.
-        let assets_dir = import_destination(state);
         let outcomes = engine_editor::import_files(&assets_dir, &sources);
         let imported = outcomes.iter().filter(|o| o.succeeded()).count();
         for outcome in &outcomes {
@@ -603,47 +1042,95 @@ fn handle_asset_requests(state: &mut EditorState) {
     rescan_assets(state);
 }
 
-/// Expands a Finder drop into regular files without following symlinked
-/// directories. The depth cap prevents a malformed or cyclic drop from
-/// monopolizing the editor, and the importer still filters unsupported files.
-fn collect_drop_sources(path: &Path, out: &mut Vec<PathBuf>, depth: u32) {
+/// Copies a Finder folder as a folder under the selected asset directory.
+/// An existing name gets a suffix, and dropping an ancestor onto itself is
+/// rejected before the destination is created.
+fn import_dropped_folder(source: &Path, assets_dir: &Path) {
+    if let Err(err) = std::fs::create_dir_all(assets_dir) {
+        tracing::warn!(path = %assets_dir.display(), error = %err, "could not create asset root for dropped folder");
+        return;
+    }
+    let (Ok(source_root), Ok(target_root)) = (
+        std::fs::canonicalize(source),
+        std::fs::canonicalize(assets_dir),
+    ) else {
+        tracing::warn!(path = %source.display(), "could not resolve dropped folder or asset target");
+        return;
+    };
+    if target_root.starts_with(&source_root) {
+        tracing::warn!(path = %source.display(), "refused to drop a folder into itself");
+        return;
+    }
+    let Some(name) = source.file_name() else {
+        tracing::warn!(path = %source.display(), "dropped folder has no name");
+        return;
+    };
+    let Some(destination) = engine_editor::unique_destination(assets_dir, Path::new(name)) else {
+        tracing::warn!(path = %source.display(), "could not find a free folder name");
+        return;
+    };
+    let copied = copy_dropped_folder_tree(source, &destination, 0);
+    tracing::info!(source = %source.display(), destination = %destination.display(), copied, "asset folder import finished");
+}
+
+/// Copies every regular file in a dropped tree, but never follows symlinks
+/// or carries over `.meta` IDs from another project.
+fn copy_dropped_folder_tree(source: &Path, destination: &Path, depth: u32) -> usize {
     if depth > 32 {
-        tracing::warn!(path = %path.display(), "ignored deeply nested dropped folder");
-        return;
+        tracing::warn!(path = %source.display(), "ignored deeply nested dropped folder");
+        return 0;
     }
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        tracing::warn!(path = %path.display(), "dropped path is no longer readable");
-        return;
+    if let Err(err) = std::fs::create_dir(destination) {
+        tracing::warn!(path = %destination.display(), error = %err, "could not create dropped asset folder");
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(source) else {
+        tracing::warn!(path = %source.display(), "could not read dropped folder");
+        return 0;
     };
-    if metadata.is_file() {
-        out.push(path.to_path_buf());
-        return;
+    let mut copied = 0;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            tracing::warn!(path = %source.display(), "could not read dropped folder entry");
+            continue;
+        };
+        let path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            tracing::warn!(path = %path.display(), "could not inspect dropped folder entry");
+            continue;
+        };
+        if metadata.is_dir() {
+            copied +=
+                copy_dropped_folder_tree(&path, &destination.join(entry.file_name()), depth + 1);
+        } else if metadata.is_file() && !is_meta_path(&path) {
+            match std::fs::copy(&path, destination.join(entry.file_name())) {
+                Ok(_) => copied += 1,
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), error = %err, "could not copy dropped asset")
+                }
+            }
+        }
     }
-    if !metadata.is_dir() {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(path) else {
-        tracing::warn!(path = %path.display(), "could not read dropped folder");
-        return;
-    };
-    for entry in entries.flatten() {
-        collect_drop_sources(&entry.path(), out, depth + 1);
-    }
+    copied
 }
 
 /// Rescans the assets directory and re-runs the import pass.
 ///
 /// Shared by every path that changes what is on disk.
-fn rescan_assets(state: &mut EditorState) {
+fn rescan_assets(state: &mut EditorState) -> bool {
     let assets_dir = state.project.assets_dir();
-    match scan_assets(&assets_dir) {
-        Ok(assets) => state.assets = assets,
+    match engine_editor::scan_assets_with_folders(&assets_dir) {
+        Ok((assets, folders)) => {
+            state.assets = assets;
+            state.asset_browser.folders = folders;
+        }
         Err(err) => {
             tracing::warn!(error = %err, "asset rescan failed");
-            return;
+            return false;
         }
     }
     state.asset_index = state.importer.run(&assets_dir, &mut state.assets);
+    true
 }
 
 /// Reacts to asset source-file changes reported by the watcher: rescans
@@ -662,8 +1149,11 @@ fn handle_asset_changes(state: &mut EditorState, watcher: Option<&AssetWatcher>)
     }
 
     let assets_dir = state.project.assets_dir();
-    match scan_assets(&assets_dir) {
-        Ok(assets) => state.assets = assets,
+    match engine_editor::scan_assets_with_folders(&assets_dir) {
+        Ok((assets, folders)) => {
+            state.assets = assets;
+            state.asset_browser.folders = folders;
+        }
         Err(err) => {
             tracing::warn!(error = %err, "asset rescan after a file change failed");
             return Vec::new();
@@ -995,6 +1485,8 @@ fn to_problem(diagnostic: &LspDiagnostic, file: &Path) -> Diagnostic {
 struct EditorHandler {
     gpu: Option<GpuContext>,
     shell: Option<EditorShell>,
+    #[cfg(target_os = "macos")]
+    native_menu: Option<native_menu::NativeMenu>,
     viewport: Option<Viewport>,
     window: Option<Arc<Window>>,
     /// The Monaco code editor, or `None` if the OS webview couldn't be
@@ -1242,7 +1734,19 @@ impl PlatformHandler for EditorHandler {
             tracing::error!("editor window started without an event-loop wake handle");
             return;
         };
-        let mut shell = EditorShell::new(&window, gpu.device(), gpu.config().format, wake);
+        let mut shell = EditorShell::new(&window, gpu.device(), gpu.config().format, wake.clone());
+        #[cfg(target_os = "macos")]
+        match native_menu::NativeMenu::new(wake) {
+            Ok(mut menu) => {
+                if let Err(err) = menu.sync(&self.state) {
+                    tracing::error!(error = %err, "could not populate native menu");
+                }
+                self.native_menu = Some(menu);
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "native menu unavailable; keeping in-window menus")
+            }
+        }
         let viewport = match Viewport::new(&gpu, &mut shell, 640, 480) {
             Ok(viewport) => viewport,
             Err(err) => {
@@ -1265,7 +1769,12 @@ impl PlatformHandler for EditorHandler {
             width: 800,
             height: 200,
         };
-        match CodeEditor::new(window.as_ref(), initial) {
+        let code_wake = self.wake.clone();
+        match CodeEditor::new(window.as_ref(), initial, move || {
+            if let Some(wake) = &code_wake {
+                let _ = wake.wake();
+            }
+        }) {
             Ok(code) => self.code = Some(code),
             Err(err) => tracing::warn!(error = %err, "code editor unavailable"),
         }
@@ -1369,6 +1878,12 @@ impl PlatformHandler for EditorHandler {
                 // on with no half-drawn UI referring to a project that
                 // has already been torn down.
                 self.apply_project_request();
+                #[cfg(target_os = "macos")]
+                if let Some(menu) = &mut self.native_menu
+                    && let Err(err) = menu.sync(&self.state)
+                {
+                    tracing::error!(error = %err, "could not refresh native menu after project switch");
+                }
                 self.pump_lsp();
                 // Keep the panel layout on disk even if the process is
                 // killed (Ctrl-C on `cargo run`) instead of closed
@@ -1380,6 +1895,10 @@ impl PlatformHandler for EditorHandler {
                 // Queued rather than imported here: this runs mid-event,
                 // outside the frame that owns the asset pass.
                 self.state.dropped_files.push(path);
+                #[cfg(target_os = "macos")]
+                if let Some(window) = &self.window {
+                    self.state.asset_browser.drop_position = macos_drop_position(window);
+                }
             }
             PlatformEvent::KeyboardInput { .. }
             | PlatformEvent::MouseButtonInput { .. }
@@ -1510,6 +2029,12 @@ impl EditorHandler {
     /// code-editor sync, and the wgpu present. A no-op until
     /// [`PlatformHandler::on_window_ready`] has stood everything up.
     fn render_frame(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let (Some(menu), Some(shell)) = (&mut self.native_menu, &mut self.shell) {
+            for command in menu.drain() {
+                shell.invoke_menu_command(&mut self.state, command);
+            }
+        }
         // Before the GPU/shell borrow below: this touches all of `self`.
         self.drive_play();
         self.drive_export();
@@ -1558,7 +2083,12 @@ impl EditorHandler {
 
             let span = std::time::Instant::now();
             shell.clear_repaint_deadline();
-            let mut full_output = shell.run_frame(window, viewport, &mut self.state);
+            #[cfg(target_os = "macos")]
+            let show_window_menus = self.native_menu.is_none();
+            #[cfg(not(target_os = "macos"))]
+            let show_window_menus = true;
+            let mut full_output =
+                shell.run_frame(window, viewport, &mut self.state, show_window_menus);
             self.state.profiler.record_span("ui", span.elapsed());
 
             sync_code_editor(
@@ -1574,6 +2104,13 @@ impl EditorHandler {
             );
 
             handle_prefab_request(&mut self.state);
+            let asset_operation_requested = self.state.asset_browser.operation_request.is_some()
+                || self.state.asset_browser.reveal_request.is_some();
+            handle_asset_operation(&mut self.state, &self.open_docs);
+            handle_asset_reveal(&mut self.state);
+            if asset_operation_requested {
+                window.request_redraw();
+            }
             handle_asset_requests(&mut self.state);
 
             // Unconditional, even though the frame itself might not
@@ -1606,6 +2143,9 @@ impl EditorHandler {
 
             if let Err(err) = result {
                 tracing::error!(error = %err, "editor frame render failed");
+            }
+            if let Some((width, height)) = self.state.viewport_size_request.take() {
+                viewport.resize(gpu, shell, width, height);
             }
         }
     }
@@ -1669,7 +2209,7 @@ impl EditorHandler {
         }
     }
 
-    /// Routes one server reply: `workspace/symbol` into the Search tab,
+    /// Routes one server reply: `workspace/symbol` into project search,
     /// everything else back to the waiting Monaco provider.
     fn apply_lsp_response(&mut self, response: LspResponse) {
         if let LspPayload::WorkspaceSymbols(result) = &response.payload {
@@ -1839,6 +2379,10 @@ impl EditorHandler {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    if mac_app::relaunch_from_cargo_if_needed()? {
+        return Ok(());
+    }
     let console_log = ConsoleLog::new();
     logging::init_default_with_layer(ConsoleLayer::new(console_log.clone()))?;
 
@@ -1881,13 +2425,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new(config)?;
 
     let assets_dir = project.assets_dir();
-    let assets = match scan_assets(&assets_dir) {
-        Ok(assets) => assets,
+    let (assets, folders) = match engine_editor::scan_assets_with_folders(&assets_dir) {
+        Ok(scanned) => scanned,
         Err(err) => {
             // A missing/unreadable assets directory shouldn't stop the
             // editor from opening — the panel just shows nothing.
             tracing::warn!(error = %err, dir = %assets_dir.display(), "failed to scan assets directory");
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     };
 
@@ -1896,6 +2440,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let saved_session = session.clone();
 
     let mut state = EditorState::new(project, World::new(), assets, console_log);
+    state.asset_browser.folders = folders;
     state.apply_session(session);
     // The recent-projects list lives in the user's config, not in a
     // project — a list of projects cannot live inside one of them. The
@@ -1955,6 +2500,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             play_process: PlayProcess::default(),
             gpu: None,
             shell: None,
+            #[cfg(target_os = "macos")]
+            native_menu: None,
             viewport: None,
             window: None,
             code: None,
@@ -2187,23 +2734,617 @@ mod tests {
     }
 
     #[test]
-    fn dropped_folder_expands_to_files() {
+    fn dropped_folder_keeps_its_tree_inside_the_selected_asset_folder() {
         let root = std::env::temp_dir().join(format!(
-            "vge-drop-test-{}-{}",
+            "vge-folder-drop-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(root.join("nested")).unwrap();
-        std::fs::write(root.join("one.png"), b"x").unwrap();
-        std::fs::write(root.join("nested/two.gltf"), b"x").unwrap();
-        let mut files = Vec::new();
-        collect_drop_sources(&root, &mut files, 0);
-        files.sort();
-        assert_eq!(files.len(), 2);
-        assert!(files.iter().all(|path| path.is_file()));
+        let source = root.join("source");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("nested/picture.png"), b"image").unwrap();
+        std::fs::write(source.join("nested/notes.txt"), b"notes").unwrap();
+        let project = Project::create(root.join("project"), "Folder drop").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("audio")).unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.asset_browser.target_dir = PathBuf::from("audio");
+        state.dropped_files.push(source);
+
+        handle_asset_requests(&mut state);
+
+        let imported = state.project.assets_dir().join("audio/source/nested");
+        assert_eq!(
+            std::fs::read(imported.join("picture.png")).unwrap(),
+            b"image"
+        );
+        assert_eq!(std::fs::read(imported.join("notes.txt")).unwrap(), b"notes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dropped_folder_uses_a_new_name_instead_of_overwriting_an_existing_folder() {
+        let root = scratch_project("folder-drop-collision");
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("new.png"), b"new").unwrap();
+        let project = Project::create(root.join("project"), "Collision").unwrap();
+        let existing = project.assets_dir().join("source");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("old.png"), b"old").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.dropped_files.push(source);
+
+        handle_asset_requests(&mut state);
+
+        assert_eq!(std::fs::read(existing.join("old.png")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(state.project.assets_dir().join("source_1/new.png")).unwrap(),
+            b"new"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dropping_a_folder_into_itself_does_not_copy_it_recursively() {
+        let root = scratch_project("folder-drop-self");
+        let project = Project::create(root.join("project"), "Self drop").unwrap();
+        let source = project.assets_dir().join("nested");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("original.png"), b"original").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.asset_browser.target_dir = PathBuf::from("nested");
+        state.dropped_files.push(source.clone());
+
+        handle_asset_requests(&mut state);
+
+        assert_eq!(
+            std::fs::read(source.join("original.png")).unwrap(),
+            b"original"
+        );
+        assert!(!source.join("nested").exists());
+        assert!(!source.join("original_1.png").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dropping_an_empty_folder_preserves_it() {
+        let root = scratch_project("folder-drop-empty");
+        let source = root.join("empty");
+        std::fs::create_dir_all(&source).unwrap();
+        let project = Project::create(root.join("project"), "Empty drop").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.dropped_files.push(source);
+
+        handle_asset_requests(&mut state);
+
+        assert!(state.project.assets_dir().join("empty").is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dropping_a_folder_recreates_a_missing_assets_root() {
+        let root = scratch_project("folder-drop-missing-root");
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("picture.png"), b"image").unwrap();
+        let project = Project::create(root.join("project"), "Missing assets").unwrap();
+        std::fs::remove_dir_all(project.assets_dir()).unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.dropped_files.push(source);
+
+        handle_asset_requests(&mut state);
+
+        assert_eq!(
+            std::fs::read(state.project.assets_dir().join("source/picture.png")).unwrap(),
+            b"image"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_empty_folder_remains_in_the_tree_without_waiting_for_a_watcher() {
+        let root = scratch_project("new-empty-folder");
+        let project = Project::create(root.join("project"), "New folder").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.asset_browser.new_folder_request = Some(PathBuf::from("empty"));
+
+        handle_asset_requests(&mut state);
+        state.asset_browser.target_dir.clear();
+
+        assert!(
+            state
+                .asset_browser
+                .folders
+                .contains(&PathBuf::from("empty"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn moving_asset_file_preserves_its_central_metadata() {
+        let root = scratch_project("move-asset-metadata");
+        let project = Project::create(&root, "Move asset").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("textures")).unwrap();
+        std::fs::write(project.assets_dir().join("sprite.png"), b"image").unwrap();
+        let old_meta = root.join(".studio/assets/sprite.png.meta");
+        std::fs::create_dir_all(old_meta.parent().unwrap()).unwrap();
+        std::fs::write(&old_meta, b"stable id").unwrap();
+
+        relocate_asset(
+            &project,
+            Path::new("sprite.png"),
+            Path::new("textures/sprite.png"),
+        )
+        .unwrap();
+
+        assert!(!project.assets_dir().join("sprite.png").exists());
+        assert!(project.assets_dir().join("textures/sprite.png").exists());
+        assert!(!old_meta.exists());
+        assert_eq!(
+            std::fs::read(root.join(".studio/assets/textures/sprite.png.meta")).unwrap(),
+            b"stable id"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn renaming_folder_moves_nested_metadata_without_losing_empty_directories() {
+        let root = scratch_project("rename-asset-folder");
+        let project = Project::create(&root, "Rename folder").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("old/empty")).unwrap();
+        std::fs::write(project.assets_dir().join("old/sprite.png"), b"image").unwrap();
+        let old_meta = root.join(".studio/assets/old/sprite.png.meta");
+        std::fs::create_dir_all(old_meta.parent().unwrap()).unwrap();
+        std::fs::write(&old_meta, b"stable id").unwrap();
+
+        relocate_asset(&project, Path::new("old"), Path::new("new")).unwrap();
+
+        assert!(project.assets_dir().join("new/empty").is_dir());
+        assert!(!old_meta.exists());
+        assert_eq!(
+            std::fs::read(root.join(".studio/assets/new/sprite.png.meta")).unwrap(),
+            b"stable id"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_move_rejects_collisions_descendants_and_escaping_paths() {
+        let root = scratch_project("reject-asset-move");
+        let project = Project::create(&root, "Reject move").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("old/child")).unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("taken")).unwrap();
+
+        assert!(relocate_asset(&project, Path::new("old"), Path::new("taken")).is_err());
+        assert!(relocate_asset(&project, Path::new("old"), Path::new("old/child/old")).is_err());
+        assert!(relocate_asset(&project, Path::new("old"), Path::new("../outside")).is_err());
+        assert!(project.assets_dir().join("old/child").is_dir());
+        assert!(project.assets_dir().join("taken").is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_move_refuses_hidden_paths_the_browser_does_not_show() {
+        let root = scratch_project("reject-hidden-asset-path");
+        let project = Project::create(&root, "Hidden asset").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join(".private")).unwrap();
+        std::fs::write(project.assets_dir().join(".private/file.png"), b"image").unwrap();
+
+        assert!(
+            relocate_asset(
+                &project,
+                Path::new(".private/file.png"),
+                Path::new("file.png")
+            )
+            .is_err()
+        );
+        assert!(project.assets_dir().join(".private/file.png").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_move_does_not_reuse_orphaned_destination_metadata() {
+        let root = scratch_project("reject-orphan-metadata");
+        let project = Project::create(&root, "Orphan metadata").unwrap();
+        std::fs::write(project.assets_dir().join("source.png"), b"image").unwrap();
+        let orphan = root.join(".studio/assets/destination.png.meta");
+        std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        std::fs::write(&orphan, b"unrelated id").unwrap();
+
+        assert!(
+            relocate_asset(
+                &project,
+                Path::new("source.png"),
+                Path::new("destination.png")
+            )
+            .is_err()
+        );
+        assert!(project.assets_dir().join("source.png").exists());
+        assert_eq!(std::fs::read(orphan).unwrap(), b"unrelated id");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_move_does_not_reuse_orphaned_legacy_sidecar() {
+        let root = scratch_project("reject-orphan-legacy-sidecar");
+        let project = Project::create(&root, "Orphan legacy metadata").unwrap();
+        std::fs::write(project.assets_dir().join("source.png"), b"image").unwrap();
+        let orphan = project.assets_dir().join("destination.png.meta");
+        std::fs::write(&orphan, b"unrelated id").unwrap();
+
+        assert!(
+            relocate_asset(
+                &project,
+                Path::new("source.png"),
+                Path::new("destination.png")
+            )
+            .is_err()
+        );
+        assert!(project.assets_dir().join("source.png").exists());
+        assert_eq!(std::fs::read(orphan).unwrap(), b"unrelated id");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_move_stops_when_metadata_cannot_be_inspected() {
+        let root = scratch_project("unreadable-metadata-path");
+        let project = Project::create(&root, "Unreadable metadata").unwrap();
+        let source = project.assets_dir().join("sprite.png");
+        std::fs::write(&source, b"image").unwrap();
+        std::fs::create_dir_all(root.join(".studio")).unwrap();
+        std::fs::write(root.join(".studio/assets"), b"not a directory").unwrap();
+
+        assert!(
+            relocate_asset(&project, Path::new("sprite.png"), Path::new("renamed.png")).is_err()
+        );
+        assert!(source.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleting_asset_removes_its_central_metadata() {
+        let root = scratch_project("delete-asset-metadata");
+        let project = Project::create(&root, "Delete asset").unwrap();
+        std::fs::write(project.assets_dir().join("sprite.png"), b"image").unwrap();
+        let meta = root.join(".studio/assets/sprite.png.meta");
+        std::fs::create_dir_all(meta.parent().unwrap()).unwrap();
+        std::fs::write(&meta, b"stable id").unwrap();
+
+        delete_asset(&project, Path::new("sprite.png")).unwrap();
+
+        assert!(!project.assets_dir().join("sprite.png").exists());
+        assert!(!meta.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleting_folder_removes_its_nested_metadata() {
+        let root = scratch_project("delete-asset-folder");
+        let project = Project::create(&root, "Delete folder").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("obsolete/child")).unwrap();
+        std::fs::write(
+            project.assets_dir().join("obsolete/child/sprite.png"),
+            b"image",
+        )
+        .unwrap();
+        let meta = root.join(".studio/assets/obsolete/child/sprite.png.meta");
+        std::fs::create_dir_all(meta.parent().unwrap()).unwrap();
+        std::fs::write(&meta, b"stable id").unwrap();
+
+        delete_asset(&project, Path::new("obsolete")).unwrap();
+
+        assert!(!project.assets_dir().join("obsolete").exists());
+        assert!(!root.join(".studio/assets/obsolete").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_refuses_malformed_metadata_before_touching_the_asset() {
+        let root = scratch_project("delete-malformed-metadata");
+        let project = Project::create(&root, "Malformed metadata").unwrap();
+        let source = project.assets_dir().join("sprite.png");
+        std::fs::write(&source, b"image").unwrap();
+        std::fs::create_dir_all(root.join(".studio/assets/sprite.png.meta")).unwrap();
+
+        assert!(delete_asset(&project, Path::new("sprite.png")).is_err());
+        assert!(source.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_move_updates_browser_selection_and_import_target() {
+        let root = scratch_project("move-selected-folder");
+        let project = Project::create(&root, "Move selected").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("old/child")).unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("destination")).unwrap();
+        std::fs::write(project.assets_dir().join("old/child/picture.png"), b"image").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.selected_asset = Some(PathBuf::from("old/child/picture.png"));
+        state.asset_browser.target_dir = PathBuf::from("old/child");
+        state.asset_browser.operation_request = Some(engine_editor::AssetOperation::Relocate {
+            from: PathBuf::from("old"),
+            to: PathBuf::from("destination/old"),
+        });
+
+        handle_asset_operation(&mut state, &HashSet::new());
+
+        assert_eq!(
+            state.selected_asset,
+            Some(PathBuf::from("destination/old/child/picture.png"))
+        );
+        assert_eq!(
+            state.asset_browser.target_dir,
+            PathBuf::from("destination/old/child")
+        );
+        assert!(state.asset_browser.operation_error.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn moving_an_asset_refreshes_live_scene_references_by_stable_id() {
+        let root = scratch_project("move-live-scene-reference");
+        let project = Project::create(&root, "Live reference").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("textures")).unwrap();
+        let source = project.assets_dir().join("sprite.png");
+        std::fs::write(&source, b"image").unwrap();
+        let id = engine::asset::AssetMeta::load_or_create(&source)
+            .unwrap()
+            .id;
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        let entity = state
+            .world
+            .spawn(ecs_components::AssetSource::with_id(
+                "sprite.png",
+                id.to_string(),
+            ))
+            .id();
+        state.asset_browser.operation_request = Some(engine_editor::AssetOperation::Relocate {
+            from: PathBuf::from("sprite.png"),
+            to: PathBuf::from("textures/sprite.png"),
+        });
+
+        handle_asset_operation(&mut state, &HashSet::new());
+
+        assert_eq!(
+            state
+                .world
+                .get::<ecs_components::AssetSource>(entity)
+                .unwrap()
+                .path,
+            "textures/sprite.png"
+        );
+        assert!(state.dirty.scene());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn moving_an_asset_updates_the_browser_without_reimporting_every_asset() {
+        let root = scratch_project("move-without-reimport");
+        let project = Project::create(&root, "Quick move").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("textures")).unwrap();
+        std::fs::write(project.assets_dir().join("sprite.png"), b"image").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        assert!(rescan_assets(&mut state));
+        let import_pass = state.importer.pass_id();
+        let id = state.asset_index.id_for(Path::new("sprite.png"));
+        state.asset_browser.operation_request = Some(engine_editor::AssetOperation::Relocate {
+            from: PathBuf::from("sprite.png"),
+            to: PathBuf::from("textures/sprite.png"),
+        });
+
+        handle_asset_operation(&mut state, &HashSet::new());
+
+        assert_eq!(state.importer.pass_id(), import_pass);
+        assert!(
+            state
+                .assets
+                .iter()
+                .any(|entry| entry.relative_path == Path::new("textures/sprite.png"))
+        );
+        assert_eq!(
+            state.asset_index.id_for(Path::new("textures/sprite.png")),
+            id
+        );
+        assert_eq!(state.asset_index.id_for(Path::new("sprite.png")), None);
+        assert!(
+            state
+                .importer
+                .records()
+                .iter()
+                .any(|record| record.relative_path == Path::new("textures/sprite.png"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn moving_into_an_occupied_folder_reports_a_name_conflict_without_an_absolute_path() {
+        let root = scratch_project("move-name-conflict");
+        let project = Project::create(&root, "Name conflict").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("audio/test")).unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("test")).unwrap();
+
+        let error =
+            relocate_asset(&project, Path::new("test"), Path::new("audio/test")).unwrap_err();
+
+        assert!(error.contains("test"));
+        assert!(error.contains("already exists"));
+        assert!(!error.contains(&root.display().to_string()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copying_an_asset_uses_a_free_name_and_a_new_asset_id() {
+        let root = scratch_project("copy-asset-fresh-id");
+        let project = Project::create(&root, "Copy asset").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("textures")).unwrap();
+        std::fs::write(project.assets_dir().join("sprite.png"), b"source image").unwrap();
+        std::fs::write(
+            project.assets_dir().join("textures/sprite.png"),
+            b"existing",
+        )
+        .unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        assert!(rescan_assets(&mut state));
+        let original_id = state.asset_index.id_for(Path::new("sprite.png"));
+
+        let copied = copy_asset(
+            &state.project,
+            Path::new("sprite.png"),
+            Path::new("textures"),
+        )
+        .unwrap();
+        assert_eq!(copied, PathBuf::from("textures/sprite_1.png"));
+        assert_eq!(
+            std::fs::read(state.project.assets_dir().join(&copied)).unwrap(),
+            b"source image"
+        );
+        assert_eq!(
+            std::fs::read(state.project.assets_dir().join("textures/sprite.png")).unwrap(),
+            b"existing"
+        );
+        assert!(rescan_assets(&mut state));
+        assert_ne!(state.asset_index.id_for(&copied), original_id);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pasting_a_copied_asset_selects_the_new_file_without_changing_the_source() {
+        let root = scratch_project("paste-copied-asset");
+        let project = Project::create(&root, "Paste asset").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("target")).unwrap();
+        std::fs::write(project.assets_dir().join("sprite.png"), b"image").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.asset_browser.operation_request = Some(engine_editor::AssetOperation::Copy {
+            from: PathBuf::from("sprite.png"),
+            into: PathBuf::from("target"),
+        });
+
+        handle_asset_operation(&mut state, &HashSet::new());
+
+        assert_eq!(
+            state.selected_asset,
+            Some(PathBuf::from("target/sprite.png"))
+        );
+        assert!(
+            state
+                .project
+                .assets_dir()
+                .join("target/sprite.png")
+                .exists()
+        );
+        assert_eq!(
+            std::fs::read(state.project.assets_dir().join("sprite.png")).unwrap(),
+            b"image"
+        );
+        assert!(
+            state
+                .assets
+                .iter()
+                .any(|entry| entry.relative_path == Path::new("target/sprite.png"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copying_a_folder_skips_legacy_metadata_and_rejects_descendants() {
+        let root = scratch_project("copy-folder-no-meta");
+        let project = Project::create(&root, "Copy folder").unwrap();
+        std::fs::create_dir_all(project.assets_dir().join("source/child")).unwrap();
+        std::fs::write(
+            project.assets_dir().join("source/child/picture.png"),
+            b"image",
+        )
+        .unwrap();
+        std::fs::write(
+            project.assets_dir().join("source/child/picture.png.meta"),
+            b"old id",
+        )
+        .unwrap();
+
+        assert!(copy_asset(&project, Path::new("source"), Path::new("source/child")).is_err());
+        let copied = copy_asset(&project, Path::new("source"), Path::new("")).unwrap();
+        assert_eq!(copied, PathBuf::from("source_1"));
+        assert!(
+            project
+                .assets_dir()
+                .join("source_1/child/picture.png")
+                .exists()
+        );
+        assert!(
+            !project
+                .assets_dir()
+                .join("source_1/child/picture.png.meta")
+                .exists()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copying_a_folder_with_a_symlink_fails_without_leaving_a_partial_copy() {
+        let root = scratch_project("copy-folder-symlink");
+        let project = Project::create(&root, "Copy safe folder").unwrap();
+        let source = project.assets_dir().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("ok.png"), b"image").unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), source.join("link.png")).unwrap();
+
+        assert!(copy_asset(&project, Path::new("source"), Path::new("")).is_err());
+        assert!(!project.assets_dir().join("source_1").exists());
+        assert!(source.join("ok.png").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reveal_refuses_paths_outside_the_project() {
+        let root = scratch_project("reveal-outside-project");
+        let project = Project::create(&root, "Reveal asset").unwrap();
+
+        assert!(reveal_asset(&project, Path::new("../outside.png")).is_err());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_move_refuses_to_invalidate_an_open_code_tab() {
+        let root = scratch_project("move-open-code-tab");
+        let project = Project::create(&root, "Open code tab").unwrap();
+        let source = project.assets_dir().join("script.rs");
+        std::fs::write(&source, b"fn main() {}").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.asset_browser.operation_request = Some(engine_editor::AssetOperation::Relocate {
+            from: PathBuf::from("script.rs"),
+            to: PathBuf::from("renamed.rs"),
+        });
+
+        handle_asset_operation(&mut state, &HashSet::from([source.clone()]));
+
+        assert!(source.exists());
+        assert!(state.asset_browser.operation_error.is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_folder_never_follows_an_assets_root_symlink_outside_the_project() {
+        let root = scratch_project("folder-drop-symlink-root");
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("picture.png"), b"image").unwrap();
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let project = Project::create(root.join("project"), "Unsafe root").unwrap();
+        std::fs::remove_dir_all(project.assets_dir()).unwrap();
+        std::os::unix::fs::symlink(&outside, project.assets_dir()).unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.dropped_files.push(source);
+
+        handle_asset_requests(&mut state);
+
+        assert!(!outside.join("source").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

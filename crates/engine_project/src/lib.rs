@@ -3,8 +3,8 @@
 //! The on-disk shape of a RustyEngine Studio project: a root directory
 //! holding a versioned [`ProjectManifest`] (`project.ron`), gameplay
 //! source (`src/`), an asset root (`assets/`), scene files (`scenes/`),
-//! and an editor-only metadata directory (`.studio/`) that a shipped
-//! runtime never reads.
+//! and a hidden `.studio/` directory. Its asset IDs are project data;
+//! per-user editor session files stay local.
 //!
 //! [`Project::create`] scaffolds that layout; [`Project::open`] parses
 //! and validates an existing one; [`Project::open_or_create`] does
@@ -431,7 +431,7 @@ impl Project {
         self.root.join(SCENES_DIR)
     }
 
-    /// Absolute path to `.studio/` (editor-only metadata).
+    /// Absolute path to `.studio/` (asset IDs and local editor state).
     pub fn studio_dir(&self) -> PathBuf {
         self.root.join(STUDIO_DIR)
     }

@@ -25,11 +25,10 @@ use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-/// Background colour painted behind the whole grid; cells with this exact
-/// background skip their own fill.
-const TERMINAL_BG: egui::Color32 = egui::Color32::from_rgb(0x12, 0x12, 0x16);
+/// Match the parent card so the grid has no separate rectangular surface.
+const TERMINAL_BG: egui::Color32 = crate::theme::PANEL_FILL;
 /// Foreground used for the default text colour and the cursor.
-const TERMINAL_FG: egui::Color32 = egui::Color32::from_rgb(0xcc, 0xcc, 0xcc);
+const TERMINAL_FG: egui::Color32 = crate::theme::TEXT;
 /// Grid the PTY and model start at, before the first [`show`] resize.
 const INITIAL: GridSize = GridSize { cols: 80, rows: 24 };
 /// Point size of the monospace font the grid is drawn in.
@@ -515,6 +514,24 @@ fn indexed_color(index: u8) -> egui::Color32 {
 mod tests {
     use super::*;
     use egui::{Key, Modifiers};
+
+    #[test]
+    fn default_terminal_colors_blend_with_the_editor_panel() {
+        assert_eq!(
+            ansi_color(
+                AnsiColor::Named(NamedColor::Background),
+                egui::Color32::BLACK
+            ),
+            crate::theme::PANEL_FILL
+        );
+        assert_eq!(
+            ansi_color(
+                AnsiColor::Named(NamedColor::Foreground),
+                egui::Color32::BLACK
+            ),
+            crate::theme::TEXT
+        );
+    }
 
     #[test]
     fn ctrl_letters_map_to_control_bytes() {

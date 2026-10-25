@@ -24,6 +24,18 @@ use engine_scene::{
 use crate::assets::AssetKind;
 use crate::inspect::{InspectField, Inspectable};
 
+#[cfg(test)]
+mod prototype_style_tests {
+    #[test]
+    fn component_sections_use_prototype_cards() {
+        let frame = super::component_frame();
+        assert_eq!(frame.fill, egui::Color32::from_rgb(24, 34, 48));
+        assert_eq!(frame.stroke.color, egui::Color32::from_rgb(37, 51, 70));
+        assert_eq!(frame.stroke.width, 1.0);
+        assert_eq!(frame.corner_radius, egui::CornerRadius::same(7));
+    }
+}
+
 /// Validates a project-relative script reference before it enters the ECS.
 pub fn valid_script_path(path: &std::path::Path) -> bool {
     !path.is_absolute()
@@ -531,7 +543,10 @@ pub fn show(
         }
         let mut remove = false;
         let mut changed = false;
-        egui::CollapsingHeader::new(component.name)
+        component_frame().show(ui, |ui| {
+            egui::CollapsingHeader::new(
+                egui::RichText::new(component.name).color(crate::theme::TEXT),
+            )
             .id_salt(component.name)
             .default_open(true)
             .show(ui, |ui| {
@@ -553,6 +568,7 @@ pub fn show(
                     }
                 });
             });
+        });
         if remove {
             (component.remove)(world, entity);
         } else if changed && apply_to_all {
@@ -564,6 +580,14 @@ pub fn show(
 
     ui.separator();
     add_component_menu(ui, world, entity);
+}
+
+fn component_frame() -> egui::Frame {
+    egui::Frame::NONE
+        .fill(egui::Color32::from_rgb(24, 34, 48))
+        .stroke(egui::Stroke::new(1.0, crate::theme::BORDER_SOFT))
+        .corner_radius(7)
+        .inner_margin(egui::Margin::symmetric(10, 4))
 }
 
 /// The entity-identity block: id, editable name, and the Static /

@@ -43,6 +43,7 @@ pub mod i18n;
 mod import;
 pub mod inspect;
 pub mod inspector;
+mod menu;
 mod output;
 pub mod overlays;
 pub mod perf_budget;
@@ -67,8 +68,9 @@ pub use asset_import::{
     unique_destination,
 };
 pub use assets::{
-    AssetBrowser, AssetEntry, AssetFolder, AssetIndex, AssetKind, AssetView,
+    AssetBrowser, AssetEntry, AssetFolder, AssetIndex, AssetKind, AssetOperation, AssetView,
     build_tree as build_asset_tree, resolve_ids as resolve_asset_ids, scan as scan_assets,
+    scan_with_folders as scan_assets_with_folders,
 };
 pub use chrome::{
     BottomTab, EditorDimension, InspectorTab, PanelVisibility, TransformSpace, Workspace,
@@ -79,6 +81,7 @@ pub use dirty::{DirtyState, PendingAction};
 pub use import::{
     AssetImporter, ImportOutcome, ImportRecord, ImportStats, ImportedAsset, ReloadReport,
 };
+pub use menu::{MenuCommand, Overlay as MenuOverlay, Panel as MenuPanel};
 pub use output::OutputLog;
 pub use overlays::OverlayToggles;
 pub use prefab::{PREFAB_DIR, write_prefab};

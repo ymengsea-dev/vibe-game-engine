@@ -212,18 +212,15 @@ pub enum BottomTab {
     /// An interactive shell (only backed by a PTY in builds with the
     /// `terminal` feature — otherwise the tab shows a notice).
     Terminal,
-    /// Project-wide text / symbol search.
-    Search,
 }
 
 impl BottomTab {
     /// Every tab, left to right.
-    pub const ALL: [BottomTab; 5] = [
+    pub const ALL: [BottomTab; 4] = [
         BottomTab::Console,
         BottomTab::Problems,
         BottomTab::Output,
         BottomTab::Terminal,
-        BottomTab::Search,
     ];
 
     /// Tab label.
@@ -233,7 +230,6 @@ impl BottomTab {
             BottomTab::Problems => "Problems",
             BottomTab::Output => "Output",
             BottomTab::Terminal => "Terminal",
-            BottomTab::Search => "Search",
         }
     }
 }

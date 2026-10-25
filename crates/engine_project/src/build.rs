@@ -4,7 +4,8 @@
 //! [`ExportPlan`] is pure (all the paths and the exact `cargo` argument
 //! list, testable without touching the toolchain); [`export`] runs it:
 //! `cargo build` in the project root, then copy the binary, pack
-//! `assets/` into `assets.pak` (see [`engine_asset::pack_dir`]), and
+//! `assets/` plus its metadata into `assets.pak` (see
+//! [`engine_asset::pack_dir_with_metadata`]), and
 //! copy the main scene next to it.
 //!
 //! Cross-compilation is out of scope — you export for the OS you build
@@ -203,7 +204,7 @@ fn io(path: &Path, err: std::io::Error) -> ProjectError {
 /// Compiles `plan.crate_name` and stages the export folder.
 ///
 /// Steps: `cargo build` (in the project root) → create `export_dir` →
-/// copy the binary → [`engine_asset::pack_dir`] the assets into
+/// copy the binary → [`engine_asset::pack_dir_with_metadata`] the assets into
 /// `assets.pak` → copy the main scene (if present).
 ///
 /// # Errors
@@ -244,8 +245,12 @@ pub fn export(project: &Project, plan: &ExportPlan) -> Result<ExportReport, Proj
     std::fs::copy(&compiled, &binary_dest).map_err(|err| io(&binary_dest, err))?;
 
     let bundle_dest = plan.bundle_dest();
-    let stats = engine_asset::pack_dir(&plan.assets_src, &bundle_dest)
-        .map_err(|err| ProjectError::Build(format!("packing assets: {err}")))?;
+    let stats = engine_asset::pack_dir_with_metadata(
+        &plan.assets_src,
+        &project.studio_dir().join("assets"),
+        &bundle_dest,
+    )
+    .map_err(|err| ProjectError::Build(format!("packing assets: {err}")))?;
 
     let scene = if plan.scene_src.exists() {
         let dest = plan.scene_dest();
@@ -411,6 +416,19 @@ mod tests {
             "fn main() { println!(\"standalone game\"); }\n",
         )
         .expect("write game entry point");
+        std::fs::create_dir_all(project.assets_dir().join("models")).expect("models directory");
+        std::fs::write(project.assets_dir().join("models/character.gltf"), b"model")
+            .expect("model");
+        let metadata = project
+            .studio_dir()
+            .join("assets/models/character.gltf.meta");
+        std::fs::create_dir_all(metadata.parent().expect("metadata parent"))
+            .expect("metadata directory");
+        std::fs::write(
+            metadata,
+            "(id: \"f2672902-8436-4652-a937-b8eaf99f3091\", source_hash: 0)",
+        )
+        .expect("metadata");
 
         let out = project.root().join("export");
         let plan = ExportPlan::new(&project, "demo", BuildProfile::Debug, &out);
@@ -423,6 +441,13 @@ mod tests {
             Some(project.root().join("export/main.ron").as_path())
         );
         assert!(report.scene.as_ref().is_some_and(|path| path.is_file()));
+        let exported = engine_scene::open_export(&out)
+            .expect("bundle exists")
+            .expect("export opens");
+        assert_eq!(
+            exported.library.id_for_path("models/character.gltf"),
+            Some("f2672902-8436-4652-a937-b8eaf99f3091")
+        );
 
         // Execute from the staged folder, with no editor or source tree on
         // the process' working path. A real exported game must stand alone.

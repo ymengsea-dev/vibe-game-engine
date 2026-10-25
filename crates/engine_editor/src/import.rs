@@ -285,6 +285,15 @@ impl AssetImporter {
         &self.records
     }
 
+    /// Keeps last-pass diagnostics attached to their asset after a path-only move.
+    pub fn relocate_paths(&mut self, from: &Path, to: &Path) {
+        for record in &mut self.records {
+            if let Ok(suffix) = record.relative_path.strip_prefix(from) {
+                record.relative_path = to.join(suffix);
+            }
+        }
+    }
+
     /// How many assets are currently held in memory.
     pub fn imported_count(&self) -> usize {
         self.imported.len()

@@ -148,11 +148,11 @@ pub fn show(ui: &mut egui::Ui, diagnostics: &Diagnostics, selected: &mut Option<
                 .striped(true)
                 .num_columns(5)
                 .show(ui, |ui| {
-                    ui.strong("Type");
-                    ui.strong("Code");
-                    ui.strong("Description");
-                    ui.strong("File");
-                    ui.strong("Line");
+                    ui.label("Type");
+                    ui.label("Code");
+                    ui.label("Description");
+                    ui.label("File");
+                    ui.label("Line");
                     ui.end_row();
 
                     for (index, diagnostic) in items.iter().enumerate() {

@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VGE Studio — UI prototype</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=Roboto:wght@400&display=swap");
+
+    :root {
+      color-scheme: dark;
+      font-family: "Roboto", system-ui, sans-serif;
+      font-weight: 400;
+      --shell: #0b111a;
+      --panel: #151d29;
+      --panel-raised: #1b2533;
+      --panel-hover: #233044;
+      --viewport: #101b25;
+      --border: #2b3b50;
+      --border-soft: #253346;
+      --text: #e4eaf3;
+      --muted: #91a0b4;
+      --subtle: #64748b;
+      --accent: #83b5ff;
+      --accent-fill: #284b7d;
+      --green: #89d2a9;
+      --amber: #e1bc7d;
+      --radius: 9px;
+      --gap: 6px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body { min-width: 980px; background: var(--shell); color: var(--text); font-size: 12px; }
+    button, input { font: inherit; }
+    button { color: inherit; cursor: pointer; }
+    button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+    .icon.fill { fill: currentColor; stroke: none; }
+    .icon.small { width: 14px; height: 14px; }
+    .icon.tiny { width: 12px; height: 12px; }
+    .app { height: 100dvh; min-height: 610px; display: grid; grid-template-rows: 36px minmax(0, 1fr) 24px; background: var(--shell); }
+    .topbar { display: flex; align-items: center; gap: 18px; padding: 0 14px; background: #111a26; border-bottom: 1px solid var(--border-soft); white-space: nowrap; }
+    .brand { display: flex; align-items: center; gap: 8px; min-width: 120px; letter-spacing: .015em; }
+    .brand img { width: 23px; height: 23px; border-radius: 6px; }
+    .brand .studio { margin-left: 2px; color: var(--subtle); font-size: 10px; letter-spacing: .12em; }
+    .menus { display: flex; align-items: center; gap: 3px; height: 100%; }
+    .menu-button, .top-action, .tab, .tool, .icon-button, .quiet-button { border: 0; background: transparent; }
+    .menu-button { height: 27px; padding: 0 9px; color: var(--muted); border-radius: 6px; }
+    .menu-button:hover, .tool:hover, .icon-button:hover, .quiet-button:hover { background: var(--panel-hover); color: var(--text); }
+    .menu { position: relative; }
+    .menu summary { list-style: none; display: flex; align-items: center; gap: 3px; }
+    .menu summary::-webkit-details-marker { display: none; }
+    .menu[open] > summary { color: var(--text); background: var(--panel-hover); }
+    .menu-popover { position: absolute; top: 33px; left: 0; z-index: 10; min-width: 208px; padding: 7px; border: 1px solid var(--border); border-radius: 9px; background: #1a2533; box-shadow: 0 16px 40px #0008; }
+    .menu-popover button { display: flex; width: 100%; align-items: center; gap: 8px; padding: 7px 9px; border: 0; border-radius: 5px; text-align: left; background: transparent; }
+    .menu-popover button:hover { background: var(--panel-hover); }
+    .menu-popover small { margin-left: auto; color: var(--subtle); }
+    .top-controls { margin-left: auto; display: flex; align-items: center; gap: 11px; }
+    .top-action { height: 27px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-raised); }
+    .top-action:hover { border-color: #466386; background: var(--panel-hover); }
+    .top-action.playing { color: var(--amber); }
+    .segmented { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 8px; background: #0c1420; }
+    .segmented button { min-width: 58px; height: 22px; padding: 0 9px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; }
+    .segmented button[aria-pressed="true"] { color: var(--text); background: #2c3d53; }
+    .segmented button:hover:not([aria-pressed="true"]) { color: var(--text); }
+
+    .workspace { min-height: 0; min-width: 0; position: relative; display: grid; gap: var(--gap); padding: var(--gap); }
+    .workspace[hidden], [hidden] { display: none !important; }
+    .scene-layout { --left-size: 240px; --right-size: 275px; --bottom-size: 220px; grid-template-columns: var(--left-size) minmax(320px, 1fr) var(--right-size); grid-template-rows: minmax(0, 1fr) var(--bottom-size); grid-template-areas: "hierarchy scene inspector" "assets console inspector"; }
+    .code-layout { --right-size: 280px; --bottom-size: 220px; grid-template-columns: minmax(400px, 1fr) var(--right-size); grid-template-rows: minmax(0, 1fr) var(--bottom-size); grid-template-areas: "code viewport" "console viewport"; }
+    .panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); box-shadow: inset 0 1px #ffffff05; }
+    .panel-header { min-height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--border-soft); color: var(--text); }
+    .panel-header .title { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+    .panel-header .title .icon { color: var(--muted); }
+    .panel-header .trail { color: var(--subtle); }
+    .panel-header .end { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+    .panel-body { min-height: 0; overflow: auto; flex: 1; }
+    .icon-button { width: 25px; height: 25px; display: inline-grid; place-items: center; border-radius: 5px; color: var(--muted); }
+    .icon-button .icon { width: 15px; height: 15px; }
+    .small-label { color: var(--subtle); font-size: 10px; letter-spacing: .09em; text-transform: uppercase; }
+    .muted { color: var(--muted); }
+    .subtle { color: var(--subtle); }
+    .pill { border: 1px solid var(--border); border-radius: 5px; padding: 3px 7px; color: var(--muted); background: var(--panel-raised); }
+    .search-box { margin: 10px 11px 7px; display: flex; align-items: center; gap: 7px; height: 29px; padding: 0 9px; border: 1px solid var(--border-soft); border-radius: 6px; color: var(--subtle); background: #101824; }
+    .search-box input { min-width: 0; width: 100%; border: 0; outline: none; background: transparent; color: var(--text); }
+    .search-box input::placeholder { color: var(--subtle); }
+    .tree { padding: 5px 8px 16px; }
+    .tree-row { display: flex; align-items: center; gap: 7px; width: 100%; height: 27px; padding: 0 9px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); text-align: left; white-space: nowrap; }
+    .tree-row:hover { background: var(--panel-hover); color: var(--text); }
+    .tree-row.selected { color: var(--text); background: var(--accent-fill); }
+    .tree-row .icon { width: 14px; height: 14px; }
+    .tree-row.depth-1 { padding-left: 22px; }
+    .tree-row.depth-2 { padding-left: 37px; }
+    .tree-row .eye { margin-left: auto; color: var(--subtle); }
+    .tree-row .name { overflow: hidden; text-overflow: ellipsis; }
+    .tree-row.folder { color: #a9bed6; }
+    .tree-section { margin: 14px 14px 5px; }
+
+    .hierarchy { grid-area: hierarchy; }
+    .scene { grid-area: scene; }
+    .inspector { grid-area: inspector; }
+    .assets { grid-area: assets; }
+    .console { grid-area: console; }
+    .scene-stage { min-height: 0; flex: 1; position: relative; overflow: hidden; background: radial-gradient(circle at 58% 51%, #1d3440 0, #142531 46%, var(--viewport) 100%); }
+    .scene-stage::before { content: ""; position: absolute; inset: 0; opacity: .22; background-image: linear-gradient(#7294aa22 1px, transparent 1px), linear-gradient(90deg, #7294aa22 1px, transparent 1px); background-size: 44px 44px; transform: perspective(520px) rotateX(56deg) scale(1.7); transform-origin: center 62%; }
+    .scene-art { position: absolute; left: 50%; top: 51%; width: min(82%, 760px); height: 77%; transform: translate(-50%, -50%); filter: drop-shadow(0 28px 22px #02070c83); }
+    .scene-compass { position: absolute; right: 18px; top: 17px; width: 62px; height: 62px; opacity: .8; }
+    .scene-hint { position: absolute; left: 15px; bottom: 13px; padding: 5px 8px; border: 1px solid #b8c8d225; border-radius: 5px; color: #b9c9d4; background: #0c1822b8; font-size: 11px; }
+    .scene-footer { min-height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-top: 1px solid var(--border-soft); }
+    .tool { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border-radius: 5px; color: var(--muted); }
+    .tool[aria-pressed="true"] { color: var(--accent); background: #264165; }
+    .tool .icon { width: 14px; height: 14px; }
+    .scene-footer .right { margin-left: auto; }
+
+    .inspector .panel-body { padding: 13px 12px 20px; }
+    .entity-heading { display: flex; align-items: center; gap: 10px; padding-bottom: 15px; }
+    .entity-glyph { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid #53769e; border-radius: 7px; color: #a8cbfa; background: #294566; }
+    .entity-heading .entity-name { font-size: 13px; }
+    .entity-heading .entity-kind { color: var(--subtle); font-size: 11px; margin-top: 3px; }
+    .component { margin: 0 0 9px; border: 1px solid var(--border-soft); border-radius: 7px; background: #182230; }
+    .component > summary { display: flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 10px; list-style: none; cursor: pointer; }
+    .component > summary::-webkit-details-marker { display: none; }
+    .component > summary .icon { width: 13px; height: 13px; color: var(--muted); }
+    .component > summary .more { margin-left: auto; color: var(--subtle); }
+    .component-fields { padding: 1px 10px 11px; }
+    .field-label { margin: 8px 0 5px; color: var(--muted); font-size: 11px; }
+    .field-triple { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+    .axis-field { min-width: 0; height: 27px; display: flex; align-items: center; gap: 4px; padding: 0 7px; border: 1px solid var(--border-soft); border-radius: 5px; background: #111b28; }
+    .axis-field b { font-weight: 400; font-size: 10px; color: #e88e8e; }
+    .axis-field.y b { color: #9cd2a0; }
+    .axis-field.z b { color: #99b9f4; }
+    .axis-field input { width: 100%; min-width: 0; border: 0; outline: none; color: var(--text); background: transparent; font-size: 11px; text-align: right; }
+    .single-field { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 27px; color: var(--muted); }
+    .single-field .value { color: var(--text); }
+    .component-action { width: 100%; height: 28px; margin-top: 3px; border: 1px dashed #42536a; border-radius: 6px; color: var(--muted); background: transparent; }
+    .component-action:hover { color: var(--text); border-color: var(--accent); }
+
+    .assets .panel-body { padding: 4px 7px 10px; }
+    .asset-crumbs { display: flex; align-items: center; gap: 5px; margin: 2px 5px 7px; color: var(--subtle); font-size: 11px; }
+    .asset-crumbs span:last-child { color: var(--muted); }
+    .tabs { min-height: 30px; display: flex; align-items: stretch; gap: 2px; padding: 4px 8px 0; border-bottom: 1px solid var(--border-soft); }
+    .tab { padding: 0 9px; border-radius: 5px 5px 0 0; color: var(--muted); white-space: nowrap; }
+    .tab:hover { color: var(--text); background: var(--panel-hover); }
+    .tab[aria-selected="true"] { color: var(--accent); box-shadow: inset 0 -2px var(--accent); }
+    .tab .count { display: inline-grid; min-width: 16px; height: 16px; padding: 0 3px; place-items: center; border-radius: 4px; background: #27374b; color: var(--muted); font-size: 10px; }
+    .tab-content { display: none; min-height: 0; flex: 1; overflow: auto; padding: 10px 13px; color: var(--muted); }
+    .tab-content.active { display: block; }
+    .log-line { display: flex; gap: 11px; min-height: 23px; align-items: baseline; white-space: nowrap; }
+    .log-time { color: var(--subtle); font-variant-numeric: tabular-nums; }
+    .log-tag { min-width: 40px; color: var(--green); }
+    .log-tag.warn { color: var(--amber); }
+    .empty-state { display: grid; height: 100%; place-items: center; color: var(--subtle); }
+
+    .code-editor { grid-area: code; }
+    .code-viewport { grid-area: viewport; }
+    .code-console { grid-area: console; }
+    .code-surface { min-height: 0; flex: 1; display: grid; grid-template-columns: 205px minmax(0, 1fr); }
+    .project-explorer { min-width: 0; padding: 10px 6px; border-right: 1px solid var(--border-soft); background: #131d29; }
+    .explorer-title { display: flex; align-items: center; justify-content: space-between; padding: 0 9px 8px; color: var(--muted); font-size: 11px; }
+    .editor-surface { min-width: 0; overflow: auto; background: #111a27; }
+    .file-tab { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; border-right: 1px solid var(--border-soft); border-bottom: 1px solid var(--accent); color: var(--text); background: #192434; }
+    .code-lines { display: grid; grid-template-columns: 38px minmax(0, 1fr); row-gap: 1px; padding: 14px 20px 18px 0; font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+    .line-number { color: #536279; text-align: right; padding-right: 12px; user-select: none; }
+    .code-text { color: #bdc9d9; }
+    .syntax-key { color: #b8a9ee; }
+    .syntax-type { color: #80c7d7; }
+    .syntax-string { color: #d4b687; }
+    .syntax-comment { color: #6c8195; }
+    .mini-stage { flex: 1; position: relative; overflow: hidden; background: radial-gradient(circle at 50% 55%, #274047, #11202b 68%); }
+    .mini-stage .scene-art { width: 91%; height: 70%; }
+
+    .statusbar { display: flex; align-items: center; gap: 10px; padding: 0 14px; color: var(--subtle); background: #111a26; border-top: 1px solid var(--border-soft); font-size: 11px; }
+    .statusbar .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+    .statusbar .right { margin-left: auto; display: flex; align-items: center; gap: 7px; }
+    .statusbar .right .icon { width: 13px; height: 13px; }
+    .resize-handle { position: absolute; z-index: 4; background: transparent; touch-action: none; }
+    .resize-handle.vertical { top: 6px; bottom: 6px; width: 8px; cursor: col-resize; }
+    .resize-handle.horizontal { height: 8px; cursor: row-resize; }
+    .scene-layout .resize-left { left: calc(6px + var(--left-size) + 2px); }
+    .scene-layout .resize-right { right: calc(6px + var(--right-size) + 2px); }
+    .scene-layout .resize-bottom { left: calc(6px + var(--left-size)); right: calc(6px + var(--right-size)); bottom: calc(6px + var(--bottom-size) + 2px); }
+    .code-layout .resize-right { right: calc(6px + var(--right-size) + 2px); }
+    .code-layout .resize-bottom { left: 6px; right: calc(6px + var(--right-size)); bottom: calc(6px + var(--bottom-size) + 2px); }
+    @media (max-width: 1160px) { .menus .optional { display: none; } .topbar { gap: 10px; } .scene-layout { --left-size: 205px; --right-size: 245px; } }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" aria-hidden="true" style="position:absolute">
+    <symbol id="i-layers" viewBox="0 0 20 20"><path d="m10 2 7 4-7 4-7-4 7-4Zm-7 8 7 4 7-4M3 14l7 4 7-4"/></symbol>
+    <symbol id="i-play" viewBox="0 0 20 20"><path d="m6 3 11 7-11 7V3Z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 20 20"><rect x="4" y="4" width="12" height="12" rx="1.5"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 20 20"><path d="m7 5 5 5-5 5"/></symbol>
+    <symbol id="i-down" viewBox="0 0 20 20"><path d="m5 7 5 5 5-5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 20 20"><path d="M10 3v14M3 10h14"/></symbol>
+    <symbol id="i-more" viewBox="0 0 20 20"><circle cx="4" cy="10" r=".9"/><circle cx="10" cy="10" r=".9"/><circle cx="16" cy="10" r=".9"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 20 20"><path d="M2 10s3-5 8-5 8 5 8 5-3 5-8 5-8-5-8-5Z"/><circle cx="10" cy="10" r="2"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 20 20"><path d="M2 5a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5Z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 20 20"><path d="M4 2h8l4 4v12H4V2Z"/><path d="M12 2v4h4"/></symbol>
+    <symbol id="i-cube" viewBox="0 0 20 20"><path d="m10 2 8 4v8l-8 4-8-4V6l8-4ZM2 6l8 4 8-4M10 10v8"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 20 20"><circle cx="10" cy="10" r="3"/><path d="M10 1v2m0 14v2M1 10h2m14 0h2M3.6 3.6 5 5m10 10 1.4 1.4M16.4 3.6 15 5M5 15l-1.4 1.4"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 20 20"><path d="M2 5h11a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H2V5Zm13 3 3-2v8l-3-2"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 20 20"><path d="M4 3v14M10 3v14M16 3v14"/><circle cx="4" cy="7" r="1.5"/><circle cx="10" cy="12" r="1.5"/><circle cx="16" cy="6" r="1.5"/></symbol>
+    <symbol id="i-viewport" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="2"/><path d="M10 1v2m0 14v2M1 10h2m14 0h2"/></symbol>
+    <symbol id="i-move" viewBox="0 0 20 20"><path d="M10 2v16M2 10h16M10 2 7 5m3-3 3 3m5 5-3-3m3 3-3 3M10 18l-3-3m3 3 3-3M2 10l3-3m-3 3 3 3"/></symbol>
+    <symbol id="i-rotate" viewBox="0 0 20 20"><path d="M16 5V2l3 3-3 3V5A7 7 0 1 0 17 12"/></symbol>
+    <symbol id="i-scale" viewBox="0 0 20 20"><path d="M3 17 17 3M10 3h7v7M3 10v7h7"/></symbol>
+    <symbol id="i-check" viewBox="0 0 20 20"><path d="m3 10 5 5 9-10"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 20 20"><rect x="2" y="3" width="16" height="14" rx="2"/><path d="m5 7 3 3-3 3m5 0h5"/></symbol>
+    <symbol id="i-code" viewBox="0 0 20 20"><path d="m7 5-5 5 5 5m6-10 5 5-5 5m-2-13-2 16"/></symbol>
+    <symbol id="i-close" viewBox="0 0 20 20"><path d="M4 4 16 16M16 4 4 16"/></symbol>
+    <symbol id="i-max" viewBox="0 0 20 20"><path d="M3 8V3h5m4 0h5v5M3 12v5h5m4 0h5v-5"/></symbol>
+    <symbol id="i-info" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8"/><path d="M10 9v5m0-8v.1"/></symbol>
+    <symbol id="mini-island" viewBox="0 0 900 560"><path d="M82 312 358 156l422 89 59 140-301 119L146 429Z" fill="#3e6a58" stroke="#7ea08c" stroke-width="4"/><path d="m347 235 96-47 111 31 46 82-117 59-125-35Z" fill="#bfa27e"/><path d="m335 233 112-72 129 39 36 81-138-54Z" fill="#936a58" stroke="#d1a17e" stroke-width="4"/><path d="m227 286 26-63 26 55-26 17Zm38-20 30-79 33 75-30 19Zm421 92 34-78 34 74-32 21Z" fill="#204c3c" stroke="#84a97c" stroke-width="3"/><path d="m254 293 3 28m40-44 2 34m423 63 4 31" stroke="#95765d" stroke-width="8"/></symbol>
+  </svg>
+
+  <div class="app" id="app">
+    <header class="topbar">
+      <div class="brand"><img src="../editor/assets/icon.svg" alt=""><span>VGE</span><span class="studio">STUDIO</span></div>
+      <nav class="menus" aria-label="Main menu">
+        <button class="menu-button">File</button><button class="menu-button">Edit</button><button class="menu-button">View</button><button class="menu-button optional">GameObject</button><button class="menu-button optional">Assets</button>
+        <details class="menu"><summary class="menu-button">Window<svg class="icon tiny"><use href="#i-down"/></svg></summary>
+          <div class="menu-popover">
+            <div class="small-label" style="padding:6px 9px">Workspace</div>
+            <button data-view="scene">Scene <small>Primary</small></button>
+            <button data-view="code">Code <small>Primary</small></button>
+            <div class="small-label" style="padding:9px 9px 5px">Panels in this preview</div>
+            <button data-focus="hierarchy">Hierarchy</button><button data-focus="inspector">Inspector</button><button data-focus="assets">Asset Browser</button><button data-focus="console">Console / Problems / Output</button>
+          </div>
+        </details>
+      </nav>
+      <div class="top-controls">
+        <button class="top-action" id="run-button" aria-label="Run scene"><svg class="icon small"><use href="#i-play"/></svg><span>Run</span></button>
+        <div class="segmented" role="group" aria-label="Editor workspace"><button data-view="scene" aria-pressed="true">Scene</button><button data-view="code" aria-pressed="false">Code</button></div>
+      </div>
+    </header>
+
+    <main class="workspace scene-layout" id="scene-layout" aria-label="Scene workspace">
+      <section class="panel hierarchy" data-panel="hierarchy" aria-label="Hierarchy">
+        <div class="panel-header"><span class="title"><svg class="icon"><use href="#i-layers"/></svg>Hierarchy</span><span class="end"><button class="icon-button" title="Create object" aria-label="Create object"><svg class="icon"><use href="#i-plus"/></svg></button><button class="icon-button" title="More" aria-label="Hierarchy options"><svg class="icon"><use href="#i-more"/></svg></button></span></div>
+        <div class="panel-body"><label class="search-box"><svg class="icon small"><use href="#i-search"/></svg><input placeholder="Search hierarchy" aria-label="Search hierarchy"></label>
+          <div class="tree"><button class="tree-row folder"><svg class="icon tiny"><use href="#i-down"/></svg><svg class="icon"><use href="#i-folder"/></svg><span class="name">Island</span></button>
+            <button class="tree-row depth-1" data-entity="Main Camera"><svg class="icon"><use href="#i-camera"/></svg><span class="name">Main Camera</span><svg class="icon eye"><use href="#i-eye"/></svg></button>
+            <button class="tree-row depth-1" data-entity="Sun"><svg class="icon"><use href="#i-sun"/></svg><span class="name">Sun</span><svg class="icon eye"><use href="#i-eye"/></svg></button>
+            <button class="tree-row depth-1 selected" data-entity="Terrain"><svg class="icon"><use href="#i-cube"/></svg><span class="name">Terrain</span><svg class="icon eye"><use href="#i-eye"/></svg></button>
+            <button class="tree-row depth-1 folder"><svg class="icon tiny"><use href="#i-down"/></svg><svg class="icon"><use href="#i-folder"/></svg><span class="name">Environment</span></button>
+            <button class="tree-row depth-2" data-entity="Cottage"><svg class="icon"><use href="#i-cube"/></svg><span class="name">Cottage</span></button>
+            <button class="tree-row depth-2" data-entity="Bridge"><svg class="icon"><use href="#i-cube"/></svg><span class="name">Bridge</span></button>
+            <button class="tree-row depth-2" data-entity="Grass 001"><svg class="icon"><use href="#i-cube"/></svg><span class="name">Grass 001</span></button>
+            <button class="tree-row depth-2" data-entity="Cottage Garden Flower 01"><svg class="icon"><use href="#i-cube"/></svg><span class="name">Cottage Garden Flower 01</span></button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel scene" data-panel="scene" aria-label="Scene viewport">
+        <div class="panel-header"><span class="title"><svg class="icon"><use href="#i-viewport"/></svg>Viewport <span class="trail">/ World</span></span><span class="end" data-tool-group="gizmo"><button class="tool" data-tool="Move" aria-pressed="true" title="Move"><svg class="icon"><use href="#i-move"/></svg></button><button class="tool" data-tool="Rotate" aria-pressed="false" title="Rotate"><svg class="icon"><use href="#i-rotate"/></svg></button><button class="tool" data-tool="Scale" aria-pressed="false" title="Scale"><svg class="icon"><use href="#i-scale"/></svg></button><button class="icon-button" title="Maximize viewport" aria-label="Maximize viewport"><svg class="icon"><use href="#i-max"/></svg></button></span></div>
+        <div class="scene-stage">
+          <svg class="scene-art" viewBox="0 0 900 560" aria-label="Illustrative island scene">
+            <defs><linearGradient id="land" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#4e7764"/><stop offset="1" stop-color="#284d43"/></linearGradient><linearGradient id="roof" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#a6765d"/><stop offset="1" stop-color="#704c45"/></linearGradient></defs>
+            <path d="M82 332 358 176l422 89 59 140-301 119L146 449Z" fill="#0e2529" stroke="#486f69" stroke-width="3"/>
+            <path d="M82 312 358 156l422 89 59 140-301 119L146 429Z" fill="url(#land)" stroke="#7ea08c" stroke-width="3"/>
+            <path d="M82 312 146 429v20L82 332Zm64 117 392 75v20l-392-75Zm392 75 301-119v20L538 524Z" fill="#25473f"/>
+            <path d="M265 332 475 214 662 270 430 390Z" fill="#698a67" opacity=".75"/>
+            <path d="M176 352 373 236m-128 144 199-116m-128 144 199-116m-129 140 200-112" stroke="#b3c3a1" stroke-opacity=".22" stroke-width="2"/>
+            <path d="m347 235 96-47 111 31 46 82-117 59-125-35Z" fill="#c7aa85" stroke="#d6bf9b" stroke-width="2"/>
+            <path d="m335 233 112-72 129 39 36 81-138-54Z" fill="url(#roof)" stroke="#d1a17e" stroke-width="3"/>
+            <path d="m474 227 138 54-12 20-117 59-9-12Z" fill="#856153"/>
+            <path d="m369 278 48-24v45l-48 25Z" fill="#39525a" stroke="#d0b997" stroke-width="3"/>
+            <path d="m519 264 36 13v31l-36 12Z" fill="#324b54" stroke="#d0b997" stroke-width="3"/>
+            <path d="M663 285 715 258l26 10-53 27Z" fill="#8f715a" stroke="#ad9276" stroke-width="2"/><path d="m686 294 53-27v59l-53 25Z" fill="#6a554b"/>
+            <g fill="#183f35" stroke="#83a476" stroke-width="2"><path d="m228 286 25-63 24 55-26 17Z"/><path d="m260 268 33-81 34 75-31 19Z"/><path d="m690 360 30-80 34 74-33 21Z"/><path d="m739 382 23-66 27 60-25 16Z"/></g>
+            <g stroke="#8f775f" stroke-width="7"><path d="m254 293 4 27M294 278l4 33M720 373l4 30M764 389l3 27"/></g>
+            <path d="m438 336 34 14-10 89-34-12Z" fill="#6e94ba" fill-opacity=".17" stroke="#83b5ff" stroke-width="2" stroke-dasharray="7 5"/>
+            <path d="m448 345 88-52" stroke="#e58e8c" stroke-width="3"/><path d="m448 345-46-18" stroke="#90d29b" stroke-width="3"/><path d="m448 345 2-72" stroke="#8eaff5" stroke-width="3"/>
+            <circle cx="448" cy="345" r="6" fill="#b9cfdf"/>
+          </svg>
+          <svg class="scene-compass" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="24" fill="#0c1822b8" stroke="#547083"/><path d="M32 32 32 9" stroke="#8eaff5" stroke-width="2"/><path d="M32 32 51 41" stroke="#e58e8c" stroke-width="2"/><path d="M32 32 15 43" stroke="#90d29b" stroke-width="2"/><circle cx="32" cy="32" r="3" fill="#b9cfdf"/></svg>
+          <div class="scene-hint">Island · Perspective</div>
+        </div>
+        <div class="scene-footer"><div class="segmented" role="group" aria-label="Dimension"><button data-toggle-group="dimension" aria-pressed="true">3D</button><button data-toggle-group="dimension" aria-pressed="false">2D</button></div><button class="tool">Global<svg class="icon tiny"><use href="#i-down"/></svg></button><button class="tool">Overlays<svg class="icon tiny"><use href="#i-down"/></svg></button><button class="tool">Terrain<svg class="icon tiny"><use href="#i-down"/></svg></button><span class="right subtle">Perspective · 60°</span></div>
+      </section>
+
+      <section class="panel inspector" data-panel="inspector" aria-label="Inspector">
+        <div class="panel-header"><span class="title"><svg class="icon"><use href="#i-sliders"/></svg>Inspector</span><span class="end"><button class="icon-button" aria-label="Inspector options" title="Inspector options"><svg class="icon"><use href="#i-more"/></svg></button></span></div>
+        <div class="panel-body"><div class="entity-heading"><span class="entity-glyph"><svg class="icon"><use href="#i-cube"/></svg></span><div><div class="entity-name" id="selected-entity">Terrain</div><div class="entity-kind">Entity · World</div></div><button class="icon-button" style="margin-left:auto" title="Visible" aria-label="Visible"><svg class="icon"><use href="#i-eye"/></svg></button></div>
+          <details class="component" open><summary><svg class="icon"><use href="#i-down"/></svg>Transform <svg class="icon more"><use href="#i-more"/></svg></summary><div class="component-fields">
+            <div class="field-label">Position</div><div class="field-triple"><label class="axis-field"><b>X</b><input value="0.00" aria-label="Position X"></label><label class="axis-field y"><b>Y</b><input value="0.00" aria-label="Position Y"></label><label class="axis-field z"><b>Z</b><input value="0.00" aria-label="Position Z"></label></div>
+            <div class="field-label">Rotation</div><div class="field-triple"><label class="axis-field"><b>X</b><input value="0.00" aria-label="Rotation X"></label><label class="axis-field y"><b>Y</b><input value="0.00" aria-label="Rotation Y"></label><label class="axis-field z"><b>Z</b><input value="0.00" aria-label="Rotation Z"></label></div>
+            <div class="field-label">Scale</div><div class="field-triple"><label class="axis-field"><b>X</b><input value="1.00" aria-label="Scale X"></label><label class="axis-field y"><b>Y</b><input value="1.00" aria-label="Scale Y"></label><label class="axis-field z"><b>Z</b><input value="1.00" aria-label="Scale Z"></label></div>
+          </div></details>
+          <details class="component" open><summary><svg class="icon"><use href="#i-down"/></svg>Mesh Renderer<svg class="icon more"><use href="#i-more"/></svg></summary><div class="component-fields"><div class="single-field"><span>Source</span><span class="value">terrain.gltf</span></div><div class="single-field"><span>Visible</span><span class="value">On</span></div><div class="single-field"><span>Material</span><span class="value">Grass</span></div></div></details>
+          <details class="component"><summary><svg class="icon"><use href="#i-chevron"/></svg>Collider<svg class="icon more"><use href="#i-more"/></svg></summary><div class="component-fields"><div class="single-field">Enabled <span class="value">On</span></div></div></details>
+          <button class="component-action">Add component</button>
+        </div>
+      </section>
+
+      <section class="panel assets" data-panel="assets" aria-label="Asset Browser"><div class="panel-header"><span class="title"><svg class="icon"><use href="#i-folder"/></svg>Project Assets</span><span class="end"><button class="icon-button" title="Import assets" aria-label="Import assets"><svg class="icon"><use href="#i-plus"/></svg></button><button class="icon-button" title="Asset options" aria-label="Asset options"><svg class="icon"><use href="#i-more"/></svg></button></span></div><div class="panel-body"><div class="asset-crumbs"><span>island</span><svg class="icon tiny"><use href="#i-chevron"/></svg><span>assets</span></div><div class="tree"><button class="tree-row folder"><svg class="icon tiny"><use href="#i-down"/></svg><svg class="icon"><use href="#i-folder"/></svg>models</button><button class="tree-row depth-1 selected"><svg class="icon"><use href="#i-file"/></svg>terrain.gltf</button><button class="tree-row depth-1"><svg class="icon"><use href="#i-file"/></svg>cottage_roof_01.gltf</button><button class="tree-row depth-1"><svg class="icon"><use href="#i-file"/></svg>character.gltf</button><button class="tree-row folder"><svg class="icon tiny"><use href="#i-chevron"/></svg><svg class="icon"><use href="#i-folder"/></svg>textures</button><button class="tree-row folder"><svg class="icon tiny"><use href="#i-chevron"/></svg><svg class="icon"><use href="#i-folder"/></svg>audio</button></div></div></section>
+
+      <section class="panel console" data-panel="console" aria-label="Console"><div class="tabs" role="tablist" aria-label="Bottom panel"><button class="tab" data-tab="Console" aria-selected="true">Console</button><button class="tab" data-tab="Problems" aria-selected="false">Problems <span class="count">0</span></button><button class="tab" data-tab="Output" aria-selected="false">Output</button><button class="tab" data-tab="Terminal" aria-selected="false">Terminal</button><button class="tab" data-tab="Search" aria-selected="false">Search</button></div><div class="tab-content active" data-content="Console"><div class="log-line"><span class="log-time">10:42:08</span><span class="log-tag">INFO</span><span>Project island opened</span></div><div class="log-line"><span class="log-time">10:42:08</span><span class="log-tag">INFO</span><span>Scene island loaded · 243 entities</span></div><div class="log-line"><span class="log-time">10:42:09</span><span class="log-tag">INFO</span><span>Asset index ready</span></div><div class="log-line"><span class="log-time">10:42:10</span><span class="log-tag warn">WARN</span><span>Texture preview generated at reduced resolution</span></div></div><div class="tab-content" data-content="Problems"><div class="empty-state">No problems in this project</div></div><div class="tab-content" data-content="Output"><div class="empty-state">No build output yet</div></div><div class="tab-content" data-content="Terminal"><div class="empty-state">Terminal preview</div></div><div class="tab-content" data-content="Search"><label class="search-box" style="margin:0"><svg class="icon"><use href="#i-search"/></svg><input placeholder="Search project" aria-label="Search project"></label></div></section>
+      <div class="resize-handle vertical resize-left" data-resize="left" aria-hidden="true"></div><div class="resize-handle vertical resize-right" data-resize="right" aria-hidden="true"></div><div class="resize-handle horizontal resize-bottom" data-resize="bottom" aria-hidden="true"></div>
+    </main>
+
+    <main class="workspace code-layout" id="code-layout" aria-label="Code workspace" hidden>
+      <section class="panel code-editor" aria-label="Code editor"><div class="panel-header"><span class="title"><svg class="icon"><use href="#i-code"/></svg>Code</span><span class="end"><button class="icon-button" title="Close Code panel" aria-label="Close Code panel"><svg class="icon"><use href="#i-close"/></svg></button></span></div><div class="code-surface"><aside class="project-explorer"><div class="explorer-title">PROJECT <svg class="icon small"><use href="#i-more"/></svg></div><div class="tree"><button class="tree-row folder"><svg class="icon tiny"><use href="#i-down"/></svg><svg class="icon"><use href="#i-folder"/></svg>island</button><button class="tree-row depth-1 folder"><svg class="icon tiny"><use href="#i-down"/></svg><svg class="icon"><use href="#i-folder"/></svg>src</button><button class="tree-row depth-2 selected"><svg class="icon"><use href="#i-file"/></svg>main.rs</button><button class="tree-row depth-2"><svg class="icon"><use href="#i-file"/></svg>world.rs</button><button class="tree-row depth-2"><svg class="icon"><use href="#i-file"/></svg>character.rs</button><button class="tree-row depth-1 folder"><svg class="icon tiny"><use href="#i-chevron"/></svg><svg class="icon"><use href="#i-folder"/></svg>assets</button><button class="tree-row depth-1"><svg class="icon"><use href="#i-file"/></svg>Cargo.toml</button></div></aside><div class="editor-surface"><div class="file-tab"><svg class="icon small"><use href="#i-file"/></svg> main.rs</div><div class="code-lines"><span class="line-number">1</span><span class="code-text"><span class="syntax-key">use</span> engine::prelude::*;</span><span class="line-number">2</span><span class="code-text"></span><span class="line-number">3</span><span class="code-text"><span class="syntax-key">fn</span> <span class="syntax-type">main</span>() -&gt; Result&lt;(), GameError&gt; {</span><span class="line-number">4</span><span class="code-text">    <span class="syntax-key">let mut</span> app = App::new(<span class="syntax-string">"island"</span>)?;</span><span class="line-number">5</span><span class="code-text">    app.load_scene(<span class="syntax-string">"scenes/island.ron"</span>)?;</span><span class="line-number">6</span><span class="code-text"></span><span class="line-number">7</span><span class="code-text">    <span class="syntax-comment">// Preview the scene in the editor viewport.</span></span><span class="line-number">8</span><span class="code-text">    app.run()</span><span class="line-number">9</span><span class="code-text">}</span></div></div></div></section>
+      <section class="panel code-viewport" aria-label="Code workspace viewport"><div class="panel-header"><span class="title"><svg class="icon"><use href="#i-viewport"/></svg>Viewport</span></div><div class="mini-stage"><svg class="scene-art" viewBox="0 0 900 560" aria-hidden="true"><use href="#mini-island"/></svg></div></section>
+      <section class="panel code-console" aria-label="Code workspace output"><div class="tabs" role="tablist" aria-label="Code bottom panel"><button class="tab" data-tab="Console" aria-selected="true">Console</button><button class="tab" data-tab="Problems" aria-selected="false">Problems <span class="count">0</span></button><button class="tab" data-tab="Output" aria-selected="false">Output</button><button class="tab" data-tab="Terminal" aria-selected="false">Terminal</button><button class="tab" data-tab="Search" aria-selected="false">Search</button></div><div class="tab-content active" data-content="Console"><div class="log-line"><span class="log-time">10:42:08</span><span class="log-tag">INFO</span><span>Project island opened</span></div><div class="log-line"><span class="log-time">10:42:09</span><span class="log-tag">INFO</span><span>Code editor ready</span></div></div><div class="tab-content" data-content="Problems"><div class="empty-state">No problems in this project</div></div><div class="tab-content" data-content="Output"><div class="empty-state">No build output yet</div></div><div class="tab-content" data-content="Terminal"><div class="empty-state">Terminal preview</div></div><div class="tab-content" data-content="Search"><label class="search-box" style="margin:0"><svg class="icon"><use href="#i-search"/></svg><input placeholder="Search project" aria-label="Search project"></label></div></section>
+      <div class="resize-handle vertical resize-right" data-resize="right" aria-hidden="true"></div><div class="resize-handle horizontal resize-bottom" data-resize="bottom" aria-hidden="true"></div>
+    </main>
+
+    <footer class="statusbar"><span class="dot"></span><span>Ln 1, Col 1</span><span>·</span><span>Spaces: 4</span><span>·</span><span>UTF-8</span><span>·</span><span>Rust</span><span class="right"><svg class="icon"><use href="#i-check"/></svg>Saved</span></footer>
+  </div>
+
+  <script>
+    const app = document.querySelector('#app');
+    const layouts = { scene: document.querySelector('#scene-layout'), code: document.querySelector('#code-layout') };
+
+    function setView(view) {
+      for (const [name, layout] of Object.entries(layouts)) layout.hidden = name !== view;
+      for (const button of document.querySelectorAll('[data-view]')) button.setAttribute('aria-pressed', String(button.dataset.view === view));
+      app.dataset.view = view;
+      document.querySelector('.menu[open]')?.removeAttribute('open');
+    }
+
+    document.addEventListener('click', event => {
+      const button = event.target.closest('button');
+      if (!button) return;
+      if (button.dataset.view) setView(button.dataset.view);
+      if (button.dataset.focus) {
+        setView('scene');
+        document.querySelector(`[data-panel="${button.dataset.focus}"]`)?.scrollIntoView({ block: 'nearest' });
+      }
+      if (button.dataset.entity) {
+        document.querySelectorAll('[data-entity]').forEach(row => row.classList.toggle('selected', row === button));
+        document.querySelector('#selected-entity').textContent = button.dataset.entity;
+      }
+      if (button.dataset.tool) {
+        button.closest('[data-tool-group]').querySelectorAll('[data-tool]').forEach(tool => tool.setAttribute('aria-pressed', String(tool === button)));
+      }
+      if (button.dataset.toggleGroup) {
+        document.querySelectorAll(`[data-toggle-group="${button.dataset.toggleGroup}"]`).forEach(choice => choice.setAttribute('aria-pressed', String(choice === button)));
+      }
+      if (button.dataset.tab) {
+        const panel = button.closest('.panel');
+        panel.querySelectorAll('[data-tab]').forEach(tab => tab.setAttribute('aria-selected', String(tab === button)));
+        panel.querySelectorAll('[data-content]').forEach(content => content.classList.toggle('active', content.dataset.content === button.dataset.tab));
+      }
+    });
+
+    document.querySelector('#run-button').addEventListener('click', event => {
+      const button = event.currentTarget;
+      const playing = button.classList.toggle('playing');
+      button.querySelector('use').setAttribute('href', playing ? '#i-stop' : '#i-play');
+      button.querySelector('span').textContent = playing ? 'Stop' : 'Run';
+      button.setAttribute('aria-label', playing ? 'Stop scene' : 'Run scene');
+    });
+
+    for (const handle of document.querySelectorAll('[data-resize]')) {
+      handle.addEventListener('pointerdown', event => {
+        event.preventDefault();
+        handle.setPointerCapture(event.pointerId);
+        const layout = handle.closest('.workspace');
+        const edge = handle.dataset.resize;
+        const property = edge === 'bottom' ? '--bottom-size' : edge === 'left' ? '--left-size' : '--right-size';
+        const start = Number.parseFloat(getComputedStyle(layout).getPropertyValue(property));
+        const pointer = edge === 'bottom' ? event.clientY : event.clientX;
+        const move = next => {
+          const delta = (edge === 'bottom' ? pointer - next.clientY : edge === 'right' ? pointer - next.clientX : next.clientX - pointer);
+          const max = edge === 'bottom' ? Math.max(140, layout.clientHeight - 220) : Math.max(210, layout.clientWidth - 430);
+          layout.style.setProperty(property, `${Math.min(max, Math.max(edge === 'bottom' ? 100 : 170, start + delta))}px`);
+        };
+        const stop = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', stop); handle.removeEventListener('pointercancel', stop); };
+        handle.addEventListener('pointermove', move);
+        handle.addEventListener('pointerup', stop);
+        handle.addEventListener('pointercancel', stop);
+      });
+    }
+    setView(new URLSearchParams(location.search).get('view') === 'code' ? 'code' : 'scene');
+  </script>
+</body>
+</html>

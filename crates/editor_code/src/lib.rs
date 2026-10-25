@@ -27,7 +27,8 @@
 //! The vendored build is located at *runtime*, first hit wins: the
 //! `EDITOR_CODE_MONACO_DIR` env var, then `monaco/` beside the
 //! running executable, then `../Resources/monaco` (macOS `.app`
-//! bundle), then the crate's `vendor/monaco` (the `cargo run` dev
+//! bundle), then the Cargo profile's `monaco/` next to a local `.app`,
+//! then the crate's `vendor/monaco` (the `cargo run` dev
 //! path). `cargo build -p editor` runs a build script that stages
 //! `vendor/monaco/` into `target/<profile>/monaco`, so a shipped
 //! `editor` binary plus that folder runs with no source tree.
@@ -58,7 +59,8 @@ fn monaco_dir() -> &'static Path {
 
 /// Picks the vendored-Monaco directory: `EDITOR_CODE_MONACO_DIR`, then
 /// `monaco/` next to the executable, then a macOS `.app`
-/// `../Resources/monaco`, then the crate's `vendor/monaco`. Returns the
+/// `../Resources/monaco`, then the Cargo profile's `monaco/`, then the
+/// crate's `vendor/monaco`. Returns the
 /// first that contains an `index.html`; if none do, returns the dev
 /// path anyway so [`CodeError::Asset`] fires with a sensible location.
 fn resolve_monaco_dir() -> PathBuf {
@@ -74,6 +76,8 @@ fn resolve_monaco_dir() -> PathBuf {
     {
         candidates.push(exe_dir.join("monaco"));
         candidates.push(exe_dir.join("../Resources/monaco"));
+        // A local Cargo .app lives beside the staged `monaco/` directory.
+        candidates.push(exe_dir.join("../../../monaco"));
     }
     candidates.push(PathBuf::from(DEV_MONACO_DIR));
 
@@ -374,7 +378,11 @@ impl CodeEditor {
     ///
     /// [`CodeError::Asset`] if the vendored Monaco build is missing;
     /// [`CodeError::WebViewInit`] if the OS refuses to create the webview.
-    pub fn new(window: &impl HasWindowHandle, bounds: PanelRect) -> Result<Self, CodeError> {
+    pub fn new(
+        window: &impl HasWindowHandle,
+        bounds: PanelRect,
+        wake: impl Fn() + 'static,
+    ) -> Result<Self, CodeError> {
         if !monaco_dir().join("index.html").is_file() {
             return Err(CodeError::Asset("monaco/index.html"));
         }
@@ -385,10 +393,7 @@ impl CodeEditor {
             .with_bounds(bounds.to_wry())
             .with_custom_protocol("monaco".into(), serve_asset)
             .with_ipc_handler(move |request: Request<String>| {
-                tracing::debug!(message = %request.body(), "code editor ipc");
-                if let Some(event) = CodeEvent::parse(request.body()) {
-                    let _ = tx.send(event);
-                }
+                dispatch_event(request.body(), &tx, &wake);
             })
             .with_devtools(true)
             .with_url("monaco://localhost/index.html")
@@ -571,6 +576,14 @@ impl CodeEditor {
     }
 }
 
+fn dispatch_event(message: &str, sender: &Sender<CodeEvent>, wake: &impl Fn()) {
+    if let Some(event) = CodeEvent::parse(message)
+        && sender.send(event).is_ok()
+    {
+        wake();
+    }
+}
+
 /// A JSON-encoded scalar field of `value`, safe to splice into a JS call.
 fn json_field(value: &serde_json::Value, key: &str) -> String {
     value
@@ -604,8 +617,12 @@ fn serve_asset(_id: WebViewId<'_>, request: Request<Vec<u8>>) -> Response<Cow<'s
         return simple_response(403, b"forbidden");
     }
 
-    let full = monaco_dir().join(relative);
-    match std::fs::read(&full) {
+    let bytes = if let Some(font) = embedded_font(relative) {
+        Ok(Cow::Borrowed(font))
+    } else {
+        std::fs::read(monaco_dir().join(relative)).map(Cow::Owned)
+    };
+    match bytes {
         Ok(bytes) => {
             tracing::debug!(
                 asset = relative,
@@ -615,13 +632,22 @@ fn serve_asset(_id: WebViewId<'_>, request: Request<Vec<u8>>) -> Response<Cow<'s
             Response::builder()
                 .header(CONTENT_TYPE, content_type(relative))
                 .header("Access-Control-Allow-Origin", "*")
-                .body(Cow::Owned(bytes))
+                .body(bytes)
                 .unwrap_or_else(|_| simple_response(500, b"response build failed"))
         }
         Err(err) => {
             tracing::warn!(asset = relative, error = %err, "monaco asset not found");
             simple_response(404, b"not found")
         }
+    }
+}
+
+fn embedded_font(relative: &str) -> Option<&'static [u8]> {
+    match relative {
+        "fonts/Roboto-Variable.ttf" => Some(include_bytes!(
+            "../../engine_editor/fonts/Roboto-Variable.ttf"
+        )),
+        _ => None,
     }
 }
 
@@ -650,6 +676,20 @@ fn content_type(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn ipc_event_wakes_host_after_queueing() {
+        let (tx, rx) = channel();
+        let wake_count = Cell::new(0);
+        dispatch_event(r#"{"type":"ready"}"#, &tx, &|| {
+            assert_eq!(rx.try_recv(), Ok(CodeEvent::Ready));
+            wake_count.set(wake_count.get() + 1);
+        });
+        assert_eq!(wake_count.get(), 1);
+        dispatch_event("not json", &tx, &|| wake_count.set(wake_count.get() + 1));
+        assert_eq!(wake_count.get(), 1);
+    }
 
     #[test]
     fn parses_each_event_kind() {
@@ -783,6 +823,20 @@ mod tests {
         );
         assert_eq!(content_type("vs/base/codicon.ttf"), "font/ttf");
         assert_eq!(content_type("weird"), "application/octet-stream");
+    }
+
+    #[test]
+    fn font_protocol_only_serves_exact_embedded_paths() {
+        assert!(embedded_font("fonts/Roboto-Variable.ttf").is_some_and(|font| !font.is_empty()));
+        assert!(embedded_font("fonts/../Roboto-Variable.ttf").is_none());
+        assert!(embedded_font("fonts/unknown.ttf").is_none());
+        assert_eq!(content_type("fonts/Roboto-Variable.ttf"), "font/ttf");
+    }
+
+    #[test]
+    fn code_webview_serves_roboto_without_bundling_jetbrains_mono() {
+        assert!(embedded_font("fonts/Roboto-Variable.ttf").is_some_and(|font| !font.is_empty()));
+        assert!(embedded_font("fonts/JetBrainsMono-Regular.ttf").is_none());
     }
 
     #[test]

@@ -1,13 +1,11 @@
-//! Read-only previews of the selected asset, drawn under the asset
+//! Read-only previews of the selected asset, drawn beside the asset browser.
 #![cfg_attr(feature = "dock-shell", allow(dead_code))]
-//! browser.
 //!
-//! Everything here reads the already-decoded data held by
-//! [`crate::AssetImporter`] (textures, glTF, audio) — nothing is
-//! instantiated into the scene and no importer runs. The heavy parts (a
-//! GPU thumbnail, a waveform reduction) are computed once into
-//! [`PreviewCache`] and reused until the selection or the import pass id
-//! changes.
+//! Thumbnails and waveforms read decoded data held by
+//! [`crate::AssetImporter`]; Play opens the selected audio file on demand.
+//! Nothing is instantiated into the scene and no importer runs here. The
+//! heavy parts (a thumbnail, a waveform reduction) are cached until
+//! the selection or import pass changes.
 //!
 //! The pure summary/reduction helpers ([`mesh_summary`],
 //! [`audio_summary`], [`texture_summary`], [`waveform_bins`],
@@ -17,18 +15,19 @@
 //!
 //! ## Not done here
 //!
-//! - No 3D-rendered mesh preview — that needs a per-mesh viewport
-//!   pipeline (Runtime & build track). A glTF shows counts plus its
-//!   first embedded image as a flat thumbnail.
-//! - No audio playback — the waveform is a static min/max sketch.
+//! - Mesh thumbnails are static, fixed-angle previews, not orbitable viewports.
+//! - Audio playback is deliberately limited to Play/Stop (no seek or volume).
 //! - No standalone material / prefab preview — those file formats don't
 //!   exist yet; glTF materials appear in the mesh summary.
 //! - Only the selected row previews; no thumbnail grid or hover
 //!   previews.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use engine_asset::{ImportedAudio, ImportedGltf, ImportedTexture};
+use engine_audio::{AudioContext, StreamingSound};
+use glam::Vec3;
+use kira::sound::{FromFileError, PlaybackState, streaming::StreamingSoundHandle};
 
 use crate::assets::AssetEntry;
 use crate::import::{AssetImporter, ImportOutcome, ImportedAsset};
@@ -36,6 +35,9 @@ use crate::import::{AssetImporter, ImportOutcome, ImportedAsset};
 /// Longest side, in pixels, of the CPU-downscaled thumbnail uploaded to
 /// egui.
 const THUMBNAIL_MAX_PX: u32 = 256;
+const MODEL_THUMBNAIL_PX: usize = 160;
+const MODEL_MAX_TRIANGLES: usize = 10_000;
+const MODEL_MAX_PIXEL_VISITS: usize = 2_000_000;
 /// Longest side, in points, the thumbnail is drawn at.
 const PREVIEW_DISPLAY_MAX: f32 = 180.0;
 /// How many min/max columns the waveform sketch reduces to.
@@ -88,9 +90,8 @@ pub struct TextureSummary {
     pub level0_bytes: usize,
 }
 
-/// Cached preview render state for the currently selected asset — a GPU
-/// thumbnail and/or a reduced waveform, rebuilt when the selection or
-/// the import pass id changes.
+/// Cached thumbnail/waveform and selected audio playback. Image data is
+/// rebuilt when the selection or import pass id changes.
 #[derive(Default)]
 pub struct PreviewCache {
     key: Option<(PathBuf, u64)>,
@@ -98,6 +99,10 @@ pub struct PreviewCache {
     /// Original (pre-downscale) thumbnail dimensions, for aspect ratio.
     source_dims: Option<(u32, u32)>,
     waveform: Vec<(f32, f32)>,
+    selected_path: Option<PathBuf>,
+    audio: Option<AudioContext>,
+    playing: Option<StreamingSoundHandle<FromFileError>>,
+    audio_error: Option<String>,
 }
 
 impl PreviewCache {
@@ -107,10 +112,62 @@ impl PreviewCache {
     }
 
     fn clear(&mut self) {
+        self.stop_audio();
         self.key = None;
         self.texture = None;
         self.source_dims = None;
         self.waveform.clear();
+    }
+
+    pub(crate) fn sync_selection(&mut self, selected: Option<&Path>) {
+        if self.selected_path.as_deref() != selected {
+            self.stop_audio();
+            self.audio_error = None;
+            self.selected_path = selected.map(Path::to_path_buf);
+        }
+    }
+
+    fn stop_audio(&mut self) {
+        if let Some(mut handle) = self.playing.take() {
+            handle.stop(kira::Tween::default());
+        }
+    }
+
+    fn play_audio(&mut self, root: &Path, relative: &Path) {
+        let result = (|| {
+            let path = audio_file_path(root, relative)?;
+            let sound = StreamingSound::from_file(path, false).map_err(|err| err.to_string())?;
+            if self.audio.is_none() {
+                self.audio = Some(AudioContext::new().map_err(|err| err.to_string())?);
+            }
+            self.audio
+                .as_mut()
+                .ok_or_else(|| "Audio output is unavailable".to_string())?
+                .play_streaming(sound)
+                .map_err(|err| err.to_string())
+        })();
+        match result {
+            Ok(handle) => {
+                self.playing = Some(handle);
+                self.audio_error = None;
+            }
+            Err(error) => self.audio_error = Some(error),
+        }
+    }
+
+    fn playing(&mut self) -> bool {
+        if let Some(handle) = self.playing.as_mut() {
+            if let Some(error) = handle.pop_error() {
+                self.audio_error = Some(error.to_string());
+                self.stop_audio();
+                return false;
+            }
+            if handle.state() != PlaybackState::Stopped {
+                return true;
+            }
+            self.playing = None;
+        }
+        false
     }
 
     fn rebuild(&mut self, ctx: &egui::Context, key: &(PathBuf, u64), imported: &ImportedAsset) {
@@ -125,9 +182,14 @@ impl PreviewCache {
                 }
             }
             ImportedAsset::Mesh(gltf) => {
-                // The first embedded image is normally the base-color map.
-                if let Some(image) = gltf.images.first() {
-                    self.load_thumbnail(ctx, key, &image.rgba8, image.width, image.height);
+                if let Some(rgba8) = model_thumbnail(gltf) {
+                    self.load_thumbnail(
+                        ctx,
+                        key,
+                        &rgba8,
+                        MODEL_THUMBNAIL_PX as u32,
+                        MODEL_THUMBNAIL_PX as u32,
+                    );
                 }
             }
             ImportedAsset::Audio(audio) => {
@@ -159,21 +221,66 @@ impl PreviewCache {
 }
 
 /// Draws the preview for `entry` (the currently selected asset row, if
-/// any) using the decoded data in `importer`.
+/// any) using decoded data in `importer`; Play reads from `asset_root`.
 pub fn show(
     ui: &mut egui::Ui,
     entry: Option<&AssetEntry>,
     importer: &AssetImporter,
     cache: &mut PreviewCache,
+    asset_root: &Path,
 ) {
     ui.separator();
-    ui.strong("Preview");
+    ui.label("Preview");
 
     let Some(entry) = entry else {
         cache.clear();
-        ui.weak("Select an asset.");
+        ui.weak("No item selected");
         return;
     };
+    cache.sync_selection(Some(&entry.relative_path));
+
+    if is_audio_file(&entry.relative_path) {
+        let imported = entry.id.and_then(|id| importer.get(id));
+        let key = (entry.relative_path.clone(), importer.pass_id());
+        if cache.key.as_ref() != Some(&key) {
+            if let Some(imported @ ImportedAsset::Audio(_)) = imported {
+                cache.rebuild(ui.ctx(), &key, imported);
+            } else {
+                cache.waveform.clear();
+                cache.key = Some(key);
+            }
+        }
+        ui.vertical_centered(|ui| {
+            if cache.waveform.is_empty() {
+                ui.weak("Waveform unavailable");
+            } else {
+                paint_waveform(ui, &cache.waveform);
+            }
+            if let Some(ImportedAsset::Audio(audio)) = imported {
+                let summary = audio_summary(audio);
+                ui.weak(format!(
+                    "{} Hz · {} ch · {:.2}s",
+                    summary.sample_rate, summary.channels, summary.duration_secs
+                ));
+            }
+            let playing = cache.playing();
+            if ui.button(if playing { "Stop" } else { "Play" }).clicked() {
+                if playing {
+                    cache.stop_audio();
+                } else {
+                    cache.play_audio(asset_root, &entry.relative_path);
+                }
+            }
+            if let Some(error) = &cache.audio_error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            if cache.playing.is_some() {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        });
+        return;
+    }
 
     if let Some(message) = failure_message(importer, entry) {
         cache.clear();
@@ -192,14 +299,11 @@ pub fn show(
         cache.rebuild(ui.ctx(), &key, imported);
     }
 
-    match imported {
+    ui.vertical_centered(|ui| match imported {
         ImportedAsset::Texture(texture) => {
             let summary = texture_summary(texture);
             if let (Some(handle), Some((w, h))) = (&cache.texture, cache.source_dims) {
-                ui.add(egui::Image::new((
-                    handle.id(),
-                    fit_size(w, h, PREVIEW_DISPLAY_MAX),
-                )));
+                show_thumbnail(ui, handle, (w, h));
             }
             ui.weak(format!(
                 "{}\u{d7}{} \u{b7} {} mips \u{b7} {}",
@@ -211,10 +315,9 @@ pub fn show(
         }
         ImportedAsset::Mesh(gltf) => {
             if let (Some(handle), Some((w, h))) = (&cache.texture, cache.source_dims) {
-                ui.add(egui::Image::new((
-                    handle.id(),
-                    fit_size(w, h, PREVIEW_DISPLAY_MAX),
-                )));
+                show_thumbnail(ui, handle, (w, h));
+            } else {
+                ui.weak("No mesh geometry to preview");
             }
             let summary = mesh_summary(gltf);
             ui.weak(format!(
@@ -230,15 +333,40 @@ pub fn show(
                 summary.animations, summary.cameras
             ));
         }
-        ImportedAsset::Audio(audio) => {
-            paint_waveform(ui, &cache.waveform);
-            let summary = audio_summary(audio);
-            ui.weak(format!(
-                "{} Hz \u{b7} {} ch \u{b7} {:.2}s",
-                summary.sample_rate, summary.channels, summary.duration_secs
-            ));
-        }
+        ImportedAsset::Audio(_) => {}
+    });
+}
+
+fn show_thumbnail(
+    ui: &mut egui::Ui,
+    handle: &egui::TextureHandle,
+    (w, h): (u32, u32),
+) -> egui::Response {
+    let size = fit_size(w, h, PREVIEW_DISPLAY_MAX.min(ui.available_width()));
+    ui.vertical_centered(|ui| ui.add(egui::Image::new((handle.id(), size))))
+        .inner
+}
+
+fn is_audio_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ["wav", "ogg", "mp3", "flac"]
+                .iter()
+                .any(|kind| ext.eq_ignore_ascii_case(kind))
+        })
+}
+
+fn audio_file_path(root: &Path, relative: &Path) -> Result<PathBuf, String> {
+    let root = root.canonicalize().map_err(|err| err.to_string())?;
+    let path = root
+        .join(relative)
+        .canonicalize()
+        .map_err(|err| err.to_string())?;
+    if !path.starts_with(&root) || !path.is_file() {
+        return Err("Audio file must be inside project assets".to_string());
     }
+    Ok(path)
 }
 
 /// The failure message from the last import pass for `entry`, if it
@@ -277,6 +405,176 @@ fn paint_waveform(ui: &mut egui::Ui, bins: &[(f32, f32)]) {
             egui::Stroke::new(1.0, color),
         );
     }
+}
+
+/// Renders one bounded, fixed-angle image from imported geometry. No viewport
+/// or repaint timer is created; PreviewCache calls this only on a new key.
+fn model_thumbnail(gltf: &ImportedGltf) -> Option<Vec<u8>> {
+    let side = MODEL_THUMBNAIL_PX;
+    let right = Vec3::new(1.0, 0.0, -1.0).normalize();
+    let towards_camera = Vec3::new(1.0, 0.8, 1.0).normalize();
+    let up = towards_camera.cross(right);
+    let project = |position: [f32; 3]| {
+        let point = Vec3::from(position);
+        Vec3::new(point.dot(right), point.dot(up), point.dot(towards_camera))
+    };
+
+    // Sampling the bounds and triangles caps selection-time CPU work for large assets.
+    // shortcut: node transforms are absent from ImportedGltf; use them when the importer retains them.
+    let vertex_count = gltf
+        .meshes
+        .iter()
+        .fold(0usize, |sum, mesh| sum.saturating_add(mesh.vertices.len()));
+    let vertex_stride = vertex_count.div_ceil(200_000).max(1);
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for mesh in &gltf.meshes {
+        for vertex in mesh.vertices.iter().step_by(vertex_stride) {
+            let point = project(vertex.position);
+            if point.is_finite() {
+                min = min.min(point);
+                max = max.max(point);
+            }
+        }
+    }
+    let extent = (max - min).truncate();
+    if !extent.is_finite() || extent.max_element() < 1e-6 {
+        return None;
+    }
+    let scale = (side as f32 - 24.0) / extent.max_element();
+    let center = (min + max) * 0.5;
+    let screen = |position: [f32; 3]| {
+        let p = project(position) - center;
+        Vec3::new(
+            side as f32 * 0.5 + p.x * scale,
+            side as f32 * 0.5 - p.y * scale,
+            p.z,
+        )
+    };
+
+    let mut pixels = vec![0u8; side * side * 4];
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.copy_from_slice(&[26, 32, 42, 255]);
+    }
+    let mut depth = vec![f32::NEG_INFINITY; side * side];
+    let triangle_count = gltf.meshes.iter().fold(0usize, |sum, mesh| {
+        sum.saturating_add(mesh.indices.len() / 3)
+    });
+    let triangle_stride = triangle_count.div_ceil(MODEL_MAX_TRIANGLES).max(1);
+    let mut triangles_seen = 0;
+    let mut visits = 0;
+    let mut drawn = false;
+    let light = Vec3::new(0.4, 0.9, 0.7).normalize();
+
+    'meshes: for mesh in &gltf.meshes {
+        let material = mesh.material.and_then(|index| gltf.materials.get(index));
+        let factor = material.map_or([0.55, 0.72, 0.9, 1.0], |m| m.base_color_factor);
+        let image = material
+            .and_then(|m| m.base_color_image)
+            .and_then(|index| gltf.images.get(index))
+            .filter(|image| {
+                (image.width as usize)
+                    .checked_mul(image.height as usize)
+                    .and_then(|pixels| pixels.checked_mul(4))
+                    == Some(image.rgba8.len())
+                    && image.width > 0
+                    && image.height > 0
+            });
+        for (triangle_index, indices) in mesh.indices.as_chunks::<3>().0.iter().enumerate() {
+            if triangle_index % triangle_stride != 0 {
+                continue;
+            }
+            if triangles_seen >= MODEL_MAX_TRIANGLES || visits >= MODEL_MAX_PIXEL_VISITS {
+                break 'meshes;
+            }
+            triangles_seen += 1;
+            let (Some(a), Some(b), Some(c)) = (
+                mesh.vertices.get(indices[0] as usize),
+                mesh.vertices.get(indices[1] as usize),
+                mesh.vertices.get(indices[2] as usize),
+            ) else {
+                continue;
+            };
+            let points = [screen(a.position), screen(b.position), screen(c.position)];
+            if !points.iter().all(|p| p.is_finite()) {
+                continue;
+            }
+            let edge = |a: Vec3, b: Vec3, x: f32, y: f32| {
+                (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x)
+            };
+            let area = edge(points[0], points[1], points[2].x, points[2].y);
+            if !area.is_finite() || area.abs() < 1e-5 {
+                continue;
+            }
+            let x0 = points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+            let x1 = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+            let y0 = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+            let y1 = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+            if x1 < 0.0 || y1 < 0.0 || x0 >= side as f32 || y0 >= side as f32 {
+                continue;
+            }
+            let x0 = x0.floor().clamp(0.0, (side - 1) as f32) as usize;
+            let x1 = x1.ceil().clamp(0.0, (side - 1) as f32) as usize;
+            let y0 = y0.floor().clamp(0.0, (side - 1) as f32) as usize;
+            let y1 = y1.ceil().clamp(0.0, (side - 1) as f32) as usize;
+            let normal = (Vec3::from(b.position) - Vec3::from(a.position))
+                .cross(Vec3::from(c.position) - Vec3::from(a.position))
+                .normalize_or_zero();
+            let shade = if normal.is_finite() {
+                0.35 + 0.65 * normal.dot(light).abs()
+            } else {
+                0.65
+            };
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    visits += 1;
+                    if visits > MODEL_MAX_PIXEL_VISITS {
+                        break 'meshes;
+                    }
+                    let px = x as f32 + 0.5;
+                    let py = y as f32 + 0.5;
+                    let weights = [
+                        edge(points[1], points[2], px, py) / area,
+                        edge(points[2], points[0], px, py) / area,
+                        edge(points[0], points[1], px, py) / area,
+                    ];
+                    if weights
+                        .iter()
+                        .any(|weight| !weight.is_finite() || *weight < 0.0)
+                    {
+                        continue;
+                    }
+                    let z = weights[0] * points[0].z
+                        + weights[1] * points[1].z
+                        + weights[2] * points[2].z;
+                    let offset = y * side + x;
+                    if !z.is_finite() || z <= depth[offset] {
+                        continue;
+                    }
+                    let texel = image.map(|image| {
+                        let u = weights[0] * a.uv[0] + weights[1] * b.uv[0] + weights[2] * c.uv[0];
+                        let v = weights[0] * a.uv[1] + weights[1] * b.uv[1] + weights[2] * c.uv[1];
+                        let tx = (u.rem_euclid(1.0) * image.width as f32) as usize;
+                        let ty = (v.rem_euclid(1.0) * image.height as f32) as usize;
+                        let start = (ty * image.width as usize + tx) * 4;
+                        &image.rgba8[start..start + 4]
+                    });
+                    if texel.is_some_and(|rgba| rgba[3] < 128) {
+                        continue;
+                    }
+                    for channel in 0..3 {
+                        let base = texel.map_or(255.0, |rgba| rgba[channel] as f32);
+                        pixels[offset * 4 + channel] =
+                            (base * factor[channel].clamp(0.0, 1.0) * shade).clamp(0.0, 255.0)
+                                as u8;
+                    }
+                    depth[offset] = z;
+                    drawn = true;
+                }
+            }
+        }
+    }
+    drawn.then_some(pixels)
 }
 
 /// Per-primitive and total counts for the glTF summary line.
@@ -408,6 +706,65 @@ pub fn human_bytes(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_preview_path_stays_inside_assets_root() {
+        let root = std::env::temp_dir().join(format!("vge-preview-path-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("sample.wav"), b"audio").unwrap();
+        assert_eq!(
+            audio_file_path(&root, std::path::Path::new("sample.wav")).unwrap(),
+            root.join("sample.wav").canonicalize().unwrap()
+        );
+        assert!(audio_file_path(&root, std::path::Path::new("../outside.wav")).is_err());
+        assert!(audio_file_path(&root, std::path::Path::new("missing.wav")).is_err());
+        std::fs::remove_file(root.join("sample.wav")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn compressed_audio_files_are_playable_without_a_waveform_import() {
+        for name in ["music.ogg", "voice.mp3", "ambient.flac", "effect.wav"] {
+            assert!(is_audio_file(std::path::Path::new(name)), "{name}");
+        }
+        assert!(!is_audio_file(std::path::Path::new("cover.png")));
+    }
+
+    #[test]
+    fn invalid_audio_reports_an_error_without_opening_an_output_device() {
+        let root = std::env::temp_dir().join(format!("vge-preview-invalid-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("bad.wav"), b"not a wave file").unwrap();
+        let mut cache = PreviewCache::new();
+        cache.play_audio(&root, Path::new("bad.wav"));
+        assert!(cache.playing.is_none());
+        assert!(cache.audio_error.is_some());
+        std::fs::remove_file(root.join("bad.wav")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn thumbnail_is_centered_in_a_wide_preview() {
+        let ctx = egui::Context::default();
+        let image = egui::ColorImage::from_rgba_unmultiplied([20, 20], &vec![255; 20 * 20 * 4]);
+        let texture = ctx.load_texture("center-test", image, egui::TextureOptions::LINEAR);
+        let mut rect = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, 150.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                rect = Some(show_thumbnail(ui, &texture, (20, 20)).rect);
+            },
+        );
+        output.textures_delta.clear();
+        let rect = rect.unwrap();
+        assert!((rect.center().x - 150.0).abs() < 3.0, "{rect:?}");
+    }
     use bytemuck::Zeroable;
     use engine_asset::ImportedMesh;
     use engine_renderer::Vertex;
@@ -423,6 +780,15 @@ mod tests {
         }
     }
 
+    fn triangle() -> ImportedMesh {
+        let mut triangle = mesh(3, 3);
+        triangle.vertices[0].position = [-1.0, -1.0, 0.0];
+        triangle.vertices[1].position = [1.0, -1.0, 0.0];
+        triangle.vertices[2].position = [0.0, 1.0, 0.0];
+        triangle.indices = vec![0, 1, 2];
+        triangle
+    }
+
     #[test]
     fn mesh_summary_counts_primitives_and_triangles() {
         let gltf = ImportedGltf {
@@ -433,6 +799,80 @@ mod tests {
         assert_eq!(summary.meshes, 2);
         assert_eq!(summary.vertices, 9);
         assert_eq!(summary.triangles, 3); // 3/3 + 6/3
+    }
+
+    #[test]
+    fn mesh_without_images_gets_a_geometry_thumbnail() {
+        let gltf = ImportedGltf {
+            meshes: vec![triangle()],
+            ..ImportedGltf::default()
+        };
+        let mut cache = PreviewCache::new();
+        cache.rebuild(
+            &egui::Context::default(),
+            &(PathBuf::from("model.gltf"), 1),
+            &ImportedAsset::Mesh(Box::new(gltf)),
+        );
+        assert!(cache.texture.is_some());
+    }
+
+    #[test]
+    fn model_thumbnail_depicts_geometry_instead_of_the_first_image() {
+        let gltf = ImportedGltf {
+            meshes: vec![triangle()],
+            images: vec![engine_asset::ImportedImage {
+                width: 1,
+                height: 1,
+                rgba8: vec![255, 0, 0, 255],
+            }],
+            ..ImportedGltf::default()
+        };
+        let image = model_thumbnail(&gltf).unwrap();
+        assert_eq!(image.len(), MODEL_THUMBNAIL_PX * MODEL_THUMBNAIL_PX * 4);
+        assert!(
+            image
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[2] > pixel[0])
+        );
+    }
+
+    #[test]
+    fn model_thumbnail_rejects_empty_and_malformed_geometry() {
+        assert!(model_thumbnail(&ImportedGltf::default()).is_none());
+        let mut bad_index = triangle();
+        bad_index.indices = vec![0, 1, 99];
+        assert!(
+            model_thumbnail(&ImportedGltf {
+                meshes: vec![bad_index],
+                ..ImportedGltf::default()
+            })
+            .is_none()
+        );
+        let mut non_finite = triangle();
+        non_finite.vertices[1].position[0] = f32::NAN;
+        assert!(
+            model_thumbnail(&ImportedGltf {
+                meshes: vec![non_finite],
+                ..ImportedGltf::default()
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn model_thumbnail_bounds_work_for_large_triangle_lists() {
+        let mut large = triangle();
+        large.indices = [0, 1, 2].repeat(MODEL_MAX_TRIANGLES + 1);
+        let gltf = ImportedGltf {
+            meshes: vec![large],
+            ..ImportedGltf::default()
+        };
+        assert_eq!(
+            model_thumbnail(&gltf).map(|image| image.len()),
+            Some(MODEL_THUMBNAIL_PX * MODEL_THUMBNAIL_PX * 4)
+        );
     }
 
     #[test]

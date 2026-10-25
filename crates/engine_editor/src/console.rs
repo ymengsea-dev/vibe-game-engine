@@ -268,7 +268,7 @@ pub fn show(ui: &mut egui::Ui, log: &ConsoleLog, filter: &mut ConsoleFilter) {
                 ui.horizontal(|ui| {
                     ui.colored_label(level_color(line.level), format!("[{}]", line.level));
                     ui.weak(short_target(&line.target));
-                    ui.label(&line.message);
+                    ui.add(egui::Label::new(&line.message).wrap());
                 });
             }
         });
@@ -299,6 +299,41 @@ fn level_color(level: Level) -> egui::Color32 {
 mod tests {
     use super::*;
     use tracing_subscriber::layer::SubscriberExt;
+
+    #[test]
+    fn long_console_message_wraps_within_the_panel() {
+        let log = ConsoleLog::new();
+        log.push(line(&"long console message ".repeat(20)));
+        log.push(line("short status"));
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(480.0, 240.0),
+                )),
+                ..Default::default()
+            },
+            |ui| show(ui, &log, &mut ConsoleFilter::default()),
+        );
+        let message = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text)
+                if text.galley.text().contains("long console message") =>
+            {
+                Some(text)
+            }
+            _ => None,
+        });
+        let message = message.expect("console message");
+        assert!(message.galley.rows.len() > 1);
+        assert!(message.pos.x + message.galley.size().x <= 480.0);
+        let short = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == "short status" => Some(text),
+            _ => None,
+        });
+        assert_eq!(short.expect("short message").galley.rows.len(), 1);
+        output.textures_delta.clear();
+    }
 
     fn line(message: &str) -> ConsoleLine {
         ConsoleLine {

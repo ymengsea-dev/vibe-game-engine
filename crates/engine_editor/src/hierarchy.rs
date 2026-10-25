@@ -370,123 +370,141 @@ pub fn show(
     secondary: &mut Vec<Entity>,
     state: &mut HierarchyState,
 ) {
-    ui.horizontal(|ui| {
-        if ui.button("+ Cube").clicked() {
-            let offset = roots(world).len() as f32 * 1.5;
-            let entity = spawn_entity(world, "Cube", Vec3::new(offset, 0.0, 0.0));
-            select_only(selected, secondary, entity);
-        }
-        let selection = selection_list(*selected, secondary);
-        let has_selection = !selection.is_empty();
-        if ui
-            .add_enabled(has_selection, egui::Button::new("Duplicate"))
-            .clicked()
-        {
-            let mut last = None;
-            for source in &selection {
-                last = Some(duplicate_entity(world, *source));
-            }
-            if let Some(new) = last {
-                select_only(selected, secondary, new);
-            }
-        }
-        if ui
-            .add_enabled(has_selection, egui::Button::new("Delete"))
-            .clicked()
-        {
-            for entity in &selection {
-                despawn_entity(world, *entity);
-            }
-            *selected = None;
-            secondary.clear();
-            state.renaming = None;
-        }
-        // Lock / unlock the whole selection. The label follows the
-        // primary's state so a second click undoes the first.
-        let primary_locked = selected.is_some_and(|e| world.get::<Lock>(e).is_some());
-        if ui
-            .add_enabled(
-                has_selection,
-                egui::Button::new(if primary_locked { "Unlock" } else { "Lock" }),
-            )
-            .on_hover_text("Locked entities ignore the gizmo, batch move, and reparent-drag")
-            .clicked()
-        {
-            for entity in &selection {
-                if let Ok(mut entity_mut) = world.get_entity_mut(*entity) {
-                    if primary_locked {
-                        entity_mut.remove::<Lock>();
-                    } else {
-                        entity_mut.insert(Lock);
-                    }
+    crate::shell::panel_header(ui, |ui| {
+        crate::shell::paint_shell_icon(ui, crate::shell::ShellIcon::Layers);
+        ui.label("Hierarchy");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(14.0);
+            ui.menu_button("+", |ui| {
+                if ui.button("Cube").clicked() {
+                    let offset = roots(world).len() as f32 * 1.5;
+                    let entity = spawn_entity(world, "Cube", Vec3::new(offset, 0.0, 0.0));
+                    select_only(selected, secondary, entity);
+                    ui.close();
                 }
-            }
-        }
-        // Prefabs are single-entity: acts on the primary only.
-        if ui
-            .add_enabled(selected.is_some(), egui::Button::new("Make Prefab"))
-            .on_hover_text("Save the selected entity as a reusable .prefab")
-            .clicked()
-            && let Some(entity) = *selected
-        {
-            state.prefab_request = Some(entity);
-        }
+                let selection = selection_list(*selected, secondary);
+                let has_selection = !selection.is_empty();
+                if ui
+                    .add_enabled(has_selection, egui::Button::new("Duplicate"))
+                    .clicked()
+                {
+                    let mut last = None;
+                    for source in &selection {
+                        last = Some(duplicate_entity(world, *source));
+                    }
+                    if let Some(new) = last {
+                        select_only(selected, secondary, new);
+                    }
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(has_selection, egui::Button::new("Delete"))
+                    .clicked()
+                {
+                    for entity in &selection {
+                        despawn_entity(world, *entity);
+                    }
+                    *selected = None;
+                    secondary.clear();
+                    state.renaming = None;
+                    ui.close();
+                }
+                // Lock / unlock the whole selection. The label follows the
+                // primary's state so a second click undoes the first.
+                let primary_locked = selected.is_some_and(|e| world.get::<Lock>(e).is_some());
+                if ui
+                    .add_enabled(
+                        has_selection,
+                        egui::Button::new(if primary_locked { "Unlock" } else { "Lock" }),
+                    )
+                    .on_hover_text(
+                        "Locked entities ignore the gizmo, batch move, and reparent-drag",
+                    )
+                    .clicked()
+                {
+                    for entity in &selection {
+                        if let Ok(mut entity_mut) = world.get_entity_mut(*entity) {
+                            if primary_locked {
+                                entity_mut.remove::<Lock>();
+                            } else {
+                                entity_mut.insert(Lock);
+                            }
+                        }
+                    }
+                    ui.close();
+                }
+                // Prefabs are single-entity: acts on the primary only.
+                if ui
+                    .add_enabled(selected.is_some(), egui::Button::new("Make Prefab"))
+                    .on_hover_text("Save the selected entity as a reusable .prefab")
+                    .clicked()
+                    && let Some(entity) = *selected
+                {
+                    state.prefab_request = Some(entity);
+                    ui.close();
+                }
+            });
+        });
     });
-    ui.add(
-        egui::TextEdit::singleline(&mut state.search)
-            .hint_text("Search")
-            .desired_width(f32::INFINITY),
-    );
-
-    // Drop target for un-parenting: a row dragged here becomes a root.
-    let root_strip = ui.add(
-        egui::Label::new(egui::RichText::new("\u{25b8} Scene root").weak())
-            .sense(egui::Sense::click()),
-    );
-    if let Some(dragged) = root_strip.dnd_release_payload::<Entity>()
-        && reparent(world, *dragged, None)
-    {
-        select_only(selected, secondary, *dragged);
-    } else if root_strip.dnd_hover_payload::<Entity>().is_some() {
-        ui.painter().rect_filled(
-            root_strip.rect,
-            2.0,
-            ui.visuals().selection.bg_fill.linear_multiply(0.3),
-        );
-    }
-    ui.separator();
-
-    let query = state.search.trim().to_lowercase();
-    let visible: Option<HashSet<Entity>> = if query.is_empty() {
-        None
-    } else {
-        let mut set = HashSet::new();
-        for root in roots(world) {
-            collect_matches(world, root, &query, &mut set);
-        }
-        Some(set)
-    };
-
-    // Rebuild the flat visible order (drives shift-click range select).
-    state.flat_order.clear();
-    for root in roots(world) {
-        flatten_visible(world, root, visible.as_ref(), &mut state.flat_order);
-    }
-
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(9, 6))
         .show(ui, |ui| {
-            for entity in roots(world) {
-                show_entity(
-                    ui,
-                    world,
-                    entity,
-                    selected,
-                    secondary,
-                    state,
-                    visible.as_ref(),
+            ui.add(
+                egui::TextEdit::singleline(&mut state.search)
+                    .hint_text("Filter hierarchy…")
+                    .desired_width(f32::INFINITY),
+            );
+
+            // Drop target for un-parenting: a row dragged here becomes a root.
+            let root_strip = ui.add(
+                egui::Label::new(egui::RichText::new("\u{25b8} Scene root").weak())
+                    .sense(egui::Sense::click()),
+            );
+            if let Some(dragged) = root_strip.dnd_release_payload::<Entity>()
+                && reparent(world, *dragged, None)
+            {
+                select_only(selected, secondary, *dragged);
+            } else if root_strip.dnd_hover_payload::<Entity>().is_some() {
+                ui.painter().rect_filled(
+                    root_strip.rect,
+                    2.0,
+                    ui.visuals().selection.bg_fill.linear_multiply(0.3),
                 );
             }
+            ui.separator();
+
+            let query = state.search.trim().to_lowercase();
+            let visible: Option<HashSet<Entity>> = if query.is_empty() {
+                None
+            } else {
+                let mut set = HashSet::new();
+                for root in roots(world) {
+                    collect_matches(world, root, &query, &mut set);
+                }
+                Some(set)
+            };
+
+            // Rebuild the flat visible order (drives shift-click range select).
+            state.flat_order.clear();
+            for root in roots(world) {
+                flatten_visible(world, root, visible.as_ref(), &mut state.flat_order);
+            }
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for entity in roots(world) {
+                        show_entity(
+                            ui,
+                            world,
+                            entity,
+                            selected,
+                            secondary,
+                            state,
+                            visible.as_ref(),
+                        );
+                    }
+                });
         });
 }
 
@@ -555,6 +573,72 @@ fn show_entity(
     });
 }
 
+fn paint_entity_icon(ui: &mut egui::Ui, camera: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+    let at = |x: f32, y: f32| rect.min + egui::vec2(x, y);
+    let stroke = egui::Stroke::new(1.2, crate::theme::MUTED);
+    let painter = ui.painter();
+    if camera {
+        painter.add(egui::Shape::line(
+            vec![
+                at(1.0, 3.0),
+                at(9.0, 3.0),
+                at(9.0, 11.0),
+                at(1.0, 11.0),
+                at(1.0, 3.0),
+            ],
+            stroke,
+        ));
+        painter.add(egui::Shape::line(
+            vec![at(9.0, 5.0), at(13.0, 3.0), at(13.0, 11.0), at(9.0, 9.0)],
+            stroke,
+        ));
+    } else {
+        painter.add(egui::Shape::line(
+            vec![
+                at(7.0, 1.0),
+                at(13.0, 4.0),
+                at(13.0, 10.0),
+                at(7.0, 13.0),
+                at(1.0, 10.0),
+                at(1.0, 4.0),
+                at(7.0, 1.0),
+            ],
+            stroke,
+        ));
+        painter.line_segment([at(1.0, 4.0), at(7.0, 7.0)], stroke);
+        painter.line_segment([at(13.0, 4.0), at(7.0, 7.0)], stroke);
+        painter.line_segment([at(7.0, 7.0), at(7.0, 13.0)], stroke);
+    }
+}
+
+fn paint_lock_icon(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+    let at = |x: f32, y: f32| rect.min + egui::vec2(x, y);
+    let stroke = egui::Stroke::new(1.2, crate::theme::SUBTLE);
+    ui.painter().add(egui::Shape::line(
+        vec![
+            at(4.0, 6.0),
+            at(4.0, 4.0),
+            at(5.5, 2.0),
+            at(8.5, 2.0),
+            at(10.0, 4.0),
+            at(10.0, 6.0),
+        ],
+        stroke,
+    ));
+    ui.painter().add(egui::Shape::line(
+        vec![
+            at(3.0, 6.0),
+            at(11.0, 6.0),
+            at(11.0, 12.0),
+            at(3.0, 12.0),
+            at(3.0, 6.0),
+        ],
+        stroke,
+    ));
+}
+
 /// The name portion of a hierarchy row: an inline rename field when this
 /// entity is being renamed, otherwise a selectable label plus its
 /// right-click menu.
@@ -593,25 +677,58 @@ fn entity_row(
 
     let disabled = is_disabled(world, entity);
     let locked = world.get::<Lock>(entity).is_some();
-    let raw_name = display_name(world, entity);
-    let name = if locked {
-        format!("\u{1f512} {raw_name}")
-    } else {
-        raw_name
-    };
+    let name = display_name(world, entity);
     let text = if disabled {
-        egui::RichText::new(name).weak().italics()
-    } else {
         egui::RichText::new(name)
+            .color(crate::theme::SUBTLE)
+            .italics()
+    } else if *selected == Some(entity) || secondary.contains(&entity) {
+        egui::RichText::new(name).color(crate::theme::TEXT)
+    } else {
+        egui::RichText::new(name).color(crate::theme::MUTED)
     };
 
     let in_selection = *selected == Some(entity) || secondary.contains(&entity);
     let row_id = egui::Id::new(("hierarchy_dnd", entity));
-    let response = ui
+    let row_rect = ui
         .dnd_drag_source(row_id, entity, |ui| {
-            let _ = ui.selectable_label(in_selection, text);
+            let row_rect =
+                egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 27.0));
+            if in_selection || ui.rect_contains_pointer(row_rect) {
+                ui.painter().rect_filled(
+                    row_rect,
+                    5.0,
+                    if in_selection {
+                        crate::theme::ACCENT_FILL
+                    } else {
+                        crate::theme::PANEL_HOVER
+                    },
+                );
+            }
+            ui.horizontal(|ui| {
+                paint_entity_icon(ui, world.get::<Camera>(entity).is_some());
+                ui.allocate_ui_with_layout(
+                    egui::vec2(
+                        (ui.available_width() - if locked { 20.0 } else { 0.0 }).max(0.0),
+                        27.0,
+                    ),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(text)
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                        );
+                    },
+                );
+                if locked {
+                    paint_lock_icon(ui);
+                }
+            });
+            row_rect
         })
-        .response;
+        .inner;
+    let response = ui.interact(row_rect, row_id, egui::Sense::click_and_drag());
     if response.clicked() {
         let (multi, range) =
             ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
@@ -705,6 +822,259 @@ fn entity_row(
 mod tests {
     use super::*;
     use engine_ecs::prelude::ChildOf;
+
+    #[test]
+    fn hierarchy_header_uses_vector_icon_not_a_text_glyph() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        let mut selected = None;
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+        });
+        let text_glyph = output.shapes.iter().any(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) => text.galley.text() == "▦",
+            _ => false,
+        });
+        output.textures_delta.clear();
+        assert!(!text_glyph);
+    }
+
+    #[test]
+    fn add_object_button_has_space_from_header_edge() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        let mut selected = None;
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(320.0, 240.0),
+                )),
+                ..Default::default()
+            },
+            |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+        );
+        let plus_right = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == "+" => {
+                Some(text.pos.x + text.galley.size().x)
+            }
+            _ => None,
+        });
+        output.textures_delta.clear();
+        assert!(
+            plus_right.is_some_and(|right| 320.0 - right >= 18.0),
+            "add icon is too close to the card edge: {plus_right:?}"
+        );
+    }
+
+    #[test]
+    fn locked_entity_uses_a_vector_indicator_not_an_emoji() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        world.spawn((Name::new("Locked"), Lock));
+        let mut selected = None;
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+        });
+        let emoji = output.shapes.iter().any(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) => text.galley.text().contains('🔒'),
+            _ => false,
+        });
+        output.textures_delta.clear();
+        assert!(!emoji);
+    }
+
+    #[test]
+    fn hierarchy_entity_names_align_next_to_their_icons() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        world.spawn(Name::new("Camera"));
+        let mut selected = None;
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+        });
+        let x = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == "Camera" => Some(text.pos.x),
+            _ => None,
+        });
+        output.textures_delta.clear();
+        assert!(
+            x.is_some_and(|x| x < 100.0),
+            "name must start beside its icon, got {x:?}"
+        );
+    }
+
+    #[test]
+    fn clicking_a_hierarchy_row_still_selects_its_entity() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        let entity = world.spawn(Name::new("Camera")).id();
+        let mut selected = None;
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+        });
+        let pos = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == "Camera" => {
+                Some(text.pos + egui::vec2(120.0, 8.0))
+            }
+            _ => None,
+        });
+        output.textures_delta.clear();
+        let pos = pos.unwrap();
+        for pressed in [true, false] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(selected, Some(entity));
+    }
+
+    #[test]
+    fn dragging_a_hierarchy_row_does_not_crash() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        let entity = world.spawn(Name::new("Dragged")).id();
+        let mut selected = None;
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+        });
+        let row = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == "Dragged" => {
+                Some(text.pos + egui::vec2(5.0, 8.0))
+            }
+            _ => None,
+        });
+        output.textures_delta.clear();
+        let row = row.expect("hierarchy row");
+        for (time, events) in [
+            (
+                0.1,
+                vec![
+                    egui::Event::PointerMoved(row),
+                    egui::Event::PointerButton {
+                        pos: row,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            ),
+            (
+                0.2,
+                vec![egui::Event::PointerMoved(row + egui::vec2(30.0, 0.0))],
+            ),
+            (
+                0.3,
+                vec![egui::Event::PointerMoved(row + egui::vec2(40.0, 0.0))],
+            ),
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(
+            egui::DragAndDrop::payload::<Entity>(&ctx).as_deref(),
+            Some(&entity)
+        );
+    }
+
+    #[test]
+    fn dragging_a_hierarchy_row_onto_another_reparents_it() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        let dragged = spawn_entity(&mut world, "Dragged", Vec3::ZERO);
+        let target = spawn_entity(&mut world, "Target", Vec3::ZERO);
+        let mut selected = None;
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+        });
+        let row = |name: &str| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == name => {
+                    Some(text.pos + egui::vec2(5.0, 8.0))
+                }
+                _ => None,
+            })
+        };
+        let from = row("Dragged").expect("dragged row");
+        let to = row("Target").expect("target row");
+        output.textures_delta.clear();
+        for (time, events) in [
+            (
+                0.1,
+                vec![
+                    egui::Event::PointerMoved(from),
+                    egui::Event::PointerButton {
+                        pos: from,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            ),
+            (
+                0.2,
+                vec![egui::Event::PointerMoved(from + egui::vec2(30.0, 0.0))],
+            ),
+            (0.3, vec![egui::Event::PointerMoved(to)]),
+            (
+                0.4,
+                vec![egui::Event::PointerButton {
+                    pos: to,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            ),
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(
+            world.get::<ChildOf>(dragged).map(|parent| parent.parent()),
+            Some(target)
+        );
+    }
 
     #[test]
     fn spawn_entity_sets_name_and_transform() {

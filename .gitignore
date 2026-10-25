@@ -11,10 +11,10 @@
 # Default dev project the editor scaffolds when run with no path argument
 /RustyEngineProject/
 
-# Per-user editor state inside any project: open panels, last selection,
-# window layout. The project itself (project.ron, assets/, scenes/, src/)
-# is committed; this is not.
-.studio/
+# Per-user editor state stays local; stable asset IDs under .studio/assets/
+# are project data and must be committed with scenes that reference them.
+**/.studio/*
+!**/.studio/assets/
 
 # Environment
 .env

@@ -139,9 +139,8 @@ fn overlay_lines(
 
 /// The editor's off-screen scene render.
 ///
-/// Fixed size rather than resizing to fill its panel — resizing means
-/// recreating the texture, the HDR target and the post stack, and
-/// re-registering with egui, which is future work.
+/// The render target follows the visible panel size so the scene fills
+/// the Scene and Code viewports without stretching its camera aspect.
 pub struct Viewport {
     width: u32,
     height: u32,
@@ -190,21 +189,7 @@ impl Viewport {
     ) -> Result<Self, EditorError> {
         let device = gpu.device();
 
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("editor viewport target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: VIEWPORT_TEXTURE_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = Self::texture_view(device, width, height);
         let texture_id = shell.register_texture(device, &view);
 
         let pipeline = gpu.create_pbr_pipeline("editor pbr");
@@ -318,6 +303,54 @@ impl Viewport {
     /// This viewport's pixel dimensions.
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Resizes the scene target while retaining its texture id and GPU
+    /// asset cache. The host calls this after presenting the old frame.
+    pub fn resize(&mut self, gpu: &GpuContext, shell: &mut EditorShell, width: u32, height: u32) {
+        let width = width.max(1);
+        let height = height.max(1);
+        if self.width == width && self.height == height {
+            return;
+        }
+        let device = gpu.device();
+        let view = Self::texture_view(device, width, height);
+        let hdr_target = gpu.create_hdr_target(width, height);
+        let post = gpu.create_post_process_stack_for_format(
+            &hdr_target,
+            width,
+            height,
+            PostSettings::default(),
+            VIEWPORT_TEXTURE_FORMAT,
+        );
+        shell.update_texture(device, self.texture_id, &view);
+        self.view = view;
+        self.hdr_target = hdr_target;
+        self.post = post;
+        self.width = width;
+        self.height = height;
+        self.camera.aspect_ratio = width as f32 / height as f32;
+        gpu.write_uniform_buffer(&self.camera_binding.buffer, &self.camera.to_uniform());
+    }
+
+    fn texture_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("editor viewport target"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: VIEWPORT_TEXTURE_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default())
     }
 
     /// The egui texture handle this viewport's panel displays.
