@@ -584,7 +584,7 @@ pub fn show_scene(
             let selected_root = selected.is_none() && browser.target_dir.as_os_str().is_empty();
             let selection_shape = ui.painter().add(egui::Shape::Noop);
             let header = ui.horizontal(|ui| {
-                folder_disclosure(ui, &mut state);
+                tree_disclosure(ui, &mut state);
                 folder_label(ui, "assets")
             });
             paint_folder_row(ui, selection_shape, header.response.rect, selected_root);
@@ -596,7 +596,7 @@ pub fn show_scene(
             }
             folder_drop_target(ui, &header.response, Path::new(""), browser);
             header.inner.context_menu(|ui| {
-                style_asset_context_menu(ui);
+                crate::theme::style_context_menu(ui);
                 paste_menu_item(ui, browser, Path::new(""));
                 if ui.button("New Folder").clicked() {
                     browser.target_dir.clear();
@@ -850,14 +850,8 @@ fn rename_prompt(ui: &mut egui::Ui, browser: &mut AssetBrowser) -> egui::Respons
     response
 }
 
-fn style_asset_context_menu(ui: &mut egui::Ui) {
-    ui.set_min_width(180.0);
-    ui.spacing_mut().button_padding = egui::vec2(10.0, 7.0);
-    ui.spacing_mut().item_spacing.y = 4.0;
-}
-
 fn asset_context_menu(ui: &mut egui::Ui, browser: &mut AssetBrowser, path: &Path) {
-    style_asset_context_menu(ui);
+    crate::theme::style_context_menu(ui);
     if ui.button("Copy").clicked() {
         browser.clipboard = Some(AssetClipboard {
             path: path.to_path_buf(),
@@ -1070,7 +1064,7 @@ fn show_folder_contents(
         let selected_folder = selected.is_none() && browser.target_dir == child.path;
         let selection_shape = ui.painter().add(egui::Shape::Noop);
         let header = ui.horizontal(|ui| {
-            folder_disclosure(ui, &mut state);
+            tree_disclosure(ui, &mut state);
             if is_renaming {
                 folder_icon(ui);
                 rename_prompt(ui, browser)
@@ -1114,7 +1108,10 @@ fn dropped_on_folder(ui: &egui::Ui, rect: egui::Rect, drop_position: Option<(i32
     })
 }
 
-fn folder_disclosure(ui: &mut egui::Ui, state: &mut egui::collapsing_header::CollapsingState) {
+pub(crate) fn tree_disclosure(
+    ui: &mut egui::Ui,
+    state: &mut egui::collapsing_header::CollapsingState,
+) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 20.0), egui::Sense::click());
     if response.clicked() {
         state.toggle(ui);

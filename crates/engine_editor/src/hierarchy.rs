@@ -21,6 +21,7 @@ use engine_ecs::components::{
     AssetSource, Camera, Disabled, Lock, Name, Transform as TransformComponent,
 };
 use engine_ecs::prelude::{ChildOf, Children, Entity, With, Without, World};
+use engine_scene::SiblingOrder;
 use engine_utils::Transform as MathTransform;
 use glam::Vec3;
 
@@ -60,8 +61,8 @@ struct Renaming {
 }
 
 /// This world's root entities: named (see below), and not parented to
-/// anything else (no `ChildOf`). Stable (sorted by [`Entity`]) order so
-/// the tree doesn't reshuffle from one frame to the next.
+/// anything else (no `ChildOf`). Saved sibling order is used when present;
+/// otherwise entity order keeps the tree stable between frames.
 ///
 /// Requiring [`Name`] at the root is deliberate, not just incidental:
 /// `bevy_ecs` reserves a handful of entity indices of its own in every
@@ -74,11 +75,11 @@ struct Renaming {
 pub fn roots(world: &mut World) -> Vec<Entity> {
     let mut query = world.query_filtered::<Entity, (With<Name>, Without<ChildOf>)>();
     let mut entities: Vec<Entity> = query.iter(world).collect();
-    entities.sort();
+    sort_siblings(world, &mut entities);
     entities
 }
 
-/// `entity`'s direct children, in a stable (sorted by [`Entity`]) order —
+/// `entity`'s direct children, in saved sibling order when present —
 /// empty if it has none (either no [`Children`] component, or one with
 /// no entries).
 pub fn children_of(world: &World, entity: Entity) -> Vec<Entity> {
@@ -86,8 +87,75 @@ pub fn children_of(world: &World, entity: Entity) -> Vec<Entity> {
         .get::<Children>(entity)
         .map(|children| children.iter().copied().collect())
         .unwrap_or_default();
-    children.sort();
+    sort_siblings(world, &mut children);
     children
+}
+
+fn sort_siblings(world: &World, siblings: &mut [Entity]) {
+    siblings.sort_by_key(|&entity| {
+        let order = world.get::<SiblingOrder>(entity);
+        (order.is_none(), order.map_or(0, |order| order.0), entity)
+    });
+}
+
+fn siblings_of(world: &mut World, parent: Option<Entity>) -> Vec<Entity> {
+    match parent {
+        Some(parent) => children_of(world, parent),
+        None => roots(world),
+    }
+}
+
+fn set_sibling_order(world: &mut World, siblings: &[Entity]) {
+    for (index, &entity) in siblings.iter().enumerate() {
+        if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+            entity_mut.insert(SiblingOrder(index as u64));
+        }
+    }
+}
+
+fn reparent_at_end(world: &mut World, child: Entity, parent: Option<Entity>) -> bool {
+    if !reparent(world, child, parent) {
+        return false;
+    }
+    let mut siblings = siblings_of(world, parent);
+    siblings.retain(|&entity| entity != child);
+    siblings.push(child);
+    set_sibling_order(world, &siblings);
+    true
+}
+
+fn reorder_relative(world: &mut World, dragged: Entity, target: Entity, after: bool) -> bool {
+    if dragged == target
+        || world.get_entity(dragged).is_err()
+        || world.get_entity(target).is_err()
+        || world.get::<Lock>(dragged).is_some()
+    {
+        return false;
+    }
+    let target_parent = world
+        .get::<ChildOf>(target)
+        .map(|child_of| child_of.parent());
+    if target_parent.is_some_and(|parent| is_descendant(world, parent, dragged)) {
+        return false;
+    }
+    let old_parent = world
+        .get::<ChildOf>(dragged)
+        .map(|child_of| child_of.parent());
+    let mut siblings = siblings_of(world, target_parent);
+    let before = siblings.clone();
+    siblings.retain(|&entity| entity != dragged);
+    let Some(index) = siblings.iter().position(|&entity| entity == target) else {
+        return false;
+    };
+    siblings.insert(index + usize::from(after), dragged);
+    if old_parent == target_parent && siblings == before {
+        return false;
+    }
+    if old_parent != target_parent && !reparent(world, dragged, target_parent) {
+        return false;
+    }
+    set_sibling_order(world, &siblings);
+    true
 }
 
 /// The label to show for `entity`: its [`Name`] component's text if it
@@ -376,6 +444,7 @@ pub fn show(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(14.0);
             ui.menu_button("+", |ui| {
+                crate::theme::style_context_menu(ui);
                 if ui.button("Cube").clicked() {
                     let offset = roots(world).len() as f32 * 1.5;
                     let entity = spawn_entity(world, "Cube", Vec3::new(offset, 0.0, 0.0));
@@ -449,11 +518,23 @@ pub fn show(
     egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(9, 6))
         .show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut state.search)
-                    .hint_text("Filter hierarchy…")
-                    .desired_width(f32::INFINITY),
-            );
+            egui::Frame::NONE
+                .fill(crate::theme::SHELL_FILL)
+                .stroke(egui::Stroke::new(1.0, crate::theme::BORDER_SOFT))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(9, 4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        paint_search_icon(ui);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut state.search)
+                                .hint_text("Filter hierarchy…")
+                                .frame(egui::Frame::NONE)
+                                .margin(egui::Margin::ZERO)
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
+                });
 
             // Drop target for un-parenting: a row dragged here becomes a root.
             let root_strip = ui.add(
@@ -461,7 +542,7 @@ pub fn show(
                     .sense(egui::Sense::click()),
             );
             if let Some(dragged) = root_strip.dnd_release_payload::<Entity>()
-                && reparent(world, *dragged, None)
+                && reparent_at_end(world, *dragged, None)
             {
                 select_only(selected, secondary, *dragged);
             } else if root_strip.dnd_hover_payload::<Entity>().is_some() {
@@ -471,7 +552,7 @@ pub fn show(
                     ui.visuals().selection.bg_fill.linear_multiply(0.3),
                 );
             }
-            ui.separator();
+            ui.add_space(4.0);
 
             let query = state.search.trim().to_lowercase();
             let visible: Option<HashSet<Entity>> = if query.is_empty() {
@@ -493,7 +574,8 @@ pub fn show(
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    for entity in roots(world) {
+                    let root_entities = roots(world);
+                    for &entity in &root_entities {
                         show_entity(
                             ui,
                             world,
@@ -503,6 +585,9 @@ pub fn show(
                             state,
                             visible.as_ref(),
                         );
+                    }
+                    if let Some(&last) = root_entities.last() {
+                        end_drop_target(ui, world, last, selected, secondary);
                     }
                 });
         });
@@ -547,11 +632,17 @@ fn show_entity(
         .filter(|child| visible.is_none_or(|set| set.contains(child)))
         .collect();
 
+    let highlight = ui.painter().add(egui::Shape::Noop);
+    let in_selection = *selected == Some(entity) || secondary.contains(&entity);
     if children.is_empty() {
-        ui.horizontal(|ui| {
-            ui.add_space(ui.spacing().indent);
+        let row = ui.horizontal(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.add_space(22.0);
             entity_row(ui, world, entity, selected, secondary, state);
         });
+        let drop_into =
+            entity_drop_target(ui, world, entity, row.response.rect, selected, secondary);
+        paint_hierarchy_row(ui, highlight, row.response.rect, in_selection || drop_into);
         return;
     }
 
@@ -563,14 +654,184 @@ fn show_entity(
         collapsing.store(ui.ctx());
     }
     let header = ui.horizontal(|ui| {
-        collapsing.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
+        ui.set_min_width(ui.available_width());
+        ui.add_space(4.0);
+        crate::assets::tree_disclosure(ui, &mut collapsing);
         entity_row(ui, world, entity, selected, secondary, state);
     });
+    let drop_into =
+        entity_drop_target(ui, world, entity, header.response.rect, selected, secondary);
+    paint_hierarchy_row(
+        ui,
+        highlight,
+        header.response.rect,
+        in_selection || drop_into,
+    );
     collapsing.show_body_indented(&header.response, ui, |ui| {
-        for child in children {
+        for &child in &children {
             show_entity(ui, world, child, selected, secondary, state, visible);
         }
+        if let Some(&last) = children.last() {
+            end_drop_target(ui, world, last, selected, secondary);
+        }
     });
+}
+
+#[derive(Clone, Copy)]
+enum DropPlacement {
+    Before,
+    Into,
+    After,
+}
+
+fn entity_drop_target(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    target: Entity,
+    rect: egui::Rect,
+    selected: &mut Option<Entity>,
+    secondary: &mut Vec<Entity>,
+) -> bool {
+    let hit_rect = egui::Rect::from_min_max(rect.min - egui::vec2(0.0, 4.0), rect.max);
+    let pointer = ui.input(|input| input.pointer.hover_pos());
+    let placement = if pointer.is_some_and(|pointer| pointer.y < rect.top()) {
+        DropPlacement::Before
+    } else {
+        DropPlacement::Into
+    };
+    handle_entity_drop(ui, world, target, hit_rect, placement, selected, secondary)
+}
+
+fn end_drop_target(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    target: Entity,
+    selected: &mut Option<Entity>,
+    secondary: &mut Vec<Entity>,
+) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::hover());
+    handle_entity_drop(
+        ui,
+        world,
+        target,
+        rect,
+        DropPlacement::After,
+        selected,
+        secondary,
+    );
+}
+
+fn handle_entity_drop(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    target: Entity,
+    hit_rect: egui::Rect,
+    placement: DropPlacement,
+    selected: &mut Option<Entity>,
+    secondary: &mut Vec<Entity>,
+) -> bool {
+    let response = ui.interact(
+        hit_rect,
+        ui.make_persistent_id((
+            "hierarchy_drop",
+            target,
+            matches!(placement, DropPlacement::After),
+        )),
+        egui::Sense::hover(),
+    );
+    let Some(dragged) = response.dnd_hover_payload::<Entity>() else {
+        return false;
+    };
+    let dragged = *dragged;
+    if dragged == target || world.get::<Lock>(dragged).is_some() {
+        return false;
+    }
+    let parent = match placement {
+        DropPlacement::Into => Some(target),
+        DropPlacement::Before | DropPlacement::After => world
+            .get::<ChildOf>(target)
+            .map(|child_of| child_of.parent()),
+    };
+    if parent.is_some_and(|parent| is_descendant(world, parent, dragged)) {
+        return false;
+    }
+    if response.dnd_release_payload::<Entity>().is_some() {
+        let moved = match placement {
+            DropPlacement::Before => reorder_relative(world, dragged, target, false),
+            DropPlacement::After => reorder_relative(world, dragged, target, true),
+            DropPlacement::Into => {
+                let group = if *selected == Some(dragged) || secondary.contains(&dragged) {
+                    selection_list(*selected, secondary)
+                } else {
+                    vec![dragged]
+                };
+                let mut moved = false;
+                for child in group {
+                    if world.get::<Lock>(child).is_none()
+                        && !is_descendant(world, target, child)
+                        && reparent_at_end(world, child, Some(target))
+                    {
+                        moved = true;
+                    }
+                }
+                moved
+            }
+        };
+        if moved {
+            select_only(selected, secondary, dragged);
+        }
+        return false;
+    }
+
+    match placement {
+        DropPlacement::Before | DropPlacement::After => {
+            let line_y = if matches!(placement, DropPlacement::Before) {
+                hit_rect.top() + 2.0
+            } else {
+                hit_rect.center().y
+            };
+            ui.painter().line_segment(
+                [
+                    egui::pos2(hit_rect.left() + 4.0, line_y),
+                    egui::pos2(hit_rect.right() - 6.0, line_y),
+                ],
+                egui::Stroke::new(2.0, crate::theme::ACCENT),
+            );
+            false
+        }
+        DropPlacement::Into => true,
+    }
+}
+
+fn paint_hierarchy_row(
+    ui: &egui::Ui,
+    shape: egui::layers::ShapeIdx,
+    rect: egui::Rect,
+    selected: bool,
+) {
+    let fill = if selected {
+        Some(crate::theme::ACCENT_FILL)
+    } else if ui.rect_contains_pointer(rect) {
+        Some(crate::theme::PANEL_HOVER)
+    } else {
+        None
+    };
+    if let Some(fill) = fill {
+        ui.painter()
+            .set(shape, egui::Shape::rect_filled(rect, 6.0, fill));
+    }
+}
+
+fn paint_search_icon(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+    let center = rect.min + egui::vec2(6.0, 6.0);
+    let stroke = egui::Stroke::new(1.3, crate::theme::MUTED);
+    ui.painter().circle_stroke(center, 4.0, stroke);
+    ui.painter().line_segment(
+        [center + egui::vec2(3.0, 3.0), center + egui::vec2(6.0, 6.0)],
+        stroke,
+    );
 }
 
 fn paint_entity_icon(ui: &mut egui::Ui, camera: bool) {
@@ -688,23 +949,11 @@ fn entity_row(
         egui::RichText::new(name).color(crate::theme::MUTED)
     };
 
-    let in_selection = *selected == Some(entity) || secondary.contains(&entity);
     let row_id = egui::Id::new(("hierarchy_dnd", entity));
     let row_rect = ui
         .dnd_drag_source(row_id, entity, |ui| {
             let row_rect =
                 egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 27.0));
-            if in_selection || ui.rect_contains_pointer(row_rect) {
-                ui.painter().rect_filled(
-                    row_rect,
-                    5.0,
-                    if in_selection {
-                        crate::theme::ACCENT_FILL
-                    } else {
-                        crate::theme::PANEL_HOVER
-                    },
-                );
-            }
             ui.horizontal(|ui| {
                 paint_entity_icon(ui, world.get::<Camera>(entity).is_some());
                 ui.allocate_ui_with_layout(
@@ -748,40 +997,8 @@ fn entity_row(
         });
     }
 
-    // Drop another row here to re-parent the dragged entity under this
-    // one (keeping its world transform). Rejected for a self-drop or a
-    // drop onto one of the dragged entity's own descendants.
-    if let Some(dragged) = response.dnd_release_payload::<Entity>() {
-        let dragged = *dragged;
-        // If the dragged row is part of the selection, re-parent the
-        // whole (unlocked, non-cycling) selection; otherwise just it.
-        let group = if *selected == Some(dragged) || secondary.contains(&dragged) {
-            selection_list(*selected, secondary)
-        } else {
-            vec![dragged]
-        };
-        let mut moved = false;
-        for child in group {
-            if world.get::<Lock>(child).is_none()
-                && !is_descendant(world, entity, child)
-                && reparent(world, child, Some(entity))
-            {
-                moved = true;
-            }
-        }
-        if moved {
-            select_only(selected, secondary, dragged);
-        }
-    } else if let Some(dragged) = response.dnd_hover_payload::<Entity>()
-        && !is_descendant(world, entity, *dragged)
-    {
-        ui.painter().rect_filled(
-            response.rect,
-            2.0,
-            ui.visuals().selection.bg_fill.linear_multiply(0.3),
-        );
-    }
     response.context_menu(|ui| {
+        crate::theme::style_context_menu(ui);
         if ui.button("Rename").clicked() {
             state.renaming = Some(Renaming {
                 entity,
@@ -1015,7 +1232,8 @@ mod tests {
         let mut world = World::new();
         let dragged = spawn_entity(&mut world, "Dragged", Vec3::ZERO);
         let target = spawn_entity(&mut world, "Target", Vec3::ZERO);
-        let mut selected = None;
+        world.spawn((Name::new("Existing child"), ChildOf(target)));
+        let mut selected = Some(target);
         let mut secondary = Vec::new();
         let mut state = HierarchyState::default();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -1030,7 +1248,19 @@ mod tests {
             })
         };
         let from = row("Dragged").expect("dragged row");
-        let to = row("Target").expect("target row");
+        let target_label = row("Target").expect("target row");
+        let target_row = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Rect(rect)
+                if rect.fill == crate::theme::ACCENT_FILL && rect.rect.contains(target_label) =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+        let to = egui::pos2(
+            target_label.x,
+            target_row.expect("target highlight").bottom() - 1.0,
+        );
         output.textures_delta.clear();
         for (time, events) in [
             (
@@ -1068,12 +1298,427 @@ mod tests {
                 },
                 |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
             );
+            if time == 0.3 {
+                let drop_highlight = output.shapes.iter().any(|shape| match &shape.shape {
+                    egui::epaint::Shape::Rect(rect) => {
+                        rect.fill == crate::theme::ACCENT_FILL && rect.rect.contains(to)
+                    }
+                    _ => false,
+                });
+                assert!(drop_highlight, "row hover must highlight the new parent");
+            }
             output.textures_delta.clear();
         }
         assert_eq!(
             world.get::<ChildOf>(dragged).map(|parent| parent.parent()),
             Some(target)
         );
+    }
+
+    #[test]
+    fn dropping_in_the_gap_above_a_row_reorders_without_reparenting() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        spawn_entity(&mut world, "One", Vec3::ZERO);
+        spawn_entity(&mut world, "Two", Vec3::ZERO);
+        spawn_entity(&mut world, "Three", Vec3::ZERO);
+        let [first, target, dragged] = <[Entity; 3]>::try_from(roots(&mut world)).unwrap();
+        let target_name = display_name(&world, target);
+        let dragged_name = display_name(&world, dragged);
+        let mut selected = Some(target);
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+        });
+        let row = |name: &str| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == name => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                }
+                _ => None,
+            })
+        };
+        let from = row(&dragged_name).unwrap().center();
+        let target_text = row(&target_name).unwrap();
+        let target_row = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Rect(rect)
+                if rect.fill == crate::theme::ACCENT_FILL
+                    && rect.rect.contains(target_text.center()) =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+        let to = egui::pos2(target_text.center().x, target_row.unwrap().top() - 1.0);
+        output.textures_delta.clear();
+        for (time, events) in [
+            (
+                0.1,
+                vec![
+                    egui::Event::PointerMoved(from),
+                    egui::Event::PointerButton {
+                        pos: from,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            ),
+            (
+                0.2,
+                vec![egui::Event::PointerMoved(from + egui::vec2(30.0, 0.0))],
+            ),
+            (0.3, vec![egui::Event::PointerMoved(to)]),
+            (
+                0.4,
+                vec![egui::Event::PointerButton {
+                    pos: to,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            ),
+        ] {
+            let mut frame = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+            );
+            if time == 0.3 {
+                let line = frame.shapes.iter().any(|shape| match &shape.shape {
+                    egui::epaint::Shape::LineSegment { points, stroke } => {
+                        stroke.color == crate::theme::ACCENT
+                            && stroke.width >= 2.0
+                            && (points[0].y - target_row.unwrap().top()).abs() < 4.0
+                    }
+                    _ => false,
+                });
+                assert!(line, "gap hover must show an insertion line");
+            }
+            frame.textures_delta.clear();
+        }
+        assert!(world.get::<ChildOf>(dragged).is_none());
+        assert_eq!(roots(&mut world), vec![first, dragged, target]);
+    }
+
+    #[test]
+    fn dropping_below_the_last_row_moves_an_entity_to_the_end() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        spawn_entity(&mut world, "One", Vec3::ZERO);
+        spawn_entity(&mut world, "Two", Vec3::ZERO);
+        spawn_entity(&mut world, "Three", Vec3::ZERO);
+        let [dragged, middle, last] = <[Entity; 3]>::try_from(roots(&mut world)).unwrap();
+        let dragged_name = display_name(&world, dragged);
+        let last_name = display_name(&world, last);
+        let mut selected = Some(last);
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+        });
+        let row = |name: &str| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == name => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                }
+                _ => None,
+            })
+        };
+        let from = row(&dragged_name).unwrap().center();
+        let last_text = row(&last_name).unwrap();
+        let last_row = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Rect(rect)
+                if rect.fill == crate::theme::ACCENT_FILL
+                    && rect.rect.contains(last_text.center()) =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        });
+        let to = egui::pos2(last_text.center().x, last_row.unwrap().bottom() + 5.0);
+        output.textures_delta.clear();
+        for (time, events) in [
+            (
+                0.1,
+                vec![
+                    egui::Event::PointerMoved(from),
+                    egui::Event::PointerButton {
+                        pos: from,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            ),
+            (
+                0.2,
+                vec![egui::Event::PointerMoved(from + egui::vec2(30.0, 0.0))],
+            ),
+            (0.3, vec![egui::Event::PointerMoved(to)]),
+            (
+                0.4,
+                vec![egui::Event::PointerButton {
+                    pos: to,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            ),
+        ] {
+            let mut frame = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+            );
+            frame.textures_delta.clear();
+        }
+        assert_eq!(roots(&mut world), vec![middle, last, dragged]);
+    }
+
+    #[test]
+    fn reordering_between_parents_keeps_sibling_order_and_world_position() {
+        let mut world = World::new();
+        let first_parent = spawn_at(&mut world, "First parent", Vec3::new(10.0, 0.0, 0.0));
+        let second_parent = spawn_at(&mut world, "Second parent", Vec3::new(20.0, 0.0, 0.0));
+        let dragged = child_at(
+            &mut world,
+            "Dragged",
+            Vec3::new(2.0, 0.0, 0.0),
+            first_parent,
+        );
+        let before = child_at(&mut world, "Before", Vec3::ZERO, second_parent);
+        let target = child_at(&mut world, "Target", Vec3::ZERO, second_parent);
+        set_sibling_order(&mut world, &[before, target]);
+
+        assert!(reorder_relative(&mut world, dragged, target, false));
+        assert_eq!(
+            children_of(&world, second_parent),
+            vec![before, dragged, target]
+        );
+        assert_eq!(
+            world.get::<ChildOf>(dragged).map(|p| p.parent()),
+            Some(second_parent)
+        );
+        assert!((world_transform(&world, dragged).translation.x - 12.0).abs() < 1e-4);
+
+        let scene = engine_scene::Scene::from_world(&mut world);
+        let mut loaded = World::new();
+        let entities = scene.instantiate(&mut loaded);
+        let loaded_parent = entities
+            .iter()
+            .copied()
+            .find(|&entity| display_name(&loaded, entity) == "Second parent")
+            .expect("saved parent");
+        let names: Vec<_> = children_of(&loaded, loaded_parent)
+            .into_iter()
+            .map(|entity| display_name(&loaded, entity))
+            .collect();
+        assert_eq!(names, ["Before", "Dragged", "Target"]);
+    }
+
+    #[test]
+    fn reordering_before_a_descendant_does_not_create_a_cycle() {
+        let mut world = World::new();
+        let parent = spawn_at(&mut world, "Parent", Vec3::ZERO);
+        let child = child_at(&mut world, "Child", Vec3::ZERO, parent);
+        let descendant = child_at(&mut world, "Descendant", Vec3::ZERO, child);
+
+        assert!(!reorder_relative(&mut world, parent, descendant, false));
+        assert_eq!(
+            world.get::<ChildOf>(child).map(|p| p.parent()),
+            Some(parent)
+        );
+        assert_eq!(
+            world.get::<ChildOf>(descendant).map(|p| p.parent()),
+            Some(child)
+        );
+        assert!(world.get::<SiblingOrder>(parent).is_none());
+    }
+
+    #[test]
+    fn selected_parent_highlight_includes_disclosure_arrow() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut world = World::new();
+        let parent = world.spawn(Name::new("Parent")).id();
+        world.spawn((Name::new("Child"), ChildOf(parent)));
+        let mut selected = Some(parent);
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+        });
+        let name = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == "Parent" => {
+                Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+            }
+            _ => None,
+        });
+        let name = name.unwrap();
+        let arrow = egui::pos2(name.left() - 32.0, name.center().y);
+        let selected_fill = output.shapes.iter().any(|shape| match &shape.shape {
+            egui::epaint::Shape::Rect(rect) => {
+                rect.fill == crate::theme::ACCENT_FILL
+                    && rect.rect.contains(arrow)
+                    && rect.rect.contains(name.center())
+            }
+            _ => false,
+        });
+        output.textures_delta.clear();
+        assert!(selected_fill, "selection must wrap the arrow and label");
+    }
+
+    #[test]
+    fn selected_hierarchy_rows_fill_the_available_panel_width() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut world = World::new();
+        let parent = world.spawn(Name::new("Parent")).id();
+        let leaf = world.spawn((Name::new("Leaf"), ChildOf(parent))).id();
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        for (entity, label) in [(parent, "Parent"), (leaf, "Leaf")] {
+            let mut selected = Some(entity);
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(360.0, 280.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+            );
+            let name = output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center())
+                }
+                _ => None,
+            });
+            let name = name.unwrap();
+            let selected_right = output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Rect(rect)
+                    if rect.fill == crate::theme::ACCENT_FILL && rect.rect.contains(name) =>
+                {
+                    Some(rect.rect.right())
+                }
+                _ => None,
+            });
+            output.textures_delta.clear();
+            assert!(
+                selected_right.is_some_and(|right| right >= 340.0),
+                "{label} highlight ends at {selected_right:?}, leaving panel space unused"
+            );
+        }
+    }
+
+    #[test]
+    fn hovering_parent_arrow_highlights_the_whole_row() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut world = World::new();
+        let parent = world.spawn(Name::new("Parent")).id();
+        world.spawn((Name::new("Child"), ChildOf(parent)));
+        let mut selected = None;
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut first = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+        });
+        let name = first.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == "Parent" => {
+                Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+            }
+            _ => None,
+        });
+        let name = name.unwrap();
+        let arrow = egui::pos2(name.left() - 32.0, name.center().y);
+        first.textures_delta.clear();
+        let mut hovered = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::PointerMoved(arrow)],
+                ..Default::default()
+            },
+            |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+        );
+        let hover_fill = hovered.shapes.iter().any(|shape| match &shape.shape {
+            egui::epaint::Shape::Rect(rect) => {
+                rect.fill == crate::theme::PANEL_HOVER
+                    && rect.rect.contains(arrow)
+                    && rect.rect.contains(name.center())
+            }
+            _ => false,
+        });
+        hovered.textures_delta.clear();
+        assert!(hover_fill, "hover must wrap the arrow and label");
+    }
+
+    #[test]
+    fn hierarchy_context_menu_items_have_asset_menu_spacing() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut world = World::new();
+        world.spawn(Name::new("Target"));
+        let mut selected = None;
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut draw = |time, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(320.0, 280.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+            )
+        };
+        let mut first = draw(0.0, vec![]);
+        let text_center = |output: &egui::FullOutput, label: &str| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center())
+                }
+                _ => None,
+            })
+        };
+        let row = text_center(&first, "Target").unwrap();
+        first.textures_delta.clear();
+        let mut opening = draw(
+            0.1,
+            vec![
+                egui::Event::PointerMoved(row),
+                egui::Event::PointerButton {
+                    pos: row,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: row,
+                    button: egui::PointerButton::Secondary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        opening.textures_delta.clear();
+        let mut menu = draw(0.2, vec![]);
+        let rename = text_center(&menu, "Rename").unwrap();
+        let duplicate = text_center(&menu, "Duplicate").unwrap();
+        menu.textures_delta.clear();
+        assert!(duplicate.y - rename.y >= 30.0);
     }
 
     #[test]

@@ -71,6 +71,9 @@ impl Scene {
         // `&World` while the query holds it). That helper is shared with
         // the editor's prefab capture so the two can't drift.
         for (entity, scene_entity) in &mut collected {
+            scene_entity.sibling_order = world
+                .get::<crate::format::SiblingOrder>(*entity)
+                .map(|order| order.0);
             scene_entity.locked = world.get::<Lock>(*entity).is_some();
             scene_entity.collider = world
                 .get::<crate::format::SceneCollider>(*entity)
@@ -257,6 +260,22 @@ mod tests {
 
         let round_tripped = Scene::from_world(&mut target);
         assert_eq!(round_tripped, scene);
+    }
+
+    #[test]
+    fn sibling_order_round_trips_through_world_and_scene() {
+        let mut source = World::new();
+        source.spawn((Name::new("First"), crate::SiblingOrder(2)));
+        let scene = Scene::from_world(&mut source);
+        assert_eq!(scene.entities[0].sibling_order, Some(2));
+
+        let mut restored = World::new();
+        let entities = scene.instantiate(&mut restored);
+        assert_eq!(
+            restored.get::<crate::SiblingOrder>(entities[0]),
+            Some(&crate::SiblingOrder(2))
+        );
+        assert_eq!(Scene::from_world(&mut restored), scene);
     }
 
     #[test]

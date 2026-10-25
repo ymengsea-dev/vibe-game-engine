@@ -59,6 +59,12 @@ pub(crate) fn modal<R>(
         })
 }
 
+pub(crate) fn style_context_menu(ui: &mut egui::Ui) {
+    ui.set_min_width(180.0);
+    ui.spacing_mut().button_padding = egui::vec2(10.0, 7.0);
+    ui.spacing_mut().item_spacing.y = 4.0;
+}
+
 fn install_fonts(ctx: &Context) {
     ctx.set_fonts(font_definitions());
 }

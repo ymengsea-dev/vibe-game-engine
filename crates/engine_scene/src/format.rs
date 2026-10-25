@@ -396,6 +396,10 @@ impl NavGridData {
 #[derive(bevy_ecs::resource::Resource, Debug, Clone, PartialEq)]
 pub struct SceneNavGrid(pub NavGridData);
 
+/// Stable display position among siblings in the editor hierarchy.
+#[derive(bevy_ecs::component::Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SiblingOrder(pub u64);
+
 /// One entity's serializable components. Every field is optional — an
 /// entity may carry any subset.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -413,6 +417,10 @@ pub struct SceneEntity {
     /// look at this field).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<usize>,
+    /// Optional display position among siblings. Old scenes without it
+    /// keep their existing fallback order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sibling_order: Option<u64>,
     /// This entity's transform, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transform: Option<TransformData>,
@@ -636,6 +644,17 @@ mod tests {
         let ron_text = scene.to_ron_string().unwrap();
         let parsed = Scene::from_ron_str(&ron_text).unwrap();
         assert_eq!(parsed, scene);
+    }
+
+    #[test]
+    fn sibling_order_in_scene_text_survives_a_save() {
+        let ron = format!(
+            "(version:{},entities:[(name:Some(\"First\"),sibling_order:Some(2))])",
+            crate::CURRENT_SCENE_VERSION
+        );
+        let scene = Scene::from_ron_str(&ron).expect("scene with sibling order");
+        let saved = scene.to_ron_string().expect("save scene");
+        assert!(saved.contains("sibling_order: Some(2)"));
     }
 
     #[test]

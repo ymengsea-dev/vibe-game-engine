@@ -10,13 +10,13 @@ use std::process::Command;
 const BUNDLE_NAME: &str = "RustyEngine Studio.app";
 const BUNDLED_MARKER: &str = "VGE_BUNDLED_LAUNCH";
 const ORIGINAL_CWD: &str = "VGE_ORIGINAL_CWD";
-const ICON: &[u8] = include_bytes!("../assets/icon.icns");
+const ICON: &[u8] = include_bytes!("../assets/app_logo.icns");
 const PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleDevelopmentRegion</key><string>en</string>
 <key>CFBundleExecutable</key><string>editor</string>
-<key>CFBundleIconFile</key><string>icon.icns</string>
+<key>CFBundleIconFile</key><string>app_logo.icns</string>
 <key>CFBundleIdentifier</key><string>dev.vge.RustyEngineStudio</string>
 <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 <key>CFBundleName</key><string>RustyEngine Studio</string>
@@ -53,14 +53,26 @@ fn ensure_directory(path: &Path) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn ensure_managed_file(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+fn ensure_managed_file(
+    path: &Path,
+    bytes: &[u8],
+    previous: Option<&[u8]>,
+) -> Result<(), Box<dyn Error>> {
     match fs::symlink_metadata(path) {
-        Ok(metadata)
-            if metadata.is_file()
-                && !metadata.file_type().is_symlink()
-                && fs::read(path)? == bytes =>
-        {
-            Ok(())
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            let current = fs::read(path)?;
+            if current == bytes {
+                Ok(())
+            } else if previous.is_some_and(|old| current == old) {
+                fs::write(path, bytes)?;
+                Ok(())
+            } else {
+                Err(format!(
+                    "refusing to replace an unexpected bundle file: {}",
+                    path.display()
+                )
+                .into())
+            }
         }
         Ok(_) => Err(format!(
             "refusing to replace an unexpected bundle file: {}",
@@ -86,8 +98,26 @@ fn stage_bundle(binary: &Path) -> Result<PathBuf, Box<dyn Error>> {
     for path in [&bundle, &contents, &macos, &resources] {
         ensure_directory(path)?;
     }
-    ensure_managed_file(&contents.join("Info.plist"), PLIST.as_bytes())?;
-    ensure_managed_file(&resources.join("icon.icns"), ICON)?;
+    let previous_plist = PLIST.replace("app_logo.icns", "icon.icns");
+    ensure_managed_file(
+        &contents.join("Info.plist"),
+        PLIST.as_bytes(),
+        Some(previous_plist.as_bytes()),
+    )?;
+    ensure_managed_file(&resources.join("app_logo.icns"), ICON, None)?;
+    let old_icon = resources.join("icon.icns");
+    match fs::symlink_metadata(&old_icon) {
+        Ok(metadata)
+            if metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && fs::read(&old_icon)? == ICON =>
+        {
+            fs::remove_file(&old_icon)?;
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
 
     let linked = macos.join("editor");
     let marker = resources.join("editor.link-id");
@@ -170,6 +200,13 @@ pub fn relaunch_from_cargo_if_needed() -> Result<bool, Box<dyn Error>> {
     }
     let cwd = std::env::current_dir()?;
     let bundle = stage_bundle(&executable)?;
+    let registration = Command::new("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
+        .arg("-f")
+        .arg(&bundle)
+        .status();
+    if !registration.is_ok_and(|status| status.success()) {
+        eprintln!("warning: could not refresh the editor's macOS Dock icon registration");
+    }
     let mut command = Command::new("open");
     let options = launch_options(&cwd, std::env::args_os().skip(1));
     command.args(&options[..3]).arg(&bundle).args(&options[3..]);
@@ -262,7 +299,43 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_icon_and_symlink_marker_are_not_overwritten() {
+    fn existing_bundle_switches_to_the_new_icon_resource() {
+        let root = std::env::temp_dir().join(format!(
+            "vge_bundle_logo_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir(&root).expect("temp root");
+        let binary = root.join("editor");
+        fs::write(&binary, b"binary").expect("binary");
+        let bundle = stage_bundle(&binary).expect("initial bundle");
+        let resources = bundle.join("Contents/Resources");
+        let old_icon = resources.join("icon.icns");
+        let new_icon = resources.join("app_logo.icns");
+        let legacy_plist = PLIST.replace("app_logo.icns", "icon.icns");
+        fs::write(bundle.join("Contents/Info.plist"), legacy_plist).expect("old plist");
+        fs::write(&old_icon, ICON).expect("old resource name");
+        if new_icon.exists() {
+            fs::remove_file(&new_icon).expect("remove new resource for migration");
+        }
+        stage_bundle(&binary).expect("refresh bundle icon");
+        let installed = fs::read(&new_icon).expect("new icon resource");
+        let plist = fs::read_to_string(bundle.join("Contents/Info.plist")).expect("updated plist");
+        let old_icon_remains = old_icon.exists();
+        let _ = fs::remove_dir_all(root);
+        assert!(
+            installed == include_bytes!("../assets/app_logo.icns"),
+            "staged icon does not match app_logo.icns"
+        );
+        assert!(plist.contains("<string>app_logo.icns</string>"));
+        assert!(!old_icon_remains, "managed old icon resource remains");
+    }
+
+    #[test]
+    fn unused_custom_icon_is_preserved_and_symlink_marker_is_rejected() {
         let root = std::env::temp_dir().join(format!(
             "vge_bundle_collision_{}_{}",
             std::process::id(),
@@ -278,10 +351,10 @@ mod tests {
         fs::create_dir_all(&resources).expect("resources");
         let icon = resources.join("icon.icns");
         fs::write(&icon, b"other icon").expect("icon");
-        assert!(stage_bundle(&binary).is_err());
+        stage_bundle(&binary).expect("custom legacy resource is unused");
         assert_eq!(fs::read(&icon).expect("icon intact"), b"other icon");
 
-        fs::write(&icon, ICON).expect("managed icon");
+        fs::remove_file(resources.join("editor.link-id")).expect("remove managed marker");
         let outside = root.join("outside");
         std::os::unix::fs::symlink(&outside, resources.join("editor.link-id"))
             .expect("symlink marker");

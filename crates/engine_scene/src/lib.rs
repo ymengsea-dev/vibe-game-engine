@@ -40,7 +40,7 @@ pub use error::SceneError;
 pub use format::{
     AssetRef, AudioEmitterData, BodyKind, CameraData, ColliderData, ColliderShape,
     MeshRendererData, NavGridData, ProjectionData, Scene, SceneAudioEmitter, SceneCollider,
-    SceneEntity, SceneNavGrid, SpriteData, TransformData,
+    SceneEntity, SceneNavGrid, SiblingOrder, SpriteData, TransformData,
 };
 pub use io::write_atomic;
 pub use migration::CURRENT_SCENE_VERSION;

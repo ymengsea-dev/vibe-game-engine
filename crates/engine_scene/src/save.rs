@@ -243,6 +243,7 @@ impl SavedEntity {
         crate::SceneEntity {
             name: self.name.clone(),
             parent: None,
+            sibling_order: None,
             transform: self.transform,
             camera: self.camera,
             mesh_renderer: self.mesh_renderer.clone(),

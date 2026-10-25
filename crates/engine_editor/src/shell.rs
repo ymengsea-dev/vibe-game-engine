@@ -1620,26 +1620,34 @@ pub(crate) enum ShellIcon {
 }
 
 fn paint_brand_mark(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(23.0, 23.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 5.0, egui::Color32::from_rgb(29, 45, 70));
-    let at = |x: f32, y: f32| rect.min + egui::vec2(x, y);
-    let stroke = egui::Stroke::new(1.25, egui::Color32::from_rgb(131, 181, 255));
-    painter.add(egui::Shape::line(
-        vec![
-            at(11.5, 4.8),
-            at(5.4, 8.0),
-            at(11.5, 11.2),
-            at(17.6, 8.0),
-            at(11.5, 4.8),
-        ],
-        stroke,
-    ));
-    for y in [11.4, 14.8] {
-        painter.add(egui::Shape::line(
-            vec![at(5.4, y), at(11.5, y + 3.3), at(17.6, y)],
-            stroke,
-        ));
+    let id = egui::Id::new("studio_app_logo");
+    let texture = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::TextureHandle>(id))
+        .or_else(|| {
+            let bytes = include_bytes!("../../../editor/assets/app_logo.png");
+            let image = match engine_renderer::decode_rgba8(bytes) {
+                Ok(image) => image,
+                Err(error) => {
+                    tracing::error!(%error, "could not decode embedded studio logo");
+                    return None;
+                }
+            };
+            let pixels = egui::ColorImage::from_rgba_unmultiplied(
+                [image.width() as usize, image.height() as usize],
+                image.as_raw(),
+            );
+            let texture =
+                ui.ctx()
+                    .load_texture("studio_app_logo", pixels, egui::TextureOptions::LINEAR);
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(id, texture.clone()));
+            Some(texture)
+        });
+    if let Some(texture) = texture {
+        ui.add(egui::Image::new((texture.id(), egui::vec2(23.0, 23.0))));
+    } else {
+        ui.add_space(23.0);
     }
 }
 
@@ -2917,6 +2925,30 @@ mod ui_tests {
             );
             output.textures_delta.clear();
         }
+    }
+
+    #[test]
+    fn studio_brand_mark_displays_the_app_logo_image() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), super::paint_brand_mark);
+        let logo_texture = output
+            .textures_delta
+            .set
+            .iter()
+            .find(|(_, deltas)| deltas.iter().any(|delta| delta.image.size() == [128, 128]))
+            .map(|(id, _)| *id);
+        let paints_logo = logo_texture.is_some_and(|id| {
+            output.shapes.iter().any(|shape| match &shape.shape {
+                egui::epaint::Shape::Mesh(mesh) => mesh.texture_id == id,
+                egui::epaint::Shape::Rect(rect) => rect
+                    .brush
+                    .as_ref()
+                    .is_some_and(|brush| brush.fill_texture_id == id),
+                _ => false,
+            })
+        });
+        output.textures_delta.clear();
+        assert!(paints_logo);
     }
 
     #[test]

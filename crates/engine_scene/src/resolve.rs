@@ -213,6 +213,9 @@ pub(crate) fn insert_components(
     if data.locked {
         entity_mut.insert(Lock);
     }
+    if let Some(order) = data.sibling_order {
+        entity_mut.insert(crate::format::SiblingOrder(order));
+    }
     if let Some(emitter) = &data.audio_emitter {
         // The carrier always goes on, resolved or not — same rule as
         // `MeshSource`: it is the only place the authored values survive
