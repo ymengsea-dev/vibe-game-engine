@@ -147,7 +147,7 @@ impl NativeMenu {
         file.append(&PredefinedMenuItem::separator())?;
         add_item(&file, &mut items, "new_scene", "New Scene")?;
         add_item(&file, &mut items, "revert_scene", "Revert Scene")?;
-        add_item(&file, &mut items, "save_scene", "Save Scene")?;
+        add_item(&file, &mut items, "save_scene", "Save Scene (⌘S)")?;
         add_item(&file, &mut items, "upgrade_rust_sdk", "Upgrade Rust SDK")?;
         file.append(&PredefinedMenuItem::separator())?;
         add_item(&file, &mut items, "export", "Build & Export…")?;
@@ -219,7 +219,7 @@ impl NativeMenu {
             &gameobject,
             &mut items,
             "delete_selected",
-            "Delete Selected",
+            "Delete Selected (⌫)",
         )?;
         menu.append(&gameobject)?;
 

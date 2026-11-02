@@ -29,49 +29,186 @@ pub trait InspectField {
     fn inspect_field(&mut self, ui: &mut egui::Ui, speed: f32) -> bool;
 }
 
+/// The widest the label column of a [`property_row`] gets.
+pub const LABEL_WIDTH: f32 = 84.0;
+
+/// Below this width a [`property_row`] puts its label above its controls
+/// instead of beside them, so narrow panels stack rather than squeeze.
+pub const STACK_BELOW: f32 = 250.0;
+
+/// One labelled Inspector row: `label` in a fixed column on the left (so
+/// every row's controls line up), `add_contents` laid out left to right in
+/// the rest. Controls that don't fit wrap onto another line instead of
+/// widening the panel; in a narrow panel the label goes above them.
+pub fn property_row<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let palette = crate::theme::NIGHT;
+    let height = ui.spacing().interact_size.y;
+    let width = ui.available_width();
+    let stacked = width < STACK_BELOW;
+    let label_width = if stacked {
+        width
+    } else {
+        (width * 0.3).clamp(56.0, LABEL_WIDTH)
+    };
+    let size = if stacked { 11.5 } else { 12.0 };
+    let galley =
+        crate::widgets::one_line(ui.painter(), label, size, palette.muted, label_width - 8.0);
+    let origin = ui.cursor().min;
+    let label_height = if stacked { galley.size().y + 2.0 } else { 0.0 };
+    let at = if stacked {
+        origin
+    } else {
+        egui::pos2(origin.x, origin.y + (height - galley.size().y) / 2.0)
+    };
+    ui.painter().galley(at, galley, palette.muted);
+    let left = if stacked { 0.0 } else { label_width };
+    let values = egui::Rect::from_min_max(
+        egui::pos2(origin.x + left, origin.y + label_height),
+        egui::pos2(origin.x + width, origin.y + label_height + height),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(values)
+            .layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true)),
+        add_contents,
+    )
+    .inner
+}
+
+/// The width of one of three equal cells in a [`property_row`], so single
+/// numbers line up with the X / Y / Z columns of the rows around them.
+pub fn cell_width(ui: &egui::Ui) -> f32 {
+    let spacing = ui.spacing().item_spacing.x;
+    ((ui.available_width() - 2.0 * spacing) / 3.0)
+        .floor()
+        .max(36.0)
+}
+
+/// A number field one [`cell_width`] wide.
+pub fn number(ui: &mut egui::Ui, value: egui::DragValue<'_>) -> egui::Response {
+    let size = egui::vec2(cell_width(ui), ui.spacing().interact_size.y);
+    let response = narrow_padding(ui, |ui| ui.add_sized(size, value));
+    scrub_cursor(ui, &response);
+    response
+}
+
+/// Shows that a number field changes when dragged sideways: while the
+/// pointer is over it or dragging it, the system cursor is replaced by a
+/// left-right arrow drawn above everything. Not while the field is being
+/// typed in, where the text cursor belongs.
+pub fn scrub_cursor(ui: &egui::Ui, response: &egui::Response) {
+    if !(response.hovered() || response.dragged()) || response.has_focus() {
+        return;
+    }
+    let Some(pointer) = ui.ctx().pointer_latest_pos() else {
+        return;
+    };
+    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("inspector_scrub_cursor"),
+    ));
+    paint_scrub_cursor(&painter, pointer);
+}
+
+/// A left-right arrow with a bar through its middle, white on a dark
+/// outline so it reads on any fill.
+fn paint_scrub_cursor(painter: &egui::Painter, at: egui::Pos2) {
+    let (left, right) = (at + egui::vec2(-9.0, 0.0), at + egui::vec2(9.0, 0.0));
+    let strokes = [
+        egui::Stroke::new(3.4, egui::Color32::from_black_alpha(170)),
+        egui::Stroke::new(1.6, egui::Color32::WHITE),
+    ];
+    for stroke in strokes {
+        painter.line_segment([left, right], stroke);
+        painter.line_segment(
+            [at + egui::vec2(0.0, -6.0), at + egui::vec2(0.0, 6.0)],
+            stroke,
+        );
+        for (tip, direction) in [(left, 1.0), (right, -1.0)] {
+            painter.line_segment([tip, tip + egui::vec2(4.0 * direction, -4.0)], stroke);
+            painter.line_segment([tip, tip + egui::vec2(4.0 * direction, 4.0)], stroke);
+        }
+    }
+}
+
+/// Number fields that fill the row in equal cells, each marked X, Y or Z.
+fn axis_fields(ui: &mut egui::Ui, values: &mut [f32], speed: f32, suffix: &str) -> bool {
+    let count = values.len() as f32;
+    let spacing = ui.spacing().item_spacing.x;
+    let width = ((ui.available_width() - spacing * (count - 1.0)) / count)
+        .floor()
+        .max(36.0);
+    let size = egui::vec2(width, ui.spacing().interact_size.y);
+    let mut changed = false;
+    for (value, axis) in values.iter_mut().zip(["X", "Y", "Z"]) {
+        let response = narrow_padding(ui, |ui| {
+            ui.add_sized(
+                size,
+                egui::DragValue::new(value).speed(speed).suffix(suffix),
+            )
+        });
+        changed |= response.changed();
+        scrub_cursor(ui, &response);
+        if !response.has_focus() {
+            let color = crate::theme::NIGHT.subtle;
+            let galley = crate::widgets::one_line(ui.painter(), axis, 11.0, color, 12.0);
+            let at = egui::pos2(
+                response.rect.left() + 7.0,
+                response.rect.center().y - galley.size().y / 2.0,
+            );
+            ui.painter().galley(at, galley, color);
+        }
+    }
+    changed
+}
+
+/// Less side padding, so a short number keeps its cell's width instead of
+/// growing it.
+fn narrow_padding<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let padding = ui.spacing().button_padding;
+    ui.spacing_mut().button_padding.x = 4.0;
+    let inner = add(ui);
+    ui.spacing_mut().button_padding = padding;
+    inner
+}
+
 impl InspectField for f32 {
     fn inspect_field(&mut self, ui: &mut egui::Ui, speed: f32) -> bool {
-        ui.add(egui::DragValue::new(self).speed(speed)).changed()
+        number(ui, egui::DragValue::new(self).speed(speed)).changed()
     }
 }
 
 impl InspectField for String {
     fn inspect_field(&mut self, ui: &mut egui::Ui, _speed: f32) -> bool {
-        ui.text_edit_singleline(self).changed()
+        crate::widgets::text_field(ui, self, "").changed()
     }
 }
 
 impl InspectField for bool {
     fn inspect_field(&mut self, ui: &mut egui::Ui, _speed: f32) -> bool {
-        ui.checkbox(self, "").changed()
+        crate::widgets::checkbox(ui, &crate::theme::NIGHT, self, "").changed()
     }
 }
 
 impl InspectField for Vec2 {
     fn inspect_field(&mut self, ui: &mut egui::Ui, speed: f32) -> bool {
-        let mut changed = false;
-        changed |= ui
-            .add(egui::DragValue::new(&mut self.x).speed(speed))
-            .changed();
-        changed |= ui
-            .add(egui::DragValue::new(&mut self.y).speed(speed))
-            .changed();
+        let mut values = self.to_array();
+        let changed = axis_fields(ui, &mut values, speed, "");
+        *self = Vec2::from_array(values);
         changed
     }
 }
 
 impl InspectField for Vec3 {
     fn inspect_field(&mut self, ui: &mut egui::Ui, speed: f32) -> bool {
-        let mut changed = false;
-        changed |= ui
-            .add(egui::DragValue::new(&mut self.x).speed(speed))
-            .changed();
-        changed |= ui
-            .add(egui::DragValue::new(&mut self.y).speed(speed))
-            .changed();
-        changed |= ui
-            .add(egui::DragValue::new(&mut self.z).speed(speed))
-            .changed();
+        let mut values = self.to_array();
+        let changed = axis_fields(ui, &mut values, speed, "");
+        *self = Vec3::from_array(values);
         changed
     }
 }
@@ -83,14 +220,15 @@ impl InspectField for Quat {
     /// every engine's transform inspector makes.
     fn inspect_field(&mut self, ui: &mut egui::Ui, speed: f32) -> bool {
         let (x, y, z) = self.to_euler(EulerRot::XYZ);
-        let mut degrees = Vec3::new(x.to_degrees(), y.to_degrees(), z.to_degrees());
-        let changed = degrees.inspect_field(ui, speed.max(1.0));
+        // `+ 0.0` turns a -0 into 0, so an unrotated object doesn't show "-0°".
+        let mut degrees = [x, y, z].map(|angle| angle.to_degrees() + 0.0);
+        let changed = axis_fields(ui, &mut degrees, speed.max(1.0), "°");
         if changed {
             *self = Quat::from_euler(
                 EulerRot::XYZ,
-                degrees.x.to_radians(),
-                degrees.y.to_radians(),
-                degrees.z.to_radians(),
+                degrees[0].to_radians(),
+                degrees[1].to_radians(),
+                degrees[2].to_radians(),
             );
         }
         changed
@@ -100,16 +238,13 @@ impl InspectField for Quat {
 impl Inspectable for engine_utils::Transform {
     fn inspect(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label("Translation");
+        property_row(ui, "Position", |ui| {
             changed |= self.translation.inspect_field(ui, 0.05);
         });
-        ui.horizontal(|ui| {
-            ui.label("Rotation °");
+        property_row(ui, "Rotation", |ui| {
             changed |= self.rotation.inspect_field(ui, 1.0);
         });
-        ui.horizontal(|ui| {
-            ui.label("Scale");
+        property_row(ui, "Scale", |ui| {
             changed |= self.scale.inspect_field(ui, 0.05);
         });
         changed
@@ -123,23 +258,19 @@ impl Inspectable for engine_renderer::Camera {
     /// owns it.
     fn inspect(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label("Eye");
+        property_row(ui, "Eye", |ui| {
             changed |= self.eye.inspect_field(ui, 0.05);
         });
-        ui.horizontal(|ui| {
-            ui.label("Target");
+        property_row(ui, "Target", |ui| {
             changed |= self.target.inspect_field(ui, 0.05);
         });
-        ui.horizontal(|ui| {
-            ui.label("Up");
+        property_row(ui, "Up", |ui| {
             changed |= self.up.inspect_field(ui, 0.01);
         });
         match &mut self.projection {
             engine_renderer::Projection::Perspective { fov_y_radians } => {
                 let mut degrees = fov_y_radians.to_degrees();
-                ui.horizontal(|ui| {
-                    ui.label("FOV °");
+                property_row(ui, "Field of view", |ui| {
                     if degrees.inspect_field(ui, 0.5) {
                         *fov_y_radians = degrees.clamp(1.0, 179.0).to_radians();
                         changed = true;
@@ -147,18 +278,15 @@ impl Inspectable for engine_renderer::Camera {
                 });
             }
             engine_renderer::Projection::Orthographic { height } => {
-                ui.horizontal(|ui| {
-                    ui.label("Ortho Height");
+                property_row(ui, "Height", |ui| {
                     changed |= height.inspect_field(ui, 0.1);
                 });
             }
         }
-        ui.horizontal(|ui| {
-            ui.label("Near");
+        property_row(ui, "Near", |ui| {
             changed |= self.near.inspect_field(ui, 0.01);
         });
-        ui.horizontal(|ui| {
-            ui.label("Far");
+        property_row(ui, "Far", |ui| {
             changed |= self.far.inspect_field(ui, 1.0);
         });
         changed
@@ -176,21 +304,16 @@ impl Inspectable for engine_ecs::components::Sprite {
     /// rework; `Collider` / `RigidBody` wrap opaque physics handles.
     fn inspect(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label("Size");
+        property_row(ui, "Size", |ui| {
             changed |= self.size.inspect_field(ui, 0.05);
         });
-        ui.horizontal(|ui| {
-            ui.label("Tint");
+        property_row(ui, "Tint", |ui| {
             changed |= ui
                 .color_edit_button_rgba_unmultiplied(&mut self.color)
                 .changed();
         });
-        ui.horizontal(|ui| {
-            ui.label("Layer");
-            changed |= ui
-                .add(egui::DragValue::new(&mut self.z_order).speed(0.1))
-                .changed();
+        property_row(ui, "Layer", |ui| {
+            changed |= number(ui, egui::DragValue::new(&mut self.z_order).speed(0.1)).changed();
         });
         changed
     }
@@ -199,6 +322,34 @@ impl Inspectable for engine_ecs::components::Sprite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Writes `scrub-cursor.png`: a position row with the drag cursor over
+    /// its Y field, for a visual check. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_scrub_cursor() {
+        let path = crate::ui_snapshot::snapshot_dir().join("scrub-cursor.png");
+        let mut position = Vec3::new(0.0, 0.681, -2.5);
+        crate::ui_snapshot::render_png(&path, egui::vec2(320.0, 70.0), 3.0, |ui| {
+            ui.painter()
+                .rect_filled(ui.max_rect(), 0.0, crate::theme::NIGHT.raised);
+            ui.add_space(20.0);
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let mut field = egui::Rect::NOTHING;
+            property_row(ui, "Position", |ui| {
+                position.inspect_field(ui, 0.05);
+                field = ui.min_rect();
+            });
+            let cell = (field.width() - 12.0) / 3.0;
+            let at = egui::pos2(field.left() + cell * 1.5 + 14.0, field.center().y);
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::new("snapshot_cursor"),
+            ));
+            paint_scrub_cursor(&painter, at);
+        })
+        .expect("snapshot");
+    }
 
     #[derive(Inspectable)]
     struct DemoLight {

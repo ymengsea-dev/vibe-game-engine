@@ -1162,24 +1162,13 @@ pub(crate) fn tree_disclosure(
     if response.clicked() {
         state.toggle(ui);
     }
-    let center = rect.center();
-    let points = if state.is_open() {
-        [
-            center + egui::vec2(-4.0, -2.0),
-            center + egui::vec2(0.0, 2.0),
-            center + egui::vec2(4.0, -2.0),
-        ]
-    } else {
-        [
-            center + egui::vec2(-2.0, -4.0),
-            center + egui::vec2(2.0, 0.0),
-            center + egui::vec2(-2.0, 4.0),
-        ]
-    };
-    ui.painter().add(egui::Shape::line(
-        points.to_vec(),
-        egui::Stroke::new(1.5, ui.visuals().text_color()),
-    ));
+    let openness = state.openness(ui.ctx());
+    crate::widgets::paint_chevron(
+        ui.painter(),
+        rect.center(),
+        openness,
+        ui.visuals().text_color(),
+    );
 }
 
 fn paint_folder_row(

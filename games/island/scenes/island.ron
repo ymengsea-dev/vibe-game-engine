@@ -1459,6 +1459,7 @@
                 ),
             )),
             is_static: true,
+            locked: true,
             collider: Some((
                 shape: TriMesh(
                     mesh: (
@@ -7879,7 +7880,7 @@
                 sound: (
                     id: "dd61a058-2720-4b76-a5ae-7f3ef7814c92",
                 ),
-                gain: 0.5,
+                gain: 0.0,
             ),
         ],
     ),

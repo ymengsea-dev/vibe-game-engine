@@ -337,6 +337,9 @@ fn install_style(ctx: &Context) {
         style.spacing.item_spacing = egui::vec2(6.0, 4.0);
         style.spacing.button_padding = egui::vec2(8.0, 3.0);
         style.spacing.interact_size.y = 24.0;
+        // egui fades a scroll area's edges in a colour it guesses from the
+        // frames around it, which shows as a lighter band on Studio's cards.
+        style.spacing.scroll.fade.strength = 0.0;
         NIGHT.apply(&mut style.visuals);
         // Between and behind panels: the darkest surface, so each panel
         // (drawn in `NIGHT.panel`) reads as a soft card on it.

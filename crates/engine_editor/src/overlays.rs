@@ -53,8 +53,6 @@ const NAV_LIFT: f32 = 0.02;
 
 /// Size of a point-light marker, in world units.
 const LIGHT_MARKER_SIZE: f32 = 0.35;
-/// Length of the directional-light arrow.
-const SUN_ARROW_LENGTH: f32 = 4.0;
 /// How many cells the ground grid draws per side, and how big each is.
 const GRID_CELLS: u32 = 40;
 /// Size of one ground-grid cell, in world units.
@@ -70,7 +68,8 @@ pub struct OverlayToggles {
     /// so the Scene View looks like the game.
     #[serde(default)]
     pub all_colliders: bool,
-    /// Directional-light headings and point-light positions.
+    /// Point-light positions and ranges. (The sun's direction is drawn
+    /// only while it is being aimed; see [`SunArrow`].)
     #[serde(default)]
     pub lights: bool,
     /// Camera view volumes.
@@ -96,6 +95,19 @@ impl OverlayToggles {
     }
 }
 
+/// Where to draw the sun's direction while it is being aimed: an arrow
+/// ending at `at`, `length` world units long. The sun has a direction but no
+/// position, so the arrow goes where the user is looking, not at the world
+/// origin, and only while the sun is being aimed, so it never sits in the
+/// scene as if it were an object.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SunArrow {
+    /// The point the arrow ends at: the centre of the view.
+    pub at: Vec3,
+    /// The arrow's length, in world units.
+    pub length: f32,
+}
+
 /// Draws the selection outline and every enabled overlay into `draw`.
 ///
 /// `selection` is the selected objects; they and their descendants get an
@@ -109,6 +121,7 @@ pub fn build(
     world: &mut World,
     lights: &LightSet,
     toggles: OverlayToggles,
+    sun: Option<SunArrow>,
     selection: &[Entity],
     mesh_bounds: impl Fn(&World, Entity) -> Option<Aabb>,
     draw: &mut DebugDraw,
@@ -116,6 +129,9 @@ pub fn build(
     let selected = selected_with_descendants(world, selection);
     draw_selection_bounds(world, &selected, &mesh_bounds, draw);
     draw_colliders(world, draw, &selected, toggles.all_colliders);
+    if let Some(sun) = sun {
+        draw_sun(lights, sun, draw);
+    }
     if !toggles.any() {
         return;
     }
@@ -350,13 +366,20 @@ fn draw_cameras(world: &mut World, draw: &mut DebugDraw) {
     }
 }
 
-/// A heading arrow per directional light, a marker per point light.
-fn draw_lights(lights: &LightSet, draw: &mut DebugDraw) {
+/// The sun's direction as an arrow pointing into `sun.at`, the way its
+/// light travels.
+fn draw_sun(lights: &LightSet, sun: SunArrow, draw: &mut DebugDraw) {
     for light in &lights.directional {
-        // A sun has a direction but no position: the arrow is drawn at
-        // the origin so it reads as "this way", not "from here".
-        draw.arrow(Vec3::ZERO, light.direction, SUN_ARROW_LENGTH, LIGHT_COLOR);
+        let Some(direction) = light.direction.try_normalize() else {
+            continue;
+        };
+        let start = sun.at - direction * sun.length;
+        draw.arrow(start, direction, sun.length, LIGHT_COLOR);
     }
+}
+
+/// A marker per point light, with a ring at its range.
+fn draw_lights(lights: &LightSet, draw: &mut DebugDraw) {
     for light in &lights.point {
         let position = light.position;
         draw.cross(position, LIGHT_MARKER_SIZE, LIGHT_COLOR);
@@ -421,6 +444,7 @@ mod tests {
             &mut world,
             &lit(),
             OverlayToggles::default(),
+            None,
             &[],
             |_, _| None,
             &mut draw,
@@ -430,6 +454,55 @@ mod tests {
             "every overlay off must cost no vertices, so the draw call is skipped"
         );
         assert!(!OverlayToggles::default().any());
+    }
+
+    #[test]
+    fn the_sun_arrow_shows_only_while_aiming_and_ends_where_you_look() {
+        let mut world = World::new();
+        let lights = lit();
+        let toggles = OverlayToggles {
+            lights: true,
+            ..Default::default()
+        };
+        let count = |world: &mut World, lights: &LightSet| {
+            let mut draw = DebugDraw::new();
+            build(world, lights, toggles, None, &[], |_, _| None, &mut draw);
+            draw.len()
+        };
+        let without_sun = LightSet {
+            directional: Vec::new(),
+            ..lights.clone()
+        };
+        assert_eq!(
+            count(&mut world, &lights),
+            count(&mut world, &without_sun),
+            "the Lights overlay draws point lights only, no sun arrow at the origin"
+        );
+
+        let at = Vec3::new(10.0, 0.0, -4.0);
+        let mut aiming = DebugDraw::new();
+        build(
+            &mut world,
+            &lights,
+            OverlayToggles::default(),
+            Some(SunArrow { at, length: 8.0 }),
+            &[],
+            |_, _| None,
+            &mut aiming,
+        );
+        let tip = aiming
+            .vertices()
+            .iter()
+            .map(|vertex| Vec3::from(vertex.position))
+            .any(|position| position.distance(at) < 1e-4);
+        assert!(tip, "the arrow ends at the centre of the view");
+        assert!(
+            aiming
+                .vertices()
+                .iter()
+                .any(|vertex| (Vec3::from(vertex.position) - (at + Vec3::Y * 8.0)).length() < 1e-4),
+            "it starts up the sun's ray (the sun shines down here)"
+        );
     }
 
     #[test]
@@ -448,7 +521,15 @@ mod tests {
 
         let mut count = |toggles: OverlayToggles| {
             let mut draw = DebugDraw::new();
-            build(&mut world, &lights, toggles, &[], |_, _| None, &mut draw);
+            build(
+                &mut world,
+                &lights,
+                toggles,
+                None,
+                &[],
+                |_, _| None,
+                &mut draw,
+            );
             draw.len()
         };
 
@@ -526,6 +607,7 @@ mod tests {
                     audio: true,
                     ..Default::default()
                 },
+                None,
                 &[],
                 |_, _| None,
                 &mut draw,
@@ -545,6 +627,7 @@ mod tests {
                 nav: true,
                 ..Default::default()
             },
+            None,
             &[],
             |_, _| None,
             &mut draw,
@@ -572,6 +655,7 @@ mod tests {
                 nav: true,
                 ..Default::default()
             },
+            None,
             &[],
             |_, _| None,
             &mut draw,
@@ -590,6 +674,7 @@ mod tests {
                 all_colliders: true,
                 ..Default::default()
             },
+            None,
             &[],
             |_, _| None,
             &mut draw,
@@ -611,6 +696,7 @@ mod tests {
                 all_colliders: true,
                 ..Default::default()
             },
+            None,
             &[],
             |_, _| None,
             &mut draw,
@@ -643,6 +729,7 @@ mod tests {
             &mut world,
             &lit(),
             OverlayToggles::default(),
+            None,
             &[selected],
             bounds,
             &mut draw,
@@ -667,6 +754,7 @@ mod tests {
                 all_colliders: true,
                 ..OverlayToggles::default()
             },
+            None,
             &[selected],
             bounds,
             &mut everything,
@@ -701,6 +789,7 @@ mod tests {
             &mut world,
             &lit(),
             OverlayToggles::default(),
+            None,
             &[parent],
             |_, _| None,
             &mut draw,

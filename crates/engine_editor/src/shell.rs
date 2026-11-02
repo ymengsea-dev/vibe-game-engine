@@ -38,8 +38,12 @@ fn studio_panel_frame() -> egui::Frame {
         .fill(palette.panel)
         .stroke(egui::Stroke::new(1.0, palette.border))
         .corner_radius(egui::CornerRadius::same(10))
-        .outer_margin(egui::Margin::same(3))
+        .outer_margin(egui::Margin::same(PANEL_GAP_HALF))
 }
+
+/// Half the gap between two panels: each panel card keeps this much space
+/// around itself, so neighbours sit two of these apart.
+const PANEL_GAP_HALF: i8 = 2;
 
 fn shell_clear_color(surface_format: wgpu::TextureFormat) -> wgpu::Color {
     let shell = crate::theme::NIGHT.shell;
@@ -87,6 +91,16 @@ trait StudioPanelExt {
         is_expanded: &mut bool,
         add_contents: impl FnOnce(&mut egui::Ui) -> R,
     ) -> Option<egui::InnerResponse<R>>;
+
+    /// [`Self::show_studio_collapsible`] without the resize grip, for a
+    /// frameless container whose caller draws the grip over the cards
+    /// inside it.
+    fn show_studio_collapsible_bare<R>(
+        self,
+        ui: &mut egui::Ui,
+        is_expanded: &mut bool,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> Option<egui::InnerResponse<R>>;
 }
 
 impl StudioPanelExt for egui::Panel {
@@ -109,12 +123,140 @@ impl StudioPanelExt for egui::Panel {
         is_expanded: &mut bool,
         add_contents: impl FnOnce(&mut egui::Ui) -> R,
     ) -> Option<egui::InnerResponse<R>> {
+        let parent = ui.available_rect_before_wrap();
+        let shown = without_resize_line(ui, |ui, content_style| {
+            self.show_collapsible(ui, is_expanded, |ui| {
+                ui.set_style(content_style);
+                add_contents(ui)
+            })
+        });
+        if let Some(shown) = &shown {
+            paint_resize_grip(ui, parent, shown.response.rect);
+        }
+        shown
+    }
+
+    fn show_studio_collapsible_bare<R>(
+        self,
+        ui: &mut egui::Ui,
+        is_expanded: &mut bool,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> Option<egui::InnerResponse<R>> {
         without_resize_line(ui, |ui, content_style| {
             self.show_collapsible(ui, is_expanded, |ui| {
                 ui.set_style(content_style);
                 add_contents(ui)
             })
         })
+    }
+}
+
+/// The edge of a panel that resizes it, found from where the panel sits in
+/// the `parent` area it was laid out in: a panel against the left edge
+/// resizes from its right edge, and so on. `None` when the panel fills the
+/// area, so has no free edge.
+fn resize_edge(parent: egui::Rect, panel: egui::Rect) -> Option<ResizeEdge> {
+    const EPS: f32 = 1.0;
+    let tall = (panel.height() - parent.height()).abs() < EPS;
+    let wide = (panel.width() - parent.width()).abs() < EPS;
+    if tall && !wide {
+        if (panel.left() - parent.left()).abs() < EPS {
+            Some(ResizeEdge::Vertical(panel.right(), panel.y_range()))
+        } else {
+            Some(ResizeEdge::Vertical(panel.left(), panel.y_range()))
+        }
+    } else if wide && !tall {
+        if (panel.top() - parent.top()).abs() < EPS {
+            Some(ResizeEdge::Horizontal(panel.bottom(), panel.x_range()))
+        } else {
+            Some(ResizeEdge::Horizontal(panel.top(), panel.x_range()))
+        }
+    } else {
+        None
+    }
+}
+
+/// A panel's resize edge: a vertical one at an x, or a horizontal one at a
+/// y, with the range it spans. It runs down the middle of the gap between
+/// two panels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ResizeEdge {
+    Vertical(f32, egui::Rangef),
+    Horizontal(f32, egui::Rangef),
+}
+
+/// Shows that a panel edge can be dragged: three small dots in the middle of
+/// the gap, and while the pointer is over the edge (egui's own grab zone)
+/// or dragging it, a blue line along it instead. egui already sets the
+/// native resize cursor there.
+fn paint_resize_grip(ui: &egui::Ui, parent: egui::Rect, panel: egui::Rect) {
+    if let Some(edge) = resize_edge(parent, panel) {
+        paint_grips(ui, &[edge], None);
+    }
+}
+
+/// Draws the grip of one resizable edge split into `edges`, one per card
+/// along it (as above the Scene workspace's bottom row, where one drag
+/// resizes both Project Assets and the Console): dots in the middle of each,
+/// or, while the edge is hovered or dragged, a line along each. `handle` is
+/// the edge's own drag response when the caller has one; otherwise the
+/// pointer is checked against egui's grab zone around each edge.
+fn paint_grips(ui: &egui::Ui, edges: &[ResizeEdge], handle: Option<&egui::Response>) {
+    let palette = crate::theme::NIGHT;
+    let grab = ui.style().interaction.resize_grab_radius_side;
+    let inset = 10.0 + f32::from(PANEL_GAP_HALF);
+    let parts = |edge: &ResizeEdge| match *edge {
+        ResizeEdge::Vertical(x, range) => (
+            egui::Rect::from_x_y_ranges(egui::Rangef::new(x - grab, x + grab), range),
+            egui::vec2(0.0, 1.0),
+            egui::pos2(x, range.center()),
+            range,
+        ),
+        ResizeEdge::Horizontal(y, range) => (
+            egui::Rect::from_x_y_ranges(range, egui::Rangef::new(y - grab, y + grab)),
+            egui::vec2(1.0, 0.0),
+            egui::pos2(range.center(), y),
+            range,
+        ),
+    };
+    let (over, dragging) = match handle {
+        Some(handle) => (handle.hovered() || handle.dragged(), handle.dragged()),
+        None => {
+            let pointer = ui.ctx().pointer_latest_pos();
+            // Over the edge, and not under a window or menu that covers it.
+            let over = pointer.is_some_and(|pointer| {
+                edges.iter().any(|edge| parts(edge).0.contains(pointer))
+                    && ui.ctx().layer_id_at(pointer) == Some(ui.layer_id())
+            });
+            (
+                over,
+                over && ui.ctx().input(|input| input.pointer.primary_down()),
+            )
+        }
+    };
+    let painter = ui.painter();
+    for edge in edges {
+        let (_, along, middle, range) = parts(edge);
+        if over {
+            let half = (range.span() / 2.0 - inset).max(0.0);
+            let color = if dragging {
+                palette.accent
+            } else {
+                palette.accent.gamma_multiply(0.55)
+            };
+            painter.line_segment(
+                [middle - along * half, middle + along * half],
+                egui::Stroke::new(2.0, color),
+            );
+        } else {
+            for step in [-1.0, 0.0, 1.0] {
+                painter.circle_filled(
+                    middle + along * (step * 4.5),
+                    1.1,
+                    palette.muted.gamma_multiply(0.7),
+                );
+            }
+        }
     }
 }
 
@@ -454,16 +596,6 @@ impl EditorShell {
                     );
                     state.prev_code_panel_rect = state.code_panel_rect;
 
-                    // Ctrl/Cmd+S with the Code panel up saves the active file
-                    // even when egui holds focus (when Monaco has focus it
-                    // handles the key itself and egui never sees it).
-                    if state.panels.code
-                        && ui.input(|i| {
-                            (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(egui::Key::S)
-                        })
-                    {
-                        state.code_save_requested = true;
-                    }
                     egui::CentralPanel::default()
                         .frame(studio_panel_frame())
                         .show(ui, |ui| show_scene_viewport(ui, viewport, state));
@@ -533,6 +665,16 @@ impl EditorShell {
             }
         }
 
+        delete_shortcut(&self.context, state);
+
+        // Cmd+S saves (see `save_shortcut`).
+        if self
+            .context
+            .input(|input| input.modifiers.command && input.key_pressed(SAVE_KEY))
+        {
+            save_shortcut(state);
+        }
+
         // Commit the frame's edits as one undo step — but not while a
         // pointer drag or text entry is still in progress, so a
         // multi-frame drag coalesces into a single step.
@@ -545,7 +687,9 @@ impl EditorShell {
                 .history
                 .settle(&mut state.world, state.selected_entity)
         {
-            state.dirty.mark_scene();
+            // Compared with the saved file, so an edit that puts things
+            // back the way they were leaves the scene clean.
+            state.sync_scene_dirty();
         }
 
         self.winit_state
@@ -795,7 +939,7 @@ fn show_scene_bottom_row(
 ) {
     let bottom_limit = (ui.available_height() - SCENE_TOP_MIN).max(SCENE_BOTTOM_MIN);
     let mut bottom_open = state.panels.asset_browser || state.panels.console;
-    egui::Panel::bottom("scene_bottom_row")
+    let bottom_row = egui::Panel::bottom("scene_bottom_row")
         .resizable(true)
         .drag_to_open(false)
         .default_size(bottom_height)
@@ -803,8 +947,9 @@ fn show_scene_bottom_row(
         .max_size(bottom_limit)
         .frame(egui::Frame::NONE)
         .show_separator_line(false)
-        .show_studio_collapsible(ui, &mut bottom_open, |ui| {
+        .show_studio_collapsible_bare(ui, &mut bottom_open, |ui| {
             let mut split_width = assets_width;
+            let mut split = None;
             if state.panels.asset_browser && state.panels.console {
                 let row = ui.available_rect_before_wrap();
                 let split_id = ui.make_persistent_id("scene_bottom_split");
@@ -823,6 +968,7 @@ fn show_scene_bottom_row(
                 if response.hovered() || response.dragged() {
                     ui.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 }
+                split = Some((response.clone(), row));
                 if (response.dragged() || response.drag_stopped())
                     && let Some(pointer) = response.interact_pointer_pos()
                 {
@@ -838,26 +984,46 @@ fn show_scene_bottom_row(
                     }
                 }
             }
+            // The cards in the row, so the row's top grip sits over each
+            // card rather than across both as if they were one panel.
+            let mut cards = Vec::new();
             if state.panels.asset_browser && state.panels.console {
-                egui::Panel::left("scene_assets_panel")
+                let assets = egui::Panel::left("scene_assets_panel")
                     .resizable(false)
                     .exact_size(split_width)
                     .frame(studio_panel_frame())
                     .show_separator_line(false)
                     .show_studio(ui, |ui| show_asset_browser(ui, state));
-                egui::CentralPanel::default()
+                let console = egui::CentralPanel::default()
                     .frame(studio_panel_frame())
                     .show(ui, |ui| bottom_tabs_panel(ui, state));
+                cards.extend([assets.response.rect, console.response.rect]);
+                if let Some((handle, row)) = &split {
+                    let x = row.left() + split_width;
+                    paint_grips(ui, &[ResizeEdge::Vertical(x, row.y_range())], Some(handle));
+                }
             } else if state.panels.asset_browser {
-                egui::CentralPanel::default()
+                let shown = egui::CentralPanel::default()
                     .frame(studio_panel_frame())
                     .show(ui, |ui| show_asset_browser(ui, state));
+                cards.push(shown.response.rect);
             } else if state.panels.console {
-                egui::CentralPanel::default()
+                let shown = egui::CentralPanel::default()
                     .frame(studio_panel_frame())
                     .show(ui, |ui| bottom_tabs_panel(ui, state));
+                cards.push(shown.response.rect);
             }
+            cards
         });
+    if let Some(row) = &bottom_row {
+        let top = row.response.rect.top();
+        let edges: Vec<_> = row
+            .inner
+            .iter()
+            .map(|card| ResizeEdge::Horizontal(top, card.x_range()))
+            .collect();
+        paint_grips(ui, &edges, None);
+    }
     if !bottom_open {
         state.panels.asset_browser = false;
         state.panels.console = false;
@@ -1079,7 +1245,23 @@ fn handle_scene_view_input(
         }
         None => scene_cursor_icon(image_response.dragged(), state.dragging_handle, gizmo_hover),
     };
-    ui.ctx().set_cursor_icon(cursor);
+    if scene_owns_cursor(
+        image_response.hovered(),
+        image_response.dragged(),
+        camera_gesture.is_some(),
+        state.dragging_handle.is_some(),
+    ) {
+        ui.ctx().set_cursor_icon(cursor);
+    }
+}
+
+/// Whether the Scene View decides the mouse cursor this frame: while the
+/// pointer is over it, or a drag that started in it is still going. Any
+/// other time the cursor belongs to whatever is under the pointer. The
+/// Scene View is drawn after the side panels, so setting it anyway would
+/// undo their cursors, such as the Inspector's drag cursor.
+fn scene_owns_cursor(hovered: bool, dragged: bool, camera_gesture: bool, gizmo_drag: bool) -> bool {
+    hovered || dragged || camera_gesture || gizmo_drag
 }
 
 /// What a Scene View drag does to the camera.
@@ -1313,8 +1495,9 @@ fn scroll_intent(events: &[egui::Event]) -> ScrollIntent {
 
 /// Cursor contract for the Scene image. The image accepts clicks and drags
 /// for gizmos, but must not advertise a grab operation while idle. A rotation
-/// ring hovered or dragged hides the system cursor: egui has no rotate cursor,
-/// so [`paint_gizmo`] draws one in its place. Keeping this decision in one
+/// ring or scale knob hovered or dragged hides the system cursor: egui has
+/// no rotate or scale cursor, so [`paint_gizmo`] draws one in its place, and
+/// scaling never looks like moving. Keeping this decision in one
 /// pure helper makes the interaction regression-testable without creating a
 /// GPU window in CI.
 fn scene_cursor_icon(
@@ -1322,7 +1505,10 @@ fn scene_cursor_icon(
     dragging: Option<GizmoHandle>,
     hovered: Option<GizmoHandle>,
 ) -> egui::CursorIcon {
-    if matches!(dragging.or(hovered), Some(GizmoHandle::Rotate(_))) {
+    if matches!(
+        dragging.or(hovered),
+        Some(GizmoHandle::Rotate(_) | GizmoHandle::ScaleAxis(_) | GizmoHandle::Scale)
+    ) {
         egui::CursorIcon::None
     } else if image_dragged && dragging.is_some() {
         egui::CursorIcon::Grabbing
@@ -1787,15 +1973,19 @@ fn paint_gizmo(
         egui::Stroke::new(1.0, crate::theme::NIGHT.shell),
         egui::StrokeKind::Outside,
     );
-    // egui has no rotate cursor, so while a ring is hovered or dragged the
-    // system cursor is hidden (see `scene_cursor_icon`) and a turning-arrow
-    // cursor is drawn at the pointer instead, as Photoshop does.
-    let turning = matches!(
-        state.dragging_handle.or(hovered),
-        Some(GizmoHandle::Rotate(_))
-    );
-    if turning && let Some(pointer) = response.hover_pos().or(response.interact_pointer_pos()) {
-        paint_rotate_cursor(&ui.ctx().layer_painter(cursor_layer()), pointer);
+    // egui has no rotate or scale cursor, so while a ring or a scale knob is
+    // hovered or dragged the system cursor is hidden (see
+    // `scene_cursor_icon`) and one is drawn at the pointer instead, as
+    // Photoshop does. Moving keeps the system pointer.
+    if let Some(pointer) = response.hover_pos().or(response.interact_pointer_pos()) {
+        let painter = ui.ctx().layer_painter(cursor_layer());
+        match state.dragging_handle.or(hovered) {
+            Some(GizmoHandle::Rotate(_)) => paint_rotate_cursor(&painter, pointer),
+            Some(GizmoHandle::ScaleAxis(_) | GizmoHandle::Scale) => {
+                paint_scale_cursor(&painter, pointer);
+            }
+            _ => {}
+        }
     }
     hovered
 }
@@ -1804,6 +1994,34 @@ fn paint_gizmo(
 /// anything else painted over the viewport.
 fn cursor_layer() -> egui::LayerId {
     egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("scene_rotate_cursor"))
+}
+
+/// The "scale" cursor: a small square with a diagonal double-headed arrow
+/// through it, pointing out from the square's corners, centred on `hotspot`;
+/// white over a dark outline so it reads on any background.
+fn paint_scale_cursor(painter: &egui::Painter, hotspot: egui::Pos2) {
+    let square = egui::Rect::from_center_size(hotspot, egui::Vec2::splat(7.0));
+    let (low, high) = (
+        hotspot + egui::vec2(-10.0, 10.0),
+        hotspot + egui::vec2(10.0, -10.0),
+    );
+    let heads = [
+        [low, low + egui::vec2(0.0, -4.5)],
+        [low, low + egui::vec2(4.5, 0.0)],
+        [high, high + egui::vec2(0.0, 4.5)],
+        [high, high + egui::vec2(-4.5, 0.0)],
+    ];
+    for stroke in [
+        egui::Stroke::new(3.2, egui::Color32::from_black_alpha(160)),
+        egui::Stroke::new(1.6, egui::Color32::WHITE),
+    ] {
+        painter.line_segment([low, square.left_bottom()], stroke);
+        painter.line_segment([square.right_top(), high], stroke);
+        for head in heads {
+            painter.line_segment(head, stroke);
+        }
+        painter.rect_stroke(square, 1.0, stroke, egui::StrokeKind::Middle);
+    }
 }
 
 /// The "rotate" cursor: a curved double-headed arrow around a hotspot dot at
@@ -1885,6 +2103,15 @@ fn apply_gizmo_edit(
     }
 }
 
+/// Where the drag reported by `response` began: the point the button was
+/// pressed, not where the pointer is once egui counts the press as a drag.
+fn drag_start_point(response: &egui::Response) -> Option<egui::Pos2> {
+    response
+        .ctx
+        .input(|input| input.pointer.press_origin())
+        .or_else(|| response.interact_pointer_pos())
+}
+
 /// Drags on the combined gizmo: an arrow moves, a ring turns like a dial,
 /// an arrow's knob stretches along its axis, the centre square scales evenly. Every selected, unlocked object changes
 /// together.
@@ -1899,8 +2126,12 @@ fn handle_gizmo_interaction(
         return;
     };
     let local = |pointer: egui::Pos2| Vec2::new(pointer.x - rect.min.x, pointer.y - rect.min.y);
+    // Pick the handle where the button went down. egui reports a drag only
+    // once the pointer has moved a few pixels, and by then it may have
+    // slid off a small scale knob onto its arrow, turning a scale into a
+    // move while the cursor still said "scale".
     if image_response.drag_started()
-        && let Some(pointer) = image_response.interact_pointer_pos()
+        && let Some(pointer) = drag_start_point(image_response)
     {
         let at = local(pointer);
         let rings = gizmo::rings_revealed(&layout, Some(at), None);
@@ -2017,7 +2248,7 @@ fn menu_file(
             dispatch_menu_command(state, new_project, MenuCommand::RevertScene);
             ui.close();
         }
-        if ui.button("Save Scene").clicked() {
+        if ui.button("Save Scene   ⌘S").clicked() {
             dispatch_menu_command(state, new_project, MenuCommand::SaveScene);
             ui.close();
         }
@@ -2226,10 +2457,62 @@ fn pick_project_directory(title: &str) -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().set_title(title).pick_folder()
 }
 
+/// Delete or Backspace removes the selection (undo with Cmd+Z), but not
+/// while typing — in a text field, or in the terminal, where Backspace
+/// belongs to the shell — and not in Play.
+fn delete_shortcut(ctx: &egui::Context, state: &mut EditorState) {
+    if !state.play.is_playing()
+        && !ctx.text_edit_focused()
+        && !terminal_has_keyboard(ctx, state)
+        && ctx.input(|input| {
+            input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
+        })
+    {
+        MenuCommand::DeleteSelected.apply(state);
+    }
+}
+
+/// Whether the integrated terminal has the keyboard.
+fn terminal_has_keyboard(ctx: &egui::Context, state: &EditorState) -> bool {
+    #[cfg(feature = "terminal")]
+    {
+        state
+            .terminal
+            .as_ref()
+            .is_some_and(|terminal| terminal.has_keyboard(ctx))
+    }
+    #[cfg(not(feature = "terminal"))]
+    {
+        let _ = (ctx, state);
+        false
+    }
+}
+
+/// With Cmd (Ctrl off macOS), the key that saves.
+const SAVE_KEY: egui::Key = egui::Key::S;
+
+/// What Cmd+S does when egui has the keyboard: saves the scene if it has
+/// unsaved changes, and the active code file while the Code panel is
+/// open. (With Monaco focused, Monaco takes Cmd+S itself and saves only
+/// its file; egui never sees the key.) The scene isn't saved in Play: the
+/// world is then the running game, not the scene being built.
+fn save_shortcut(state: &mut EditorState) {
+    if state.panels.code {
+        state.code_save_requested = true;
+    }
+    if state.play.is_playing() {
+        return;
+    }
+    state.sync_scene_dirty();
+    if state.dirty.scene() {
+        MenuCommand::SaveScene.apply(state);
+    }
+}
+
 /// Runs `action` now if nothing is unsaved; otherwise stashes it in
 /// `state.pending_action` so [`unsaved_changes_modal`] can prompt.
 pub(crate) fn request_guarded(state: &mut EditorState, action: PendingAction) {
-    if state.dirty.any() {
+    if state.has_unsaved_changes() {
         state.pending_action = Some(action);
     } else {
         apply_pending(state, action);
@@ -2320,6 +2603,7 @@ fn unsaved_changes_modal(ui: &mut egui::Ui, state: &mut EditorState) {
                 choice = Some(Choice::Proceed);
             }
             if ui.button("Discard").clicked() {
+                state.discard_unsaved_scene();
                 choice = Some(Choice::Proceed);
             }
             if ui.button("Cancel").clicked() {
@@ -2441,7 +2725,7 @@ fn menu_gameobject(ui: &mut egui::Ui, state: &mut EditorState) {
             ui.close();
         }
         if ui
-            .add_enabled(has_selection, egui::Button::new("Delete Selected"))
+            .add_enabled(has_selection, egui::Button::new("Delete Selected   ⌫"))
             .clicked()
         {
             MenuCommand::DeleteSelected.apply(state);
@@ -3130,9 +3414,16 @@ fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
     egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(12, 13))
         .show(ui, |ui| {
+            // A resizable panel keeps the width its content takes, and a
+            // vertical scroll area grows sideways to fit its widest row. So
+            // the content gets a fixed rect that the panel never sees past:
+            // a row too wide is clipped instead of widening the Inspector.
+            let rect = ui.available_rect_before_wrap();
+            let mut content = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+            content.set_clip_rect(rect.intersect(ui.clip_rect()));
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show(&mut content, |ui| {
                     inspector::show(
                         ui,
                         &mut state.world,
@@ -3143,6 +3434,7 @@ fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
                         &mut state.open_script_request,
                     );
                 });
+            ui.advance_cursor_after_rect(rect);
         });
 }
 
@@ -3186,7 +3478,8 @@ fn code_panel_body(ui: &mut egui::Ui, close: &mut bool) {
 /// Code mode: Monaco's project explorer and editor, rendered viewport, and output.
 #[cfg_attr(feature = "dock-shell", allow(dead_code))]
 fn show_code_workspace(ui: &mut egui::Ui, viewport: &Viewport, state: &mut EditorState) {
-    egui::Panel::right("code_viewport_panel")
+    let parent = ui.available_rect_before_wrap();
+    let viewport_panel = egui::Panel::right("code_viewport_panel")
         .resizable(true)
         .default_size(280.0)
         .min_size(220.0)
@@ -3207,6 +3500,7 @@ fn show_code_workspace(ui: &mut egui::Ui, viewport: &Viewport, state: &mut Edito
                 .maintain_aspect_ratio(false),
             );
         });
+    paint_resize_grip(ui, parent, viewport_panel.response.rect);
 
     let mut console_open = state.panels.console;
     egui::Panel::bottom("code_console_panel")
@@ -3247,14 +3541,6 @@ fn show_code_workspace(ui: &mut egui::Ui, viewport: &Viewport, state: &mut Edito
         pointer_down,
     );
     state.prev_code_panel_rect = state.code_panel_rect;
-
-    if state.panels.code
-        && ui.input(|input| {
-            (input.modifiers.command || input.modifiers.ctrl) && input.key_pressed(egui::Key::S)
-        })
-    {
-        state.code_save_requested = true;
-    }
 }
 
 /// Bounded chat surface shared by the stable and docked shells. Provider
@@ -3575,7 +3861,11 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
             });
             ui.weak("Select a tilemap, then click or drag in 2D Scene View.");
         });
+        // The menu's contents run only while it is open: that is when the
+        // viewport shows which way the sun shines.
+        state.aiming_sun = false;
         ui.menu_button("Environment", |ui| {
+            state.aiming_sun = true;
             environment_ambient_ui(ui, state);
             ui.separator();
             ui.label("Lighting");
@@ -4179,6 +4469,102 @@ mod ui_tests {
     }
 
     #[test]
+    fn save_shortcut_saves_the_scene_and_the_open_code_file() {
+        let (root, mut state) = menu_test_state();
+        state.world.spawn(engine_ecs::components::Name::new("Cube"));
+        state.mark_dirty();
+        state.panels.code = false;
+
+        super::save_shortcut(&mut state);
+        assert!(!state.dirty.scene(), "the scene is saved");
+        assert!(state.scene_path.is_file());
+        assert!(
+            !state.code_save_requested,
+            "no code file without the Code panel"
+        );
+
+        state.panels.code = true;
+        super::save_shortcut(&mut state);
+        assert!(state.code_save_requested, "the open code file is saved too");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Runs two egui frames with a text field — focused when `typing` —
+    /// pressing `key` in the second, and applies the delete shortcut there.
+    fn press_for_delete(state: &mut crate::EditorState, key: egui::Key, typing: bool) {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        // The first frame settles focus, the second carries the key.
+        for events in [
+            Vec::new(),
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ] {
+            let pressing = !events.is_empty();
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let response = ui.text_edit_singleline(&mut text);
+                if typing {
+                    response.request_focus();
+                }
+                if pressing {
+                    super::delete_shortcut(ui.ctx(), state);
+                }
+            });
+            // Nothing is drawn, so the font texture upload is dropped.
+            output.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn backspace_or_delete_removes_the_selection_but_not_while_typing() {
+        let (root, mut state) = menu_test_state();
+        let cube = state
+            .world
+            .spawn(engine_ecs::components::Name::new("Cube"))
+            .id();
+        state.select_only(cube);
+
+        press_for_delete(&mut state, egui::Key::Backspace, true);
+        assert!(state.world.get_entity(cube).is_ok(), "typing keeps it");
+
+        press_for_delete(&mut state, egui::Key::Backspace, false);
+        assert!(state.world.get_entity(cube).is_err(), "Backspace deletes");
+        assert!(state.dirty.scene());
+
+        let sphere = state
+            .world
+            .spawn(engine_ecs::components::Name::new("Sphere"))
+            .id();
+        state.select_only(sphere);
+        press_for_delete(&mut state, egui::Key::Delete, false);
+        assert!(state.world.get_entity(sphere).is_err(), "Delete deletes");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_shortcut_leaves_the_scene_alone_in_play() {
+        let (root, mut state) = menu_test_state();
+        state.mark_dirty();
+        state.play.start(&mut state.world);
+
+        super::save_shortcut(&mut state);
+        assert!(
+            state.dirty.scene(),
+            "the running game is not saved as the scene"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn menu_save_before_guarded_action_keeps_dirty_code_safe() {
         let (root, mut state) = menu_test_state();
         state.mark_dirty();
@@ -4578,6 +4964,233 @@ mod ui_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A tree trunk with the sections the Inspector shows most: transform,
+    /// collider, visual rules and a material override.
+    fn inspector_test_state() -> (std::path::PathBuf, crate::EditorState) {
+        use engine_ecs::components::{MeshSource, Name, Static, Transform};
+        let (root, mut state) = menu_test_state();
+        let mut transform =
+            engine_utils::Transform::from_translation(glam::Vec3::new(0.0, 0.681, 0.0));
+        transform.rotation = glam::Quat::from_euler(
+            glam::EulerRot::XYZ,
+            4.75f32.to_radians(),
+            -33.15f32.to_radians(),
+            8.65f32.to_radians(),
+        );
+        transform.scale = glam::Vec3::splat(1.229);
+        let trunk = state
+            .world
+            .spawn((
+                Name::new("Tree 110 Trunk"),
+                Transform::from(transform),
+                Static,
+                MeshSource::new("mesh-id", "material-id"),
+                engine_scene::SceneCollider(engine_scene::ColliderData {
+                    shape: engine_scene::ColliderShape::Cylinder {
+                        half_height: 1.6,
+                        radius: 0.35,
+                    },
+                    body: engine_scene::BodyKind::Fixed,
+                }),
+                engine_scene::SceneRules(vec![engine_scene::RuleData {
+                    trigger: engine_scene::RuleTrigger::Named("game_start".into()),
+                    action: engine_scene::RuleAction::EmitEvent {
+                        name: "open_gate".into(),
+                    },
+                    condition: None,
+                    graph_position: None,
+                }]),
+                engine_scene::SceneMaterialOverride(engine_scene::MaterialOverrideData {
+                    tint: [1.0, 1.0, 1.0],
+                    metallic: None,
+                    roughness: Some(0.6),
+                }),
+            ))
+            .id();
+        state.select_only(trunk);
+        (root, state)
+    }
+
+    /// Writes `inspector.png` (a wide panel) and `inspector-narrow.png`, for
+    /// a visual check. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_panel() {
+        let (root, mut state) = inspector_test_state();
+        for (name, width) in [("inspector.png", 420.0), ("inspector-narrow.png", 270.0)] {
+            let path = crate::ui_snapshot::snapshot_dir().join(name);
+            crate::ui_snapshot::render_png(&path, egui::vec2(width + 20.0, 1040.0), 2.0, |ui| {
+                egui::Panel::right("snapshot_inspector")
+                    .exact_size(width)
+                    .frame(super::studio_panel_frame())
+                    .show_separator_line(false)
+                    .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                    .show(ui, |_| {});
+            })
+            .expect("snapshot");
+        }
+        let _ = std::fs::remove_dir_all(root);
+
+        // An object without a 3D model offers to take an image.
+        let (root, mut state) = menu_test_state();
+        let spawn = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Spawn point"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+            ))
+            .id();
+        state.select_only(spawn);
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-empty.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 520.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `console.png` (a wide Console) and `console-narrow.png`, with
+    /// the lines Studio logs at start-up, for a visual check. Needs a GPU
+    /// adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_console_panel() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let (root, mut state) = menu_test_state();
+        let subscriber = tracing_subscriber::registry()
+            .with(crate::console::ConsoleLayer::new(state.console.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "editor", total = 21, imported = 21, cached = 0, failed = 0, "asset import pass complete");
+            tracing::warn!(target: "editor", "recovered unsaved scene changes from a previous session; save to keep them");
+            tracing::info!(target: "editor", "editor window ready");
+            tracing::info!(target: "engine_renderer::gpu", adapter = "Apple M1 Pro", format = "Bgra8UnormSrgb", width = 3024, height = 1834, msaa = 4, "GPU context initialized");
+            // As the `log` bridge reports a record: its real target in a
+            // `log.target` field.
+            tracing::warn!(
+                log.target = "egui_wgpu::renderer",
+                log.module_path = "egui_wgpu::renderer",
+                log.file = "/Users/macbook/.cargo/registry/src/egui-wgpu-0.36.1/src/renderer.rs",
+                log.line = 407,
+                "Detected a linear (sRGBA aware) framebuffer Bgra8UnormSrgb. egui prefers Rgba8Unorm or Bgra8Unorm"
+            );
+            tracing::info!(target: "editor_code", monaco_dir = "/Users/macbook/Drive D/Source Code/Game engine/vge/target/debug/RustyEngine Studio.app/Contents/MacOS/../../../monaco", "code editor webview created");
+            tracing::info!(target: "editor_lsp", root = "/Users/macbook/Drive D/Source Code/Game engine/vge/games/island", server = "rust-analyzer", "language server started");
+            tracing::error!(target: "engine_editor::play", "build failed: see the Output tab");
+            tracing::debug!(target: "engine_editor::assets", "watching 4 folders");
+        });
+        state.console_filter.min_level = crate::console::LevelFilter::Debug;
+        for (name, width) in [("console.png", 860.0), ("console-narrow.png", 420.0)] {
+            let path = crate::ui_snapshot::snapshot_dir().join(name);
+            crate::ui_snapshot::render_png(&path, egui::vec2(width, 380.0), 2.0, |ui| {
+                egui::CentralPanel::default()
+                    .frame(super::studio_panel_frame())
+                    .show(ui, |ui| super::bottom_tabs_panel(ui, &mut state));
+            })
+            .expect("snapshot");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Opening sections must never push the panel wider than the width the
+    /// user gave it: a resizable panel keeps whatever width its content
+    /// takes, so one wide row used to widen the Inspector for good.
+    #[test]
+    fn opening_inspector_sections_never_widens_the_panel() {
+        let (root, mut state) = inspector_test_state();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut width = 0.0;
+        for frame in 0..8 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 900.0),
+                    )),
+                    time: Some(f64::from(frame) * 0.5),
+                    ..Default::default()
+                },
+                |ui| {
+                    let panel = egui::Panel::right("width_inspector")
+                        .resizable(true)
+                        .default_size(240.0)
+                        .frame(super::studio_panel_frame())
+                        .show_separator_line(false)
+                        .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+                    width = panel.response.rect.width();
+                },
+            );
+            output.textures_delta.clear();
+        }
+        let _ = std::fs::remove_dir_all(root);
+        assert!(width <= 247.0, "the Inspector grew to {width} points");
+    }
+
+    /// Writes `panel-grips.png`: three resizable panels around a central
+    /// one, showing the resize grips in the gaps, for a visual check. Needs
+    /// a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_panel_grips() {
+        use super::StudioPanelExt;
+        let path = crate::ui_snapshot::snapshot_dir().join("panel-grips.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(640.0, 400.0), 2.0, |ui| {
+            for (panel, size) in [
+                (egui::Panel::left("grip_left"), 160.0),
+                (egui::Panel::right("grip_right"), 160.0),
+                (egui::Panel::bottom("grip_bottom"), 120.0),
+            ] {
+                panel
+                    .resizable(true)
+                    .default_size(size)
+                    .frame(super::studio_panel_frame())
+                    .show_separator_line(false)
+                    .show_studio_collapsible(ui, &mut true, |ui| {
+                        ui.allocate_space(ui.available_size());
+                    });
+            }
+            egui::CentralPanel::default()
+                .frame(super::studio_panel_frame())
+                .show(ui, |ui| {
+                    ui.allocate_space(ui.available_size());
+                });
+        })
+        .expect("snapshot");
+    }
+
+    /// Writes `bottom-row.png`: the Scene workspace's bottom row (Project
+    /// Assets beside the Console) under a stand-in viewport, for a visual
+    /// check of the gaps and grips. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_scene_bottom_row() {
+        let (root, mut state) = menu_test_state();
+        state.panels.asset_browser = true;
+        state.panels.console = true;
+        let path = crate::ui_snapshot::snapshot_dir().join("bottom-row.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(900.0, 420.0), 2.0, |ui| {
+            ui.painter()
+                .rect_filled(ui.max_rect(), 0.0, crate::theme::NIGHT.shell);
+            super::show_scene_bottom_row(ui, &mut state, 220.0, 320.0);
+            egui::CentralPanel::default()
+                .frame(super::studio_panel_frame())
+                .show(ui, |ui| {
+                    ui.allocate_space(ui.available_size());
+                });
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Writes `scene-chrome.png`: the Scene panel's header and footer, for
     /// a visual check. Needs a GPU adapter.
     #[test]
@@ -4598,6 +5211,62 @@ mod ui_tests {
         })
         .expect("snapshot");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A drag on a small handle must be judged from where the button went
+    /// down: egui reports the drag only after the pointer has moved, by
+    /// which time it can be off a scale knob and on its move arrow.
+    #[test]
+    fn a_drag_starts_where_the_button_was_pressed() {
+        let ctx = egui::Context::default();
+        let press = egui::pos2(100.0, 100.0);
+        // egui hit-tests against the previous frame's widgets, so the first
+        // frame only lays the area out.
+        let frames = [
+            vec![egui::Event::PointerMoved(press)],
+            vec![egui::Event::PointerButton {
+                pos: press,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerMoved(egui::pos2(104.0, 100.0))],
+            vec![egui::Event::PointerMoved(egui::pos2(115.0, 100.0))],
+        ];
+        let mut start = None;
+        for (frame, events) in frames.into_iter().enumerate() {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300.0, 300.0),
+                    )),
+                    time: Some(frame as f64 * 0.1),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let response = ui.allocate_rect(ui.max_rect(), egui::Sense::drag());
+                    if response.drag_started() {
+                        start = super::drag_start_point(&response);
+                    }
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(start, Some(press));
+    }
+
+    #[test]
+    fn the_scene_view_leaves_the_cursor_alone_when_the_pointer_is_elsewhere() {
+        assert!(!super::scene_owns_cursor(false, false, false, false));
+        assert!(super::scene_owns_cursor(true, false, false, false));
+        assert!(
+            super::scene_owns_cursor(false, true, false, false),
+            "a drag that leaves the view keeps its cursor"
+        );
+        assert!(super::scene_owns_cursor(false, false, true, false));
+        assert!(super::scene_owns_cursor(false, false, false, true));
     }
 
     #[test]
@@ -4625,6 +5294,44 @@ mod ui_tests {
             scene_cursor_icon(true, Some(GizmoHandle::Rotate(Axis::Y)), None),
             egui::CursorIcon::None
         );
+        for scale in [GizmoHandle::ScaleAxis(Axis::X), GizmoHandle::Scale] {
+            assert_eq!(
+                scene_cursor_icon(false, None, Some(scale)),
+                egui::CursorIcon::None,
+                "a scale knob swaps the system cursor for the drawn scale cursor"
+            );
+            assert_eq!(
+                scene_cursor_icon(true, Some(scale), None),
+                egui::CursorIcon::None
+            );
+        }
+        assert_eq!(
+            scene_cursor_icon(false, None, Some(GizmoHandle::Move(Axis::X))),
+            egui::CursorIcon::Default,
+            "moving keeps the system pointer"
+        );
+    }
+
+    /// Writes `gizmo-cursors.png`: the drawn rotate and scale cursors on a
+    /// light and a dark background, for a visual check. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_gizmo_cursors() {
+        let path = crate::ui_snapshot::snapshot_dir().join("gizmo-cursors.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(160.0, 60.0), 4.0, |ui| {
+            let rect = ui.max_rect();
+            let (dark, light) = rect.split_left_right_at_fraction(0.5);
+            ui.painter()
+                .rect_filled(dark, 0.0, crate::theme::NIGHT.shell);
+            ui.painter()
+                .rect_filled(light, 0.0, egui::Color32::from_rgb(0x8C, 0xB3, 0x6E));
+            for half in [dark, light] {
+                let (left, right) = half.split_left_right_at_fraction(0.5);
+                super::paint_rotate_cursor(ui.painter(), left.center());
+                super::paint_scale_cursor(ui.painter(), right.center());
+            }
+        })
+        .expect("snapshot");
     }
 
     #[test]
@@ -5075,6 +5782,34 @@ mod ui_tests {
     }
 
     #[test]
+    fn a_panel_resizes_from_the_edge_that_faces_the_rest_of_the_window() {
+        use super::{ResizeEdge, resize_edge};
+        let parent = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 600.0));
+        let tall = egui::Rangef::new(0.0, 600.0);
+        let wide = egui::Rangef::new(0.0, 1000.0);
+        let left = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(250.0, 600.0));
+        let right = egui::Rect::from_min_max(egui::pos2(700.0, 0.0), egui::pos2(1000.0, 600.0));
+        let bottom = egui::Rect::from_min_max(egui::pos2(0.0, 400.0), egui::pos2(1000.0, 600.0));
+        assert_eq!(
+            resize_edge(parent, left),
+            Some(ResizeEdge::Vertical(250.0, tall))
+        );
+        assert_eq!(
+            resize_edge(parent, right),
+            Some(ResizeEdge::Vertical(700.0, tall))
+        );
+        assert_eq!(
+            resize_edge(parent, bottom),
+            Some(ResizeEdge::Horizontal(400.0, wide))
+        );
+        assert_eq!(
+            resize_edge(parent, parent),
+            None,
+            "a panel filling the area has no free edge"
+        );
+    }
+
+    #[test]
     fn panels_are_soft_cards_on_the_window_surface() {
         let frame = super::studio_panel_frame();
         assert_eq!(frame.fill, crate::theme::NIGHT.panel);
@@ -5082,7 +5817,7 @@ mod ui_tests {
         assert_eq!(frame.stroke.width, 1.0);
         assert_eq!(frame.stroke.color, crate::theme::NIGHT.border);
         assert_eq!(frame.inner_margin, egui::Margin::ZERO);
-        assert_eq!(frame.outer_margin, egui::Margin::same(3));
+        assert_eq!(frame.outer_margin, egui::Margin::same(2), "a 4-point gap");
     }
 
     #[test]
@@ -5191,7 +5926,7 @@ mod ui_tests {
             super::bottom_tabs_panel(ui, &mut state);
         });
         let label_x = output.shapes.iter().find_map(|shape| match &shape.shape {
-            egui::epaint::Shape::Text(text) if text.galley.text() == "No log output yet." => {
+            egui::epaint::Shape::Text(text) if text.galley.text() == "No messages yet." => {
                 Some(text.pos.x)
             }
             _ => None,

@@ -66,23 +66,44 @@ impl OutputLog {
 /// Draws the Output tab: monospace lines, newest at the bottom, or an
 /// empty-state hint.
 pub fn show(ui: &mut egui::Ui, output: &OutputLog) {
+    let palette = crate::theme::NIGHT;
     let lines = output.snapshot();
     ui.horizontal(|ui| {
-        ui.label(format!("{} lines", lines.len()));
-        if ui.button("Clear").clicked() {
-            output.clear();
-        }
+        ui.spacing_mut().interact_size.y = 24.0;
+        ui.label(egui::RichText::new(format!("{} lines", lines.len())).color(palette.subtle));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if crate::widgets::pill_button(ui, &palette, "Clear", palette.text, !lines.is_empty())
+                .clicked()
+            {
+                output.clear();
+            }
+            if crate::widgets::pill_button(ui, &palette, "Copy", palette.text, !lines.is_empty())
+                .clicked()
+            {
+                ui.ctx().copy_text(lines.join("\n"));
+            }
+        });
     });
+    ui.add_space(4.0);
 
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
             if lines.is_empty() {
-                ui.weak("No output. Play, build, and task output appears here.");
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("No output yet. Play, Run and Build & Export write here.")
+                        .color(palette.subtle),
+                );
             }
             for line in &lines {
-                ui.label(egui::RichText::new(line).monospace());
+                ui.label(
+                    egui::RichText::new(line)
+                        .font(egui::FontId::monospace(12.0))
+                        .color(palette.text),
+                );
             }
         });
 }

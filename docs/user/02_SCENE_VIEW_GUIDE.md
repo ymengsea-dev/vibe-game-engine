@@ -53,7 +53,7 @@ Select an object to show its gizmo. One gizmo moves, rotates and scales, so ther
 | **Arrows** | Red (X), green (Y) and blue (Z) arrows out of the object | Move the object along that axis. The object follows the pointer. |
 | **Scale knobs** | A small square on each arrow, in the arrow's colour | Stretch or squash the object along that axis only: drag toward the arrow tip to grow, toward the centre to shrink. |
 | **Rotation rings** | A thin arc around the object for each axis, in the same colours. They appear when you move the pointer near the object, and only the front half of each ring is drawn. | Turn the object around that axis, like a dial. Over a ring the pointer changes to a curved double arrow. |
-| **Centre square** | A small white square at the object's centre | Scale the whole object evenly: drag right or up to grow, left or down to shrink. |
+| **Centre square** | A small white square at the object's centre | Scale the whole object evenly: drag right or up to grow, left or down to shrink. Over the square or a scale knob the pointer changes to a small square with a diagonal double arrow, so scaling never looks like moving. |
 
 Away from the object you see only the arrows with their scale knobs and the centre square, so the gizmo stays uncluttered. Move the pointer toward the object and the rings appear; they stay faint until you hover one. The handle under the pointer brightens, and the handle you are dragging turns yellow. The gizmo is drawn on top of the scene and stays the same size on screen at any zoom.
 
@@ -90,6 +90,8 @@ To lock or unlock an object, right-click it in the Hierarchy and choose **Lock**
 
 Each mode keeps its own camera position.
 
+The first time you open a project, the Scene View shows its whole scene. To get that view back at any time, click empty space to select nothing and press **F**. After that, where you are looking, and whether 3D or 2D is showing, is saved automatically for each project and comes back when you reopen it. Moving, zooming or rotating the view never counts as an unsaved change, so it never makes Studio ask you to save.
+
 ---
 
 ## Global / Local
@@ -107,7 +109,7 @@ Overlays are visual aids for building the scene. They are never shown in the run
 | Option | When on | Typical use |
 | --- | --- | --- |
 | **All colliders** | Draws every object's physics shape as a green wireframe, with the selected object's in yellow. | Checking where the player can walk or collide |
-| **Lights** | Draws the sun's direction as an arrow and a marker at each point light. | Aiming the sun and placing lamps |
+| **Lights** | Draws a marker at each point light, with a ring at its range. | Placing lamps |
 | **Cameras** | Draws each camera's view volume. | Seeing what a game camera will show |
 | **Ground grid** | Draws a flat 40 × 40 m grid of 1 m squares at height 0, centred on the world origin. | Lining objects up and judging distances |
 | **Audio emitters** | Draws a marker at each sound source and a ring at the distance where it fades to silence. | Placing sounds and checking their reach |
@@ -202,10 +204,10 @@ Scene-wide settings that have no position in the world.
 | **Add selected sound** | Adds the sound file selected in Project Assets (WAV) as an ambient sound. |
 | **Create point light** | Adds a light at a position. Move it with the gizmo; set its color, strength and range in the Inspector. Up to 16 point lights nearest the camera light the scene at once. |
 | **Override scene lighting** | Gives the scene its own sun and ambient light instead of the default daylight. |
-| **Sun direction**, **Sun strength**, **Sun color** | Where the sunlight comes from, how bright it is, and its color. |
+| **Sun direction**, **Sun strength**, **Sun color** | Where the sunlight comes from, how bright it is, and its color. While this menu is open, a yellow arrow in the middle of the view shows which way the sunlight travels. |
 | **Ambient** | How bright the shaded areas are. |
 
-A sound that belongs to an object (footsteps, an engine, a waterfall) is not an ambient sound. Add an **Audio Emitter** component to that object instead (Inspector → **Add Component**), so the sound comes from the object and fades with distance.
+A sound that belongs to an object (footsteps, an engine, a waterfall) is not an ambient sound. Add an **Audio Emitter** component to that object instead (Inspector → **Add component**), so the sound comes from the object and fades with distance.
 
 Ambient sounds play when the game runs (Play, Run or an exported game). They do not play while editing.
 

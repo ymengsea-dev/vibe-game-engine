@@ -145,3 +145,200 @@ pub(crate) fn segment_label(
         .min_size(egui::vec2(38.0, 22.0)),
     )
 }
+
+/// The disclosure chevron of the asset and Hierarchy trees: "›" when
+/// closed, turning to "⌄" as `openness` goes from 0 to 1.
+pub(crate) fn paint_chevron(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    openness: f32,
+    color: egui::Color32,
+) {
+    let angle = openness.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
+    let (sin, cos) = angle.sin_cos();
+    let points = [
+        egui::vec2(-2.0, -4.0),
+        egui::vec2(2.0, 0.0),
+        egui::vec2(-2.0, 4.0),
+    ]
+    .map(|point| center + egui::vec2(point.x * cos - point.y * sin, point.x * sin + point.y * cos));
+    painter.add(egui::Shape::line(
+        points.to_vec(),
+        egui::Stroke::new(1.5, color),
+    ));
+}
+
+/// The icon of a drop-down (`egui::ComboBox::icon`): the same chevron as
+/// the trees, pointing down, instead of egui's filled triangle.
+pub(crate) fn combo_chevron(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    _visuals: &egui::style::WidgetVisuals,
+    _open: bool,
+) {
+    let color = if ui.is_enabled() {
+        crate::theme::NIGHT.muted
+    } else {
+        crate::theme::NIGHT.subtle
+    };
+    paint_chevron(ui.painter(), rect.center(), 1.0, color);
+}
+
+/// A macOS-style checkbox: a soft rounded box that fills with the accent
+/// colour and shows a white check when on. The whole row is clickable and
+/// as tall as every other control.
+pub(crate) fn checkbox(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    on: &mut bool,
+    label: &str,
+) -> egui::Response {
+    const BOX: f32 = 14.0;
+    let height = ui.spacing().interact_size.y;
+    let galley = (!label.is_empty()).then(|| {
+        one_line(
+            ui.painter(),
+            label,
+            12.0,
+            palette.text,
+            (ui.available_width() - BOX - 6.0).max(0.0),
+        )
+    });
+    let width = BOX + galley.as_ref().map_or(0.0, |galley| 6.0 + galley.size().x);
+    let (rect, mut response) =
+        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let enabled = ui.is_enabled();
+    let box_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + BOX / 2.0, rect.center().y),
+        egui::Vec2::splat(BOX),
+    );
+    let fill = match (*on, response.hovered() && enabled) {
+        (true, _) => palette.accent,
+        (false, true) => palette.selected.lerp_to_gamma(palette.muted, 0.25),
+        (false, false) => palette.selected,
+    };
+    let painter = ui.painter();
+    painter.rect_filled(
+        box_rect,
+        4.0,
+        fill.gamma_multiply(if enabled { 1.0 } else { 0.5 }),
+    );
+    if *on {
+        let c = box_rect.center();
+        painter.add(egui::Shape::line(
+            vec![
+                c + egui::vec2(-3.5, 0.2),
+                c + egui::vec2(-1.0, 2.7),
+                c + egui::vec2(3.6, -2.6),
+            ],
+            egui::Stroke::new(1.7, palette.shell),
+        ));
+    }
+    if let Some(galley) = galley {
+        let pos = egui::pos2(
+            box_rect.right() + 6.0,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        let color = if enabled {
+            palette.text
+        } else {
+            palette.subtle
+        };
+        painter.galley(pos, galley, color);
+    }
+    response
+}
+
+/// A one-line text field as tall as every other control, filling the
+/// width it is given.
+pub(crate) fn text_field(ui: &mut egui::Ui, text: &mut String, hint: &str) -> egui::Response {
+    let height = ui.spacing().interact_size.y;
+    let field = field(ui, text, 12.0, height)
+        .hint_text(hint)
+        .desired_width(ui.available_width());
+    ui.add(field)
+}
+
+/// A one-line text edit in `size`-point text, `height` points tall. egui
+/// sizes a text edit from its text and margins, so the margins make up the
+/// height.
+pub(crate) fn field<'t>(
+    ui: &egui::Ui,
+    text: &'t mut String,
+    size: f32,
+    height: f32,
+) -> egui::TextEdit<'t> {
+    let font = egui::FontId::proportional(size);
+    let row = ui.ctx().fonts_mut(|fonts| fonts.row_height(&font));
+    let vertical = ((height - row) / 2.0).round().clamp(0.0, 40.0) as i8;
+    egui::TextEdit::singleline(text)
+        .font(font)
+        .margin(egui::Margin {
+            left: 8,
+            right: 8,
+            top: vertical,
+            bottom: vertical,
+        })
+        .vertical_align(egui::Align::Center)
+}
+
+/// A round "⋯" button for a section's less-used actions; show its menu
+/// with `egui::Popup::menu(&response)`.
+pub(crate) fn more_button(ui: &mut egui::Ui, palette: &Palette) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(22.0), egui::Sense::click());
+    let painter = ui.painter();
+    if response.hovered()
+        || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response))
+    {
+        painter.rect_filled(rect, 11.0, palette.selected);
+    }
+    let color = if response.hovered() {
+        palette.text
+    } else {
+        palette.muted
+    };
+    for dx in [-5.0, 0.0, 5.0] {
+        painter.circle_filled(rect.center() + egui::vec2(dx, 0.0), 1.4, color);
+    }
+    response
+}
+
+/// A search field: a soft rounded field with a magnifier at the left,
+/// `width` points wide and as tall as other controls.
+pub(crate) fn search_field(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    let height = ui.spacing().interact_size.y;
+    let mut edit = field(ui, text, 12.0, height)
+        .hint_text(hint)
+        .desired_width(width)
+        .background_color(palette.hover);
+    let margin = (height
+        - ui.ctx()
+            .fonts_mut(|fonts| fonts.row_height(&egui::FontId::proportional(12.0))))
+        / 2.0;
+    edit = edit.margin(egui::Margin {
+        left: 26,
+        right: 8,
+        top: margin.round().clamp(0.0, 40.0) as i8,
+        bottom: margin.round().clamp(0.0, 40.0) as i8,
+    });
+    let response = ui.add(edit);
+    let center = egui::pos2(response.rect.left() + 13.0, response.rect.center().y - 0.5);
+    let ink = egui::Stroke::new(1.4, palette.muted);
+    ui.painter()
+        .circle_stroke(center + egui::vec2(-1.0, -1.0), 4.0, ink);
+    ui.painter().line_segment(
+        [center + egui::vec2(2.0, 2.0), center + egui::vec2(5.0, 5.0)],
+        ink,
+    );
+    response
+}

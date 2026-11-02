@@ -7,6 +7,7 @@
 
 use engine_renderer::Camera;
 use glam::{Vec2, Vec3};
+use serde::{Deserialize, Serialize};
 
 /// Vertical field of view of the 3D Scene View (matches [`Camera::new`]).
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
@@ -299,9 +300,114 @@ impl SceneCameras {
     }
 }
 
+/// Where the Scene View was looking, as kept in the editor session so it
+/// is the same when the project reopens. Editor-only: the scene file and
+/// its unsaved-changes state never see it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SavedSceneView {
+    /// The perspective 3D view.
+    pub three_d: SavedSceneCamera,
+    /// The orthographic 2D view.
+    pub two_d: SavedSceneCamera,
+    /// Whether the 2D view was the one showing.
+    pub mode_2d: bool,
+}
+
+/// One [`SceneCamera`] in [`SavedSceneView`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SavedSceneCamera {
+    /// See [`SceneCamera::focus`].
+    pub focus: [f32; 3],
+    /// See [`SceneCamera::yaw`].
+    pub yaw: f32,
+    /// See [`SceneCamera::pitch`].
+    pub pitch: f32,
+    /// See [`SceneCamera::distance`].
+    pub distance: f32,
+    /// See [`SceneCamera::ortho_height`].
+    pub ortho_height: f32,
+}
+
+impl From<SceneCamera> for SavedSceneCamera {
+    fn from(camera: SceneCamera) -> Self {
+        Self {
+            focus: camera.focus.to_array(),
+            yaw: camera.yaw,
+            pitch: camera.pitch,
+            distance: camera.distance,
+            ortho_height: camera.ortho_height,
+        }
+    }
+}
+
+impl SavedSceneCamera {
+    /// The camera this describes, kept within the navigation limits.
+    /// `None` for a value no navigation could produce (not finite) — the
+    /// session file is hand-editable, so it is not trusted.
+    pub fn restore(self) -> Option<SceneCamera> {
+        let finite = self.focus.iter().all(|value| value.is_finite())
+            && [self.yaw, self.pitch, self.distance, self.ortho_height]
+                .iter()
+                .all(|value| value.is_finite());
+        finite.then(|| SceneCamera {
+            focus: Vec3::from_array(self.focus),
+            yaw: self.yaw,
+            pitch: self.pitch.clamp(-MAX_PITCH, MAX_PITCH),
+            distance: self.distance.clamp(MIN_DISTANCE, MAX_DISTANCE),
+            ortho_height: self.ortho_height.clamp(MIN_ORTHO_HEIGHT, MAX_ORTHO_HEIGHT),
+        })
+    }
+}
+
+impl SceneCameras {
+    /// Both views for the session; a glide in progress is saved where it
+    /// was heading.
+    pub fn saved(&self, mode_2d: bool) -> SavedSceneView {
+        SavedSceneView {
+            three_d: self.glide_3d.unwrap_or(self.three_d).into(),
+            two_d: self.glide_2d.unwrap_or(self.two_d).into(),
+            mode_2d,
+        }
+    }
+
+    /// Cameras from a session, with the default view for any that can't
+    /// be restored.
+    pub fn from_saved(view: &SavedSceneView) -> Self {
+        Self {
+            three_d: view.three_d.restore().unwrap_or_default(),
+            two_d: view.two_d.restore().unwrap_or_default(),
+            glide_3d: None,
+            glide_2d: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_view_restores_the_same_cameras() {
+        let mut cameras = SceneCameras::default();
+        cameras.three_d.zoom(3.0, false, None);
+        cameras.three_d.orbit(Vec2::new(40.0, 10.0));
+        cameras.two_d.pan(Vec2::new(30.0, -12.0), true, 600.0);
+
+        let saved = cameras.saved(true);
+        assert!(saved.mode_2d);
+        assert_eq!(SceneCameras::from_saved(&saved), cameras);
+    }
+
+    #[test]
+    fn a_broken_saved_camera_falls_back_to_the_default_view() {
+        let mut saved = SceneCameras::default().saved(false);
+        saved.three_d.distance = f32::NAN;
+        saved.two_d.ortho_height = -5.0;
+
+        let restored = SceneCameras::from_saved(&saved);
+        assert_eq!(restored.three_d, SceneCamera::default());
+        assert_eq!(restored.two_d.ortho_height, MIN_ORTHO_HEIGHT);
+    }
 
     fn close(a: Vec3, b: Vec3) -> bool {
         a.distance(b) < 1e-3

@@ -126,13 +126,16 @@ impl PanelRect {
 /// Something the editor reported back to the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeEvent {
-    /// The buffer for `path` changed and is now unsaved. `text` is the
-    /// full new document (Monaco full-sync), for the LSP bridge.
+    /// The buffer for `path` changed. `text` is the full new document
+    /// (Monaco full-sync), for the LSP bridge.
     BufferEdited {
         /// The edited file.
         path: PathBuf,
         /// The complete current buffer text.
         text: String,
+        /// Whether the buffer now differs from the last save. `false`
+        /// after undoing back to the saved text.
+        unsaved: bool,
     },
     /// The caret moved within `path` (1-based line/column).
     CursorMoved {
@@ -283,6 +286,9 @@ enum RawEvent {
     Edited {
         path: String,
         text: String,
+        /// Missing from older pages, which reported every edit as unsaved.
+        #[serde(default = "edited_is_unsaved")]
+        dirty: bool,
     },
     Cursor {
         path: String,
@@ -315,14 +321,19 @@ enum RawEvent {
     },
 }
 
+fn edited_is_unsaved() -> bool {
+    true
+}
+
 impl CodeEvent {
     /// Parses one IPC message. Returns `None` for anything that isn't a
     /// recognised event.
     pub fn parse(message: &str) -> Option<Self> {
         match serde_json::from_str::<RawEvent>(message).ok()? {
-            RawEvent::Edited { path, text } => Some(Self::BufferEdited {
+            RawEvent::Edited { path, text, dirty } => Some(Self::BufferEdited {
                 path: path.into(),
                 text,
+                unsaved: dirty,
             }),
             RawEvent::Cursor { path, line, column } => Some(Self::CursorMoved {
                 path: path.into(),
@@ -699,6 +710,17 @@ mod tests {
             Some(CodeEvent::BufferEdited {
                 path: PathBuf::from("src/a.rs"),
                 text: "fn a() {}".to_string(),
+                unsaved: true,
+            })
+        );
+        assert_eq!(
+            CodeEvent::parse(
+                r#"{"type":"edited","path":"src/a.rs","text":"fn a() {}","dirty":false}"#
+            ),
+            Some(CodeEvent::BufferEdited {
+                path: PathBuf::from("src/a.rs"),
+                text: "fn a() {}".to_string(),
+                unsaved: false,
             })
         );
         assert_eq!(

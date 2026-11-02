@@ -369,6 +369,14 @@
         else { post({ type: 'open', path: rel }); }
       }
 
+      // Asks the host to write `path`, remembering which version is being
+      // saved so `markSaved` can tell later edits apart.
+      function postSave(path) {
+        var entry = models[path];
+        entry.savingVersion = entry.model.getAlternativeVersionId();
+        post({ type: 'save', path: path, contents: entry.model.getValue() });
+      }
+
       function activate(path) {
         current = path;
         if (showingWelcome) {
@@ -405,30 +413,46 @@
         openFile: function (path, language, contents) {
           if (!models[path]) {
             var model = monaco.editor.createModel(contents, language || 'plaintext', monaco.Uri.file(path));
-            models[path] = { model: model, dirty: false };
+            // `savedVersion` is the model's alternative version id at the
+            // last save. Undo returns to an earlier id, so typing and then
+            // undoing it counts as unchanged, not as an unsaved edit.
+            models[path] = { model: model, dirty: false,
+                             savedVersion: model.getAlternativeVersionId() };
             tabOrder.push(path);
             model.onDidChangeContent(function () {
-              if (models[path].replacing) return;
-              if (!models[path].dirty) { models[path].dirty = true; renderTabs(); }
-              post({ type: 'edited', path: path, text: model.getValue() });
+              var entry = models[path];
+              if (entry.replacing) return;
+              var dirty = model.getAlternativeVersionId() !== entry.savedVersion;
+              if (entry.dirty !== dirty) { entry.dirty = dirty; renderTabs(); }
+              post({ type: 'edited', path: path, text: model.getValue(), dirty: dirty });
             });
           } else {
             models[path].replacing = true;
             models[path].model.setValue(contents);
             models[path].replacing = false;
             models[path].dirty = false;
+            models[path].savedVersion = models[path].model.getAlternativeVersionId();
           }
           activate(path);
         },
         markSaved: function (path) {
-          if (models[path]) { models[path].dirty = false; renderTabs(); renderFiles(); }
+          var entry = models[path];
+          if (!entry) return;
+          // The version that was written, not the current one: text typed
+          // while the save was in flight is still unsaved.
+          entry.savedVersion = entry.savingVersion !== undefined
+            ? entry.savingVersion : entry.model.getAlternativeVersionId();
+          entry.savingVersion = undefined;
+          entry.dirty = entry.model.getAlternativeVersionId() !== entry.savedVersion;
+          if (entry.dirty) {
+            post({ type: 'edited', path: path, text: entry.model.getValue(), dirty: true });
+          }
+          renderTabs(); renderFiles();
         },
         // Save the active file — same as the in-editor Ctrl/Cmd+S, but
         // callable by the host when egui (not Monaco) holds keyboard focus.
         saveActive: function () {
-          if (current && models[current]) {
-            post({ type: 'save', path: current, contents: models[current].model.getValue() });
-          }
+          if (current && models[current]) { postSave(current); }
         },
         setDiagnostics: function (path, list) {
           // `list` items are already Monaco `IMarkerData` (1-based
@@ -645,9 +669,7 @@
       });
 
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, function () {
-        if (current) {
-          post({ type: 'save', path: current, contents: models[current].model.getValue() });
-        }
+        if (current) { postSave(current); }
       });
 
       // Tell the host the bridge is live so it can push the file list

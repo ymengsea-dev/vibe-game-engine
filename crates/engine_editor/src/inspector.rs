@@ -27,7 +27,7 @@ use engine_scene::{
 };
 
 use crate::assets::{AssetIndex, AssetKind};
-use crate::inspect::{InspectField, Inspectable};
+use crate::inspect::{InspectField, Inspectable, number, property_row};
 
 mod graph;
 
@@ -449,7 +449,7 @@ fn rule_target_picker(
         .iter()
         .find(|(id, _)| id == target)
         .map_or("Missing target", |(_, name)| name.as_str());
-    egui::ComboBox::from_id_salt(("visual_rule_target", salt))
+    choice(("visual_rule_target", salt), ui)
         .selected_text(selected)
         .show_ui(ui, |ui| {
             for (id, name) in options {
@@ -467,9 +467,8 @@ fn rule_fields(
     text_targets: &[(String, String)],
     audio_targets: &[(String, String)],
 ) {
-    ui.horizontal(|ui| {
-        ui.label("When");
-        egui::ComboBox::from_id_salt(("visual_rule_trigger", entity, index))
+    property_row(ui, "When", |ui| {
+        choice(("visual_rule_trigger", entity, index), ui)
             .selected_text(match &rule.trigger {
                 RuleTrigger::UiClicked => "This button is clicked",
                 RuleTrigger::Named(_) => "Named event",
@@ -495,31 +494,35 @@ fn rule_fields(
             });
     });
     if let RuleTrigger::Named(name) = &mut rule.trigger {
-        ui.add(egui::TextEdit::singleline(name).hint_text("Event name"));
+        property_row(ui, "Event", |ui| {
+            crate::widgets::text_field(ui, name, "Event name");
+        });
     }
-    ui.horizontal(|ui| {
-        ui.label("Do");
-        match &mut rule.action {
-            RuleAction::SetUiText { target, .. } => {
-                ui.label("Set UI text on");
+    match &mut rule.action {
+        RuleAction::SetUiText { target, text } => {
+            property_row(ui, "Set text on", |ui| {
                 rule_target_picker(ui, (entity, index), target, text_targets);
-            }
-            RuleAction::PlayAudio { target } => {
-                ui.label("Play sound on");
-                rule_target_picker(ui, (entity, index), target, audio_targets);
-            }
-            RuleAction::EmitEvent { name } => {
-                ui.label("Emit event");
-                ui.add(egui::TextEdit::singleline(name).hint_text("Event name"));
-            }
-            RuleAction::SetVariable { .. } | RuleAction::AddToVariable { .. } => {
-                variable_action_fields(ui, (entity, index), &mut rule.action);
-            }
+            });
+            property_row(ui, "Text", |ui| {
+                crate::widgets::text_field(ui, text, "");
+            });
+            note(ui, "Write {score} to show a variable's value.");
         }
-    });
-    if let RuleAction::SetUiText { text, .. } = &mut rule.action {
-        ui.add(egui::TextEdit::singleline(text).desired_width(f32::INFINITY));
-        ui.weak("Write {score} to show a variable's value.");
+        RuleAction::PlayAudio { target } => {
+            property_row(ui, "Play sound on", |ui| {
+                rule_target_picker(ui, (entity, index), target, audio_targets);
+            });
+        }
+        RuleAction::EmitEvent { name } => {
+            property_row(ui, "Emit event", |ui| {
+                crate::widgets::text_field(ui, name, "Event name");
+            });
+        }
+        RuleAction::SetVariable { .. } | RuleAction::AddToVariable { .. } => {
+            property_row(ui, "Do", |ui| {
+                variable_action_fields(ui, (entity, index), &mut rule.action);
+            });
+        }
     }
     rule_condition_fields(ui, (entity, index), &mut rule.condition);
 }
@@ -527,6 +530,8 @@ fn rule_fields(
 fn variable_action_fields(ui: &mut egui::Ui, salt: (Entity, usize), action: &mut RuleAction) {
     let adding = matches!(action, RuleAction::AddToVariable { .. });
     egui::ComboBox::from_id_salt(("visual_rule_variable_op", salt))
+        .width(72.0)
+        .icon(crate::widgets::combo_chevron)
         .selected_text(if adding { "Add to" } else { "Set" })
         .show_ui(ui, |ui| {
             let (name, number) = match action {
@@ -546,18 +551,18 @@ fn variable_action_fields(ui: &mut egui::Ui, salt: (Entity, usize), action: &mut
                 };
             }
         });
-    let (name, number, preposition) = match action {
+    let (name, value, preposition) = match action {
         RuleAction::SetVariable { name, value } => (name, value, "to"),
         RuleAction::AddToVariable { name, amount } => (name, amount, "by"),
         _ => return,
     };
-    ui.add(
-        egui::TextEdit::singleline(name)
-            .hint_text("Variable")
-            .desired_width(90.0),
-    );
+    let height = ui.spacing().interact_size.y;
+    let field = crate::widgets::field(ui, name, 12.0, height)
+        .hint_text("Variable")
+        .desired_width(90.0);
+    ui.add(field);
     ui.label(preposition);
-    ui.add(egui::DragValue::new(number).speed(0.1));
+    number(ui, egui::DragValue::new(value).speed(0.1));
 }
 
 fn rule_condition_fields(
@@ -565,9 +570,12 @@ fn rule_condition_fields(
     salt: (Entity, usize),
     condition: &mut Option<RuleCondition>,
 ) {
-    ui.horizontal(|ui| {
+    property_row(ui, "Only if", |ui| {
         let mut enabled = condition.is_some();
-        if ui.checkbox(&mut enabled, "Only if").changed() {
+        if crate::widgets::checkbox(ui, &crate::theme::NIGHT, &mut enabled, "")
+            .on_hover_text("Run this rule only when a variable matches")
+            .changed()
+        {
             *condition = enabled.then(|| RuleCondition {
                 variable: "score".into(),
                 compare: RuleCompare::GreaterOrEqual,
@@ -577,20 +585,21 @@ fn rule_condition_fields(
         let Some(condition) = condition else {
             return;
         };
-        ui.add(
-            egui::TextEdit::singleline(&mut condition.variable)
-                .hint_text("Variable")
-                .desired_width(90.0),
-        );
+        let height = ui.spacing().interact_size.y;
+        let field = crate::widgets::field(ui, &mut condition.variable, 12.0, height)
+            .hint_text("Variable")
+            .desired_width(90.0);
+        ui.add(field);
         egui::ComboBox::from_id_salt(("visual_rule_compare", salt))
-            .width(44.0)
+            .width(52.0)
+            .icon(crate::widgets::combo_chevron)
             .selected_text(condition.compare.symbol())
             .show_ui(ui, |ui| {
                 for compare in RuleCompare::ALL {
                     ui.selectable_value(&mut condition.compare, compare, compare.symbol());
                 }
             });
-        ui.add(egui::DragValue::new(&mut condition.value).speed(0.1));
+        number(ui, egui::DragValue::new(&mut condition.value).speed(0.1));
     });
 }
 
@@ -697,13 +706,15 @@ const REGISTRY: &[ComponentUi] = &[
             let Some(mut data) = world.get::<ScenePointLight>(entity).map(|light| light.0) else {
                 return false;
             };
-            let mut changed = ui.color_edit_button_rgb(&mut data.color).changed();
-            changed |= ui
-                .add(egui::Slider::new(&mut data.intensity, 0.0..=1000.0).text("Intensity"))
-                .changed();
-            changed |= ui
-                .add(egui::Slider::new(&mut data.range, 0.01..=10_000.0).text("Guide range"))
-                .changed();
+            let mut changed = property_row(ui, "Color", |ui| {
+                ui.color_edit_button_rgb(&mut data.color).changed()
+            });
+            for (label, value, range) in [
+                ("Intensity", &mut data.intensity, 0.0..=1000.0),
+                ("Range", &mut data.range, 0.01..=10_000.0),
+            ] {
+                changed |= property_row(ui, label, |ui| slider(ui, value, range));
+            }
             if changed && let Ok(mut entity_mut) = world.get_entity_mut(entity) {
                 entity_mut.insert(ScenePointLight(data));
             }
@@ -731,106 +742,83 @@ const REGISTRY: &[ComponentUi] = &[
                 return false;
             };
             let mut changed = false;
-            ui.label("Position and size");
-            changed |= ui
-                .add(
+            property_row(ui, "Center", |ui| {
+                changed |= number(
+                    ui,
                     egui::DragValue::new(&mut data.center[0])
                         .prefix("X ")
                         .speed(0.1),
                 )
                 .changed();
-            changed |= ui
-                .add(
+                changed |= number(
+                    ui,
                     egui::DragValue::new(&mut data.center[2])
                         .prefix("Z ")
                         .speed(0.1),
                 )
                 .changed();
-            changed |= ui
-                .add(
-                    egui::DragValue::new(&mut data.base_height)
-                        .prefix("Level ")
-                        .speed(0.1),
-                )
-                .changed();
-            for (label, value) in ["Half width", "Half depth"]
-                .into_iter()
-                .zip(&mut data.half_extent)
-            {
-                changed |= ui
-                    .add(
+            });
+            property_row(ui, "Level", |ui| {
+                changed |=
+                    number(ui, egui::DragValue::new(&mut data.base_height).speed(0.1)).changed();
+            });
+            property_row(ui, "Half size", |ui| {
+                for (axis, value) in ["W ", "D "].into_iter().zip(&mut data.half_extent) {
+                    changed |= number(
+                        ui,
                         egui::DragValue::new(value)
-                            .prefix(format!("{label} "))
+                            .prefix(axis)
                             .speed(0.1)
                             .range(0.01..=10000.0),
                     )
                     .changed();
-            }
-            ui.collapsing("Waves and physics", |ui| {
-                for (label, value) in ["Direction X", "Direction Z"]
-                    .into_iter()
-                    .zip(&mut data.wave_direction)
-                {
-                    changed |= ui
-                        .add(
+                }
+            });
+            subsection(ui, "Waves and physics", |ui| {
+                property_row(ui, "Direction", |ui| {
+                    for (axis, value) in ["X ", "Z "].into_iter().zip(&mut data.wave_direction) {
+                        changed |= number(
+                            ui,
                             egui::DragValue::new(value)
-                                .prefix(format!("{label} "))
+                                .prefix(axis)
                                 .speed(0.05)
                                 .range(-1.0..=1.0),
                         )
                         .changed();
+                    }
+                });
+                for (label, value, speed, range) in [
+                    ("Amplitude", &mut data.wave_amplitude, 0.01, 0.0..=100.0),
+                    ("Length", &mut data.wave_length, 0.1, 0.01..=10000.0),
+                    (
+                        "Speed",
+                        &mut data.wave_speed,
+                        0.05,
+                        f32::NEG_INFINITY..=f32::INFINITY,
+                    ),
+                ] {
+                    property_row(ui, label, |ui| {
+                        changed |=
+                            number(ui, egui::DragValue::new(value).speed(speed).range(range))
+                                .changed();
+                    });
                 }
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut data.wave_amplitude)
-                            .prefix("Amplitude ")
-                            .speed(0.01)
-                            .range(0.0..=100.0),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut data.wave_length)
-                            .prefix("Length ")
-                            .speed(0.1)
-                            .range(0.01..=10000.0),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut data.wave_speed)
-                            .prefix("Speed ")
-                            .speed(0.05),
-                    )
-                    .changed();
-                for (label, value) in ["Current X", "Current Y", "Current Z"]
-                    .into_iter()
-                    .zip(&mut data.current)
-                {
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(value)
-                                .prefix(format!("{label} "))
-                                .speed(0.05),
-                        )
-                        .changed();
+                property_row(ui, "Current", |ui| {
+                    for (axis, value) in ["X ", "Y ", "Z "].into_iter().zip(&mut data.current) {
+                        changed |= number(ui, egui::DragValue::new(value).prefix(axis).speed(0.05))
+                            .changed();
+                    }
+                });
+                for (label, value, speed, range) in [
+                    ("Density", &mut data.density, 10.0, 0.01..=100000.0),
+                    ("Drag", &mut data.linear_drag, 0.05, 0.0..=1000.0),
+                ] {
+                    property_row(ui, label, |ui| {
+                        changed |=
+                            number(ui, egui::DragValue::new(value).speed(speed).range(range))
+                                .changed();
+                    });
                 }
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut data.density)
-                            .prefix("Density ")
-                            .speed(10.0)
-                            .range(0.01..=100000.0),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut data.linear_drag)
-                            .prefix("Drag ")
-                            .speed(0.05)
-                            .range(0.0..=1000.0),
-                    )
-                    .changed();
             });
             if !changed {
                 return false;
@@ -843,7 +831,7 @@ const REGISTRY: &[ComponentUi] = &[
                     true
                 }
                 Err(error) => {
-                    ui.colored_label(egui::Color32::RED, error.to_string());
+                    ui.colored_label(crate::theme::NIGHT.danger, error.to_string());
                     false
                 }
             }
@@ -873,40 +861,41 @@ const REGISTRY: &[ComponentUi] = &[
                 return false;
             };
             let mut changed = false;
-            ui.horizontal(|ui| {
-                ui.label("Sound");
+            property_row(ui, "Sound", |ui| {
                 changed |= value.sound.id.inspect_field(ui, 0.0);
-                if let Some(dropped) = released_asset(ui, AssetKind::Audio) {
-                    if set_emitter_sound_from_drop(&mut value, assets, &dropped) {
-                        changed = true;
-                    } else {
-                        ui.weak("Import this audio file before assigning it.");
-                    }
+            });
+            if let Some(dropped) = released_asset(ui, AssetKind::Audio) {
+                if set_emitter_sound_from_drop(&mut value, assets, &dropped) {
+                    changed = true;
+                } else {
+                    note(ui, "Import this audio file before assigning it.");
                 }
-            });
-            ui.horizontal(|ui| {
-                changed |= ui.checkbox(&mut value.autoplay, "Autoplay").changed();
-                changed |= ui.checkbox(&mut value.looping, "Loop").changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label("Gain");
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut value.gain)
-                            .speed(0.05)
-                            .range(0.0..=4.0),
-                    )
+            }
+            property_row(ui, "Playback", |ui| {
+                let palette = crate::theme::NIGHT;
+                ui.spacing_mut().item_spacing.x = 14.0;
+                changed |= crate::widgets::checkbox(ui, &palette, &mut value.autoplay, "Autoplay")
                     .changed();
+                changed |=
+                    crate::widgets::checkbox(ui, &palette, &mut value.looping, "Loop").changed();
             });
-            ui.horizontal(|ui| {
-                ui.label("Radius");
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut value.radius)
-                            .speed(0.25)
-                            .range(0.0..=1000.0),
-                    )
-                    .changed();
+            property_row(ui, "Gain", |ui| {
+                changed |= number(
+                    ui,
+                    egui::DragValue::new(&mut value.gain)
+                        .speed(0.05)
+                        .range(0.0..=4.0),
+                )
+                .changed();
+            });
+            property_row(ui, "Radius", |ui| {
+                changed |= number(
+                    ui,
+                    egui::DragValue::new(&mut value.radius)
+                        .speed(0.25)
+                        .range(0.0..=1000.0),
+                )
+                .changed();
             });
             if changed && let Ok(mut entity_mut) = world.get_entity_mut(entity) {
                 entity_mut.insert(SceneAudioEmitter(value));
@@ -935,45 +924,57 @@ const REGISTRY: &[ComponentUi] = &[
                 return false;
             };
             let mut changed = false;
-            let fit_sprite = if world.get::<SpriteSource>(entity).is_some()
-                || world.get::<Sprite>(entity).is_some()
-            {
-                ui.small_button("Fit box to sprite").clicked()
-            } else {
-                false
+            let has_sprite = world.get::<SpriteSource>(entity).is_some()
+                || world.get::<Sprite>(entity).is_some();
+            property_row(ui, "Body", |ui| {
+                choice(("collider_body", entity), ui)
+                    .selected_text(format!("{:?}", value.0.body))
+                    .show_ui(ui, |ui| {
+                        for body in [BodyKind::Fixed, BodyKind::Dynamic, BodyKind::Kinematic] {
+                            changed |= ui
+                                .selectable_value(&mut value.0.body, body, format!("{body:?}"))
+                                .changed();
+                        }
+                    });
+            });
+            property_row(ui, "Shape", |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(shape_name(&value.0.shape))
+                            .color(crate::theme::NIGHT.text),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(collider_shape_summary(&value.0.shape));
+            });
+            let dimension = |ui: &mut egui::Ui, label: &str, value: &mut f32| {
+                property_row(ui, label, |ui| {
+                    number(
+                        ui,
+                        egui::DragValue::new(value)
+                            .speed(0.05)
+                            .range(0.001..=10000.0),
+                    )
+                    .changed()
+                })
             };
-            egui::ComboBox::from_label("Body")
-                .selected_text(format!("{:?}", value.0.body))
-                .show_ui(ui, |ui| {
-                    for body in [BodyKind::Fixed, BodyKind::Dynamic, BodyKind::Kinematic] {
-                        changed |= ui
-                            .selectable_value(&mut value.0.body, body, format!("{body:?}"))
-                            .changed();
-                    }
-                });
-            ui.label(collider_shape_summary(&value.0.shape));
             match &mut value.0.shape {
-                ColliderShape::Ball { radius } => {
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(radius)
-                                .prefix("Radius ")
-                                .speed(0.05)
-                                .range(0.001..=10000.0),
-                        )
-                        .changed()
-                }
+                ColliderShape::Ball { radius } => changed |= dimension(ui, "Radius", radius),
                 ColliderShape::Cuboid { half_extents } => {
-                    for (axis, extent) in ["X", "Y", "Z"].into_iter().zip(half_extents) {
-                        changed |= ui
-                            .add(
+                    property_row(ui, "Half size", |ui| {
+                        let mut values = *half_extents;
+                        for (axis, extent) in ["X ", "Y ", "Z "].into_iter().zip(&mut values) {
+                            changed |= number(
+                                ui,
                                 egui::DragValue::new(extent)
-                                    .prefix(format!("Half {axis} "))
+                                    .prefix(axis)
                                     .speed(0.05)
                                     .range(0.001..=10000.0),
                             )
                             .changed();
-                    }
+                        }
+                        *half_extents = values;
+                    });
                 }
                 ColliderShape::Cylinder {
                     half_height,
@@ -983,30 +984,22 @@ const REGISTRY: &[ComponentUi] = &[
                     half_height,
                     radius,
                 } => {
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(half_height)
-                                .prefix("Half height ")
-                                .speed(0.05)
-                                .range(0.001..=10000.0),
-                        )
-                        .changed();
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(radius)
-                                .prefix("Radius ")
-                                .speed(0.05)
-                                .range(0.001..=10000.0),
-                        )
-                        .changed();
+                    changed |= dimension(ui, "Half height", half_height);
+                    changed |= dimension(ui, "Radius", radius);
                 }
                 ColliderShape::TriMesh { mesh } => {
-                    ui.label(format!("Mesh asset {}", mesh.id));
+                    property_row(ui, "Mesh", |ui| {
+                        ui.add(egui::Label::new(mesh.id.as_str()).truncate());
+                    });
                     if released_asset(ui, AssetKind::Mesh).is_some() {
-                        ui.weak("Mesh drop received; import resolution will assign its stable id.");
+                        note(
+                            ui,
+                            "Mesh drop received; import resolution will assign its stable id.",
+                        );
                     }
                 }
             }
+            let fit_sprite = has_sprite && ui.button("Fit box to sprite").clicked();
             if changed && let Ok(mut entity_mut) = world.get_entity_mut(entity) {
                 entity_mut.insert(value);
             }
@@ -1078,12 +1071,18 @@ const REGISTRY: &[ComponentUi] = &[
             if let Some(mut source) = world.get::<SpriteSource>(entity).cloned() {
                 let parsed = GridRegion::parse(&source.region);
                 let mut use_grid = parsed.is_some();
-                let toggled = ui
-                    .checkbox(&mut use_grid, "Use sprite-sheet cell")
+                let toggled = property_row(ui, "Sheet", |ui| {
+                    crate::widgets::checkbox(
+                        ui,
+                        &crate::theme::NIGHT,
+                        &mut use_grid,
+                        "Use one cell",
+                    )
                     .on_hover_text(
                         "Divide the image into equal columns and rows, then choose one cell",
                     )
-                    .changed();
+                    .changed()
+                });
                 let region = if use_grid {
                     let mut grid = parsed.unwrap_or(GridRegion {
                         columns: 2,
@@ -1091,29 +1090,23 @@ const REGISTRY: &[ComponentUi] = &[
                         column: 0,
                         row: 0,
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Grid");
-                        ui.add(
-                            egui::DragValue::new(&mut grid.columns)
-                                .range(1..=4096)
-                                .prefix("Columns "),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut grid.rows)
-                                .range(1..=4096)
-                                .prefix("Rows "),
-                        );
+                    property_row(ui, "Columns", |ui| {
+                        number(ui, egui::DragValue::new(&mut grid.columns).range(1..=4096));
+                    });
+                    property_row(ui, "Rows", |ui| {
+                        number(ui, egui::DragValue::new(&mut grid.rows).range(1..=4096));
                     });
                     grid.column = grid.column.min(grid.columns.saturating_sub(1));
                     grid.row = grid.row.min(grid.rows.saturating_sub(1));
-                    ui.horizontal(|ui| {
-                        ui.label("Cell");
-                        ui.add(
+                    property_row(ui, "Cell", |ui| {
+                        number(
+                            ui,
                             egui::DragValue::new(&mut grid.column)
                                 .range(0..=grid.columns - 1)
                                 .prefix("X "),
                         );
-                        ui.add(
+                        number(
+                            ui,
                             egui::DragValue::new(&mut grid.row)
                                 .range(0..=grid.rows - 1)
                                 .prefix("Y "),
@@ -1135,9 +1128,12 @@ const REGISTRY: &[ComponentUi] = &[
                 if let Some(grid) = GridRegion::parse(&source.region) {
                     let previous = world.get::<SceneSpriteAnimation>(entity).copied();
                     let mut enabled = previous.is_some();
-                    ui.checkbox(&mut enabled, "Animate sheet").on_hover_text(
-                        "Play consecutive cells from the selected cell in Play mode",
-                    );
+                    property_row(ui, "Animate", |ui| {
+                        crate::widgets::checkbox(ui, &crate::theme::NIGHT, &mut enabled, "")
+                            .on_hover_text(
+                                "Play consecutive cells from the selected cell in Play mode",
+                            );
+                    });
                     if enabled {
                         let mut data = previous.map_or(
                             SpriteAnimationData {
@@ -1152,17 +1148,29 @@ const REGISTRY: &[ComponentUi] = &[
                         let available = (u64::from(grid.columns) * u64::from(grid.rows) - first)
                             .min(4096) as u32;
                         data.frames = data.frames.clamp(1, available);
-                        ui.horizontal(|ui| {
-                            ui.label("Frames");
-                            ui.add(egui::DragValue::new(&mut data.frames).range(1..=available));
-                            ui.label("FPS");
-                            ui.add(
-                                egui::DragValue::new(&mut data.fps)
-                                    .speed(0.1)
-                                    .range(0.1..=120.0),
+                        property_row(ui, "Frames", |ui| {
+                            number(
+                                ui,
+                                egui::DragValue::new(&mut data.frames).range(1..=available),
                             );
                         });
-                        ui.checkbox(&mut data.looping, "Loop");
+                        property_row(ui, "Speed", |ui| {
+                            number(
+                                ui,
+                                egui::DragValue::new(&mut data.fps)
+                                    .speed(0.1)
+                                    .range(0.1..=120.0)
+                                    .suffix(" fps"),
+                            );
+                        });
+                        property_row(ui, "Loop", |ui| {
+                            crate::widgets::checkbox(
+                                ui,
+                                &crate::theme::NIGHT,
+                                &mut data.looping,
+                                "",
+                            );
+                        });
                         if previous.is_none_or(|animation| animation.data != data) {
                             world
                                 .entity_mut(entity)
@@ -1179,7 +1187,7 @@ const REGISTRY: &[ComponentUi] = &[
                 }
             }
             if world.get::<SceneCollider>(entity).is_none()
-                && ui.small_button("Add box collision").clicked()
+                && ui.button("Add box collision").clicked()
             {
                 changed |= fit_sprite_collider(world, entity);
             }
@@ -1208,12 +1216,7 @@ const REGISTRY: &[ComponentUi] = &[
                 return false;
             };
 
-            let changed = ui
-                .horizontal(|ui| {
-                    ui.label("Path");
-                    path.inspect_field(ui, 0.0)
-                })
-                .inner;
+            let changed = property_row(ui, "Path", |ui| path.inspect_field(ui, 0.0));
             let mut changed = changed;
             if let Some(dropped) = released_asset(ui, AssetKind::Mesh) {
                 path = dropped.to_string_lossy().into_owned();
@@ -1224,15 +1227,17 @@ const REGISTRY: &[ComponentUi] = &[
             // `.meta` sidecar and the editor re-resolves it on load.
             match &had_id {
                 Some(id) => {
-                    ui.horizontal(|ui| {
-                        ui.label("Id");
+                    property_row(ui, "ID", |ui| {
                         ui.add(
-                            egui::Label::new(egui::RichText::new(id).monospace().weak()).truncate(),
+                            egui::Label::new(
+                                egui::RichText::new(id).color(crate::theme::NIGHT.subtle),
+                            )
+                            .truncate(),
                         );
                     });
                 }
                 None => {
-                    ui.weak("No stable id — reference is path-only.");
+                    note(ui, "No stable ID yet, so the reference uses the path only.");
                 }
             }
 
@@ -1266,88 +1271,95 @@ const REGISTRY: &[ComponentUi] = &[
                 return false;
             };
             let mut changed = false;
-            egui::ComboBox::from_label("Widget")
-                .selected_text(match data.kind {
-                    UiKind::Label => "Label",
-                    UiKind::Button => "Button",
-                })
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_value(&mut data.kind, UiKind::Label, "Label")
-                        .changed()
-                    {
-                        data.color = UiElementData::label().color;
-                        changed = true;
-                    }
-                    if ui
-                        .selectable_value(&mut data.kind, UiKind::Button, "Button")
-                        .changed()
-                    {
-                        data.color = UiElementData::button().color;
-                        changed = true;
-                    }
-                });
-            ui.horizontal(|ui| {
-                ui.label("Text");
-                changed |= ui
-                    .add(egui::TextEdit::singleline(&mut data.text).char_limit(1024))
-                    .changed();
+            property_row(ui, "Widget", |ui| {
+                choice(("game_ui_widget", entity), ui)
+                    .selected_text(match data.kind {
+                        UiKind::Label => "Label",
+                        UiKind::Button => "Button",
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_value(&mut data.kind, UiKind::Label, "Label")
+                            .changed()
+                        {
+                            data.color = UiElementData::label().color;
+                            changed = true;
+                        }
+                        if ui
+                            .selectable_value(&mut data.kind, UiKind::Button, "Button")
+                            .changed()
+                        {
+                            data.color = UiElementData::button().color;
+                            changed = true;
+                        }
+                    });
             });
-            egui::ComboBox::from_label("Anchor")
-                .selected_text(format!("{:?}", data.anchor))
-                .show_ui(ui, |ui| {
-                    for anchor in [
-                        UiAnchor::TopLeft,
-                        UiAnchor::Top,
-                        UiAnchor::TopRight,
-                        UiAnchor::Left,
-                        UiAnchor::Center,
-                        UiAnchor::Right,
-                        UiAnchor::BottomLeft,
-                        UiAnchor::Bottom,
-                        UiAnchor::BottomRight,
-                    ] {
-                        changed |= ui
-                            .selectable_value(&mut data.anchor, anchor, format!("{anchor:?}"))
-                            .changed();
-                    }
-                });
+            property_row(ui, "Text", |ui| {
+                changed |= crate::widgets::text_field(ui, &mut data.text, "").changed();
+            });
+            property_row(ui, "Anchor", |ui| {
+                choice(("game_ui_anchor", entity), ui)
+                    .selected_text(format!("{:?}", data.anchor))
+                    .show_ui(ui, |ui| {
+                        for anchor in [
+                            UiAnchor::TopLeft,
+                            UiAnchor::Top,
+                            UiAnchor::TopRight,
+                            UiAnchor::Left,
+                            UiAnchor::Center,
+                            UiAnchor::Right,
+                            UiAnchor::BottomLeft,
+                            UiAnchor::Bottom,
+                            UiAnchor::BottomRight,
+                        ] {
+                            changed |= ui
+                                .selectable_value(&mut data.anchor, anchor, format!("{anchor:?}"))
+                                .changed();
+                        }
+                    });
+            });
             for (label, values) in [("Offset", &mut data.offset), ("Size", &mut data.size)] {
-                ui.horizontal(|ui| {
-                    ui.label(label);
+                property_row(ui, label, |ui| {
                     for value in values {
                         let mut control = egui::DragValue::new(value).speed(1.0);
                         if label == "Size" {
                             control = control.range(1.0..=10000.0);
                         }
-                        changed |= ui.add(control).changed();
+                        changed |= number(ui, control).changed();
                     }
                 });
             }
-            ui.horizontal(|ui| {
-                ui.label(if data.kind == UiKind::Label {
+            property_row(
+                ui,
+                if data.kind == UiKind::Label {
                     "Text color"
                 } else {
                     "Background"
-                });
-                changed |= ui
-                    .color_edit_button_rgba_unmultiplied(&mut data.color)
-                    .changed();
-            });
+                },
+                |ui| {
+                    changed |= ui
+                        .color_edit_button_rgba_unmultiplied(&mut data.color)
+                        .changed();
+                },
+            );
             if data.kind == UiKind::Button
                 && let Some(id) = world.get::<engine_scene::SceneObjectId>(entity)
             {
-                ui.horizontal(|ui| {
-                    ui.label("Click ID");
-                    ui.add(egui::Label::new(id.0.as_str()).truncate());
-                    if ui.small_button("Copy").clicked() {
+                property_row(ui, "Click ID", |ui| {
+                    if ui.button("Copy").clicked() {
                         ui.ctx().copy_text(id.0.clone());
                     }
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(id.0.as_str()).color(crate::theme::NIGHT.subtle),
+                        )
+                        .truncate(),
+                    );
                 });
             }
             if data.text.len() > 1024 {
                 ui.colored_label(
-                    egui::Color32::RED,
+                    crate::theme::NIGHT.danger,
                     "Text is too long for a scene UI element",
                 );
                 return false;
@@ -1374,10 +1386,10 @@ const REGISTRY: &[ComponentUi] = &[
                 return false;
             };
             let mut path = value.path.clone();
-            let changed = path.inspect_field(ui, 0.0);
+            let changed = property_row(ui, "File", |ui| path.inspect_field(ui, 0.0));
             if !path.is_empty() && !valid_script_path(std::path::Path::new(&path)) {
                 ui.colored_label(
-                    egui::Color32::RED,
+                    crate::theme::NIGHT.danger,
                     "Expected src/*.rs or assets/scripts/*.lua",
                 );
             }
@@ -1427,24 +1439,61 @@ fn released_asset(ui: &mut egui::Ui, expected: AssetKind) -> Option<std::path::P
 }
 
 fn sprite_image_slot(ui: &mut egui::Ui, name: &str) -> Option<std::path::PathBuf> {
-    ui.horizontal(|ui| {
-        ui.label("Image");
-        let response = ui.add_sized(
-            [ui.available_width(), 26.0],
-            egui::Button::new(name).sense(egui::Sense::hover()),
+    property_row(ui, "Image", |ui| image_drop_zone(ui, name, None))
+}
+
+/// A soft drop target for an image from Project Assets: `text`, with an
+/// optional `hint` under it, and it lights up while an asset is dragged
+/// over it. Returns the dropped image.
+fn image_drop_zone(
+    ui: &mut egui::Ui,
+    text: &str,
+    hint: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    let palette = crate::theme::NIGHT;
+    let height = if hint.is_some() { 48.0 } else { 30.0 };
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
+    let dragging = response.dnd_hover_payload::<std::path::PathBuf>().is_some();
+    let (fill, ink) = if dragging {
+        (palette.accent_fill, palette.text)
+    } else {
+        (palette.raised, palette.muted)
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 9.0, fill);
+    let room = rect.width() - 16.0;
+    let title = crate::widgets::one_line(painter, text, 12.0, ink, room);
+    let note = hint.map(|hint| crate::widgets::one_line(painter, hint, 11.5, palette.subtle, room));
+    let gap = 3.0;
+    let total = title.size().y + note.as_ref().map_or(0.0, |note| gap + note.size().y);
+    let mut y = rect.center().y - total / 2.0;
+    let title_height = title.size().y;
+    painter.galley(
+        egui::pos2(rect.center().x - title.size().x / 2.0, y),
+        title,
+        ink,
+    );
+    y += title_height + gap;
+    if let Some(note) = note {
+        painter.galley(
+            egui::pos2(rect.center().x - note.size().x / 2.0, y),
+            note,
+            palette.subtle,
         );
-        response
-            .dnd_release_payload::<std::path::PathBuf>()
-            .filter(|path| AssetKind::from_path(path) == AssetKind::Texture)
-            .map(|path| (*path).clone())
-    })
-    .inner
+    }
+    response
+        .dnd_release_payload::<std::path::PathBuf>()
+        .filter(|path| AssetKind::from_path(path) == AssetKind::Texture)
+        .map(|path| (*path).clone())
 }
 
 /// Draws the inspector for `selected`, or a placeholder message if
 /// nothing (or a since-despawned entity) is selected.
 ///
-/// Clicking a section's "Open Script" button sets `*open_script` to that
+/// Choosing "Open script" in a section's "⋯" menu sets `*open_script` to that
 /// component's Rust type name; the host resolves it to a source location
 /// (via rust-analyzer) and opens it in the code editor.
 ///
@@ -1462,27 +1511,30 @@ pub fn show(
     assets: &AssetIndex,
     open_script: &mut Option<String>,
 ) {
+    let palette = crate::theme::NIGHT;
     let Some(entity) = selected else {
-        ui.label("No entity selected.");
+        ui.label(egui::RichText::new("No entity selected.").color(palette.muted));
         return;
     };
     if world.get_entity(entity).is_err() {
-        ui.label("Selected entity no longer exists.");
+        ui.label(egui::RichText::new("Selected entity no longer exists.").color(palette.muted));
         return;
     }
-
-    let multi = !others.is_empty();
-    if multi {
-        ui.horizontal(|ui| {
-            ui.weak(format!("{} entities selected", others.len() + 1));
-            ui.checkbox(batch_edit, "Apply edits to all");
-        });
-        ui.separator();
-    }
-    let apply_to_all = multi && *batch_edit;
+    inspector_style(ui.style_mut());
 
     identity_header(ui, world, entity);
-    ui.separator();
+    let multi = !others.is_empty();
+    if multi {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{} entities selected", others.len() + 1))
+                    .color(palette.muted),
+            );
+            crate::widgets::checkbox(ui, &palette, batch_edit, "Apply edits to all");
+        });
+    }
+    let apply_to_all = multi && *batch_edit;
+    ui.add_space(6.0);
 
     for component in REGISTRY {
         if !(component.present)(world, entity) {
@@ -1490,33 +1542,31 @@ pub fn show(
         }
         let mut remove = false;
         let mut changed = false;
-        component_frame().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            egui::CollapsingHeader::new(
-                egui::RichText::new(component.name).color(crate::theme::NIGHT.text),
-            )
-            .id_salt(component.name)
-            .default_open(true)
-            .show(ui, |ui| {
-                changed = (component.inspect)(world, entity, ui, assets);
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    if ui.small_button("Remove").clicked() {
-                        remove = true;
-                    }
-                    if ui
-                        .small_button("Open Script")
-                        .on_hover_text(format!(
-                            "Jump to `{}`'s declaration (needs rust-analyzer)",
-                            component.type_name
-                        ))
-                        .clicked()
-                    {
-                        *open_script = Some(component.type_name.to_string());
-                    }
-                });
-            });
-        });
+        section(
+            ui,
+            component.name,
+            Some(|ui: &mut egui::Ui| {
+                if ui
+                    .button("Open script")
+                    .on_hover_text(format!(
+                        "Jump to `{}`'s declaration (needs rust-analyzer)",
+                        component.type_name
+                    ))
+                    .clicked()
+                {
+                    *open_script = Some(component.type_name.to_string());
+                    ui.close();
+                }
+                if ui
+                    .button(egui::RichText::new("Remove component").color(palette.danger))
+                    .clicked()
+                {
+                    remove = true;
+                    ui.close();
+                }
+            }),
+            |ui| changed = (component.inspect)(world, entity, ui, assets),
+        );
         if remove {
             (component.remove)(world, entity);
         } else if changed && apply_to_all {
@@ -1530,70 +1580,57 @@ pub fn show(
         .get::<SceneTilemap>(entity)
         .map(|source| source.0.clone())
     {
-        component_frame().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            egui::CollapsingHeader::new(
-                egui::RichText::new("Tilemap").color(crate::theme::NIGHT.text),
-            )
-            .id_salt("Tilemap")
-            .default_open(true)
-            .show(ui, |ui| {
-                let image = crate::assets::parse_asset_id(&data.atlas.id)
-                    .and_then(|id| assets.path_for(id))
-                    .and_then(|path| path.file_name())
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("Missing image");
-                ui.label(format!("Image: {image}"));
-                ui.weak("Paint or erase from Viewport → Tilemap in 2D mode.");
-                ui.horizontal(|ui| {
-                    ui.label("Sheet grid");
-                    ui.add(
-                        egui::DragValue::new(&mut data.columns)
-                            .range(1..=4096)
-                            .prefix("Columns "),
-                    );
-                    ui.add(
-                        egui::DragValue::new(&mut data.rows)
-                            .range(1..=4096)
-                            .prefix("Rows "),
-                    );
-                });
-                data.brush_column = data.brush_column.min(data.columns - 1);
-                data.brush_row = data.brush_row.min(data.rows - 1);
-                ui.horizontal(|ui| {
-                    ui.label("Tile size");
-                    ui.add(
-                        egui::DragValue::new(&mut data.cell_size[0])
-                            .range(0.01..=10_000.0)
-                            .prefix("W "),
-                    );
-                    ui.add(
-                        egui::DragValue::new(&mut data.cell_size[1])
-                            .range(0.01..=10_000.0)
-                            .prefix("H "),
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Brush cell");
-                    ui.add(
-                        egui::DragValue::new(&mut data.brush_column)
-                            .range(0..=data.columns - 1)
-                            .prefix("X "),
-                    );
-                    ui.add(
-                        egui::DragValue::new(&mut data.brush_row)
-                            .range(0..=data.rows - 1)
-                            .prefix("Y "),
-                    );
-                });
-                ui.checkbox(&mut data.brush_collision, "Paint solid tiles")
-                    .on_hover_text(
-                        "Add fixed collision to painted cells; repaint with this off to clear it",
-                    );
-                if let Err(error) = crate::tilemap::update_settings(world, entity, data.clone()) {
-                    ui.colored_label(egui::Color32::RED, error);
+        section(ui, "Tilemap", None::<fn(&mut egui::Ui)>, |ui| {
+            let image = crate::assets::parse_asset_id(&data.atlas.id)
+                .and_then(|id| assets.path_for(id))
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("Missing image");
+            property_row(ui, "Image", |ui| {
+                ui.add(egui::Label::new(image).truncate());
+            });
+            note(ui, "Paint or erase from Viewport → Tilemap in 2D mode.");
+            property_row(ui, "Columns", |ui| {
+                number(ui, egui::DragValue::new(&mut data.columns).range(1..=4096));
+            });
+            property_row(ui, "Rows", |ui| {
+                number(ui, egui::DragValue::new(&mut data.rows).range(1..=4096));
+            });
+            data.brush_column = data.brush_column.min(data.columns - 1);
+            data.brush_row = data.brush_row.min(data.rows - 1);
+            property_row(ui, "Tile size", |ui| {
+                for value in &mut data.cell_size {
+                    number(ui, egui::DragValue::new(value).range(0.01..=10_000.0));
                 }
             });
+            property_row(ui, "Brush cell", |ui| {
+                number(
+                    ui,
+                    egui::DragValue::new(&mut data.brush_column)
+                        .range(0..=data.columns - 1)
+                        .prefix("X "),
+                );
+                number(
+                    ui,
+                    egui::DragValue::new(&mut data.brush_row)
+                        .range(0..=data.rows - 1)
+                        .prefix("Y "),
+                );
+            });
+            property_row(ui, "Solid", |ui| {
+                crate::widgets::checkbox(
+                    ui,
+                    &palette,
+                    &mut data.brush_collision,
+                    "Paint solid tiles",
+                )
+                .on_hover_text(
+                    "Add fixed collision to painted cells; repaint with this off to clear it",
+                );
+            });
+            if let Err(error) = crate::tilemap::update_settings(world, entity, data.clone()) {
+                ui.colored_label(palette.danger, error);
+            }
         });
     }
 
@@ -1618,69 +1655,76 @@ pub fn show(
     let can_add_rule = rules.len() < 16 && visual_rule_count(world) < 1024;
     let mut add_rule = None;
     let mut remove_rule = None;
-    component_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        egui::CollapsingHeader::new(
-            egui::RichText::new("Visual Rules").color(crate::theme::NIGHT.text),
-        )
-        .id_salt("Visual Rules")
-        .default_open(!rules.is_empty())
-        .show(ui, |ui| {
-            ui.weak("React to this button or to a named gameplay event.");
-            if ui.button("Open Gameplay Graph").clicked() {
-                graph::open(ui.ctx(), entity);
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
-                        can_add_rule && has_text_target,
-                        egui::Button::new("+ Text action"),
-                    )
-                    .clicked()
-                {
-                    add_rule = Some((RuleActionKind::Text, None));
-                }
-                if ui
-                    .add_enabled(
-                        can_add_rule && has_audio_target,
-                        egui::Button::new("+ Play sound"),
-                    )
-                    .clicked()
-                {
-                    add_rule = Some((RuleActionKind::Audio, None));
-                }
-                if ui
-                    .add_enabled(can_add_rule, egui::Button::new("+ Emit event"))
-                    .clicked()
-                {
-                    add_rule = Some((RuleActionKind::Event, None));
-                }
-                if ui
-                    .add_enabled(can_add_rule, egui::Button::new("+ Variable"))
-                    .clicked()
-                {
-                    add_rule = Some((RuleActionKind::Variable, None));
-                }
-            });
-            for (index, rule) in rules.iter_mut().enumerate() {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(format!("Rule {}", index + 1));
-                    if ui.small_button("Remove").clicked() {
-                        remove_rule = Some(index);
+    section(ui, "Visual Rules", None::<fn(&mut egui::Ui)>, |ui| {
+        note(ui, "React to this button or to a named gameplay event.");
+        ui.horizontal_wrapped(|ui| {
+            let add = egui::Button::new(egui::RichText::new("Add rule").color(if can_add_rule {
+                palette.accent
+            } else {
+                palette.subtle
+            }))
+            .fill(palette.hover);
+            ui.add_enabled_ui(can_add_rule, |ui| {
+                egui::containers::menu::MenuButton::from_button(add).ui(ui, |ui| {
+                    crate::theme::style_context_menu(ui);
+                    for (label, kind, enabled) in [
+                        ("Set UI text", RuleActionKind::Text, has_text_target),
+                        ("Play a sound", RuleActionKind::Audio, has_audio_target),
+                        ("Emit an event", RuleActionKind::Event, true),
+                        ("Change a variable", RuleActionKind::Variable, true),
+                    ] {
+                        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                            add_rule = Some((kind, None));
+                            ui.close();
+                        }
                     }
                 });
-                rule_fields(
-                    ui,
-                    entity,
-                    index,
-                    rule,
-                    owner_is_button,
-                    &text_targets,
-                    &audio_targets,
-                );
+            });
+            if ui.button("Open gameplay graph").clicked() {
+                graph::open(ui.ctx(), entity);
             }
         });
+        for (index, rule) in rules.iter_mut().enumerate() {
+            egui::Frame::NONE
+                .fill(palette.panel)
+                .corner_radius(7)
+                .inner_margin(egui::Margin {
+                    left: 10,
+                    right: 4,
+                    top: 2,
+                    bottom: 8,
+                })
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(crate::theme::semibold(format!("Rule {}", index + 1)));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let more = crate::widgets::more_button(ui, &palette);
+                            egui::Popup::menu(&more).show(|ui| {
+                                crate::theme::style_context_menu(ui);
+                                if ui
+                                    .button(
+                                        egui::RichText::new("Remove rule").color(palette.danger),
+                                    )
+                                    .clicked()
+                                {
+                                    remove_rule = Some(index);
+                                    ui.close();
+                                }
+                            });
+                        });
+                    });
+                    rule_fields(
+                        ui,
+                        entity,
+                        index,
+                        rule,
+                        owner_is_button,
+                        &text_targets,
+                        &audio_targets,
+                    );
+                });
+        }
     });
     graph::show(
         ui.ctx(),
@@ -1711,47 +1755,52 @@ pub fn show(
 
     if world.get::<MeshSource>(entity).is_some() {
         let mut changed = false;
-        component_frame().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            egui::CollapsingHeader::new(
-                egui::RichText::new("Material").color(crate::theme::NIGHT.text),
-            )
-            .id_salt("Mesh material")
-            .default_open(true)
-            .show(ui, |ui| {
+        let mut reset = false;
+        let custom = world.get::<SceneMaterialOverride>(entity).is_some();
+        section(
+            ui,
+            "Material",
+            custom.then_some(|ui: &mut egui::Ui| {
+                if ui.button("Use imported material").clicked() {
+                    reset = true;
+                    ui.close();
+                }
+            }),
+            |ui| {
                 if let Some(mut value) = world
                     .get::<SceneMaterialOverride>(entity)
                     .map(|current| current.0.clone())
                 {
-                    let mut edited = ui
-                        .horizontal(|ui| {
-                            ui.label("Tint");
-                            ui.color_edit_button_rgb(&mut value.tint).changed()
-                        })
-                        .inner;
-                    ui.weak("Multiplies the imported color.");
+                    let mut edited = property_row(ui, "Tint", |ui| {
+                        ui.color_edit_button_rgb(&mut value.tint)
+                            .on_hover_text("Multiplies the imported color")
+                            .changed()
+                    });
                     for (label, factor) in [
                         ("Metallic", &mut value.metallic),
                         ("Roughness", &mut value.roughness),
                     ] {
-                        ui.horizontal(|ui| {
+                        property_row(ui, label, |ui| {
                             let mut enabled = factor.is_some();
-                            if ui.checkbox(&mut enabled, label).changed() {
+                            if crate::widgets::checkbox(ui, &palette, &mut enabled, "")
+                                .on_hover_text("Override the imported value")
+                                .changed()
+                            {
                                 *factor = enabled.then_some(0.5);
                                 edited = true;
                             }
                             if let Some(value) = factor {
-                                edited |= ui.add(egui::Slider::new(value, 0.0..=1.0)).changed();
+                                edited |= slider(ui, value, 0.0..=1.0);
+                            } else {
+                                ui.label(egui::RichText::new("Imported").color(palette.subtle));
                             }
                         });
                     }
-                    if ui.button("Use imported material").clicked() {
-                        changed = set_material_override(world, entity, None);
-                    } else if edited {
+                    if edited {
                         changed = set_material_override(world, entity, Some(value));
                     }
                 } else {
-                    ui.weak("Using the imported material.");
+                    note(ui, "Using the imported material.");
                     if ui.button("Customize material").clicked() {
                         changed = set_material_override(
                             world,
@@ -1760,8 +1809,11 @@ pub fn show(
                         );
                     }
                 }
-            });
-        });
+            },
+        );
+        if reset {
+            changed = set_material_override(world, entity, None);
+        }
         if changed && apply_to_all {
             for &other in others {
                 copy_material_override(world, entity, other);
@@ -1769,51 +1821,197 @@ pub fn show(
         }
     }
 
-    ui.separator();
+    ui.add_space(4.0);
+    // A 3D model can't also show a flat image, so only other objects
+    // offer to take one.
     if world.get::<SpriteSource>(entity).is_none()
         && world.get::<Sprite>(entity).is_none()
-        && let Some(path) = sprite_image_slot(ui, "Drop image here to add Sprite")
+        && world.get::<MeshSource>(entity).is_none()
+        && let Some(path) = image_drop_zone(
+            ui,
+            "Add an image",
+            Some("Drag a PNG or JPEG here from Project Assets"),
+        )
     {
         set_sprite_image(world, entity, assets, &path);
     }
     add_component_menu(ui, world, entity);
 }
 
-/// A component section: a soft filled card (no outline), full width so
+/// The Inspector's spacing: every control 24 points tall with the same
+/// padding, so buttons, fields, drop-downs and checkboxes line up.
+fn inspector_style(style: &mut egui::Style) {
+    let spacing = &mut style.spacing;
+    spacing.item_spacing = egui::vec2(6.0, 6.0);
+    spacing.button_padding = egui::vec2(10.0, 4.0);
+    spacing.interact_size.y = 24.0;
+    spacing.combo_width = 120.0;
+    style.visuals.text_edit_bg_color = Some(crate::theme::NIGHT.hover);
+}
+
+/// A short muted line under a section's title or a field.
+fn note(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .size(11.5)
+            .color(crate::theme::NIGHT.muted),
+    );
+}
+
+/// A drop-down that fills the rest of its row, with the trees' chevron.
+fn choice(id_salt: impl std::hash::Hash + std::fmt::Debug, ui: &egui::Ui) -> egui::ComboBox {
+    egui::ComboBox::from_id_salt(id_salt)
+        .width(ui.available_width())
+        .icon(crate::widgets::combo_chevron)
+}
+
+/// A component section: a soft filled card with its name and, at the
+/// right, a "⋯" menu of less-used actions. Sections don't fold: an object
+/// has only a few, so every property is in view.
+fn section(
+    ui: &mut egui::Ui,
+    title: &str,
+    menu: Option<impl FnOnce(&mut egui::Ui)>,
+    add_body: impl FnOnce(&mut egui::Ui),
+) {
+    let palette = crate::theme::NIGHT;
+    component_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), SECTION_HEADER_HEIGHT),
+            egui::Sense::hover(),
+        );
+        let room = rect.width() - if menu.is_some() { 28.0 } else { 0.0 };
+        let galley = crate::theme::weighted_galley(
+            ui.painter(),
+            title,
+            egui::FontId::proportional(12.5),
+            palette.text,
+            crate::theme::SEMIBOLD,
+            Some(room.max(0.0)),
+        );
+        let at = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(at, galley, palette.text);
+        if let Some(menu) = menu {
+            let slot = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - 11.0, rect.center().y),
+                egui::Vec2::splat(22.0),
+            );
+            let more = ui
+                .scope_builder(egui::UiBuilder::new().max_rect(slot), |ui| {
+                    crate::widgets::more_button(ui, &palette)
+                })
+                .inner;
+            egui::Popup::menu(&more).show(|ui| {
+                crate::theme::style_context_menu(ui);
+                menu(ui);
+            });
+        }
+        add_body(ui);
+        ui.add_space(6.0);
+    });
+    ui.add_space(2.0);
+}
+
+/// A small heading inside a section for a set of related properties.
+fn subsection(ui: &mut egui::Ui, title: &str, add_body: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(title)
+            .size(11.5)
+            .color(crate::theme::NIGHT.subtle),
+    );
+    add_body(ui);
+}
+
+/// A slider that fills the rest of its row, with its value in a number
+/// field one cell wide at the end.
+fn slider(ui: &mut egui::Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>) -> bool {
+    let spacing = ui.spacing().item_spacing.x;
+    let field = crate::inspect::cell_width(ui).min(64.0);
+    // The knob reaches past the track's ends by its radius.
+    let knob = ui.spacing().interact_size.y / 2.0;
+    // In a wrapping row `available_width` is the whole row, so measure
+    // what the controls before this one left.
+    let left = ui.max_rect().right() - ui.cursor().min.x;
+    ui.spacing_mut().slider_width = (left - spacing - field - knob).max(40.0);
+    ui.visuals_mut().slider_trailing_fill = true;
+    let speed = ((*range.end() - *range.start()) / 500.0).clamp(0.001, 10.0);
+    let changed = ui
+        .add(
+            egui::Slider::new(value, range.clone())
+                .show_value(false)
+                .handle_shape(egui::style::HandleShape::Circle),
+        )
+        .changed();
+    let number = ui.add_sized(
+        [field, ui.spacing().interact_size.y],
+        egui::DragValue::new(value)
+            .range(range)
+            .speed(speed)
+            .max_decimals(2),
+    );
+    crate::inspect::scrub_cursor(ui, &number);
+    changed | number.changed()
+}
+
+/// The kind of a collider's shape, in a word.
+fn shape_name(shape: &ColliderShape) -> &'static str {
+    match shape {
+        ColliderShape::Ball { .. } => "Ball",
+        ColliderShape::Cuboid { .. } => "Box",
+        ColliderShape::Cylinder { .. } => "Cylinder",
+        ColliderShape::Capsule { .. } => "Capsule",
+        ColliderShape::TriMesh { .. } => "Mesh",
+    }
+}
+
+/// The height of a section's header row.
+const SECTION_HEADER_HEIGHT: f32 = 30.0;
+
+/// A component section's card: a soft fill with no outline, full width so
 /// every section in the Inspector lines up.
 fn component_frame() -> egui::Frame {
     egui::Frame::NONE
         .fill(crate::theme::NIGHT.raised)
         .corner_radius(9)
-        .inner_margin(egui::Margin::symmetric(10, 4))
+        .inner_margin(egui::Margin {
+            left: 10,
+            right: 8,
+            top: 1,
+            bottom: 4,
+        })
 }
 
-/// The entity-identity block: id, editable name, and the Static /
-/// Disabled markers.
+/// The object's identity, above its sections: its name as a larger field,
+/// its id, and the Static / Disabled / Locked markers.
 fn identity_header(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
-    ui.horizontal(|ui| {
-        ui.label("Name");
-        // `Name` is a `String` newtype — reuse `String`'s `InspectField`.
-        let mut name = name_of(world, entity).unwrap_or_default();
-        if name.inspect_field(ui, 0.0) {
-            set_name(world, entity, name);
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label("ID");
-        ui.weak(format!("{entity:?}"));
-    });
-    ui.horizontal(|ui| {
+    let palette = crate::theme::NIGHT;
+    let mut name = name_of(world, entity).unwrap_or_default();
+    let field = crate::widgets::field(ui, &mut name, 14.0, 30.0)
+        .hint_text("Name")
+        .desired_width(ui.available_width());
+    let field = ui.add(field);
+    if field.changed() {
+        set_name(world, entity, name);
+    }
+    ui.label(
+        egui::RichText::new(format!("ID {entity:?}"))
+            .size(11.5)
+            .color(palette.subtle),
+    );
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 14.0;
         let mut is_static = has::<Static>(world, entity);
-        if ui.checkbox(&mut is_static, "Static").changed() {
+        if crate::widgets::checkbox(ui, &palette, &mut is_static, "Static").changed() {
             toggle_marker::<Static>(world, entity, is_static);
         }
         let mut disabled = has::<Disabled>(world, entity);
-        if ui.checkbox(&mut disabled, "Disabled").changed() {
+        if crate::widgets::checkbox(ui, &palette, &mut disabled, "Disabled").changed() {
             toggle_marker::<Disabled>(world, entity, disabled);
         }
         let mut locked = has::<Lock>(world, entity);
-        if ui.checkbox(&mut locked, "Locked").changed() {
+        if crate::widgets::checkbox(ui, &palette, &mut locked, "Locked").changed() {
             toggle_marker::<Lock>(world, entity, locked);
         }
     });
@@ -1834,7 +2032,13 @@ fn toggle_marker<T: Component + Default>(world: &mut World, entity: Entity, pres
 /// The Add-Component menu: every [`REGISTRY`] entry not already on the
 /// entity.
 fn add_component_menu(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
-    ui.menu_button("Add Component", |ui| {
+    let palette = crate::theme::NIGHT;
+    let button = egui::Button::new(egui::RichText::new("Add component").color(palette.accent))
+        .fill(palette.raised)
+        .corner_radius(9)
+        .min_size(egui::vec2(ui.available_width(), 30.0));
+    egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+        crate::theme::style_context_menu(ui);
         let mut any = false;
         for component in REGISTRY {
             if component.name == "Sprite" || (component.present)(world, entity) {

@@ -3,7 +3,9 @@
 //! reads it.
 //!
 //! Restored on project open: the active [`Workspace`], the current
-//! [`PanelVisibility`], and the last scene that was open.
+//! [`PanelVisibility`], the last scene that was open, and where the Scene
+//! View was looking. It is saved automatically as these change, so none
+//! of it counts as an unsaved change to the game.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -14,6 +16,7 @@ use crate::assets::AssetView;
 use crate::chrome::{PanelVisibility, Workspace};
 use crate::error::EditorError;
 use crate::overlays::OverlayToggles;
+use crate::scene_camera::SavedSceneView;
 
 /// On-disk format version for `.studio/session.ron`.
 pub const SESSION_VERSION: u32 = 1;
@@ -64,6 +67,10 @@ pub struct EditorSession {
     /// the `assets` root itself). Everything else starts folded. Additive.
     #[serde(default)]
     pub asset_folders_open: BTreeSet<PathBuf>,
+    /// Where the Scene View was looking (3D and 2D) and which of the two
+    /// was showing. Additive; `None` opens the default view.
+    #[serde(default)]
+    pub scene_view: Option<SavedSceneView>,
 }
 
 impl Default for EditorSession {
@@ -80,6 +87,7 @@ impl Default for EditorSession {
             overlays: OverlayToggles::default(),
             hierarchy_open: BTreeSet::new(),
             asset_folders_open: BTreeSet::new(),
+            scene_view: None,
         }
     }
 }

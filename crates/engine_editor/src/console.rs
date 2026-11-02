@@ -30,9 +30,22 @@ pub struct ConsoleLine {
     /// The event's `tracing` target (module path or explicit `target:`),
     /// e.g. `engine_editor::shell`.
     pub target: String,
-    /// The event's `message` field (if any) followed by its other
-    /// fields as `name=value` — see [`ConsoleLayer::on_event`].
+    /// The event's `message` field: its text, if it has one.
     pub message: String,
+    /// The event's other fields as space-separated `name=value`, shown
+    /// after the message as data.
+    pub fields: String,
+}
+
+impl ConsoleLine {
+    /// The message and its fields as one line of text.
+    pub fn text(&self) -> String {
+        match (self.message.is_empty(), self.fields.is_empty()) {
+            (_, true) => self.message.clone(),
+            (true, false) => self.fields.clone(),
+            (false, false) => format!("{} {}", self.message, self.fields),
+        }
+    }
 }
 
 /// The lowest severity the Console tab shows. `Trace` shows everything;
@@ -62,14 +75,14 @@ impl LevelFilter {
         LevelFilter::Trace,
     ];
 
-    /// Label for the level picker.
+    /// Label for the level picker: what the choice shows.
     pub fn label(self) -> &'static str {
         match self {
-            LevelFilter::Error => "Error",
-            LevelFilter::Warn => "Warn",
+            LevelFilter::Error => "Errors",
+            LevelFilter::Warn => "Warnings",
             LevelFilter::Info => "Info",
             LevelFilter::Debug => "Debug",
-            LevelFilter::Trace => "Trace",
+            LevelFilter::Trace => "Everything",
         }
     }
 
@@ -121,8 +134,7 @@ impl ConsoleFilter {
             return true;
         }
         let needle = self.search.to_lowercase();
-        line.message.to_lowercase().contains(&needle)
-            || line.target.to_lowercase().contains(&needle)
+        line.text().to_lowercase().contains(&needle) || line.target.to_lowercase().contains(&needle)
     }
 }
 
@@ -188,90 +200,246 @@ impl<S: Subscriber> Layer<S> for ConsoleLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
+        // Records bridged from the `log` crate arrive with the target "log"
+        // and their real target, module, file and line as fields; show the
+        // real target and drop the rest.
+        let target = visitor
+            .log_target
+            .unwrap_or_else(|| event.metadata().target().to_string());
         self.log.push(ConsoleLine {
             level: *event.metadata().level(),
-            target: event.metadata().target().to_string(),
+            target,
             message: visitor.message,
+            fields: visitor.fields,
         });
     }
 }
 
 /// Collects an event's `message` field (`tracing`'s conventional name
-/// for its main text, e.g. from `tracing::info!("...")`) plus any other
-/// fields, formatted as `name=value` and space-separated after it.
+/// for its main text, e.g. from `tracing::info!("...")`) and, apart, any
+/// other fields, formatted as space-separated `name=value`.
 #[derive(Default)]
 struct MessageVisitor {
     message: String,
+    fields: String,
+    /// The `log.target` field of a record bridged from the `log` crate.
+    log_target: Option<String>,
 }
 
 impl Visit for MessageVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "log.target" {
+            self.log_target = Some(value.to_owned());
+        } else {
+            self.record_debug(field, &value);
+        }
+    }
+
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name().starts_with("log.") {
+            return;
+        }
         if field.name() == "message" {
             self.message = format!("{value:?}");
             return;
         }
-        if self.message.is_empty() {
-            self.message = format!("{}={value:?}", field.name());
-        } else {
-            self.message
-                .push_str(&format!(" {}={value:?}", field.name()));
+        if !self.fields.is_empty() {
+            self.fields.push(' ');
         }
+        self.fields.push_str(&format!("{}={value:?}", field.name()));
     }
 }
 
-/// Draws the Console tab: a filter row (level picker, text search, line
-/// count, Clear, Copy) above `log`'s captured lines — filtered by
-/// `filter`, most recent at the bottom, color-coded by level.
+/// Draws the Console tab: a toolbar (search, level picker, line count,
+/// Copy, Clear) above `log`'s captured lines, filtered by `filter`, most
+/// recent at the bottom. Each line is its level tag, its source and the
+/// message in fixed columns, so wrapped messages stay aligned.
 pub fn show(ui: &mut egui::Ui, log: &ConsoleLog, filter: &mut ConsoleFilter) {
+    let palette = crate::theme::NIGHT;
     let lines = log.snapshot();
     let shown: Vec<&ConsoleLine> = lines.iter().filter(|line| filter.matches(line)).collect();
 
+    let copy_all = |ui: &egui::Ui| {
+        let text = shown
+            .iter()
+            .map(|line| format!("[{}] {} {}", line.level, line.target, line.text()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ui.ctx().copy_text(text);
+    };
     ui.horizontal(|ui| {
-        egui::ComboBox::from_id_salt("console_level_filter")
-            .selected_text(filter.min_level.label())
-            .show_ui(ui, |ui| {
-                for level in LevelFilter::ALL {
-                    ui.selectable_value(&mut filter.min_level, level, level.label());
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.spacing_mut().interact_size.y = 24.0;
+        // The buttons take their place at the right first; the search
+        // field gets what is left, so a narrow panel never overlaps them.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if crate::widgets::pill_button(ui, &palette, "Clear", palette.text, !lines.is_empty())
+                .clicked()
+            {
+                log.clear();
+            }
+            if crate::widgets::pill_button(ui, &palette, "Copy", palette.text, !shown.is_empty())
+                .on_hover_text("Copy the messages shown")
+                .clicked()
+            {
+                copy_all(ui);
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                const LEVEL_WIDTH: f32 = 112.0;
+                let show_count = ui.available_width() >= 420.0;
+                let count_width = if show_count { 96.0 } else { 0.0 };
+                let room = ui.available_width() - LEVEL_WIDTH - count_width - 16.0;
+                let width = room.clamp(80.0, 280.0);
+                crate::widgets::search_field(ui, &palette, &mut filter.search, "Filter", width);
+                egui::ComboBox::from_id_salt("console_level_filter")
+                    .width(LEVEL_WIDTH)
+                    .icon(crate::widgets::combo_chevron)
+                    .selected_text(filter.min_level.label())
+                    .show_ui(ui, |ui| {
+                        for level in LevelFilter::ALL {
+                            ui.selectable_value(&mut filter.min_level, level, level.label());
+                        }
+                    });
+                if show_count {
+                    let count = if shown.len() == lines.len() {
+                        format!("{} messages", lines.len())
+                    } else {
+                        format!("{} of {}", shown.len(), lines.len())
+                    };
+                    ui.label(egui::RichText::new(count).color(palette.subtle));
                 }
             });
-        ui.add(
-            egui::TextEdit::singleline(&mut filter.search)
-                .hint_text("Filter")
-                .desired_width(160.0),
-        );
-        ui.label(format!("{} / {}", shown.len(), lines.len()));
-        if ui.button("Clear").clicked() {
-            log.clear();
-        }
-        if ui.button("Copy").clicked() {
-            let text = shown
-                .iter()
-                .map(|line| format!("[{}] {} {}", line.level, line.target, line.message))
-                .collect::<Vec<_>>()
-                .join("\n");
-            ui.ctx().copy_text(text);
-        }
+        });
     });
+    ui.add_space(8.0);
 
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             if shown.is_empty() {
-                ui.weak(if lines.is_empty() {
-                    "No log output yet."
-                } else {
-                    "No lines match the filter."
-                });
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(if lines.is_empty() {
+                        "No messages yet."
+                    } else {
+                        "No messages match the filter."
+                    })
+                    .color(palette.subtle),
+                );
             }
             for line in shown {
-                ui.horizontal(|ui| {
-                    ui.colored_label(level_color(line.level), format!("[{}]", line.level));
-                    ui.weak(short_target(&line.target));
-                    ui.add(egui::Label::new(&line.message).wrap());
-                });
+                console_row(ui, line);
             }
         });
+}
+
+/// Below this width the Console drops its source column, so messages keep
+/// the room.
+const SOURCE_COLUMN_BELOW: f32 = 460.0;
+
+/// The width of the Console's source column.
+const SOURCE_WIDTH: f32 = 132.0;
+
+/// The width of the Console's level column, room for "[ERROR]".
+const LEVEL_WIDTH: f32 = 60.0;
+
+/// One Console line: its level tag, source and message, each in its own
+/// column, with Copy in its context menu. Plain text, no row fill: it is
+/// log output.
+fn console_row(ui: &mut egui::Ui, line: &ConsoleLine) {
+    const PAD_X: f32 = 4.0;
+    const PAD_Y: f32 = 4.0;
+    let palette = crate::theme::NIGHT;
+    let width = ui.available_width();
+    let source_width = if width >= SOURCE_COLUMN_BELOW {
+        SOURCE_WIDTH
+    } else {
+        0.0
+    };
+    let message_x = PAD_X + LEVEL_WIDTH + source_width;
+    let ink = crate::theme::NIGHT.text;
+    // The message reads as text; its fields follow as quieter data.
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = (width - message_x - PAD_X).max(40.0);
+    if !line.message.is_empty() {
+        job.append(
+            &line.message,
+            0.0,
+            egui::TextFormat::simple(egui::FontId::proportional(12.5), ink),
+        );
+    }
+    if !line.fields.is_empty() {
+        job.append(
+            &line.fields,
+            if line.message.is_empty() { 0.0 } else { 8.0 },
+            egui::TextFormat {
+                font_id: egui::FontId::monospace(11.5),
+                color: palette.muted,
+                valign: egui::Align::Center,
+                ..Default::default()
+            },
+        );
+    }
+    let message = ui.painter().layout_job(job);
+    let first_row = message
+        .rows
+        .first()
+        .map_or(message.size().y, |row| row.height());
+    let height = message.size().y.max(first_row) + 2.0 * PAD_Y;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let painter = ui.painter();
+    let middle = rect.top() + PAD_Y + first_row / 2.0;
+    let color = level_color(line.level);
+    let tag = crate::widgets::one_line(
+        painter,
+        &format!("[{}]", line.level),
+        12.0,
+        color,
+        LEVEL_WIDTH - 6.0,
+    );
+    painter.galley(
+        egui::pos2(rect.left() + PAD_X, middle - tag.size().y / 2.0),
+        tag,
+        color,
+    );
+    if source_width > 0.0 {
+        let source = crate::widgets::one_line(
+            painter,
+            &short_target(&line.target),
+            11.5,
+            palette.subtle,
+            source_width - 12.0,
+        );
+        let at = egui::pos2(
+            rect.left() + PAD_X + LEVEL_WIDTH,
+            middle - source.size().y / 2.0,
+        );
+        painter.galley(at, source, palette.subtle);
+    }
+    painter.galley(
+        egui::pos2(rect.left() + message_x, rect.top() + PAD_Y),
+        message,
+        ink,
+    );
+    let response = if source_width == 0.0 {
+        response.on_hover_text_at_pointer(&line.target)
+    } else {
+        response
+    };
+    response.context_menu(|ui| {
+        crate::theme::style_context_menu(ui);
+        if ui.button("Copy message").clicked() {
+            ui.ctx().copy_text(line.text());
+            ui.close();
+        }
+        if ui.button("Copy with source").clicked() {
+            ui.ctx()
+                .copy_text(format!("[{}] {} {}", line.level, line.target, line.text()));
+            ui.close();
+        }
+    });
 }
 
 /// The last one or two `::`-separated segments of a target, so the
@@ -285,6 +453,7 @@ fn short_target(target: &str) -> String {
     }
 }
 
+/// The colour of a line's level tag.
 fn level_color(level: Level) -> egui::Color32 {
     match level {
         Level::ERROR => crate::theme::NIGHT.danger,
@@ -340,6 +509,7 @@ mod tests {
             level: Level::INFO,
             target: String::new(),
             message: message.to_string(),
+            fields: String::new(),
         }
     }
 
@@ -348,6 +518,7 @@ mod tests {
             level,
             target: target.to_string(),
             message: message.to_string(),
+            fields: String::new(),
         }
     }
 
@@ -410,7 +581,9 @@ mod tests {
         let snapshot = log.snapshot();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].level, Level::WARN);
-        assert_eq!(snapshot[0].message, "trouble code=42");
+        assert_eq!(snapshot[0].message, "trouble");
+        assert_eq!(snapshot[0].fields, "code=42");
+        assert_eq!(snapshot[0].text(), "trouble code=42");
     }
 
     #[test]

@@ -556,6 +556,7 @@ impl Viewport {
         gpu: &GpuContext,
         world: &mut World,
         overlays: crate::OverlayToggles,
+        sun: Option<crate::overlays::SunArrow>,
         selection: &[Entity],
     ) {
         self.update_water(gpu, world);
@@ -600,6 +601,7 @@ impl Viewport {
             world,
             &self.lights,
             overlays,
+            sun,
             selection,
             |world, entity| {
                 let renderer = world.get::<engine_ecs::components::MeshRenderer>(entity)?;

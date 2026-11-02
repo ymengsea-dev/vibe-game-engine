@@ -101,6 +101,10 @@ pub struct Terminal {
     size: GridSize,
     reader_alive: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
+    /// The terminal widget's id from the last frame it was drawn, so the
+    /// editor can tell when keys belong to the shell (see
+    /// [`Terminal::has_keyboard`]).
+    widget_id: Option<egui::Id>,
 }
 
 impl Terminal {
@@ -166,7 +170,17 @@ impl Terminal {
             size: INITIAL,
             reader_alive,
             reader: Some(reader),
+            widget_id: None,
         })
+    }
+
+    /// Whether the terminal has keyboard focus, so keys such as Backspace
+    /// go to the shell rather than to editor shortcuts. egui drops the
+    /// focus of a widget that stops being drawn, so a hidden terminal
+    /// never holds the keyboard.
+    pub fn has_keyboard(&self, ctx: &egui::Context) -> bool {
+        self.widget_id
+            .is_some_and(|id| ctx.memory(|memory| memory.has_focus(id)))
     }
 
     /// Whether the shell process is still alive.
@@ -285,6 +299,7 @@ pub fn show(ui: &mut egui::Ui, terminal: &mut Terminal) {
     terminal.resize(cols, rows);
 
     let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+    terminal.widget_id = Some(response.id);
     if response.clicked() {
         response.request_focus();
     }

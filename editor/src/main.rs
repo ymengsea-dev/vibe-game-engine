@@ -479,12 +479,20 @@ fn sync_code_editor(
 
     for event in code.poll() {
         match event {
-            CodeEvent::BufferEdited { path, text } => {
+            CodeEvent::BufferEdited {
+                path,
+                text,
+                unsaved,
+            } => {
                 let Ok(path) = resolve_code_path(&state.project, &path) else {
                     tracing::warn!(path = %path.display(), "refused code edit outside the project");
                     continue;
                 };
-                state.dirty.mark_document(&path);
+                if unsaved {
+                    state.dirty.mark_document(&path);
+                } else {
+                    state.dirty.clear_document(&path);
+                }
                 set_lua_syntax_diagnostics(code, state, code_problems, &path, &text);
                 if let Some(lsp) = lsp.as_mut()
                     && lsp.accepts_path(&path)
@@ -2532,7 +2540,7 @@ impl PlatformHandler for EditorHandler {
     }
 
     fn on_close_requested(&mut self) -> bool {
-        if self.state.dirty.any() {
+        if self.state.has_unsaved_changes() {
             // Keep running; the shell shows the "unsaved changes" dialog,
             // which sets `exit_requested` on Save/Discard.
             self.state.pending_action = Some(engine::editor::PendingAction::Quit);
@@ -2692,6 +2700,11 @@ impl EditorHandler {
         let session = EditorSession::load(&self.session_path);
         self.saved_session = session.clone();
         self.state.apply_session(session);
+        // A project opened for the first time has no saved view: show its
+        // whole scene rather than a fixed spot near the origin.
+        if self.saved_session.scene_view.is_none() {
+            self.state.frame_scene();
+        }
 
         // Language servers are rooted at a project directory and must restart.
         self.lsp = match &self.wake {
@@ -2828,7 +2841,14 @@ impl EditorHandler {
                     self.state.game_view.texture = Some(texture);
                 }
             } else {
-                viewport.render(gpu, &mut self.state.world, self.state.overlays, &selection);
+                let sun = self.state.sun_arrow();
+                viewport.render(
+                    gpu,
+                    &mut self.state.world,
+                    self.state.overlays,
+                    sun,
+                    &selection,
+                );
             }
             self.state.profiler.record_span("viewport", span.elapsed());
 
@@ -2920,7 +2940,10 @@ impl EditorHandler {
         if !std::mem::take(&mut self.state.sdk_upgrade_request) {
             return;
         }
-        if self.state.dirty.any() || self.state.play.is_playing() || self.state.export_running {
+        if self.state.has_unsaved_changes()
+            || self.state.play.is_playing()
+            || self.state.export_running
+        {
             self.state.sdk_upgrade_message =
                 Some("Save your changes and stop Play or export before upgrading the SDK.".into());
             if let Some(window) = &self.window {
@@ -3291,6 +3314,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         Ok(false) => {}
         Err(err) => tracing::warn!(error = %err, "autosave recovery failed"),
+    }
+    // A project opened for the first time has no saved view: show its whole
+    // scene rather than a fixed spot near the origin.
+    if saved_session.scene_view.is_none() {
+        state.frame_scene();
     }
 
     // Watch the assets directory so an edited/added/removed source file

@@ -114,7 +114,7 @@ pub use history::{History, HistoryChange, HistoryError};
 pub use inspect::{InspectField, Inspectable};
 pub use play::{EditorMode, GameControl, PlayKind, PlayState};
 pub use profiler::{FrameProfiler, FrameSample};
-pub use scene_camera::{SceneCamera, SceneCameras};
+pub use scene_camera::{SavedSceneCamera, SavedSceneView, SceneCamera, SceneCameras};
 pub use session::{EditorSession, SESSION_FILE, SESSION_VERSION};
 pub use shell::EditorShell;
 pub use state::{AUTOSAVE_FILE, DEFAULT_SCENE_PATH, EditorState, recovery_candidate};

@@ -89,8 +89,7 @@ pub fn derive_inspectable(input: TokenStream) -> TokenStream {
         }
 
         rows.push(quote! {
-            ui.horizontal(|ui| {
-                ui.label(#label);
+            ::engine_editor::inspect::property_row(ui, #label, |ui| {
                 changed |= ::engine_editor::inspect::InspectField::inspect_field(
                     &mut self.#ident,
                     ui,

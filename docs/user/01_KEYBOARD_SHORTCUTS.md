@@ -17,10 +17,10 @@ This reference lists every shortcut and mouse action available in RustyEngine St
 | ⌘Q | Quit Studio | macOS application menu; asks first if there are unsaved changes |
 | ⌘Z | Undo | Undoes the last scene edit, including terrain sculpting and node moves in the Gameplay Graph |
 | ⌘⇧Z or ⌘Y | Redo | |
-| ⌘S | Save the open code file | Only when the Code panel is open |
+| ⌘S | Save | Saves the scene if it has unsaved changes. With the Code panel open, also saves the code file you are editing. While you type in the code editor, ⌘S saves only that file. While the game is playing, the scene is not saved (it is read-only then) |
 | ⌘, | Settings | Also **File → Settings…**; see [Storage](03_STORAGE.md) |
 
-To save the scene, use **File → Save Scene**. There is no keyboard shortcut for it yet.
+**Resizing panels:** in the Scene workspace, Project Assets sits under the Hierarchy and the Console under the Scene View, and each has its own height. Three small dots in the gap between two panels mark an edge you can drag. Over it, the pointer becomes the resize cursor and a blue line shows the edge; drag to resize.
 
 ---
 
@@ -37,7 +37,7 @@ To save the scene, use **File → Save Scene**. There is no keyboard shortcut fo
 | Fly down / up | Hold right mouse button + Q / E | — |
 | Fly faster | Hold ⇧ while flying | — |
 | Look around while flying | Move the mouse while holding the right button and a fly key | — |
-| Frame the selection | **F** | **F** |
+| Frame the selection (with nothing selected: the whole scene) | **F** | **F** |
 
 The 3D and 2D views each remember their own camera position. Switching between them returns you to where you were.
 
@@ -60,6 +60,7 @@ The 3D and 2D views each remember their own camera position. Switching between t
 | Rotate around an axis | Drag a ring of the gizmo, like turning a dial |
 | Scale along one axis | Drag the small square on that axis's arrow |
 | Scale evenly | Drag the white square at the centre of the gizmo |
+| Delete the selected objects | **⌫ Backspace** or **Delete**. Their children go too; **⌘Z** brings them back. Ignored while you type in a text field or the terminal, and while the game is playing |
 | Select tool | **V**, or the arrow button at the top right of the viewport |
 | Hand tool (left-drag moves the view) | **H**, or the hand button |
 | Hand tool while held | Hold **Space**; release to return to Select |
@@ -84,6 +85,7 @@ While terrain sculpting or tile painting is on, left clicks go to the brush inst
 | Reorder objects | Drag a row between two other rows |
 | Group the selected objects | **⌘G** (works in the Scene View too) |
 | Ungroup the selected group | **⇧⌘G** |
+| Delete the selected objects | **⌫ Backspace** or **Delete** (works in the Scene View too; ⌘Z undoes) |
 | Rename, Duplicate, Group, Ungroup, Make Prefab, Enable/Disable, Lock/Unlock, Delete | Right-click a row |
 | Create a new object | **+** button at the top of the panel |
 
@@ -104,6 +106,35 @@ A group keeps related objects together, like a folder. For example, put every tr
 - **⌘Z** undoes grouping and ungrouping.
 
 The same commands are in the **+** menu at the top of the Hierarchy and in the **GameObject** menu.
+
+---
+
+## Inspector panel
+
+Each component of the selected object has its own card, always open. Its less-used actions (**Open script**, **Remove component**) are in the **⋯** menu at the top right of the card.
+
+| Action | How |
+| --- | --- |
+| Change a number | Drag sideways on its field: right to increase, left to decrease. Over a number field the pointer becomes a left-right arrow. |
+| Type an exact number | Click the field, type, then press **Enter** |
+| Rename the object | Click the name at the top of the Inspector and type |
+| Give an object a 2D image (a sprite) | Drag a PNG or JPEG from Project Assets onto **Add an image**. Not offered for 3D models. |
+| Replace a sprite's image | Drag another image onto the sprite's **Image** field |
+| Add a component | **Add component** at the bottom of the Inspector |
+
+---
+
+## Console
+
+Each message shows its level (**[ERROR]** in red, **[WARN]** in amber, **[DEBUG]** in blue), where it came from, and the message, each in its own column. Details such as sizes and paths follow the message in a quieter monospaced font.
+
+| Action | How |
+| --- | --- |
+| Show only some messages | Type in **Filter** (matches the message and where it came from) |
+| Show more or fewer levels | The level menu: **Errors**, **Warnings**, **Info** (the default), **Debug** or **Everything** |
+| Copy one message | Right-click it → **Copy message** or **Copy with source** |
+| Copy every message shown | **Copy** |
+| Empty the Console | **Clear** |
 
 ---
 
@@ -177,7 +208,5 @@ These common editor shortcuts are planned but not implemented. Use the listed al
 
 | Shortcut | Alternative |
 | --- | --- |
-| ⌘S to save the scene | File → Save Scene |
-| Delete / Backspace to delete the selection | Right-click the object in the Hierarchy → Delete |
 | ⌘D to duplicate | Right-click the object in the Hierarchy → Duplicate |
 

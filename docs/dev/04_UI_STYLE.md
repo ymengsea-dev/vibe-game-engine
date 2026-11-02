@@ -7,9 +7,10 @@ The code that implements them:
 | What | Where |
 | --- | --- |
 | Palette, fonts, base style | `crates/engine_editor/src/theme.rs` (`NIGHT`, `Palette::apply`, `semibold`, `weighted_galley`) |
-| Shared controls | `crates/engine_editor/src/widgets.rs` (`pill_button`, `toggle`, `popup_choice`, `segmented`, `segment_label`, `one_line`) |
+| Shared controls | `crates/engine_editor/src/widgets.rs` (`pill_button`, `toggle`, `checkbox`, `text_field`, `field`, `popup_choice`, `segmented`, `segment_label`, `more_button`, `paint_chevron`, `combo_chevron`, `one_line`) |
+| Property rows | `crates/engine_editor/src/inspect.rs` (`property_row`, `cell_width`, `number`) |
 | Panel frame and header | `crates/engine_editor/src/shell.rs` (`studio_panel_frame`, `panel_header`, `panel_title`, `toolbar_icon_button`) |
-| Reference screens | Settings → Storage (`settings_window.rs`), the Scene panel header and footer (`shell.rs`) |
+| Reference screens | Settings → Storage (`settings_window.rs`), the Scene panel header and footer (`shell.rs`), the Inspector (`inspector.rs`: `section`, `identity_header`) |
 | Visual check | `crates/engine_editor/src/ui_snapshot.rs` (see [Checking your work](#checking-your-work)) |
 
 ---
@@ -99,12 +100,14 @@ Status colours are always these: errors `danger`, warnings `highlight`, info `in
 | Groups and cards inside a panel | 9 |
 | Segmented tracks | 9; segments 7 |
 | Pill buttons, fields, sidebar items | 6–7 |
-| egui's default widgets (checkboxes, combo boxes) | 4, so a checkbox stays a box |
+| Checkboxes (`widgets::checkbox`), egui's default widgets | 4, so a checkbox stays a box |
 | Toggles, badges | fully round |
 
 - **Spacing** is in steps of 2: 2 between segments, 6–8 between related items, 12 between controls in a row, 14–16 inside a group, 20–28 between groups, 28–32 window margins.
 - **Rows** in a group are 42 points tall (one line) or 52 (title plus description).
 - **Dividers** between rows start at the text, not the group's edge, as on macOS.
+- **Control height:** every control in a panel row is 24 points tall: buttons, number fields, text fields, drop-downs and checkboxes. egui sizes a text edit from its text and margins only (it ignores `min_size` height), so build text fields with `widgets::text_field` or `widgets::field`, which set the margins.
+- **Panel gaps:** panel cards sit 4 points apart (`PANEL_GAP_HALF` in `shell.rs`). A resizable edge shows three dots in the middle of its gap, and a 2-point `accent` line (dimmed; full while dragging) when hovered. Show resizable panels with `show_studio_collapsible`, which draws this (`paint_resize_grip`); a resizable panel shown another way calls `paint_resize_grip` itself.
 - **Narrow panels:** when a panel gets too narrow for content side by side, stack the secondary part under the main one rather than squeezing both. For example, Project Assets moves its preview under the file tree below 420 points (`preview_below_tree` in `shell.rs`).
 
 ---
@@ -122,6 +125,15 @@ Use the shared versions; don't restyle a control by hand.
 | One value from a short list | `widgets::popup_choice` ("30 days ⌄") | Not a drag field |
 | Text that must fit | `widgets::one_line(…, max_width)` | Lay out the controls first, then fit the text to what is left |
 | Grouped settings rows | `group` and `group_row` in `settings_window.rs` (the pattern to follow) | A title with an optional description on the left, controls in a right-aligned slot |
+| A labelled property ("Position", "Body") | `inspect::property_row(ui, "Label", \|ui\| …)` | A fixed label column, so every row's controls line up; the controls wrap instead of overflowing. Below 250 points (`STACK_BELOW`) the label goes above the controls. |
+| A number | `inspect::number(ui, DragValue::new(…))` | One third of the row, so single numbers line up with X / Y / Z columns. Vectors use `InspectField` for `Vec2`/`Vec3`/`Quat`: equal cells, each marked with a quiet "X", "Y" or "Z" (no axis colours). Every number field shows the drag cursor (`inspect::scrub_cursor`): a drawn left-right arrow while hovered or dragged, since dragging sideways changes the value. |
+| A search field | `widgets::search_field(ui, &NIGHT, &mut text, "Filter", width)` | A soft field with a magnifier; lay the buttons out first and give it what is left |
+| Tabs in the bottom panel (Console, Problems, Output, Terminal) | `chrome_tab` in `shell.rs` | The one place underlined tabs stay: the chosen tab's text and underline are `accent`. The user prefers this look for that panel; use `segmented` everywhere else. |
+| A log line | `console_row` in `console.rs` (the pattern to follow) | Fixed columns: the level tag (`[WARN]` in its status colour), the source (dropped below 460 points), then the message as text and its `name=value` fields after it in quiet Menlo. Plain text: no hover fill, no row background, no dots. |
+| A check box | `widgets::checkbox(ui, &NIGHT, &mut on, "Label")` | Accent-filled with a check when on. Not `ui.checkbox`. |
+| A drop-down | `egui::ComboBox` with `.icon(widgets::combo_chevron)` | The trees' chevron, not egui's filled triangle |
+| A group of properties | `section` in `inspector.rs` (the pattern to follow) | A soft card with a semibold title, always open (an object has only a few, so nothing folds); less-used actions go in a `widgets::more_button` "⋯" menu. A set of related rows inside it gets a small `subsection` heading. |
+| Less-used actions | `widgets::more_button` with `egui::Popup::menu(&response)` | "Open script", "Remove component" (in `danger`) |
 | A menu | `ui.menu_button` | Menus take the app-wide style, which is already Night |
 | A window | No egui title bar. macOS window controls at the top left (red close; grey minimise and zoom when unavailable), Esc closes | See `window_controls` in `settings_window.rs` |
 | A confirmation | `egui::Modal` with a `raised` frame, radius 12; actions as pill buttons on the right, the destructive one in `danger` | Name the action in the title ("Delete old engine copies?") |
@@ -143,6 +155,9 @@ Use the shared versions; don't restyle a control by hand.
 - Hard-coded colours, the old blue palette, or warm and brown tones (tried and rejected).
 - Identical rounded cards for everything, and a "big number in a card" as the default summary. Use a centrepiece that belongs to the subject (Storage uses a segmented usage bar).
 - Accent-filled backgrounds for a chosen segment (use `selected`), and accent colour as decoration.
+- Content that can widen a resizable panel. A side panel keeps the width its content takes, and a vertical `ScrollArea` grows sideways to fit its widest row, so one wide row widens the panel for good. Give the scroll area a fixed rect the panel never sees past (see `inspector_tabs_panel` in `shell.rs`), and make rows wrap or fit.
+- Measuring with `ui.available_width()` after other controls in a wrapping row: it returns the whole row. Use `ui.max_rect().right() - ui.cursor().min.x` for what is left.
+- `CollapsingHeader` and `ui.collapsing` for groups of properties. They indent the body and draw a tree line; use `section`. Folding belongs to trees (Hierarchy, Project Assets), not to property groups.
 - egui's automatic nested layouts for row content. They place items unpredictably; allocate a fixed row and position its parts.
 
 ---
@@ -158,6 +173,6 @@ Look at every UI change before handing it over.
    VGE_SNAPSHOT_DIR=/tmp/shots cargo test -p engine_editor -- --ignored snapshot
    ```
 
-   The snapshots include `studio.png` (the whole window), `settings.png`, `settings-automatic.png` and `scene-chrome.png`.
+   The snapshots include `studio.png` (the whole window), `settings.png`, `settings-automatic.png`, `scene-chrome.png`, and `inspector.png` / `inspector-narrow.png` (a wide and a narrow Inspector), `inspector-empty.png` (an object without a model), `scrub-cursor.png` (the number-field drag cursor), and `console.png` / `console-narrow.png`.
 3. For a window or panel, add a containment test like `everything_in_settings_stays_inside_the_window`: no text or card outside the frame. Measure text with `TextShape::visual_bounding_rect()`.
 4. Then check it in `cargo run -p editor`. The user verifies UI there.

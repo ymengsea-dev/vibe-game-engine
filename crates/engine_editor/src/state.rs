@@ -144,6 +144,12 @@ pub struct EditorState {
     /// open documents — drives the status bar, the window title, and the
     /// close guard.
     pub dirty: DirtyState,
+    /// The scene as it is on disk — captured on load and save. The scene
+    /// only counts as unsaved while the world differs from this, so an
+    /// edit that is undone, or a change set back by hand, is not reported.
+    /// `None` when the world has no file behind it yet (a new scene, or a
+    /// scene file that failed to load).
+    saved_scene: Option<Scene>,
     /// A guarded action (quit / new scene / revert) waiting on the
     /// "unsaved changes" dialog. `None` when no dialog is open.
     pub pending_action: Option<PendingAction>,
@@ -187,6 +193,10 @@ pub struct EditorState {
     pub tile_paint_active: bool,
     /// Erases cells instead of applying the tilemap's brush cell.
     pub tile_erase_active: bool,
+    /// Whether the sun is being aimed this frame (the Scene View's
+    /// Environment menu is open), so the viewport draws its direction.
+    /// Set each frame by the Scene View footer.
+    pub aiming_sun: bool,
     /// In-progress viewport stroke; no disk writes until pointer release.
     pub terrain_stroke: Option<TerrainStroke>,
     /// Finished stroke waiting for the host's asset write/import pass.
@@ -354,6 +364,7 @@ impl EditorState {
             panels: PanelVisibility::default(),
             workspace_layouts: Workspace::ALL.map(Workspace::visibility),
             dirty: DirtyState::default(),
+            saved_scene: None,
             pending_action: None,
             configuration_index: 0,
             overlays: OverlayToggles::default(),
@@ -369,6 +380,7 @@ impl EditorState {
             terrain_sculpt_active: false,
             tile_paint_active: false,
             tile_erase_active: false,
+            aiming_sun: false,
             terrain_stroke: None,
             terrain_sculpt_request: None,
             terrain_refresh_request: None,
@@ -410,6 +422,46 @@ impl EditorState {
     /// undo step or scene-mutating menu action.
     pub fn mark_dirty(&mut self) {
         self.dirty.mark_scene();
+    }
+
+    /// Re-checks the scene's unsaved flag against the scene on disk:
+    /// clears it (and the crash autosave) when the world matches the
+    /// saved file again, sets it when it doesn't. Without a saved file
+    /// the flag is left as it is.
+    ///
+    /// Call after edits settle and before asking whether anything is
+    /// unsaved; it captures the whole world, so not every frame.
+    pub fn sync_scene_dirty(&mut self) {
+        // In Play the world is the running game, not the edited scene.
+        if self.play.is_playing() {
+            return;
+        }
+        let Some(saved) = &self.saved_scene else {
+            return;
+        };
+        if Scene::from_world(&mut self.world) == *saved {
+            if self.dirty.scene() {
+                self.dirty.clear_scene();
+                self.clear_autosave();
+            }
+        } else {
+            self.dirty.mark_scene();
+        }
+    }
+
+    /// Whether anything is unsaved, with the scene re-checked against
+    /// its file first (see [`EditorState::sync_scene_dirty`]). Use this
+    /// for the close guard and the "unsaved changes" prompt.
+    pub fn has_unsaved_changes(&mut self) -> bool {
+        self.sync_scene_dirty();
+        self.dirty.any()
+    }
+
+    /// Drops the crash autosave because the user chose to discard the
+    /// scene's unsaved edits — otherwise the next launch would recover
+    /// the very edits they threw away.
+    pub fn discard_unsaved_scene(&mut self) {
+        self.clear_autosave();
     }
 
     /// Applies a scene mutation from the shared Studio tool schema through
@@ -474,6 +526,8 @@ impl EditorState {
             Ok(Some(crate::HistoryChange::World)) => {
                 self.secondary_selection.clear();
                 self.dragging_handle = None;
+                // Undoing back to the saved state makes the scene clean.
+                self.sync_scene_dirty();
             }
             Ok(Some(crate::HistoryChange::Terrain { model_path })) => {
                 self.terrain_refresh_request = Some(model_path);
@@ -495,6 +549,7 @@ impl EditorState {
         self.terrain_sculpt_request = None;
         self.tile_paint_active = false;
         self.history = History::new();
+        self.saved_scene = None;
         self.dirty.mark_scene();
     }
 
@@ -541,6 +596,7 @@ impl EditorState {
         // Nothing is unsaved in a project just opened, and a pending
         // prompt about the *old* project's changes would be nonsense.
         self.dirty = DirtyState::default();
+        self.saved_scene = None;
         self.pending_action = None;
         self.project_request = None;
         self.sdk_upgrade_request = false;
@@ -593,6 +649,20 @@ impl EditorState {
         self.overlays = session.overlays;
         self.hierarchy.open = session.hierarchy_open;
         self.asset_browser.open_folders = session.asset_folders_open;
+        match &session.scene_view {
+            Some(view) => {
+                self.scene_cameras = crate::SceneCameras::from_saved(view);
+                self.dimension = if view.mode_2d {
+                    EditorDimension::Mode2D
+                } else {
+                    EditorDimension::Mode3D
+                };
+            }
+            None => {
+                self.scene_cameras = crate::SceneCameras::default();
+                self.dimension = EditorDimension::default();
+            }
+        }
         // Clamped, not trusted: the session is per-user state that may
         // be older than the project's configuration list.
         self.configuration_index = session
@@ -638,6 +708,7 @@ impl EditorState {
             overlays: self.overlays,
             hierarchy_open: self.hierarchy.open.clone(),
             asset_folders_open: self.asset_browser.open_folders.clone(),
+            scene_view: Some(self.scene_cameras.saved(self.dimension.is_2d())),
         }
     }
 
@@ -650,6 +721,7 @@ impl EditorState {
     pub fn save_scene(&mut self) -> Result<(), SceneError> {
         let scene = Scene::from_world(&mut self.world);
         scene.save_to_file(&self.scene_path)?;
+        self.saved_scene = Some(scene);
         self.dirty.clear_scene();
         // The scene on disk now matches the world — drop any crash
         // autosave so it can't shadow a clean file next launch.
@@ -671,6 +743,7 @@ impl EditorState {
     ///
     /// [`SceneError`] if serialization or the atomic write fails.
     pub fn autosave_scene(&mut self) -> Result<(), SceneError> {
+        self.sync_scene_dirty();
         if !self.dirty.scene() {
             return Ok(());
         }
@@ -714,8 +787,11 @@ impl EditorState {
                 self.clear_selection();
                 self.dirty.mark_scene();
                 self.heal_asset_sources();
-                self.recovered_from_autosave = true;
-                Ok(true)
+                // An autosave that matches the scene file holds nothing
+                // to recover — drop it rather than flag the scene.
+                self.sync_scene_dirty();
+                self.recovered_from_autosave = self.dirty.scene();
+                Ok(self.recovered_from_autosave)
             }
             Err(err) => {
                 tracing::warn!(
@@ -1085,6 +1161,7 @@ impl EditorState {
         self.terrain_stroke = None;
         self.terrain_sculpt_request = None;
         self.clear_selection();
+        self.saved_scene = Some(Scene::from_world(&mut self.world));
         self.dirty.clear_scene();
         self.heal_asset_sources();
         Ok(())
@@ -1312,15 +1389,65 @@ impl EditorState {
         self.scene_cameras.active(self.dimension.is_2d())
     }
 
+    /// The sun's direction arrow for the viewport while the sun is being
+    /// aimed: ending at the centre of the view and sized to it, so it is in
+    /// sight at any zoom. `None` the rest of the time.
+    pub fn sun_arrow(&self) -> Option<crate::overlays::SunArrow> {
+        self.aiming_sun.then(|| {
+            let camera = self.scene_camera();
+            crate::overlays::SunArrow {
+                at: camera.focus,
+                length: (camera.distance * 0.25).clamp(1.0, 500.0),
+            }
+        })
+    }
+
+    /// Points both Scene View cameras (3D and 2D) at the whole scene,
+    /// keeping their viewing angle, so a scene opens showing all of it.
+    /// Leaves the cameras alone for an empty scene.
+    pub fn frame_scene(&mut self) {
+        let Some((center, radius)) = self.scene_bounds() else {
+            return;
+        };
+        for two_d in [false, true] {
+            self.scene_cameras.stop_glide(two_d);
+            self.scene_cameras.active_mut(two_d).frame(center, radius);
+        }
+    }
+
+    /// The sphere [`EditorState::frame_scene`] fits on screen, or `None` for
+    /// an empty scene.
+    fn scene_bounds(&mut self) -> Option<(Vec3, f32)> {
+        // Only placed objects count: not screen-space game UI, and not the
+        // ECS's own internal entities, which have no transform.
+        let mut query = self.world.query_filtered::<engine_ecs::prelude::Entity, (
+            bevy_ecs::query::With<engine_ecs::components::Transform>,
+            bevy_ecs::query::Without<engine_ecs::prelude::ChildOf>,
+            bevy_ecs::query::Without<engine_scene::SceneUi>,
+        )>();
+        let roots: Vec<_> = query.iter(&self.world).collect();
+        let (center, radius) = selection_bounds(&self.world, &roots)?;
+        // The sphere around the scene's bounding box is generous (its
+        // corners are mostly empty), so fit a smaller one: the scene's main
+        // area fills the view instead of floating in the middle of it.
+        Some((center, radius * SCENE_FIT))
+    }
+
     /// Moves the Scene View camera to fit every selected object and its
-    /// children. Returns `false` when nothing is selected.
+    /// children, or the whole scene (as when a project first opens) when
+    /// nothing is selected. Returns `false` when there is nothing to frame.
     pub fn frame_selection(&mut self) -> bool {
         let roots: Vec<_> = self
             .selected_entity
             .into_iter()
             .chain(self.secondary_selection.iter().copied())
             .collect();
-        let Some((center, radius)) = selection_bounds(&self.world, &roots) else {
+        let bounds = if roots.is_empty() {
+            self.scene_bounds()
+        } else {
+            selection_bounds(&self.world, &roots)
+        };
+        let Some((center, radius)) = bounds else {
             return false;
         };
         let two_d = self.dimension.is_2d();
@@ -1381,6 +1508,10 @@ impl EditorState {
 
 /// A bounding sphere around `roots` and all their descendants, from world
 /// positions plus a per-object size (sprite size, else largest scale axis).
+/// How much of the scene's bounding sphere [`EditorState::frame_scene`]
+/// fits on screen.
+const SCENE_FIT: f32 = 0.75;
+
 fn selection_bounds(
     world: &engine_ecs::prelude::World,
     roots: &[engine_ecs::prelude::Entity],
@@ -1893,6 +2024,57 @@ mod tests {
             .entity_mut(entity)
             .insert(engine_ecs::components::Lock);
         assert!(state.gizmo_origin().is_none());
+    }
+
+    #[test]
+    fn frame_scene_fits_every_object_at_once() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let before = *state.scene_camera();
+        state.frame_scene();
+        assert_eq!(
+            *state.scene_camera(),
+            before,
+            "an empty scene keeps the view"
+        );
+
+        let west = hierarchy::spawn_entity(&mut state.world, "West", Vec3::new(-30.0, 0.0, 0.0));
+        let east = hierarchy::spawn_entity(&mut state.world, "East", Vec3::new(30.0, 0.0, 10.0));
+        let leaf = hierarchy::spawn_entity(&mut state.world, "Leaf", Vec3::new(0.0, 0.0, 0.0));
+        state
+            .world
+            .entity_mut(leaf)
+            .insert(engine_ecs::prelude::ChildOf(east));
+        state.frame_scene();
+
+        let camera = *state.scene_camera();
+        assert!(
+            (camera.focus - Vec3::new(0.0, 0.0, 5.0)).length() < 0.5,
+            "{}",
+            camera.focus
+        );
+        assert!(
+            camera.distance > before.distance * 5.0,
+            "{}",
+            camera.distance
+        );
+        let _ = west;
+    }
+
+    #[test]
+    fn framing_with_nothing_selected_shows_the_whole_scene() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        hierarchy::spawn_entity(&mut state.world, "West", Vec3::new(-30.0, 0.0, 0.0));
+        hierarchy::spawn_entity(&mut state.world, "East", Vec3::new(30.0, 0.0, 10.0));
+        state.clear_selection();
+
+        assert!(state.frame_selection());
+        while state.scene_cameras.advance_glide(false, 0.05) {}
+        let glided = *state.scene_camera();
+        state.frame_scene();
+        assert!((glided.focus - state.scene_camera().focus).length() < 1e-2);
+        assert!((glided.distance - state.scene_camera().distance).abs() < 1e-2);
     }
 
     #[test]
@@ -2457,6 +2639,128 @@ mod tests {
         std::fs::create_dir_all(state.scene_path.parent().unwrap()).ok();
         state.save_scene().unwrap();
         assert!(!state.autosave_path().exists());
+    }
+
+    #[test]
+    fn an_edit_put_back_by_hand_leaves_the_scene_clean() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let cube = state.world.spawn(Name::new("Cube")).id();
+        state.save_scene().unwrap();
+
+        state.world.get_mut::<Name>(cube).unwrap().0 = "Box".into();
+        state.sync_scene_dirty();
+        assert!(state.dirty.scene(), "a real change is unsaved");
+
+        state.world.get_mut::<Name>(cube).unwrap().0 = "Cube".into();
+        state.sync_scene_dirty();
+        assert!(!state.has_unsaved_changes(), "back to the saved scene");
+    }
+
+    #[test]
+    fn undoing_back_to_the_saved_scene_clears_the_dirty_flag() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.save_scene().unwrap();
+
+        state
+            .history
+            .begin_frame(&mut state.world, state.selected_entity);
+        state.world.spawn(Name::new("Cube"));
+        assert!(
+            state
+                .history
+                .settle(&mut state.world, state.selected_entity)
+        );
+        state.sync_scene_dirty();
+        assert!(state.dirty.scene());
+
+        state.undo();
+        assert!(!state.dirty.any());
+    }
+
+    #[test]
+    fn a_marked_scene_that_matches_its_file_is_not_unsaved() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.save_scene().unwrap();
+        state.mark_dirty(); // e.g. a toggle switched on and back off
+
+        assert!(!state.has_unsaved_changes());
+    }
+
+    #[test]
+    fn an_autosave_matching_the_scene_file_is_dropped_not_recovered() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.world.spawn(Name::new("Cube"));
+        state.save_scene().unwrap();
+        state.load_scene().unwrap();
+        state.dirty.mark_scene();
+        state.autosave_scene().unwrap();
+        assert!(
+            !state.autosave_path().exists(),
+            "nothing differs, nothing to back up"
+        );
+
+        // Even an autosave left by an older Studio is ignored when it
+        // matches the file.
+        let text = Scene::from_world(&mut state.world).to_ron_string().unwrap();
+        std::fs::create_dir_all(state.autosave_path().parent().unwrap()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(state.autosave_path(), text).unwrap();
+
+        assert!(!state.recover_from_autosave().unwrap());
+        assert!(!state.dirty.any());
+        assert!(!state.recovered_from_autosave);
+        assert!(!state.autosave_path().exists());
+    }
+
+    #[test]
+    fn moving_the_scene_view_is_remembered_but_never_unsaved() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.world.spawn(Name::new("Cube"));
+        state.save_scene().unwrap();
+
+        state
+            .history
+            .begin_frame(&mut state.world, state.selected_entity);
+        state.scene_cameras.active_mut(false).zoom(4.0, false, None);
+        state.dimension = EditorDimension::Mode2D;
+        state.scene_cameras.active_mut(true).zoom(-2.0, true, None);
+        assert!(
+            !state
+                .history
+                .settle(&mut state.world, state.selected_entity)
+        );
+        assert!(
+            !state.has_unsaved_changes(),
+            "a view change is not a game change"
+        );
+
+        let mut reopened = editor_state(&project);
+        reopened.apply_session(state.capture_session());
+        assert_eq!(reopened.scene_cameras, state.scene_cameras);
+        assert_eq!(reopened.dimension, EditorDimension::Mode2D);
+    }
+
+    #[test]
+    fn discarding_unsaved_edits_removes_the_autosave() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.save_scene().unwrap();
+        state.world.spawn(Name::new("Cube"));
+        state.dirty.mark_scene();
+        state.autosave_scene().unwrap();
+        assert!(state.autosave_path().exists());
+
+        state.discard_unsaved_scene();
+
+        assert!(
+            !state.autosave_path().exists(),
+            "the next launch must not recover it"
+        );
     }
 
     #[test]
