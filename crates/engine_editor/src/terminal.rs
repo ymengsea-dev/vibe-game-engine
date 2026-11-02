@@ -26,9 +26,9 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 /// Match the parent card so the grid has no separate rectangular surface.
-const TERMINAL_BG: egui::Color32 = crate::theme::PANEL_FILL;
+const TERMINAL_BG: egui::Color32 = crate::theme::NIGHT.panel;
 /// Foreground used for the default text colour and the cursor.
-const TERMINAL_FG: egui::Color32 = crate::theme::TEXT;
+const TERMINAL_FG: egui::Color32 = crate::theme::NIGHT.text;
 /// Grid the PTY and model start at, before the first [`show`] resize.
 const INITIAL: GridSize = GridSize { cols: 80, rows: 24 };
 /// Point size of the monospace font the grid is drawn in.
@@ -266,7 +266,7 @@ pub fn show(ui: &mut egui::Ui, terminal: &mut Terminal) {
     if !terminal.is_running() {
         ui.horizontal(|ui| {
             ui.colored_label(
-                egui::Color32::from_rgb(0xdc, 0xb4, 0x5a),
+                crate::theme::NIGHT.highlight,
                 "Shell exited — reopen the tab to start a new one.",
             );
         });
@@ -522,14 +522,14 @@ mod tests {
                 AnsiColor::Named(NamedColor::Background),
                 egui::Color32::BLACK
             ),
-            crate::theme::PANEL_FILL
+            crate::theme::NIGHT.panel
         );
         assert_eq!(
             ansi_color(
                 AnsiColor::Named(NamedColor::Foreground),
                 egui::Color32::BLACK
             ),
-            crate::theme::TEXT
+            crate::theme::NIGHT.text
         );
     }
 

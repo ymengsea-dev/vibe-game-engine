@@ -1,4 +1,6 @@
-//! GPU context: wgpu instance, adapter, device/queue, and window surface.
+//! GPU context: wgpu instance, adapter, device/queue, and where frames go —
+//! a window surface, or an offscreen texture read back to the CPU
+//! ([`GpuContext::headless`]).
 
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -9,6 +11,7 @@ use crate::config::{
     build_surface_config, choose_msaa_sample_count, choose_surface_format, should_reconfigure,
 };
 use crate::error::RendererError;
+use crate::offscreen::{CapturedFrame, OFFSCREEN_FORMAT, OffscreenTarget};
 
 /// The MSAA sample count requested for the main color pass. The actual
 /// count is this clamped to what the adapter reports for the HDR target
@@ -16,15 +19,12 @@ use crate::error::RendererError;
 /// available. Making this configurable per project is future work.
 pub const REQUESTED_MSAA_SAMPLE_COUNT: u32 = 4;
 
-/// Owns the wgpu handles needed to render into a window: the device/queue
-/// pair and the window's presentable surface.
+/// Owns the wgpu handles needed to render: the device/queue pair and where
+/// finished frames go (see [`Presenter`]).
 ///
-/// The instance and window are retained solely to recreate the surface if
-/// the OS invalidates it. The adapter is not needed after initialization.
+/// The adapter is not needed after initialization.
 pub struct GpuContext {
-    instance: wgpu::Instance,
-    window: Arc<Window>,
-    surface: RwLock<wgpu::Surface<'static>>,
+    presenter: Presenter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -41,6 +41,36 @@ const DEFAULT_CLEAR_COLOR: wgpu::Color = wgpu::Color {
     b: 0.12,
     a: 1.0,
 };
+
+/// Where a [`GpuContext`]'s frames are shown.
+enum Presenter {
+    /// A window's swapchain. The instance and window are retained solely to
+    /// recreate the surface if the OS invalidates it.
+    Window {
+        instance: wgpu::Instance,
+        window: Arc<Window>,
+        surface: RwLock<wgpu::Surface<'static>>,
+    },
+    /// No window: frames are read back for another process to display.
+    Offscreen(OffscreenTarget),
+}
+
+/// A frame acquired for drawing: a swapchain image or the offscreen texture.
+pub(crate) enum Frame {
+    Surface(wgpu::SurfaceTexture),
+    Offscreen(wgpu::Texture),
+}
+
+impl Frame {
+    /// A view to draw the frame into.
+    pub(crate) fn view(&self) -> wgpu::TextureView {
+        let texture = match self {
+            Frame::Surface(surface) => &surface.texture,
+            Frame::Offscreen(texture) => texture,
+        };
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SurfaceRecovery {
@@ -118,15 +148,113 @@ impl GpuContext {
         );
 
         Ok(Self {
-            instance,
-            window,
-            surface: RwLock::new(surface),
+            presenter: Presenter::Window {
+                instance,
+                window,
+                surface: RwLock::new(surface),
+            },
             device,
             queue,
             config,
             clear_color: DEFAULT_CLEAR_COLOR,
             msaa_sample_count,
         })
+    }
+
+    /// Initializes wgpu with no window: frames are drawn into an offscreen
+    /// `width`×`height` texture and read back with
+    /// [`GpuContext::take_frame`]. Every render path works as with a
+    /// window. Used to stream a game into Studio's Scene View.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RendererError`] if adapter selection or the device request
+    /// fails, or if either dimension is zero.
+    pub fn headless(width: u32, height: u32) -> Result<Self, RendererError> {
+        if width == 0 || height == 0 {
+            return Err(RendererError::ZeroSize { width, height });
+        }
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|err| RendererError::NoSuitableAdapter(err.to_string()))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("VGE headless device"),
+            ..Default::default()
+        }))
+        .map_err(|err| RendererError::DeviceRequest(err.to_string()))?;
+
+        // Pipelines read the colour format and size from here, exactly as
+        // with a window surface.
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            format: OFFSCREEN_FORMAT,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: Vec::new(),
+        };
+        let msaa_sample_count = choose_msaa_sample_count(
+            adapter
+                .get_texture_format_features(crate::pipeline::HDR_TEXTURE_FORMAT)
+                .flags,
+            REQUESTED_MSAA_SAMPLE_COUNT,
+        );
+        tracing::info!(
+            adapter = %adapter.get_info().name,
+            width,
+            height,
+            msaa = msaa_sample_count,
+            "headless GPU context initialized"
+        );
+        let target = OffscreenTarget::new(&device, width, height);
+        Ok(Self {
+            presenter: Presenter::Offscreen(target),
+            device,
+            queue,
+            config,
+            clear_color: DEFAULT_CLEAR_COLOR,
+            msaa_sample_count,
+        })
+    }
+
+    /// Whether frames go to an offscreen texture instead of a window.
+    pub fn is_headless(&self) -> bool {
+        matches!(self.presenter, Presenter::Offscreen(_))
+    }
+
+    /// The newest finished offscreen frame, without blocking; `None` for a
+    /// windowed context or while no frame has finished since the last call.
+    pub fn take_frame(&self) -> Option<CapturedFrame> {
+        match &self.presenter {
+            Presenter::Offscreen(target) => target.take(&self.device, false),
+            Presenter::Window { .. } => None,
+        }
+    }
+
+    /// Like [`GpuContext::take_frame`], but first waits for the GPU to
+    /// finish every submitted frame.
+    pub fn wait_for_frame(&self) -> Option<CapturedFrame> {
+        match &self.presenter {
+            Presenter::Offscreen(target) => target.take(&self.device, true),
+            Presenter::Window { .. } => None,
+        }
+    }
+
+    /// Offscreen frames dropped because the CPU had not read the previous
+    /// ones yet (always `0` for a windowed context).
+    pub fn skipped_frames(&self) -> u64 {
+        match &self.presenter {
+            Presenter::Offscreen(target) => target.skipped(),
+            Presenter::Window { .. } => 0,
+        }
     }
 
     /// The wgpu device, for creating pipelines, buffers, and textures.
@@ -140,9 +268,13 @@ impl GpuContext {
         &self.queue
     }
 
-    /// The window's presentable surface.
-    pub fn surface(&self) -> impl std::ops::Deref<Target = wgpu::Surface<'static>> + '_ {
-        self.read_surface()
+    /// The window's presentable surface; `None` for a
+    /// [`GpuContext::headless`] context.
+    pub fn surface(&self) -> Option<impl std::ops::Deref<Target = wgpu::Surface<'static>> + '_> {
+        match &self.presenter {
+            Presenter::Window { surface, .. } => Some(read_surface(surface)),
+            Presenter::Offscreen(_) => None,
+        }
     }
 
     /// The surface's current configuration.
@@ -182,7 +314,14 @@ impl GpuContext {
         }
         self.config.width = width;
         self.config.height = height;
-        self.read_surface().configure(&self.device, &self.config);
+        match &mut self.presenter {
+            Presenter::Window { surface, .. } => {
+                read_surface(surface).configure(&self.device, &self.config);
+            }
+            Presenter::Offscreen(target) => {
+                *target = OffscreenTarget::new(&self.device, width, height);
+            }
+        }
         Ok(())
     }
 
@@ -197,83 +336,63 @@ impl GpuContext {
         self.clear_color
     }
 
-    /// Presents a previously-acquired surface texture (from
+    /// Shows a previously-acquired frame (from
     /// [`GpuContext::acquire_frame`]) after its command buffer has been
-    /// submitted.
-    pub(crate) fn present(&self, surface_texture: wgpu::SurfaceTexture) {
-        self.queue.present(surface_texture);
+    /// submitted: presents a swapchain image, or starts reading an
+    /// offscreen frame back.
+    pub(crate) fn present(&self, frame: Frame) {
+        match (frame, &self.presenter) {
+            (Frame::Surface(surface_texture), _) => self.queue.present(surface_texture),
+            (Frame::Offscreen(_), Presenter::Offscreen(target)) => {
+                target.capture(&self.device, &self.queue);
+            }
+            (Frame::Offscreen(_), Presenter::Window { .. }) => {}
+        }
     }
 
-    /// Acquires the current surface texture, or `None` if this frame
-    /// should be skipped.
+    /// Acquires the frame to draw into, or `None` if this frame should be
+    /// skipped. An offscreen context always has one.
     ///
     /// `Outdated` surfaces are reconfigured and retried once; `Lost`
     /// surfaces are recreated, configured, and retried once. Transient
     /// failures (`Timeout`, `Occluded`, `Validation`) are logged and skipped
     /// so callers can try again next frame.
-    pub(crate) fn acquire_frame(&self) -> Option<wgpu::SurfaceTexture> {
-        let first = self.read_surface().get_current_texture();
-        match surface_recovery(&first) {
-            SurfaceRecovery::Ready | SurfaceRecovery::Skip => self.finish_acquire(first),
+    pub(crate) fn acquire_frame(&self) -> Option<Frame> {
+        let (instance, window, surface) = match &self.presenter {
+            Presenter::Window {
+                instance,
+                window,
+                surface,
+            } => (instance, window, surface),
+            Presenter::Offscreen(target) => {
+                return Some(Frame::Offscreen(target.texture().clone()));
+            }
+        };
+        let first = read_surface(surface).get_current_texture();
+        let texture = match surface_recovery(&first) {
+            SurfaceRecovery::Ready | SurfaceRecovery::Skip => finish_acquire(first),
             SurfaceRecovery::Reconfigure => {
                 tracing::debug!("surface outdated; reconfiguring");
-                self.read_surface().configure(&self.device, &self.config);
-                let retry = self.read_surface().get_current_texture();
-                self.finish_acquire(retry)
+                read_surface(surface).configure(&self.device, &self.config);
+                let retry = read_surface(surface).get_current_texture();
+                finish_acquire(retry)
             }
             SurfaceRecovery::Recreate => {
                 tracing::debug!("surface lost; recreating");
-                let surface = match self.instance.create_surface(Arc::clone(&self.window)) {
-                    Ok(surface) => surface,
+                let fresh = match instance.create_surface(Arc::clone(window)) {
+                    Ok(fresh) => fresh,
                     Err(err) => {
                         tracing::error!(error = %err, "could not recreate lost surface");
                         return None;
                     }
                 };
-                surface.configure(&self.device, &self.config);
-                *self.write_surface() = surface;
-                let retry = self.read_surface().get_current_texture();
-                self.finish_acquire(retry)
+                fresh.configure(&self.device, &self.config);
+                *write_surface(surface) = fresh;
+                let retry = read_surface(surface).get_current_texture();
+                finish_acquire(retry)
             }
-        }
-    }
-
-    fn finish_acquire(&self, status: wgpu::CurrentSurfaceTexture) -> Option<wgpu::SurfaceTexture> {
-        match status {
-            wgpu::CurrentSurfaceTexture::Success(texture) => Some(texture),
-            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
-                tracing::debug!("suboptimal surface texture acquired; presenting anyway");
-                Some(texture)
-            }
-            skip @ (wgpu::CurrentSurfaceTexture::Timeout
-            | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Outdated
-            | wgpu::CurrentSurfaceTexture::Lost
-            | wgpu::CurrentSurfaceTexture::Validation) => {
-                tracing::debug!(?skip, "skipping frame: surface texture unavailable");
-                None
-            }
-        }
-    }
-
-    fn read_surface(&self) -> RwLockReadGuard<'_, wgpu::Surface<'static>> {
-        match self.surface.read() {
-            Ok(surface) => surface,
-            Err(poisoned) => {
-                tracing::warn!("surface lock was poisoned; recovering it");
-                poisoned.into_inner()
-            }
-        }
-    }
-
-    fn write_surface(&self) -> RwLockWriteGuard<'_, wgpu::Surface<'static>> {
-        match self.surface.write() {
-            Ok(surface) => surface,
-            Err(poisoned) => {
-                tracing::warn!("surface lock was poisoned; recovering it");
-                poisoned.into_inner()
-            }
-        }
+        };
+        texture.map(Frame::Surface)
     }
 
     /// Creates a GPU buffer initialized with `data`, usable as a uniform
@@ -318,13 +437,11 @@ impl GpuContext {
     /// recoverable skips), but returns `Result` since surface
     /// loss/recreation handling is expected to grow real error paths.
     pub fn render_clear(&self) -> Result<(), RendererError> {
-        let Some(surface_texture) = self.acquire_frame() else {
+        let Some(frame) = self.acquire_frame() else {
             return Ok(());
         };
 
-        let view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame.view();
 
         let mut encoder = self
             .device
@@ -353,7 +470,7 @@ impl GpuContext {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        self.present(surface_texture);
+        self.present(frame);
         Ok(())
     }
 
@@ -387,13 +504,11 @@ impl GpuContext {
         &self,
         draw: impl FnOnce(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView),
     ) -> Result<(), RendererError> {
-        let Some(surface_texture) = self.acquire_frame() else {
+        let Some(frame) = self.acquire_frame() else {
             return Ok(());
         };
 
-        let view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame.view();
 
         let mut encoder = self
             .device
@@ -404,8 +519,50 @@ impl GpuContext {
         draw(&self.device, &self.queue, &mut encoder, &view);
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        self.present(surface_texture);
+        self.present(frame);
         Ok(())
+    }
+}
+
+fn finish_acquire(status: wgpu::CurrentSurfaceTexture) -> Option<wgpu::SurfaceTexture> {
+    match status {
+        wgpu::CurrentSurfaceTexture::Success(texture) => Some(texture),
+        wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
+            tracing::debug!("suboptimal surface texture acquired; presenting anyway");
+            Some(texture)
+        }
+        skip @ (wgpu::CurrentSurfaceTexture::Timeout
+        | wgpu::CurrentSurfaceTexture::Occluded
+        | wgpu::CurrentSurfaceTexture::Outdated
+        | wgpu::CurrentSurfaceTexture::Lost
+        | wgpu::CurrentSurfaceTexture::Validation) => {
+            tracing::debug!(?skip, "skipping frame: surface texture unavailable");
+            None
+        }
+    }
+}
+
+fn read_surface<'a>(
+    surface: &'a RwLock<wgpu::Surface<'static>>,
+) -> RwLockReadGuard<'a, wgpu::Surface<'static>> {
+    match surface.read() {
+        Ok(surface) => surface,
+        Err(poisoned) => {
+            tracing::warn!("surface lock was poisoned; recovering it");
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn write_surface<'a>(
+    surface: &'a RwLock<wgpu::Surface<'static>>,
+) -> RwLockWriteGuard<'a, wgpu::Surface<'static>> {
+    match surface.write() {
+        Ok(surface) => surface,
+        Err(poisoned) => {
+            tracing::warn!("surface lock was poisoned; recovering it");
+            poisoned.into_inner()
+        }
     }
 }
 

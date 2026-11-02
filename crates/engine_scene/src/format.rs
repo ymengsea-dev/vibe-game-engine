@@ -177,13 +177,79 @@ impl AssetRef {
 /// On-disk mesh/material — the serializable, reference-only form of what
 /// will eventually resolve into a live `engine_ecs::MeshRenderer`. See the
 /// module docs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MeshRendererData {
     /// The mesh asset this entity renders.
     pub mesh: AssetRef,
     /// The material asset this entity renders with.
     pub material: AssetRef,
+    /// Optional per-object PBR changes; absent in older scenes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_override: Option<MaterialOverrideData>,
 }
+
+/// Per-object adjustments layered over the imported glTF material.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaterialOverrideData {
+    /// Multiplies the imported base color's RGB; alpha is unchanged.
+    pub tint: [f32; 3],
+    /// Replaces the imported metallic factor when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metallic: Option<f32>,
+    /// Replaces the imported roughness factor when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roughness: Option<f32>,
+}
+
+impl Default for MaterialOverrideData {
+    fn default() -> Self {
+        Self {
+            tint: [1.0; 3],
+            metallic: None,
+            roughness: None,
+        }
+    }
+}
+
+impl MaterialOverrideData {
+    /// Applies this object's authored adjustments without editing the shared asset.
+    pub fn apply(&self, mut material: engine_renderer::Material) -> engine_renderer::Material {
+        for (color, tint) in material.base_color_factor[..3].iter_mut().zip(self.tint) {
+            *color *= tint;
+        }
+        if let Some(metallic) = self.metallic {
+            material.metallic_factor = metallic;
+        }
+        if let Some(roughness) = self.roughness {
+            material.roughness_factor = roughness;
+        }
+        material
+    }
+}
+
+/// Authored material adjustments on a live entity, retained even if its mesh is missing.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq)]
+pub struct SceneMaterialOverride(pub MaterialOverrideData);
+
+/// The adjustments used to build a live mesh; the editor compares this with
+/// [`SceneMaterialOverride`] to refresh only entities whose material changed.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq)]
+pub struct AppliedMaterialOverride(pub Option<MaterialOverrideData>);
+
+/// One authored foliage group: a model drawn at many world-space poses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FoliageData {
+    /// Model geometry to instance.
+    pub mesh: AssetRef,
+    /// Imported material carried by the model.
+    pub material: AssetRef,
+    /// World-space instance transforms, in deterministic scatter order.
+    pub instances: Vec<TransformData>,
+}
+
+/// Live source data retained if the model cannot yet be resolved.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq)]
+pub struct SceneFoliage(pub FoliageData);
 
 /// On-disk sprite — the serializable, reference-only form of what will
 /// resolve into a live `engine_ecs::Sprite`. See the module docs.
@@ -191,8 +257,8 @@ pub struct MeshRendererData {
 pub struct SpriteData {
     /// The atlas texture asset this sprite samples.
     pub atlas: AssetRef,
-    /// The named (or gridded, e.g. `"0_0"`) region within `atlas` this
-    /// sprite samples.
+    /// `full`, a legacy name (draws the full image), or
+    /// `grid:columns,rows:column,row` for one evenly divided sheet cell.
     pub region: String,
     /// World-space width/height.
     pub size: [f32; 2],
@@ -203,7 +269,282 @@ pub struct SpriteData {
     /// back as.
     #[serde(default)]
     pub z_order: f32,
+    /// Optional row-major flipbook starting at `region`'s grid cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<SpriteAnimationData>,
 }
+
+/// A simple sprite-sheet flipbook. The first frame is the sprite's grid cell.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SpriteAnimationData {
+    /// Consecutive row-major cells, including the first one.
+    pub frames: u32,
+    /// Playback speed in frames per second.
+    pub fps: f32,
+    /// Whether playback returns to the first frame after the last.
+    pub looping: bool,
+}
+
+/// Live flipbook clock; source sprite region stays at the authored first cell.
+#[derive(bevy_ecs::component::Component, Debug, Clone, Copy, PartialEq)]
+pub struct SceneSpriteAnimation {
+    /// Authored playback settings.
+    pub data: SpriteAnimationData,
+    /// Seconds since playback began, bounded by the clip duration.
+    pub elapsed: f32,
+    /// The sprite image's rectangle inside the packed scene atlas.
+    pub image_uv: Option<engine_renderer::UvRect>,
+    /// Runtime playback state; not written into the authored scene.
+    pub playing: bool,
+}
+
+impl SceneSpriteAnimation {
+    /// Starts the flipbook at its authored first cell.
+    pub fn new(data: SpriteAnimationData) -> Self {
+        Self {
+            data,
+            elapsed: 0.0,
+            image_uv: None,
+            playing: true,
+        }
+    }
+}
+
+/// Sparse tilemap settings. Painted cells are ordinary child sprites, so
+/// both editor preview and either game language use the normal sprite path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TilemapData {
+    /// Image split into the sheet grid.
+    pub atlas: AssetRef,
+    /// Sheet columns and rows, not map bounds.
+    pub columns: u32,
+    /// Sheet rows.
+    pub rows: u32,
+    /// World-space width and height of each painted tile.
+    pub cell_size: [f32; 2],
+    /// Current editor brush column.
+    pub brush_column: u32,
+    /// Current editor brush row.
+    pub brush_row: u32,
+    /// Whether painting a cell adds fixed collision to that cell.
+    #[serde(default)]
+    pub brush_collision: bool,
+}
+
+impl TilemapData {
+    /// A four-by-four sprite sheet with one-world-unit tiles.
+    pub fn new(atlas: AssetRef) -> Self {
+        Self {
+            atlas,
+            columns: 4,
+            rows: 4,
+            cell_size: [1.0, 1.0],
+            brush_column: 0,
+            brush_row: 0,
+            brush_collision: false,
+        }
+    }
+}
+
+/// Live carrier for a tilemap parent; painted children carry the sprites.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq)]
+pub struct SceneTilemap(pub TilemapData);
+
+/// Screen-space anchor for an authored game UI element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum UiAnchor {
+    /// Parent screen's top-left corner.
+    #[default]
+    TopLeft,
+    /// Center of the top edge.
+    Top,
+    /// Top-right corner.
+    TopRight,
+    /// Center of the left edge.
+    Left,
+    /// Screen center.
+    Center,
+    /// Center of the right edge.
+    Right,
+    /// Bottom-left corner.
+    BottomLeft,
+    /// Center of the bottom edge.
+    Bottom,
+    /// Bottom-right corner.
+    BottomRight,
+}
+
+/// The two authorable game UI widgets in this scene format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiKind {
+    /// Read-only text.
+    Label,
+    /// Clickable text on a colored rectangle.
+    Button,
+}
+
+/// One label or button, positioned in pixels relative to the game window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiElementData {
+    /// Label or button.
+    pub kind: UiKind,
+    /// Visible caption.
+    pub text: String,
+    /// Screen edge or point used for placement.
+    pub anchor: UiAnchor,
+    /// Pixel displacement from the anchor.
+    pub offset: [f32; 2],
+    /// Width and height in screen pixels.
+    pub size: [f32; 2],
+    /// Linear RGBA text color for labels, background color for buttons.
+    pub color: [f32; 4],
+}
+
+/// Carries authored UI data on a named scene entity in the editor world.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq)]
+pub struct SceneUi(pub UiElementData);
+
+/// An authored condition that can drive a scene action in either game language.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuleData {
+    /// Event that runs this rule.
+    pub trigger: RuleTrigger,
+    /// Engine-owned action to apply when the event arrives.
+    pub action: RuleAction,
+    /// Optional check on a gameplay variable; the action runs only when it holds.
+    /// Absent in older scenes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<RuleCondition>,
+    /// Where the Gameplay Graph draws this rule's action node, in graph units.
+    /// Editor layout only; `None` uses the automatic column layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_position: Option<[f32; 2]>,
+}
+
+impl RuleData {
+    /// An unconditional rule with automatic graph layout.
+    pub fn new(trigger: RuleTrigger, action: RuleAction) -> Self {
+        Self {
+            trigger,
+            action,
+            condition: None,
+            graph_position: None,
+        }
+    }
+}
+
+/// Compares a numeric gameplay variable with a constant. Unset variables read as `0`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuleCondition {
+    /// Variable name, using the same 1–64 printable-byte rule as event names.
+    pub variable: String,
+    /// How the variable is compared with `value`.
+    pub compare: RuleCompare,
+    /// Finite constant on the right-hand side.
+    pub value: f64,
+}
+
+/// Comparison used by a [`RuleCondition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuleCompare {
+    /// `variable == value`
+    Equal,
+    /// `variable != value`
+    NotEqual,
+    /// `variable < value`
+    Less,
+    /// `variable <= value`
+    LessOrEqual,
+    /// `variable > value`
+    Greater,
+    /// `variable >= value`
+    GreaterOrEqual,
+}
+
+impl RuleCompare {
+    /// Every comparison, in editor display order.
+    pub const ALL: [Self; 6] = [
+        Self::Equal,
+        Self::NotEqual,
+        Self::Less,
+        Self::LessOrEqual,
+        Self::Greater,
+        Self::GreaterOrEqual,
+    ];
+
+    /// Short operator text for editor labels.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Equal => "=",
+            Self::NotEqual => "≠",
+            Self::Less => "<",
+            Self::LessOrEqual => "≤",
+            Self::Greater => ">",
+            Self::GreaterOrEqual => "≥",
+        }
+    }
+
+    /// Applies the comparison.
+    pub fn holds(self, left: f64, right: f64) -> bool {
+        match self {
+            Self::Equal => left == right,
+            Self::NotEqual => left != right,
+            Self::Less => left < right,
+            Self::LessOrEqual => left <= right,
+            Self::Greater => left > right,
+            Self::GreaterOrEqual => left >= right,
+        }
+    }
+}
+
+/// A click on this rule's owning button, or a gameplay event name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RuleTrigger {
+    /// The owning UI Button was clicked.
+    UiClicked,
+    /// A Lua or Rust game emitted this name.
+    Named(String),
+}
+
+/// Actions available to visual rules without exposing engine internals.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RuleAction {
+    /// Replace an authored UI Label or Button's caption.
+    SetUiText {
+        /// Stable ID of an authored UI Label or Button.
+        target: String,
+        /// Replacement caption.
+        text: String,
+    },
+    /// Trigger an authored audio emitter.
+    PlayAudio {
+        /// Stable ID of an authored audio emitter.
+        target: String,
+    },
+    /// Queue another named event after the current event's actions.
+    EmitEvent {
+        /// Name of the event to send to other authored rules.
+        name: String,
+    },
+    /// Set a numeric gameplay variable.
+    SetVariable {
+        /// Variable name.
+        name: String,
+        /// Finite new value.
+        value: f64,
+    },
+    /// Add to a numeric gameplay variable; use a negative amount to subtract.
+    AddToVariable {
+        /// Variable name; an unset variable starts at `0`.
+        name: String,
+        /// Finite amount to add.
+        amount: f64,
+    },
+}
+
+/// Live carrier for an entity's saved visual rules.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq)]
+pub struct SceneRules(pub Vec<RuleData>);
 
 /// The physics shape a [`SceneEntity`] collides with.
 ///
@@ -400,10 +741,210 @@ pub struct SceneNavGrid(pub NavGridData);
 #[derive(bevy_ecs::component::Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SiblingOrder(pub u64);
 
+/// Stable authored identity, independent of the ECS entity allocated on load.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq, Eq)]
+pub struct SceneObjectId(pub String);
+
+/// Authored scene-wide daylight. Absent in older scenes, which retain the
+/// host application's existing lighting defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LightingData {
+    /// Direction the sunlight travels toward, in world space.
+    pub sun_direction: [f32; 3],
+    /// Linear RGB sunlight color.
+    pub sun_color: [f32; 3],
+    /// Sunlight brightness.
+    pub sun_intensity: f32,
+    /// Brightness of the renderer's daylight sky/ground ambient colors.
+    pub ambient_intensity: f32,
+}
+
+impl Default for LightingData {
+    fn default() -> Self {
+        Self {
+            sun_direction: [-0.4, -1.0, -0.3],
+            sun_color: [1.0, 0.98, 0.92],
+            sun_intensity: 3.0,
+            ambient_intensity: 1.0,
+        }
+    }
+}
+
+impl LightingData {
+    /// Converts validated authored values to the shared renderer light set.
+    pub fn to_light_set(self) -> engine_renderer::LightSet {
+        let mut lights = engine_renderer::LightSet::new();
+        lights.directional.push(engine_renderer::DirectionalLight {
+            direction: glam::Vec3::from_array(self.sun_direction).normalize(),
+            color: glam::Vec3::from_array(self.sun_color),
+            intensity: self.sun_intensity,
+        });
+        lights.ambient.intensity = self.ambient_intensity;
+        lights
+    }
+
+    pub(crate) fn validate(self) -> Result<(), String> {
+        let direction = glam::Vec3::from_array(self.sun_direction);
+        if !direction.is_finite()
+            || !direction.length_squared().is_finite()
+            || direction.length_squared() < 0.000001
+        {
+            return Err("sun_direction must be finite, normalizable, and nonzero".into());
+        }
+        if !self
+            .sun_color
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
+        {
+            return Err("sun_color must contain finite values in [0, 100]".into());
+        }
+        if !(self.sun_intensity.is_finite() && (0.0..=1000.0).contains(&self.sun_intensity)) {
+            return Err("sun_intensity must be finite and in [0, 1000]".into());
+        }
+        if !(self.ambient_intensity.is_finite() && (0.0..=1000.0).contains(&self.ambient_intensity))
+        {
+            return Err("ambient_intensity must be finite and in [0, 1000]".into());
+        }
+        Ok(())
+    }
+}
+
+/// Scene-wide settings that have no position in the world, such as ambient
+/// wind or background music. Positional effects (a waterfall, a torch)
+/// stay components on the objects that make them.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct EnvironmentData {
+    /// Sounds that loop for the whole scene at the same volume everywhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ambient_sounds: Vec<AmbientSoundData>,
+}
+
+impl EnvironmentData {
+    /// Most ambient sounds one scene may declare.
+    pub const MAX_AMBIENT_SOUNDS: usize = 8;
+
+    /// Whether nothing is set, so the scene file can omit the section.
+    pub fn is_empty(&self) -> bool {
+        self.ambient_sounds.is_empty()
+    }
+}
+
+/// One looping, non-positional scene sound.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AmbientSoundData {
+    /// The audio asset to loop.
+    pub sound: AssetRef,
+    /// Linear gain, `1.0` being the clip's own level (at most `4.0`).
+    #[serde(default = "default_gain")]
+    pub gain: f32,
+}
+
+/// ECS carrier for the scene's [`EnvironmentData`] while editing.
+#[derive(bevy_ecs::prelude::Resource, Debug, Clone, PartialEq, Default)]
+pub struct SceneEnvironment(pub EnvironmentData);
+
+/// ECS carrier for scene-wide authored lighting.
+#[derive(bevy_ecs::prelude::Resource, Debug, Clone, Copy, PartialEq)]
+pub struct SceneLighting(pub LightingData);
+
+/// Editable light properties; position comes from the entity transform.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PointLightData {
+    /// Linear RGB color.
+    pub color: [f32; 3],
+    /// Brightness multiplier.
+    pub intensity: f32,
+    /// Editor reach indicator and future falloff distance.
+    pub range: f32,
+}
+
+impl Default for PointLightData {
+    fn default() -> Self {
+        Self {
+            color: [1.0, 0.9, 0.7],
+            intensity: 10.0,
+            range: 8.0,
+        }
+    }
+}
+
+/// ECS carrier for a scene entity's authored point light.
+#[derive(bevy_ecs::prelude::Component, Debug, Clone, Copy, PartialEq)]
+pub struct ScenePointLight(pub PointLightData);
+
+/// Serializable water settings; the live surface is validated on load.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WaterData {
+    /// World-space centre of the XZ rectangle.
+    pub center: [f32; 3],
+    /// Positive half-width and half-depth.
+    pub half_extent: [f32; 2],
+    /// Still-water height.
+    pub base_height: f32,
+    /// Wave travel direction in XZ.
+    pub wave_direction: [f32; 2],
+    /// Wave height.
+    pub wave_amplitude: f32,
+    /// Crest-to-crest distance.
+    pub wave_length: f32,
+    /// Angular wave speed.
+    pub wave_speed: f32,
+    /// Surface flow velocity.
+    pub current: [f32; 3],
+    /// Water mass density.
+    pub density: f32,
+    /// Linear water drag.
+    pub linear_drag: f32,
+}
+
+impl From<engine_physics::WaterSurface> for WaterData {
+    fn from(surface: engine_physics::WaterSurface) -> Self {
+        Self {
+            center: surface.center.to_array(),
+            half_extent: surface.half_extent.to_array(),
+            base_height: surface.base_height,
+            wave_direction: surface.wave.direction.to_array(),
+            wave_amplitude: surface.wave.amplitude,
+            wave_length: surface.wave.length,
+            wave_speed: surface.wave.speed,
+            current: surface.current.to_array(),
+            density: surface.density,
+            linear_drag: surface.linear_drag,
+        }
+    }
+}
+
+impl TryFrom<WaterData> for engine_physics::WaterSurface {
+    type Error = engine_physics::PhysicsError;
+
+    fn try_from(data: WaterData) -> Result<Self, Self::Error> {
+        Self::new(
+            glam::Vec3::from_array(data.center),
+            glam::Vec2::from_array(data.half_extent),
+            data.base_height,
+            engine_physics::WaterWave {
+                direction: glam::Vec2::from_array(data.wave_direction),
+                amplitude: data.wave_amplitude,
+                length: data.wave_length,
+                speed: data.wave_speed,
+            },
+            glam::Vec3::from_array(data.current),
+            data.density,
+            data.linear_drag,
+        )
+    }
+}
+
 /// One entity's serializable components. Every field is optional — an
 /// entity may carry any subset.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SceneEntity {
+    /// Stable UUID for gameplay references; old scenes receive one on first save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_id: Option<String>,
+    /// Project-relative source attached to this entity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
     /// This entity's display name, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -430,6 +971,9 @@ pub struct SceneEntity {
     /// This entity's mesh/material, as asset references, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_renderer: Option<MeshRendererData>,
+    /// Authored instanced foliage group, absent in older scenes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foliage: Option<FoliageData>,
     /// A project-relative path to the asset file this entity was created
     /// from, if any — set by the editor's drag-an-asset-into-the-scene
     /// action, before a real import/GPU resolution exists. Additive and
@@ -446,6 +990,9 @@ pub struct SceneEntity {
     /// This entity's 2D sprite, as an atlas reference, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sprite: Option<SpriteData>,
+    /// Sparse 2D tilemap settings; cells are normal child sprite entities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tilemap: Option<TilemapData>,
     /// Whether the editor has disabled this entity (hidden from the
     /// Scene view, greyed in the hierarchy). Additive and optional, so
     /// pre-existing scene files parse unchanged.
@@ -465,6 +1012,18 @@ pub struct SceneEntity {
     /// A sound this entity emits, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_emitter: Option<AudioEmitterData>,
+    /// Authored water surface; absent in older scenes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub water: Option<WaterData>,
+    /// Authored point light; its position is the entity's transform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point_light: Option<PointLightData>,
+    /// Authored screen-space UI label or button.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<UiElementData>,
+    /// Event/action rules owned by this object; absent in older scenes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<RuleData>,
 }
 
 /// `#[serde(skip_serializing_if)]` predicate for a `bool` that defaults
@@ -491,6 +1050,12 @@ pub struct Scene {
     /// The level's walkability grid, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nav_grid: Option<NavGridData>,
+    /// Scene-wide authored daylight, if this scene overrides host defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lighting: Option<LightingData>,
+    /// Scene-wide effects with no position: ambient sounds.
+    #[serde(default, skip_serializing_if = "EnvironmentData::is_empty")]
+    pub environment: EnvironmentData,
 }
 
 /// Serde default for [`Scene::version`] when the field is missing from
@@ -509,6 +1074,8 @@ impl Default for Scene {
             version: crate::CURRENT_SCENE_VERSION,
             entities: Vec::new(),
             nav_grid: None,
+            lighting: None,
+            environment: EnvironmentData::default(),
         }
     }
 }
@@ -552,6 +1119,36 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tilemap_solid_brush_survives_scene_format_round_trip() {
+        let source = r#"(atlas:(id:"67d09e47-5520-4b5a-a132-a68a4a60f452"),columns:4,rows:4,cell_size:(1.0,1.0),brush_column:0,brush_row:0,brush_collision:true)"#;
+        let parsed: TilemapData = ron::from_str(source).unwrap();
+        let saved = ron::to_string(&parsed).unwrap();
+        assert!(saved.contains("brush_collision:true"));
+        let legacy = source.replace(",brush_collision:true", "");
+        let legacy: TilemapData = ron::from_str(&legacy).unwrap();
+        assert!(!legacy.brush_collision);
+    }
+
+    #[test]
+    fn material_override_tints_imported_color_and_replaces_selected_pbr_factors() {
+        let authored = MaterialOverrideData {
+            tint: [0.5, 0.25, 1.0],
+            metallic: Some(0.8),
+            roughness: None,
+        };
+        let imported = engine_renderer::Material {
+            base_color_factor: [0.8, 0.4, 0.2, 0.7],
+            metallic_factor: 0.1,
+            roughness_factor: 0.65,
+            ..engine_renderer::Material::DEFAULT
+        };
+        let applied = authored.apply(imported);
+        assert_eq!(applied.base_color_factor, [0.4, 0.1, 0.2, 0.7]);
+        assert_eq!(applied.metallic_factor, 0.8);
+        assert_eq!(applied.roughness_factor, 0.65);
+    }
     use glam::{Quat, Vec3};
 
     #[test]
@@ -624,6 +1221,7 @@ mod tests {
                         material: AssetRef {
                             id: uuid::Uuid::nil().to_string(),
                         },
+                        material_override: None,
                     }),
                     sprite: Some(SpriteData {
                         atlas: AssetRef {
@@ -633,6 +1231,7 @@ mod tests {
                         size: [1.0, 1.0],
                         color: [1.0, 1.0, 1.0, 1.0],
                         z_order: 0.0,
+                        animation: None,
                     }),
                     ..Default::default()
                 },
@@ -723,5 +1322,90 @@ mod tests {
         )"#;
         let sprite: SpriteData = ron::from_str(text).expect("legacy sprite data must still load");
         assert_eq!(sprite.z_order, 0.0);
+        assert!(sprite.animation.is_none());
+    }
+    #[test]
+    fn sprite_animation_survives_scene_text_round_trip() {
+        let text = r#"(
+            atlas: (id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+            region: "grid:4,1:0,0",
+            size: (1.0, 1.0),
+            color: (1.0, 1.0, 1.0, 1.0),
+            animation: Some((frames: 4, fps: 8.0, looping: true)),
+        )"#;
+        let sprite: SpriteData = ron::from_str(text).unwrap();
+        let saved = ron::to_string(&sprite).unwrap();
+        assert!(saved.contains("animation:"), "{saved}");
+    }
+
+    #[test]
+    fn authored_event_rule_survives_scene_text_round_trip() {
+        let text = r#"(
+            name: Some("Button"),
+            rules: [(
+                trigger: UiClicked,
+                action: PlayAudio(target: "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+            )],
+        )"#;
+        let entity: SceneEntity = ron::from_str(text).unwrap();
+        let saved = ron::to_string(&entity).unwrap();
+        assert!(saved.contains("rules:"), "{saved}");
+    }
+    #[test]
+    fn authored_lighting_round_trips_and_legacy_scene_keeps_no_override() {
+        let old = Scene::from_ron_str("(version: 5, entities: [])").unwrap();
+        assert!(old.lighting.is_none());
+
+        let scene = Scene {
+            lighting: Some(LightingData {
+                sun_direction: [-0.3, -1.0, 0.2],
+                sun_color: [1.0, 0.8, 0.6],
+                sun_intensity: 2.5,
+                ambient_intensity: 0.4,
+            }),
+            ..Scene::default()
+        };
+        let restored = Scene::from_ron_str(&scene.to_ron_string().unwrap()).unwrap();
+        assert_eq!(restored.lighting, scene.lighting);
+        #[derive(serde::Deserialize)]
+        struct PreviousSceneShape {
+            version: u32,
+            entities: Vec<SceneEntity>,
+        }
+        let older: PreviousSceneShape = ron::from_str(&scene.to_ron_string().unwrap()).unwrap();
+        assert_eq!(older.version, crate::CURRENT_SCENE_VERSION);
+        assert!(older.entities.is_empty());
+    }
+
+    #[test]
+    fn authored_point_light_survives_a_scene_text_round_trip() {
+        let text = r#"(version: 5, entities: [(
+            name: Some("Lamp"),
+            point_light: Some((color: (1.0, 0.5, 0.25), intensity: 3.0, range: 5.0)),
+        )])"#;
+        let parsed = Scene::from_ron_str(text).expect("point light scene");
+        let serialized = parsed.to_ron_string().expect("save scene");
+        assert!(
+            serialized.contains("point_light"),
+            "light settings were lost"
+        );
+    }
+
+    #[test]
+    fn scene_rejects_invalid_authored_lighting() {
+        let mut scene = Scene {
+            lighting: Some(LightingData::default()),
+            ..Scene::default()
+        };
+        scene.lighting.as_mut().unwrap().sun_direction = [0.0; 3];
+        assert!(scene.validate().is_err());
+        scene.lighting.as_mut().unwrap().sun_direction = [0.0, -1.0, 0.0];
+        scene.lighting.as_mut().unwrap().sun_intensity = f32::NAN;
+        assert!(scene.validate().is_err());
+        scene.lighting.as_mut().unwrap().sun_intensity = f32::MAX;
+        assert!(scene.validate().is_err());
+        scene.lighting.as_mut().unwrap().sun_intensity = 1.0;
+        scene.lighting.as_mut().unwrap().sun_direction = [f32::MAX, -1.0, 0.0];
+        assert!(scene.validate().is_err());
     }
 }

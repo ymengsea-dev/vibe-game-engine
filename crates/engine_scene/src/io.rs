@@ -1,5 +1,6 @@
 //! File I/O for scenes: save/load RON files, validating on both ends.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::error::SceneError;
@@ -44,10 +45,25 @@ impl Scene {
     /// Returns [`SceneError::Validation`] naming the first invalid entity
     /// (by index) and why.
     pub fn validate(&self) -> Result<(), SceneError> {
+        let mut ids = HashSet::new();
+        let mut rule_count = 0usize;
         for (index, entity) in self.entities.iter().enumerate() {
             entity
                 .validate()
                 .map_err(|reason| SceneError::Validation(format!("entity {index}: {reason}")))?;
+            if let Some(id) = &entity.object_id
+                && !ids.insert(id)
+            {
+                return Err(SceneError::Validation(format!(
+                    "entity {index}: duplicate object_id {id}"
+                )));
+            }
+            rule_count += entity.rules.len();
+            if rule_count > 1024 {
+                return Err(SceneError::Validation(
+                    "scene has more than 1024 event rules".into(),
+                ));
+            }
         }
         self.validate_hierarchy().map_err(SceneError::Validation)?;
         if let Some(nav_grid) = &self.nav_grid {
@@ -55,6 +71,14 @@ impl Scene {
                 .validate()
                 .map_err(|reason| SceneError::Validation(format!("nav_grid: {reason}")))?;
         }
+        if let Some(lighting) = self.lighting {
+            lighting
+                .validate()
+                .map_err(|reason| SceneError::Validation(format!("lighting: {reason}")))?;
+        }
+        self.environment
+            .validate()
+            .map_err(|reason| SceneError::Validation(format!("environment: {reason}")))?;
         Ok(())
     }
 
@@ -159,6 +183,27 @@ mod tests {
     use super::*;
     use crate::format::{CameraData, ProjectionData, SceneEntity, TransformData};
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn scene_rejects_duplicate_object_ids() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let scene = Scene {
+            entities: vec![
+                SceneEntity {
+                    object_id: Some(id.clone()),
+                    ..Default::default()
+                },
+                SceneEntity {
+                    object_id: Some(id),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(
+            matches!(scene.validate(), Err(SceneError::Validation(message)) if message.contains("duplicate object_id"))
+        );
+    }
 
     /// Unique path per test in the OS temp dir — avoids needing a
     /// `tempfile`-style dependency for what's otherwise a couple of

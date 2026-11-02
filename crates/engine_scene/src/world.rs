@@ -14,17 +14,58 @@
 //! reference that failed to resolve still round-trips, so re-saving a
 //! scene whose asset file is missing never deletes the reference.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::hierarchy::ChildOf;
 use bevy_ecs::prelude::{Entity, World};
-use engine_ecs::components::{AssetSource, Camera, Disabled, Lock, Name, Static, Transform};
+use engine_ecs::components::{
+    AssetSource, Camera, Disabled, Lock, Name, Script, Static, Transform,
+};
 
 use crate::capture::capture_renderables;
 use crate::format::{CameraData, Scene, SceneEntity, TransformData};
 use crate::resolve::{InstantiateReport, NullResolver, SceneResolver, insert_components};
 
+/// Resolves authored point lights against current parent-relative transforms.
+pub fn point_lights_from_world(world: &mut World) -> Vec<engine_renderer::PointLight> {
+    engine_ecs::propagate_transforms(world);
+    let mut query = world.query_filtered::<(
+        &engine_ecs::components::GlobalTransform,
+        &crate::format::ScenePointLight,
+    ), bevy_ecs::prelude::Without<Disabled>>();
+    query
+        .iter(world)
+        .map(|(transform, light)| engine_renderer::PointLight {
+            position: transform.0.translation,
+            color: glam::Vec3::from_array(light.0.color),
+            intensity: light.0.intensity,
+            range: light.0.range,
+        })
+        .collect()
+}
+
 impl Scene {
+    /// Gives legacy entities an in-memory identity before scripts run.
+    /// The editor persists these IDs on its next scene save.
+    pub fn assign_missing_object_ids(&mut self) {
+        let mut used: HashSet<String> = self
+            .entities
+            .iter()
+            .filter_map(|entity| entity.object_id.clone())
+            .collect();
+        for entity in &mut self.entities {
+            if entity.object_id.is_none() {
+                loop {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    if used.insert(id.clone()) {
+                        entity.object_id = Some(id);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /// Captures every **named** entity in `world` — its `Name`, plus its
     /// `Transform`/`Camera` if present, plus its parent (as an index into
     /// the returned scene's `entities`) if it has a `ChildOf`.
@@ -74,6 +115,20 @@ impl Scene {
             scene_entity.sibling_order = world
                 .get::<crate::format::SiblingOrder>(*entity)
                 .map(|order| order.0);
+            scene_entity.script = world
+                .get::<Script>(*entity)
+                .map(|script| script.path.clone());
+            let object_id = match world.get::<crate::SceneObjectId>(*entity) {
+                Some(id) => id.0.clone(),
+                None => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    world
+                        .entity_mut(*entity)
+                        .insert(crate::SceneObjectId(id.clone()));
+                    id
+                }
+            };
+            scene_entity.object_id = Some(object_id);
             scene_entity.locked = world.get::<Lock>(*entity).is_some();
             scene_entity.collider = world
                 .get::<crate::format::SceneCollider>(*entity)
@@ -81,9 +136,27 @@ impl Scene {
             scene_entity.audio_emitter = world
                 .get::<crate::format::SceneAudioEmitter>(*entity)
                 .map(|carrier| carrier.0.clone());
+            scene_entity.water = world
+                .get::<engine_ecs::components::WaterVolume>(*entity)
+                .map(|volume| volume.surface.into());
+            scene_entity.point_light = world
+                .get::<crate::format::ScenePointLight>(*entity)
+                .map(|light| light.0);
+            scene_entity.ui = world
+                .get::<crate::format::SceneUi>(*entity)
+                .map(|ui| ui.0.clone());
             let (mesh_renderer, sprite) = capture_renderables(world, *entity);
             scene_entity.mesh_renderer = mesh_renderer;
+            scene_entity.foliage = world
+                .get::<crate::SceneFoliage>(*entity)
+                .map(|source| source.0.clone());
             scene_entity.sprite = sprite;
+            scene_entity.tilemap = world
+                .get::<crate::SceneTilemap>(*entity)
+                .map(|source| source.0.clone());
+            scene_entity.rules = world
+                .get::<crate::SceneRules>(*entity)
+                .map_or_else(Vec::new, |source| source.0.clone());
         }
 
         // By name, not `Entity` order: neither `Entity`'s `Ord` nor its
@@ -118,6 +191,13 @@ impl Scene {
             nav_grid: world
                 .get_resource::<crate::format::SceneNavGrid>()
                 .map(|carrier| carrier.0.clone()),
+            lighting: world
+                .get_resource::<crate::format::SceneLighting>()
+                .map(|carrier| carrier.0),
+            environment: world
+                .get_resource::<crate::format::SceneEnvironment>()
+                .map(|carrier| carrier.0.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -161,6 +241,16 @@ impl Scene {
         if let Some(nav_grid) = &self.nav_grid {
             world.insert_resource(crate::format::SceneNavGrid(nav_grid.clone()));
         }
+        if let Some(lighting) = self.lighting {
+            world.insert_resource(crate::format::SceneLighting(lighting));
+        } else {
+            world.remove_resource::<crate::format::SceneLighting>();
+        }
+        if self.environment.is_empty() {
+            world.remove_resource::<crate::format::SceneEnvironment>();
+        } else {
+            world.insert_resource(crate::format::SceneEnvironment(self.environment.clone()));
+        }
         let spawned: Vec<Entity> = self
             .entities
             .iter()
@@ -198,8 +288,150 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_ecs::components::Script;
     use engine_utils::Transform as MathTransform;
     use glam::Vec3;
+
+    #[test]
+    fn authored_button_round_trips_and_mounts_as_clickable_screen_ui() {
+        use crate::{SceneUi, UiAnchor, UiElementData, UiKind};
+        use engine_ui::{PointerInput, Ui};
+
+        let object_id = uuid::Uuid::new_v4().to_string();
+        let mut world = World::new();
+        world.spawn((
+            Name::new("Start Button"),
+            crate::SceneObjectId(object_id.clone()),
+            SceneUi(UiElementData {
+                kind: UiKind::Button,
+                text: "Start".into(),
+                anchor: UiAnchor::BottomRight,
+                offset: [-20.0, -15.0],
+                size: [100.0, 30.0],
+                color: [0.2, 0.3, 0.4, 1.0],
+            }),
+        ));
+        let text = Scene::from_world(&mut world).to_ron_string().unwrap();
+        let reopened = Scene::from_ron_str(&text).unwrap();
+        let mut restored = World::new();
+        let entities = reopened.instantiate(&mut restored);
+        assert_eq!(
+            restored.get::<SceneUi>(entities[0]).unwrap().0.text,
+            "Start"
+        );
+
+        let mut ui = Ui::new(400.0, 200.0);
+        let buttons = reopened.mount_ui(&mut ui);
+        let button = *buttons
+            .iter()
+            .find_map(|(node, id)| (id == &object_id).then_some(node))
+            .expect("mounted button");
+        ui.layout();
+        let rect = ui.rect_of(button).unwrap();
+        assert_eq!(
+            (rect.x, rect.y, rect.w, rect.h),
+            (280.0, 155.0, 100.0, 30.0)
+        );
+        ui.interact(PointerInput {
+            position: [300.0, 170.0],
+            pressed: true,
+            released: false,
+        });
+        assert_eq!(
+            ui.interact(PointerInput {
+                position: [300.0, 170.0],
+                pressed: false,
+                released: true,
+            }),
+            vec![button]
+        );
+    }
+
+    #[test]
+    fn mounted_ui_maps_labels_and_omits_disabled_objects() {
+        let mut scene = Scene::default();
+        scene.entities.push(crate::SceneEntity {
+            object_id: Some("label-id".into()),
+            ui: Some(crate::UiElementData::label()),
+            ..Default::default()
+        });
+        scene.entities.push(crate::SceneEntity {
+            object_id: Some("disabled-id".into()),
+            ui: Some(crate::UiElementData::button()),
+            disabled: true,
+            ..Default::default()
+        });
+        let mut ui = engine_ui::Ui::new(400.0, 200.0);
+        let nodes = scene.mount_ui(&mut ui);
+        assert_eq!(
+            nodes.values().collect::<Vec<_>>(),
+            vec![&"label-id".to_owned()]
+        );
+    }
+
+    #[test]
+    fn legacy_scene_assigns_missing_ids_once_without_changing_existing_ids() {
+        let existing = uuid::Uuid::new_v4().to_string();
+        let mut scene = Scene {
+            entities: vec![
+                SceneEntity {
+                    name: Some("Old A".into()),
+                    ..Default::default()
+                },
+                SceneEntity {
+                    name: Some("Old B".into()),
+                    ..Default::default()
+                },
+                SceneEntity {
+                    object_id: Some(existing.clone()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        scene.assign_missing_object_ids();
+        let ids: Vec<_> = scene
+            .entities
+            .iter()
+            .map(|entity| entity.object_id.clone())
+            .collect();
+        assert!(ids.iter().all(Option::is_some));
+        assert_ne!(ids[0], ids[1]);
+        assert_eq!(ids[2].as_deref(), Some(existing.as_str()));
+        scene.assign_missing_object_ids();
+        assert_eq!(
+            scene
+                .entities
+                .iter()
+                .map(|entity| entity.object_id.clone())
+                .collect::<Vec<_>>(),
+            ids
+        );
+    }
+
+    #[test]
+    fn script_attachment_and_object_id_survive_scene_save_and_load() {
+        let mut world = World::new();
+        world.spawn((Name::new("Actor"), Script::new("assets/scripts/actor.lua")));
+        let first = Scene::from_world(&mut world);
+        assert_eq!(
+            first.entities[0].script.as_deref(),
+            Some("assets/scripts/actor.lua")
+        );
+        let id = first.entities[0]
+            .object_id
+            .as_ref()
+            .expect("stable object ID");
+        assert!(uuid::Uuid::parse_str(id).is_ok());
+        assert_eq!(
+            Scene::from_world(&mut world).entities[0].object_id.as_ref(),
+            Some(id)
+        );
+
+        let mut restored = World::new();
+        first.instantiate(&mut restored);
+        assert_eq!(Scene::from_world(&mut restored), first);
+    }
 
     #[test]
     fn from_world_captures_named_entities_with_transforms() {
@@ -384,6 +616,8 @@ mod tests {
                 ..Default::default()
             }],
             nav_grid: None,
+            lighting: None,
+            environment: Default::default(),
         };
         let mut world = World::new();
         let spawned = scene.instantiate(&mut world);
@@ -401,6 +635,8 @@ mod tests {
                 ..Default::default()
             }],
             nav_grid: None,
+            lighting: None,
+            environment: Default::default(),
         };
         let mut world = World::new();
         let spawned = scene.instantiate(&mut world);
@@ -421,6 +657,7 @@ mod tests {
                     size: [1.0, 1.0],
                     color: [1.0, 1.0, 1.0, 1.0],
                     z_order: 0.0,
+                    animation: None,
                 }),
                 ..Default::default()
             }],
@@ -550,6 +787,8 @@ mod tests {
                 ..Default::default()
             }],
             nav_grid: None,
+            lighting: None,
+            environment: Default::default(),
         };
 
         let mut world = World::new();
@@ -559,6 +798,75 @@ mod tests {
         let captured = Scene::from_world(&mut world);
 
         assert_eq!(captured.entities[0].audio_emitter, Some(emitter));
+    }
+
+    #[test]
+    fn authored_emitter_gain_and_radius_reach_the_live_emitter() {
+        use crate::{AssetRef, AudioEmitterData, SceneError, SceneResolver};
+        use engine_ecs::AudioEmitter;
+
+        struct SoundResolver;
+        impl SceneResolver for SoundResolver {
+            fn resolve_mesh(
+                &mut self,
+                _: &AssetRef,
+                _: &AssetRef,
+            ) -> Result<Option<engine_ecs::components::MeshRenderer>, SceneError> {
+                Ok(None)
+            }
+            fn resolve_sprite_uv(
+                &mut self,
+                _: &AssetRef,
+                _: &str,
+            ) -> Result<Option<engine_renderer::UvRect>, SceneError> {
+                Ok(None)
+            }
+            fn resolve_sound(
+                &mut self,
+                _: &AssetRef,
+                _: bool,
+            ) -> Result<Option<engine_audio::StaticSound>, SceneError> {
+                let mut wav = b"RIFF".to_vec();
+                wav.extend_from_slice(&38u32.to_le_bytes());
+                wav.extend_from_slice(b"WAVEfmt ");
+                wav.extend_from_slice(&16u32.to_le_bytes());
+                wav.extend_from_slice(&1u16.to_le_bytes());
+                wav.extend_from_slice(&1u16.to_le_bytes());
+                wav.extend_from_slice(&44_100u32.to_le_bytes());
+                wav.extend_from_slice(&88_200u32.to_le_bytes());
+                wav.extend_from_slice(&2u16.to_le_bytes());
+                wav.extend_from_slice(&16u16.to_le_bytes());
+                wav.extend_from_slice(b"data");
+                wav.extend_from_slice(&2u32.to_le_bytes());
+                wav.extend_from_slice(&[0, 0]);
+                Ok(engine_audio::StaticSound::from_bytes(wav, false).ok())
+            }
+        }
+
+        let scene = Scene {
+            entities: vec![SceneEntity {
+                name: Some("Quiet bell".into()),
+                audio_emitter: Some(AudioEmitterData {
+                    sound: AssetRef {
+                        id: "8a1d0f84-0a3a-4a1e-9d5b-2f3d4e5a6b7c".into(),
+                    },
+                    autoplay: false,
+                    looping: false,
+                    gain: 0.5,
+                    radius: 12.5,
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut world = World::new();
+        let report = scene.instantiate_with_resolver(&mut world, &mut SoundResolver);
+        assert_eq!(report.unresolved, 0);
+        let emitter = world
+            .get::<AudioEmitter>(report.spawned[0])
+            .expect("live emitter");
+        assert_eq!(emitter.gain, 0.5);
+        assert_eq!(emitter.radius, 12.5);
     }
 
     #[test]
@@ -573,6 +881,8 @@ mod tests {
             version: crate::CURRENT_SCENE_VERSION,
             entities: Vec::new(),
             nav_grid: Some(grid.clone()),
+            lighting: None,
+            environment: Default::default(),
         };
 
         let mut world = World::new();
@@ -584,6 +894,139 @@ mod tests {
             Some(grid),
             "a level's walkability is the level's, and has to survive a save"
         );
+    }
+
+    #[test]
+    fn authored_lighting_survives_world_round_trip() {
+        let lighting = crate::LightingData {
+            sun_direction: [0.0, -1.0, 0.0],
+            sun_color: [0.5, 0.6, 1.0],
+            sun_intensity: 1.5,
+            ambient_intensity: 0.2,
+        };
+        let scene = Scene {
+            lighting: Some(lighting),
+            ..Scene::default()
+        };
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        assert_eq!(Scene::from_world(&mut world).lighting, Some(lighting));
+    }
+
+    #[test]
+    fn authored_water_survives_scene_save_reopen_and_instantiation() {
+        use engine_ecs::components::WaterVolume;
+        let surface = engine_physics::WaterSurface {
+            center: glam::Vec3::new(2.0, 0.0, -3.0),
+            half_extent: glam::Vec2::new(5.0, 7.0),
+            base_height: 1.5,
+            wave: engine_physics::WaterWave {
+                amplitude: 0.2,
+                ..Default::default()
+            },
+            current: glam::Vec3::new(0.5, 0.0, 0.0),
+            density: 980.0,
+            linear_drag: 0.8,
+        };
+        let mut world = World::new();
+        world.spawn((Name::new("Pond"), WaterVolume { surface }));
+
+        let text = Scene::from_world(&mut world).to_ron_string().unwrap();
+        let reopened = Scene::from_ron_str(&text).unwrap();
+        let mut loaded = World::new();
+        let entities = reopened.instantiate(&mut loaded);
+        assert_eq!(
+            loaded.get::<WaterVolume>(entities[0]).unwrap().surface,
+            surface
+        );
+        assert_eq!(Scene::from_world(&mut loaded).entities, reopened.entities);
+    }
+
+    #[test]
+    fn point_light_survives_world_scene_world_round_trip() {
+        let settings = crate::format::PointLightData {
+            color: [0.2, 0.4, 0.8],
+            intensity: 5.0,
+            range: 7.0,
+        };
+        let mut world = World::new();
+        world.spawn((
+            Name::new("Lamp"),
+            Transform::from(engine_utils::Transform::from_translation(Vec3::new(
+                2.0, 3.0, 4.0,
+            ))),
+            crate::format::ScenePointLight(settings),
+        ));
+
+        let scene = Scene::from_world(&mut world);
+        assert_eq!(scene.entities[0].point_light, Some(settings));
+        let mut reopened = World::new();
+        let spawned = scene.instantiate(&mut reopened);
+        assert_eq!(
+            reopened
+                .get::<crate::format::ScenePointLight>(spawned[0])
+                .map(|light| light.0),
+            Some(settings)
+        );
+        assert_eq!(Scene::from_world(&mut reopened), scene);
+    }
+
+    #[test]
+    fn point_lights_use_parent_world_position_and_skip_disabled_entities() {
+        let mut world = World::new();
+        let parent = world
+            .spawn(Transform::from(engine_utils::Transform::from_translation(
+                Vec3::new(10.0, 0.0, 0.0),
+            )))
+            .id();
+        world.spawn((
+            Transform::from(engine_utils::Transform::from_translation(Vec3::new(
+                1.0, 2.0, 3.0,
+            ))),
+            bevy_ecs::hierarchy::ChildOf(parent),
+            crate::format::ScenePointLight(crate::format::PointLightData {
+                color: [0.2, 0.4, 0.8],
+                intensity: 5.0,
+                range: 7.0,
+            }),
+        ));
+        world.spawn((
+            Transform::default(),
+            Disabled,
+            crate::format::ScenePointLight(crate::format::PointLightData::default()),
+        ));
+
+        let lights = super::point_lights_from_world(&mut world);
+        assert_eq!(lights.len(), 1);
+        assert_eq!(lights[0].position, Vec3::new(11.0, 2.0, 3.0));
+        assert_eq!(lights[0].color.to_array(), [0.2, 0.4, 0.8]);
+        assert_eq!(lights[0].intensity, 5.0);
+    }
+
+    #[test]
+    fn invalid_authored_water_is_rejected_before_instantiation() {
+        let mut water = crate::WaterData::from(engine_physics::WaterSurface::default());
+        water.half_extent[0] = 0.0;
+        let scene = Scene {
+            entities: vec![SceneEntity {
+                name: Some("Bad pond".into()),
+                water: Some(water),
+                ..SceneEntity::default()
+            }],
+            ..Scene::default()
+        };
+        assert!(scene.validate().is_err());
+        let text = scene.to_ron_string().unwrap();
+        let parsed = Scene::from_ron_str(&text).unwrap();
+        assert!(parsed.validate().is_err());
+    }
+
+    #[test]
+    fn scene_without_lighting_clears_previous_scene_override() {
+        let mut world = World::new();
+        world.insert_resource(crate::SceneLighting(crate::LightingData::default()));
+        Scene::default().instantiate(&mut world);
+        assert!(world.get_resource::<crate::SceneLighting>().is_none());
     }
 
     #[test]
@@ -616,6 +1059,8 @@ mod tests {
                 ..Default::default()
             }],
             nav_grid: None,
+            lighting: None,
+            environment: Default::default(),
         };
 
         let mut world = World::new();
@@ -658,6 +1103,35 @@ mod tests {
         assert_eq!(sprite.atlas.id, ATLAS_ID);
         assert_eq!(sprite.region, "coin_0");
         assert_eq!(sprite.size, [2.0, 3.0]);
+    }
+
+    #[test]
+    fn sprite_animation_survives_world_scene_world_round_trip() {
+        let mut world = World::new();
+        let mut source = sprite_source();
+        source.region = "grid:4,1:0,0".into();
+        let animation = crate::SpriteAnimationData {
+            frames: 4,
+            fps: 8.0,
+            looping: true,
+        };
+        world.spawn((
+            Name::new("Coin"),
+            source,
+            crate::SceneSpriteAnimation::new(animation),
+        ));
+
+        let text = Scene::from_world(&mut world).to_ron_string().unwrap();
+        let parsed = Scene::from_ron_str(&text).unwrap();
+        let mut reopened = World::new();
+        let entities = parsed.instantiate(&mut reopened);
+        assert_eq!(
+            reopened
+                .get::<crate::SceneSpriteAnimation>(entities[0])
+                .unwrap()
+                .data,
+            animation
+        );
     }
 
     #[test]
@@ -716,6 +1190,68 @@ mod tests {
     }
 
     #[test]
+    fn material_override_survives_scene_reopen_and_unresolved_mesh() {
+        let authored = crate::MaterialOverrideData {
+            tint: [0.25, 0.5, 1.0],
+            metallic: Some(0.8),
+            roughness: Some(0.3),
+        };
+        let scene = Scene {
+            entities: vec![SceneEntity {
+                name: Some("Tinted crate".into()),
+                mesh_renderer: Some(crate::MeshRendererData {
+                    mesh: crate::AssetRef { id: MESH_ID.into() },
+                    material: crate::AssetRef {
+                        id: MATERIAL_ID.into(),
+                    },
+                    material_override: Some(authored.clone()),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let reopened = Scene::from_ron_str(&scene.to_ron_string().unwrap()).unwrap();
+        let mut world = World::new();
+        reopened.instantiate(&mut world);
+        assert_eq!(
+            Scene::from_world(&mut world).entities[0]
+                .mesh_renderer
+                .as_ref()
+                .and_then(|mesh| mesh.material_override.as_ref()),
+            Some(&authored),
+        );
+    }
+
+    #[test]
+    fn foliage_instances_survive_scene_reopen_without_the_model_file() {
+        let authored = crate::FoliageData {
+            mesh: crate::AssetRef { id: MESH_ID.into() },
+            material: crate::AssetRef {
+                id: MATERIAL_ID.into(),
+            },
+            instances: vec![crate::TransformData::from(
+                engine_utils::Transform::from_translation(glam::Vec3::new(3.0, 1.0, -2.0)),
+            )],
+        };
+        let scene = Scene {
+            entities: vec![SceneEntity {
+                name: Some("Grass patch".into()),
+                foliage: Some(authored.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let reopened = Scene::from_ron_str(&scene.to_ron_string().unwrap()).unwrap();
+        let mut world = World::new();
+        reopened.instantiate(&mut world);
+        assert_eq!(
+            Scene::from_world(&mut world).entities[0].foliage,
+            Some(authored)
+        );
+    }
+
+    #[test]
     fn unresolved_reference_survives_a_save_cycle() {
         // The data-loss guard: open a scene whose asset file is gone,
         // save it again, and the reference must still be in the file.
@@ -727,6 +1263,7 @@ mod tests {
                     material: crate::format::AssetRef {
                         id: MATERIAL_ID.into(),
                     },
+                    material_override: None,
                 }),
                 ..Default::default()
             }],
@@ -807,6 +1344,7 @@ mod tests {
                     material: crate::format::AssetRef {
                         id: MATERIAL_ID.into(),
                     },
+                    material_override: None,
                 }),
                 ..Default::default()
             }],

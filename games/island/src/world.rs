@@ -359,8 +359,12 @@ pub fn route_points() -> Vec<Vec3> {
         Vec3::new(2.0, 0.0, -18.0),
         Vec3::new(15.0, 0.0, -19.0),
     ];
-    points.extend(crate::journey::landmarks().map(|landmark| landmark.position));
-    points.push(crate::journey::summit_position());
+    points.extend([
+        Vec3::new(-10.0, 0.0, 8.0),
+        Vec3::new(-18.0, 0.0, -10.0),
+        Vec3::new(10.0, 0.0, -20.0),
+        Vec3::new(20.0, 0.0, -18.0),
+    ]);
     for point in &mut points {
         point.y = height_at(point.x, point.z);
     }
@@ -1189,6 +1193,17 @@ mod tests {
             assert!(
                 normal_at(point.x, point.z).y > 0.72,
                 "route is too steep at {point:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn route_preserves_the_four_authored_clearings() {
+        let points = route_points();
+        for (x, z) in [(-10.0, 8.0), (-18.0, -10.0), (10.0, -20.0), (20.0, -18.0)] {
+            assert!(
+                points.iter().any(|point| point.x == x && point.z == z),
+                "route lost clearing at ({x}, {z})"
             );
         }
     }

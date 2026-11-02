@@ -2,8 +2,11 @@
 //! [`RigidBody`]-driven entity's simulated world pose from a
 //! [`PhysicsWorld`] back into its [`Transform`] component.
 
-use bevy_ecs::world::World;
+use std::collections::HashMap;
+
+use bevy_ecs::{hierarchy::ChildOf, prelude::Entity, world::World};
 use engine_physics::PhysicsWorld;
+use engine_utils::Transform as MathTransform;
 
 use crate::components::{RigidBody, Transform};
 
@@ -23,28 +26,61 @@ use crate::components::{RigidBody, Transform};
 /// valid transient state, not corruption" choice
 /// [`crate::render::extract_and_render`] makes for its own queries.
 ///
-/// # Parenting caveat
-///
-/// Physics bodies are inherently world-space — rapier has no concept of
-/// the ECS's parent/child hierarchy — so this only produces correct
-/// results for entities *without* a `ChildOf` parent (or whose parent is
-/// always at the identity transform). A physics-driven child entity would
-/// have its local `Transform` overwritten with what is really a world
-/// pose, then have the parent's transform composed on top of it again by
-/// `propagate_transforms`, double-applying the parent's offset.
-/// Parent-relative physics bodies are future work once there's a concrete
-/// need for them (e.g. vehicles with physics-driven wheels).
+/// Parented bodies convert Rapier's world pose into the parent's local
+/// coordinates. The parent must have nonzero scale; otherwise the child is
+/// left unchanged for that step. Parent poses are recomputed from local
+/// transforms, since the cached world transform may predate this fixed step.
 ///
 /// Scale is left untouched — rapier rigid bodies have no scale, only
 /// position and orientation.
 pub fn sync_rigid_bodies(world: &mut World, physics: &PhysicsWorld) {
-    let mut query = world.query::<(&RigidBody, &mut Transform)>();
-    for (rigid_body, mut transform) in query.iter_mut(world) {
-        let Some(body) = physics.rapier.bodies.get(rigid_body.0) else {
-            continue;
+    fn world_transform(
+        world: &World,
+        entity: Entity,
+        cache: &mut HashMap<Entity, MathTransform>,
+    ) -> Option<MathTransform> {
+        if let Some(&transform) = cache.get(&entity) {
+            return Some(transform);
+        }
+        world.get_entity(entity).ok()?;
+        let local = world
+            .get::<Transform>(entity)
+            .map_or(MathTransform::IDENTITY, |t| t.0);
+        let global = match world.get::<ChildOf>(entity) {
+            Some(parent) => world_transform(world, parent.parent(), cache)?.mul_transform(&local),
+            None => local,
         };
-        transform.0.translation = body.translation();
-        transform.0.rotation = *body.rotation();
+        cache.insert(entity, global);
+        Some(global)
+    }
+
+    let mut parent_transforms = HashMap::new();
+    let mut query = world.query::<(Entity, &RigidBody, Option<&ChildOf>)>();
+    let poses: Vec<_> = query
+        .iter(world)
+        .filter_map(|(entity, rigid_body, child_of)| {
+            let body = physics.rapier.bodies.get(rigid_body.0)?;
+            let mut translation = body.translation();
+            let mut rotation = *body.rotation();
+            if let Some(child_of) = child_of {
+                // shortcut: a physics-driven parent uses its last ECS pose; resolve its live
+                // body pose when nested dynamic bodies become an authored workflow.
+                let parent = world_transform(world, child_of.parent(), &mut parent_transforms)?;
+                if parent.scale.abs().min_element() <= f32::EPSILON {
+                    return None;
+                }
+                let inverse_rotation = parent.rotation.inverse();
+                translation = inverse_rotation * (translation - parent.translation) / parent.scale;
+                rotation = inverse_rotation * rotation;
+            }
+            Some((entity, translation, rotation))
+        })
+        .collect();
+    for (entity, translation, rotation) in poses {
+        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+            transform.0.translation = translation;
+            transform.0.rotation = rotation;
+        }
     }
 }
 
@@ -78,6 +114,73 @@ mod tests {
         let transform = world.get::<Transform>(entity).unwrap();
         // Falling under gravity: y should have decreased from 10.
         assert!(transform.0.translation.y < 10.0);
+    }
+
+    #[test]
+    fn sync_keeps_parented_body_transform_parent_relative() {
+        use crate::components::GlobalTransform;
+        use bevy_ecs::hierarchy::ChildOf;
+
+        let mut physics = PhysicsWorld::default();
+        let (body, _collider) = RigidBody::spawn(
+            &mut physics,
+            RigidBodyBuilder::fixed().translation(Vec3::new(6.0, 2.0, 0.0)),
+            ColliderBuilder::cuboid(1.0, 1.0, 0.05),
+        );
+        let mut world = World::new();
+        let parent = world
+            .spawn(Transform(engine_utils::Transform::from_translation(
+                Vec3::new(5.0, 0.0, 0.0),
+            )))
+            .id();
+        let child = world
+            .spawn((
+                body,
+                Transform(engine_utils::Transform::from_translation(Vec3::new(
+                    1.0, 2.0, 0.0,
+                ))),
+                ChildOf(parent),
+            ))
+            .id();
+        crate::propagate_transforms(&mut world);
+        assert_eq!(
+            world.get::<GlobalTransform>(child).unwrap().0.translation,
+            Vec3::new(6.0, 2.0, 0.0)
+        );
+
+        sync_rigid_bodies(&mut world, &physics);
+        assert_eq!(
+            world.get::<Transform>(child).unwrap().0.translation,
+            Vec3::new(1.0, 2.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn sync_uses_a_parents_current_local_transform_after_it_moves() {
+        let mut physics = PhysicsWorld::default();
+        let (body, _collider) = RigidBody::spawn(
+            &mut physics,
+            RigidBodyBuilder::fixed().translation(Vec3::new(6.0, 2.0, 0.0)),
+            ColliderBuilder::cuboid(1.0, 1.0, 0.05),
+        );
+        let mut world = World::new();
+        let parent = world
+            .spawn(Transform(engine_utils::Transform::from_translation(
+                Vec3::new(5.0, 0.0, 0.0),
+            )))
+            .id();
+        let child = world
+            .spawn((body, Transform::default(), ChildOf(parent)))
+            .id();
+        crate::propagate_transforms(&mut world);
+        world.get_mut::<Transform>(parent).unwrap().0.translation.x = 4.0;
+
+        sync_rigid_bodies(&mut world, &physics);
+
+        assert_eq!(
+            world.get::<Transform>(child).unwrap().0.translation,
+            Vec3::new(2.0, 2.0, 0.0)
+        );
     }
 
     #[test]

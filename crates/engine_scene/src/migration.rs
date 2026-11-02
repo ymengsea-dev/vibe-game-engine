@@ -1,9 +1,13 @@
 //! Scene format version migration.
 //!
 //! Every bump so far has been purely additive, which is why `migrate`
-//! only stamps the version. v3 → v4 added `SceneEntity::audio_emitter`
+//! only stamps the version. v4 → v5 added optional object IDs and script
+//! attachments. v3 → v4 added `SceneEntity::audio_emitter`
 //! and `Scene::nav_grid`, both `Option` with `#[serde(default)]`, so a
 //! v3 file loads silent and with no nav grid — exactly what it was.
+//! `Scene::lighting` is an optional v5-compatible extension: older pinned
+//! Rust SDKs ignore it but must still load scenes saved by newer Studio.
+//! `SceneEntity::ui` is likewise an optional v5-compatible extension.
 //! v2 → v3 added `SceneEntity::collider` the same way, so a v2 file
 //! loads with no body and behaves exactly as it did before.
 //!
@@ -24,7 +28,7 @@ use crate::format::Scene;
 /// The current on-disk [`Scene`] format version. Bump this — and extend
 /// `migrate` with the new version's transformation — whenever
 /// `Scene`/`SceneEntity`'s shape changes.
-pub const CURRENT_SCENE_VERSION: u32 = 4;
+pub const CURRENT_SCENE_VERSION: u32 = 5;
 
 /// Migrates `scene` to [`CURRENT_SCENE_VERSION`] if it was parsed from an
 /// older format, stamping its `version` field. A no-op if `scene` is
@@ -60,6 +64,8 @@ mod tests {
             version: CURRENT_SCENE_VERSION,
             entities: vec![SceneEntity::default()],
             nav_grid: None,
+            lighting: None,
+            environment: Default::default(),
         };
         let migrated = migrate(scene.clone()).unwrap();
         assert_eq!(migrated, scene);
@@ -71,6 +77,8 @@ mod tests {
             version: 1,
             entities: vec![SceneEntity::default()],
             nav_grid: None,
+            lighting: None,
+            environment: Default::default(),
         };
         let migrated = migrate(scene).unwrap();
         assert_eq!(migrated.version, CURRENT_SCENE_VERSION);
@@ -82,6 +90,8 @@ mod tests {
             version: CURRENT_SCENE_VERSION + 1,
             entities: Vec::new(),
             nav_grid: None,
+            lighting: None,
+            environment: Default::default(),
         };
         let err = migrate(scene).unwrap_err();
         assert!(matches!(

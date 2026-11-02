@@ -5,7 +5,7 @@ use std::path::Path;
 
 use engine_ecs::components::{AssetSource, MeshSource, SpriteSource};
 use engine_ecs::prelude::{Entity, World};
-use engine_scene::{ColliderShape, SceneAudioEmitter, SceneCollider};
+use engine_scene::{ColliderShape, SceneAudioEmitter, SceneCollider, SceneFoliage, SceneTilemap};
 
 use crate::assets::{AssetIndex, parse_asset_id};
 
@@ -62,8 +62,15 @@ pub fn scan(world: &mut World, index: &AssetIndex) -> Vec<AssetDependency> {
         add(entity, "MeshSource.mesh", &source.mesh);
         add(entity, "MeshSource.material", &source.material);
     }
+    for (entity, source) in world.query::<(Entity, &SceneFoliage)>().iter(world) {
+        add(entity, "Foliage.mesh", &source.0.mesh.id);
+        add(entity, "Foliage.material", &source.0.material.id);
+    }
     for (entity, source) in world.query::<(Entity, &SpriteSource)>().iter(world) {
         add(entity, "SpriteSource.atlas", &source.atlas);
+    }
+    for (entity, source) in world.query::<(Entity, &SceneTilemap)>().iter(world) {
+        add(entity, "Tilemap.atlas", &source.0.atlas.id);
     }
     for (entity, emitter) in world.query::<(Entity, &SceneAudioEmitter)>().iter(world) {
         add(entity, "AudioEmitter.sound", &emitter.0.sound.id);
@@ -89,6 +96,21 @@ mod tests {
     use super::*;
     use engine_ecs::components::{MeshSource, Name};
     use engine_scene::{AssetRef, AudioEmitterData};
+
+    #[test]
+    fn foliage_model_is_reported_as_a_missing_asset_dependency() {
+        let id = engine_asset::AssetId::new().to_string();
+        let mut world = World::new();
+        world.spawn(engine_scene::SceneFoliage(engine_scene::FoliageData {
+            mesh: AssetRef { id: id.clone() },
+            material: AssetRef { id: id.clone() },
+            instances: Vec::new(),
+        }));
+        let report = missing(&mut world, &AssetIndex::new());
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].id, id);
+        assert_eq!(report[0].users.len(), 2);
+    }
 
     #[test]
     fn scan_finds_unique_component_users_and_ignores_invalid_ids() {

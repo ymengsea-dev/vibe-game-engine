@@ -34,13 +34,13 @@
 use bevy_ecs::prelude::Entity;
 use bevy_ecs::world::EntityWorldMut;
 use engine_ecs::components::{
-    AssetSource, Camera, Disabled, Lock, MeshRenderer, MeshSource, Name, Sprite, SpriteSource,
-    Static, Transform,
+    AssetSource, Camera, Disabled, InstancedMeshRenderer, Lock, MeshRenderer, MeshSource, Name,
+    Script, Sprite, SpriteSource, Static, Transform, WaterVolume,
 };
 use engine_renderer::UvRect;
 
 use crate::error::SceneError;
-use crate::format::{AssetRef, SceneEntity};
+use crate::format::{AssetRef, MaterialOverrideData, SceneEntity};
 
 /// Resolves a scene's asset references into live renderable components.
 ///
@@ -75,6 +75,18 @@ pub trait SceneResolver {
         mesh: &AssetRef,
         material: &AssetRef,
     ) -> Result<Option<MeshRenderer>, SceneError>;
+
+    /// Resolves a mesh with per-object material adjustments. Older custom
+    /// resolvers keep their previous behavior until they opt in.
+    fn resolve_mesh_with_material(
+        &mut self,
+        mesh: &AssetRef,
+        material: &AssetRef,
+        material_override: Option<&MaterialOverrideData>,
+    ) -> Result<Option<MeshRenderer>, SceneError> {
+        let _ = material_override;
+        self.resolve_mesh(mesh, material)
+    }
 
     /// Resolves an atlas reference plus a named region into the UV
     /// rectangle that region occupies.
@@ -192,6 +204,14 @@ pub(crate) fn insert_components(
     if let Some(name) = &data.name {
         entity_mut.insert(Name::new(name.clone()));
     }
+    entity_mut.insert(crate::SceneObjectId(
+        data.object_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+    ));
+    if let Some(script) = &data.script {
+        entity_mut.insert(Script::new(script.clone()));
+    }
     if let Some(transform) = data.transform {
         entity_mut.insert(Transform::from(engine_utils::Transform::from(transform)));
     }
@@ -226,6 +246,8 @@ pub(crate) fn insert_components(
             Ok(Some(sound)) => {
                 let mut live = engine_ecs::audio::AudioEmitter::new(sound);
                 live.autoplay = emitter.autoplay;
+                live.gain = emitter.gain;
+                live.radius = emitter.radius;
                 entity_mut.insert(live);
             }
             Ok(None) => {}
@@ -245,6 +267,29 @@ pub(crate) fn insert_components(
         // survives on a live entity — and the next save reads it back.
         entity_mut.insert(crate::format::SceneCollider(collider.clone()));
     }
+    if let Some(water) = data.water {
+        match engine_physics::WaterSurface::try_from(water) {
+            Ok(surface) => {
+                entity_mut.insert(WaterVolume { surface });
+            }
+            Err(error) => {
+                *unresolved += 1;
+                tracing::warn!(%error, "skipped invalid water surface");
+            }
+        }
+    }
+    if let Some(light) = data.point_light {
+        entity_mut.insert(crate::format::ScenePointLight(light));
+    }
+    if let Some(ui) = &data.ui {
+        entity_mut.insert(crate::format::SceneUi(ui.clone()));
+    }
+    if let Some(tilemap) = &data.tilemap {
+        entity_mut.insert(crate::SceneTilemap(tilemap.clone()));
+    }
+    if !data.rules.is_empty() {
+        entity_mut.insert(crate::SceneRules(data.rules.clone()));
+    }
 
     if let Some(mesh_renderer) = &data.mesh_renderer {
         // Stamped before resolution is even attempted, and kept whether
@@ -256,9 +301,19 @@ pub(crate) fn insert_components(
             mesh_renderer.mesh.id.clone(),
             mesh_renderer.material.id.clone(),
         ));
-        match resolver.resolve_mesh(&mesh_renderer.mesh, &mesh_renderer.material) {
+        if let Some(material_override) = &mesh_renderer.material_override {
+            entity_mut.insert(crate::SceneMaterialOverride(material_override.clone()));
+        }
+        match resolver.resolve_mesh_with_material(
+            &mesh_renderer.mesh,
+            &mesh_renderer.material,
+            mesh_renderer.material_override.as_ref(),
+        ) {
             Ok(Some(renderer)) => {
-                entity_mut.insert(renderer);
+                entity_mut.insert((
+                    renderer,
+                    crate::AppliedMaterialOverride(mesh_renderer.material_override.clone()),
+                ));
             }
             Ok(None) => {}
             Err(err) => {
@@ -270,6 +325,23 @@ pub(crate) fn insert_components(
                     error = %err,
                     "skipped unresolvable mesh renderer"
                 );
+            }
+        }
+    }
+    if let Some(foliage) = &data.foliage {
+        entity_mut.insert(crate::SceneFoliage(foliage.clone()));
+        match resolver.resolve_mesh(&foliage.mesh, &foliage.material) {
+            Ok(Some(renderer)) => {
+                entity_mut.insert(InstancedMeshRenderer {
+                    mesh: renderer.mesh,
+                    material: renderer.material,
+                    instances: foliage.instances.iter().copied().map(Into::into).collect(),
+                });
+            }
+            Ok(None) => {}
+            Err(err) => {
+                *unresolved += 1;
+                tracing::warn!(error = %err, "skipped unresolvable foliage model");
             }
         }
     }
@@ -285,6 +357,9 @@ pub(crate) fn insert_components(
             color: sprite.color,
             z_order: sprite.z_order,
         });
+        if let Some(animation) = sprite.animation {
+            entity_mut.insert(crate::SceneSpriteAnimation::new(animation));
+        }
         match resolver.resolve_sprite_uv(&sprite.atlas, &sprite.region) {
             Ok(Some(uv)) => {
                 entity_mut.insert(Sprite {
@@ -399,6 +474,7 @@ mod tests {
                 size: [2.0, 3.0],
                 color: [1.0, 0.5, 0.25, 1.0],
                 z_order: 0.0,
+                animation: None,
             }),
             ..Default::default()
         }

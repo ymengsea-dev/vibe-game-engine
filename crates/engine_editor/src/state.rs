@@ -9,12 +9,12 @@
 use std::path::{Path, PathBuf};
 
 use engine_ecs::components::{
-    AssetSource, Disabled, MeshSource, Name, Transform as TransformComponent,
+    AssetSource, Disabled, MeshSource, Name, Sprite, SpriteSource, Transform as TransformComponent,
 };
-use engine_ecs::prelude::{Entity, Without, World};
+use engine_ecs::prelude::{ChildOf, Children, Entity, Without, World};
 use engine_project::Project;
 use engine_scene::{Scene, SceneError, write_atomic};
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 use crate::assets::{AssetBrowser, AssetEntry, AssetIndex};
 use crate::chrome::{
@@ -24,7 +24,7 @@ use crate::console::{ConsoleFilter, ConsoleLog};
 use crate::diagnostics::{Diagnostic, Diagnostics};
 use crate::dirty::{DirtyState, PendingAction};
 use crate::error::EditorError;
-use crate::gizmo::{Axis, GizmoMode};
+use crate::gizmo::GizmoHandle;
 use crate::hierarchy::{self, HierarchyState};
 use crate::history::History;
 use crate::import::AssetImporter;
@@ -35,7 +35,7 @@ use crate::play::PlayState;
 use crate::preview::PreviewCache;
 use crate::profiler::FrameProfiler;
 use crate::session::{EditorSession, SESSION_VERSION};
-use crate::terrain_tools::TerrainToolState;
+use crate::terrain_tools::{TerrainStroke, TerrainToolState};
 
 /// Where the editor's "Save Scene" / "Open Scene" actions read and write,
 /// relative to the editor's working directory.
@@ -103,16 +103,12 @@ pub struct EditorState {
     /// Plain-text sink shown in the bottom panel's Output tab. Empty
     /// until the build pipeline / terminal write into it.
     pub output: OutputLog,
-    /// The axis the translate gizmo is currently being dragged along, if
-    /// a drag is in progress — `None` the rest of the time (including
-    /// while an entity is selected but nothing's being dragged).
-    pub dragging_axis: Option<Axis>,
+    /// The gizmo handle (move arrow, rotation ring or scale square) being
+    /// dragged, if a drag is in progress — `None` the rest of the time.
+    pub dragging_handle: Option<GizmoHandle>,
     /// Where [`EditorState::save_scene`]/[`EditorState::load_scene`] read
     /// and write. Defaults to [`DEFAULT_SCENE_PATH`].
     pub scene_path: PathBuf,
-    /// What a drag on a Scene View gizmo handle does — translate, rotate,
-    /// or scale the selected entity.
-    pub gizmo_mode: GizmoMode,
     /// Undo/redo stack of world snapshots — driven by the editor shell
     /// around each frame's UI pass (see [`History`]).
     pub history: History,
@@ -161,6 +157,10 @@ pub struct EditorState {
     /// Set by File ▸ Build & Export…: the folder to stage the export
     /// into. Taken by the shell binary, which owns the build thread.
     pub export_request: Option<PathBuf>,
+    /// File-menu request to pin this Rust project to the bundled SDK.
+    pub sdk_upgrade_request: bool,
+    /// Result shown in a dismissible dialog after the host handles that request.
+    pub sdk_upgrade_message: Option<String>,
     /// Whether an export build is running. The menu item is disabled
     /// while it is — two cargo builds writing one `target/` is a way to
     /// lose an afternoon.
@@ -171,12 +171,31 @@ pub struct EditorState {
     /// The gizmo coordinate space shown in the toolbar (display-only for
     /// now — the gizmo still uses world axes).
     pub transform_space: TransformSpace,
+    /// The Scene View tool chosen in the toolbar.
+    pub view_tool: crate::ViewTool,
+    /// Space is held over the Scene View: Hand applies until it is released.
+    pub temporary_hand: bool,
     /// 3D vs 2D authoring: switches the viewport camera to an
     /// orthographic front view and constrains the gizmo to the screen
     /// plane. In-memory only (not persisted in the session yet).
     pub dimension: EditorDimension,
     /// Terrain and vegetation authoring controls used by the Scene View.
     pub terrain_tools: TerrainToolState,
+    /// Enables brush interaction instead of the transform gizmo.
+    pub terrain_sculpt_active: bool,
+    /// Paints sprite cells on a selected tilemap in the 2D viewport.
+    pub tile_paint_active: bool,
+    /// Erases cells instead of applying the tilemap's brush cell.
+    pub tile_erase_active: bool,
+    /// In-progress viewport stroke; no disk writes until pointer release.
+    pub terrain_stroke: Option<TerrainStroke>,
+    /// Finished stroke waiting for the host's asset write/import pass.
+    pub terrain_sculpt_request: Option<TerrainStroke>,
+    /// Scene View navigation for the 3D and 2D modes.
+    pub scene_cameras: crate::SceneCameras,
+    /// A terrain model rewritten by undo/redo, waiting for the host to
+    /// re-import it and refresh the meshes that use it.
+    pub terrain_refresh_request: Option<std::path::PathBuf>,
     /// When set (and more than one entity is selected), an Inspector
     /// field edit on the primary is copied to every other selected
     /// entity that has the same component.
@@ -233,6 +252,14 @@ pub struct EditorState {
     /// viewed. Only present in builds with the `terminal` feature.
     #[cfg(feature = "terminal")]
     pub terminal: Option<crate::terminal::Terminal>,
+    /// Per-user Studio settings (Settings window).
+    pub settings: crate::storage::StudioSettings,
+    /// Whether the Settings window is open.
+    pub settings_open: bool,
+    /// Storage measurements, cleaning and the automatic limits.
+    pub storage: crate::storage::StorageView,
+    /// The game shown in the Scene View while Play previews it.
+    pub game_view: crate::game_view::GameView,
     /// The hierarchy panel's search text and in-progress inline rename.
     pub hierarchy: HierarchyState,
     /// Project search query, results, and pending jump.
@@ -245,6 +272,9 @@ pub struct EditorState {
     /// Prefab"). The host writes the file and refreshes the asset list.
     /// Drained each frame.
     pub create_prefab_request: Option<Entity>,
+    /// Set by the Terrain menu; the host writes an editable terrain mesh
+    /// and refreshes imports after the UI frame.
+    pub create_terrain_request: bool,
     /// Set when the user picked `Assets ▸ Import…`. The host opens the
     /// file dialog, because the dialog blocks and the copy needs the
     /// project directory — neither belongs in a menu closure that only
@@ -312,9 +342,8 @@ impl EditorState {
             console_filter: ConsoleFilter::default(),
             diagnostics: Diagnostics::new(),
             output: OutputLog::new(),
-            dragging_axis: None,
+            dragging_handle: None,
             scene_path,
-            gizmo_mode: GizmoMode::default(),
             history: History::new(),
             profiler: FrameProfiler::new(),
             play: PlayState::new(),
@@ -329,10 +358,21 @@ impl EditorState {
             configuration_index: 0,
             overlays: OverlayToggles::default(),
             export_request: None,
+            sdk_upgrade_request: false,
+            sdk_upgrade_message: None,
             export_running: false,
             transform_space: TransformSpace::default(),
+            view_tool: crate::ViewTool::default(),
+            temporary_hand: false,
             dimension: EditorDimension::default(),
             terrain_tools: TerrainToolState::default(),
+            terrain_sculpt_active: false,
+            tile_paint_active: false,
+            tile_erase_active: false,
+            terrain_stroke: None,
+            terrain_sculpt_request: None,
+            terrain_refresh_request: None,
+            scene_cameras: crate::SceneCameras::default(),
             batch_edit: false,
             bottom_tab: BottomTab::default(),
             inspector_tab: InspectorTab::default(),
@@ -350,10 +390,15 @@ impl EditorState {
             cursor_column: 1,
             #[cfg(feature = "terminal")]
             terminal: None,
+            settings: crate::storage::StudioSettings::default(),
+            settings_open: false,
+            storage: crate::storage::StorageView::default(),
+            game_view: crate::game_view::GameView::default(),
             hierarchy: HierarchyState::default(),
             search: crate::search::SearchState::default(),
             open_script_request: None,
             create_prefab_request: None,
+            create_terrain_request: false,
             import_request: false,
             dropped_files: Vec::new(),
             rescan_request: false,
@@ -403,6 +448,41 @@ impl EditorState {
         Ok(())
     }
 
+    /// Reverts the most recent edit (world or terrain stroke).
+    pub fn undo(&mut self) {
+        let result = self
+            .history
+            .undo(&mut self.world, &mut self.selected_entity);
+        self.follow_history_change(result);
+    }
+
+    /// Re-applies the most recently undone edit.
+    pub fn redo(&mut self) {
+        let result = self
+            .history
+            .redo(&mut self.world, &mut self.selected_entity);
+        self.follow_history_change(result);
+    }
+
+    /// A world restore invalidates selection-derived state; a terrain restore
+    /// asks the host to reload that terrain's mesh; a failure is shown.
+    fn follow_history_change(
+        &mut self,
+        result: Result<Option<crate::HistoryChange>, crate::HistoryError>,
+    ) {
+        match result {
+            Ok(Some(crate::HistoryChange::World)) => {
+                self.secondary_selection.clear();
+                self.dragging_handle = None;
+            }
+            Ok(Some(crate::HistoryChange::Terrain { model_path })) => {
+                self.terrain_refresh_request = Some(model_path);
+            }
+            Ok(None) => {}
+            Err(error) => self.asset_browser.operation_error = Some(error.to_string()),
+        }
+    }
+
     /// Replaces the world with a fresh empty scene: clears the selection
     /// and any in-progress gizmo drag, resets the undo history, and marks
     /// the scene dirty (the empty world is not yet on disk). The scene
@@ -410,7 +490,10 @@ impl EditorState {
     pub fn new_scene(&mut self) {
         self.world = World::new();
         self.clear_selection();
-        self.dragging_axis = None;
+        self.dragging_handle = None;
+        self.terrain_stroke = None;
+        self.terrain_sculpt_request = None;
+        self.tile_paint_active = false;
         self.history = History::new();
         self.dirty.mark_scene();
     }
@@ -434,7 +517,12 @@ impl EditorState {
 
         self.world = World::new();
         self.clear_selection();
-        self.dragging_axis = None;
+        self.dragging_handle = None;
+        self.terrain_stroke = None;
+        self.terrain_sculpt_request = None;
+        self.terrain_sculpt_active = false;
+        self.tile_paint_active = false;
+        self.tile_erase_active = false;
         self.history = History::new();
 
         // The import cache is keyed by path, and paths from the old
@@ -455,9 +543,21 @@ impl EditorState {
         self.dirty = DirtyState::default();
         self.pending_action = None;
         self.project_request = None;
+        self.sdk_upgrade_request = false;
+        self.sdk_upgrade_message = None;
         self.play = PlayState::new();
 
         self.recent_projects.push(self.project.root());
+        let root = self.project.root().to_path_buf();
+        self.storage.opened(&root);
+    }
+
+    /// Runs the storage limits and applies background results (see
+    /// [`crate::storage::StorageView::tick`]).
+    pub fn tick_storage(&mut self) {
+        let root = self.project.root().to_path_buf();
+        self.storage
+            .tick(self.settings.storage, &root, &self.output);
     }
 
     /// Switches the active workspace and applies its panel-visibility
@@ -491,6 +591,8 @@ impl EditorState {
         self.asset_browser.view = session.asset_view;
         self.asset_browser.preview_open = session.preview_open;
         self.overlays = session.overlays;
+        self.hierarchy.open = session.hierarchy_open;
+        self.asset_browser.open_folders = session.asset_folders_open;
         // Clamped, not trusted: the session is per-user state that may
         // be older than the project's configuration list.
         self.configuration_index = session
@@ -534,6 +636,8 @@ impl EditorState {
             preview_open: self.asset_browser.preview_open,
             configuration_index: self.configuration_index,
             overlays: self.overlays,
+            hierarchy_open: self.hierarchy.open.clone(),
+            asset_folders_open: self.asset_browser.open_folders.clone(),
         }
     }
 
@@ -667,7 +771,243 @@ impl EditorState {
         if let Some(mesh_source) = mesh_source {
             entity.insert(mesh_source);
         }
+        if matches!(
+            crate::assets::AssetKind::from_path(asset_path),
+            crate::assets::AssetKind::Texture
+        ) && let Some(id) = self.asset_index.id_for(asset_path)
+        {
+            entity.insert((
+                SpriteSource {
+                    atlas: id.to_string(),
+                    region: "full".into(),
+                    size: [1.0, 1.0],
+                    color: [1.0; 4],
+                    z_order: 0.0,
+                },
+                Sprite::new(
+                    glam::Vec2::ONE,
+                    engine_renderer::UvRect {
+                        min: [0.0; 2],
+                        max: [1.0; 2],
+                    },
+                ),
+            ));
+        }
         entity.id()
+    }
+
+    /// Selected image eligible for sprite creation, if it has a stable asset ID.
+    pub fn selected_texture_asset(&self) -> Option<&Path> {
+        self.selected_asset.as_deref().filter(|path| {
+            crate::assets::AssetKind::from_path(path) == crate::assets::AssetKind::Texture
+                && self.asset_index.id_for(path).is_some()
+        })
+    }
+
+    /// Selected sound file, if it has a stable asset ID.
+    pub fn selected_audio_asset(&self) -> Option<&Path> {
+        self.selected_asset.as_deref().filter(|path| {
+            crate::assets::AssetKind::from_path(path) == crate::assets::AssetKind::Audio
+                && self.asset_index.id_for(path).is_some()
+        })
+    }
+
+    /// The scene's environment settings (empty when none are set).
+    pub fn environment(&self) -> engine_scene::EnvironmentData {
+        self.world
+            .get_resource::<engine_scene::SceneEnvironment>()
+            .map(|carrier| carrier.0.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replaces the scene's environment settings and marks the scene dirty.
+    pub fn set_environment(&mut self, environment: engine_scene::EnvironmentData) {
+        if environment.is_empty() {
+            self.world
+                .remove_resource::<engine_scene::SceneEnvironment>();
+        } else {
+            self.world
+                .insert_resource(engine_scene::SceneEnvironment(environment));
+        }
+        self.mark_dirty();
+    }
+
+    /// Adds the selected sound file as a looping ambient sound for the scene.
+    pub fn add_ambient_sound_from_selection(&mut self) -> Result<(), String> {
+        let path = self
+            .selected_audio_asset()
+            .ok_or("Select an imported WAV sound in Project Assets")?;
+        let id = self
+            .asset_index
+            .id_for(path)
+            .ok_or("The selected sound has no asset ID yet")?
+            .to_string();
+        let mut environment = self.environment();
+        if environment
+            .ambient_sounds
+            .iter()
+            .any(|ambient| ambient.sound.id == id)
+        {
+            return Err("That sound is already an ambient sound".into());
+        }
+        if environment.ambient_sounds.len() >= engine_scene::EnvironmentData::MAX_AMBIENT_SOUNDS {
+            return Err(format!(
+                "A scene can have at most {} ambient sounds",
+                engine_scene::EnvironmentData::MAX_AMBIENT_SOUNDS
+            ));
+        }
+        environment
+            .ambient_sounds
+            .push(engine_scene::AmbientSoundData {
+                sound: engine_scene::AssetRef { id },
+                gain: 1.0,
+            });
+        self.set_environment(environment);
+        Ok(())
+    }
+
+    /// Creates a sparse tilemap from the selected imported image.
+    pub fn create_tilemap_from_selected_image(&mut self) -> Result<Entity, String> {
+        let image = self
+            .selected_texture_asset()
+            .ok_or("Select an imported PNG or JPEG in Project Assets")?;
+        let id = self
+            .asset_index
+            .id_for(image)
+            .ok_or("The selected image has no asset ID")?;
+        let parent = hierarchy::spawn_entity(&mut self.world, "Tilemap", Vec3::ZERO);
+        self.world
+            .entity_mut(parent)
+            .insert(engine_scene::SceneTilemap(engine_scene::TilemapData::new(
+                engine_scene::AssetRef { id: id.to_string() },
+            )));
+        self.select_only(parent);
+        self.dimension = EditorDimension::Mode2D;
+        self.terrain_sculpt_active = false;
+        self.tile_paint_active = true;
+        self.tile_erase_active = false;
+        self.mark_dirty();
+        Ok(parent)
+    }
+
+    /// Paints or erases one cell of the selected tilemap. Repeating the same
+    /// brush on the same cell is a no-op, so a drag does not spawn duplicates.
+    pub fn paint_tile_cell(&mut self, x: i32, y: i32, erase: bool) -> Result<bool, String> {
+        let parent = self.selected_entity.ok_or("Select a tilemap first")?;
+        let map = self
+            .world
+            .get::<engine_scene::SceneTilemap>(parent)
+            .ok_or("Select a tilemap first")?
+            .0
+            .clone();
+        if x.unsigned_abs() > 10_000 || y.unsigned_abs() > 10_000 {
+            return Err("Tile position is outside the supported editing area".into());
+        }
+        map.validate()
+            .map_err(|error| format!("Tilemap settings are invalid: {error}"))?;
+        let center = Vec3::new(
+            (x as f32 + 0.5) * map.cell_size[0],
+            (y as f32 + 0.5) * map.cell_size[1],
+            0.0,
+        );
+        if !center.is_finite() {
+            return Err("Tile position is not finite".into());
+        }
+        let existing = self.world.get::<Children>(parent).and_then(|children| {
+            children
+                .iter()
+                .find(|&&child| {
+                    self.world.get::<SpriteSource>(child).is_some()
+                        && self
+                            .world
+                            .get::<TransformComponent>(child)
+                            .is_some_and(|transform| transform.0.translation == center)
+                })
+                .copied()
+        });
+        if erase {
+            if let Some(existing) = existing {
+                self.world.despawn(existing);
+                self.mark_dirty();
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        let region = engine_scene::GridRegion {
+            columns: map.columns,
+            rows: map.rows,
+            column: map.brush_column,
+            row: map.brush_row,
+        }
+        .name();
+        let brush_collider = crate::tilemap::brush_collider(map.cell_size);
+        if let Some(existing) = existing {
+            let mut changed = false;
+            {
+                let Some(mut source) = self.world.get_mut::<SpriteSource>(existing) else {
+                    return Err("Tile no longer has an image".into());
+                };
+                if source.region != region || source.atlas != map.atlas.id {
+                    source.region = region;
+                    source.atlas = map.atlas.id;
+                    changed = true;
+                }
+            }
+            let current = self.world.get::<engine_scene::SceneCollider>(existing);
+            if map.brush_collision && current.is_none() {
+                self.world
+                    .entity_mut(existing)
+                    .insert(engine_scene::SceneCollider(brush_collider));
+                changed = true;
+            } else if !map.brush_collision
+                && current.is_some_and(|collider| collider.0 == brush_collider)
+            {
+                self.world
+                    .entity_mut(existing)
+                    .remove::<engine_scene::SceneCollider>();
+                changed = true;
+            }
+            if changed {
+                self.mark_dirty();
+            }
+            return Ok(changed);
+        }
+        if self
+            .world
+            .get::<Children>(parent)
+            .is_some_and(|children| children.len() >= 20_000)
+        {
+            return Err("Tilemap has reached the 20,000-cell editing limit".into());
+        }
+        let tile = self
+            .world
+            .spawn((
+                Name::new(format!("Tile ({x}, {y})")),
+                TransformComponent::from(engine_utils::Transform::from_translation(center)),
+                ChildOf(parent),
+                SpriteSource {
+                    atlas: map.atlas.id,
+                    region,
+                    size: map.cell_size,
+                    color: [1.0; 4],
+                    z_order: 0.0,
+                },
+                Sprite::new(
+                    Vec2::from_array(map.cell_size),
+                    engine_renderer::UvRect {
+                        min: [0.0; 2],
+                        max: [1.0; 2],
+                    },
+                ),
+            ))
+            .id();
+        if map.brush_collision {
+            self.world
+                .entity_mut(tile)
+                .insert(engine_scene::SceneCollider(brush_collider));
+        }
+        self.mark_dirty();
+        Ok(true)
     }
 
     /// Returns the current read-only reverse dependency report for scene assets.
@@ -742,10 +1082,130 @@ impl EditorState {
         let mut world = World::new();
         scene.instantiate(&mut world);
         self.world = world;
+        self.terrain_stroke = None;
+        self.terrain_sculpt_request = None;
         self.clear_selection();
         self.dirty.clear_scene();
         self.heal_asset_sources();
         Ok(())
+    }
+
+    /// Loads the selected terrain's source data after validating both paths
+    /// against the project root. A non-terrain selection is a clean error.
+    pub fn begin_terrain_stroke(&self) -> Result<TerrainStroke, String> {
+        let entity = self.selected_entity.ok_or("Select a terrain first")?;
+        let source = self
+            .world
+            .get::<AssetSource>(entity)
+            .ok_or("Selected object has no terrain asset")?;
+        let relative = PathBuf::from(&source.path);
+        if relative
+            .extension()
+            .is_none_or(|extension| extension != "gltf")
+        {
+            return Err("Selected object is not a terrain mesh".into());
+        }
+        let model = self
+            .project
+            .resolve(&Path::new("assets").join(&relative))
+            .map_err(|error| error.to_string())?;
+        let authored = self
+            .project
+            .resolve(&Path::new("assets").join(relative.with_extension("terrain")))
+            .map_err(|error| error.to_string())?;
+        if !model.is_file() {
+            return Err("Terrain mesh is missing".into());
+        }
+        let asset = crate::terrain_tools::TerrainAsset::load(&authored)
+            .map_err(|error| format!("Could not load terrain source: {error}"))?;
+        let (heightmap, _) = asset.into_parts().map_err(|error| error.to_string())?;
+        Ok(TerrainStroke {
+            entity,
+            relative_model: relative,
+            heightmap,
+            centers: Vec::new(),
+        })
+    }
+
+    /// Bakes a selected model into one instanced group on the selected terrain.
+    pub fn scatter_selected_mesh_on_terrain(&mut self) -> Result<usize, String> {
+        let model = self
+            .selected_asset
+            .as_deref()
+            .ok_or("Select a model in Project Assets first")?;
+        if crate::assets::AssetKind::from_path(model) != crate::assets::AssetKind::Mesh {
+            return Err("Select a glTF or GLB model in Project Assets".into());
+        }
+        let model_id = self
+            .asset_index
+            .id_for(model)
+            .ok_or("The selected model has not been imported yet")?;
+        let model_path = self
+            .project
+            .resolve(&Path::new("assets").join(model))
+            .map_err(|error| error.to_string())?;
+        if !model_path.is_file() {
+            return Err("The selected model file is missing".into());
+        }
+        let terrain = self.begin_terrain_stroke()?;
+        let size = terrain.heightmap.size();
+        let mut controls = self.terrain_tools.clone();
+        controls.sanitize();
+        let cells_per_side = (size / controls.scatter_spacing).ceil().max(1.0) as u64;
+        if cells_per_side.saturating_mul(cells_per_side) > 20_000 {
+            return Err(
+                "Foliage area is too dense; increase Spacing (maximum 20,000 cells)".into(),
+            );
+        }
+        let area = engine_renderer::ScatterArea::new(Vec2::splat(-size * 0.5), Vec2::splat(size));
+        let terrain_world = hierarchy::world_transform(&self.world, terrain.entity);
+        let instances: Vec<_> = controls
+            .scatter_preview(area, Some(&terrain.heightmap))
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|pose| engine_scene::TransformData::from(terrain_world.mul_transform(&pose)))
+            .collect();
+        if instances.is_empty() {
+            return Err("No foliage was placed; increase Density".into());
+        }
+        let authored_path = self
+            .project
+            .resolve(&Path::new("assets").join(terrain.relative_model.with_extension("terrain")))
+            .map_err(|error| error.to_string())?;
+        crate::terrain_tools::TerrainAsset::from_heightmap(&terrain.heightmap, &controls)
+            .save(&authored_path)
+            .map_err(|error| format!("Could not save foliage settings: {error}"))?;
+
+        let count = instances.len();
+        let name = model
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Model");
+        let id = model_id.to_string();
+        let group = self
+            .world
+            .spawn((
+                Name::new(format!("{name} Foliage")),
+                engine_scene::SceneFoliage(engine_scene::FoliageData {
+                    mesh: engine_scene::AssetRef { id: id.clone() },
+                    material: engine_scene::AssetRef { id },
+                    instances,
+                }),
+            ))
+            .id();
+        self.select_only(group);
+        self.mark_dirty();
+        Ok(count)
+    }
+
+    /// Queues an authored stroke only if its terrain is still selected.
+    pub fn finish_terrain_stroke(&mut self) {
+        if let Some(stroke) = self.terrain_stroke.take()
+            && self.selected_entity == Some(stroke.entity)
+            && !stroke.centers.is_empty()
+        {
+            self.terrain_sculpt_request = Some(stroke);
+        }
     }
 
     /// Every entity in the selection: the primary (if any) first, then
@@ -795,6 +1255,36 @@ impl EditorState {
         self.clear_selection();
     }
 
+    /// Puts the selection into a new group (see
+    /// [`hierarchy::group_entities`]), selects it and starts renaming it in
+    /// the Hierarchy. Returns whether a group was made.
+    pub fn group_selection(&mut self) -> bool {
+        let selection = self.selection();
+        let Some(group) = hierarchy::group_entities(&mut self.world, &selection) else {
+            return false;
+        };
+        self.select_only(group);
+        self.hierarchy.start_rename(&self.world, group);
+        true
+    }
+
+    /// Ungroups every selected group (see [`hierarchy::ungroup`]) and
+    /// selects what was inside. Returns whether anything was ungrouped.
+    pub fn ungroup_selection(&mut self) -> bool {
+        let freed: Vec<Entity> = self
+            .selection()
+            .into_iter()
+            .filter_map(|entity| hierarchy::ungroup(&mut self.world, entity))
+            .flatten()
+            .collect();
+        let Some((&first, rest)) = freed.split_first() else {
+            return false;
+        };
+        self.selected_entity = Some(first);
+        self.secondary_selection = rest.to_vec();
+        true
+    }
+
     /// Deep-copies every selected entity; the last copy becomes the new
     /// primary selection. No-op on an empty selection.
     pub fn duplicate_selection(&mut self) {
@@ -807,14 +1297,56 @@ impl EditorState {
         }
     }
 
-    /// The selected entity's current translation, if it's selected and
-    /// has a `Transform` — where the Scene View panel's translate gizmo
-    /// (and [`crate::Viewport::render`]'s `gizmo_origin` argument) should
-    /// draw. `None` hides the gizmo entirely.
+    /// The Scene View tool in effect: Hand while Space is held, else the
+    /// toolbar choice.
+    pub fn active_view_tool(&self) -> crate::ViewTool {
+        if self.temporary_hand {
+            crate::ViewTool::Hand
+        } else {
+            self.view_tool
+        }
+    }
+
+    /// The Scene View camera for the current 2D/3D mode.
+    pub fn scene_camera(&self) -> &crate::SceneCamera {
+        self.scene_cameras.active(self.dimension.is_2d())
+    }
+
+    /// Moves the Scene View camera to fit every selected object and its
+    /// children. Returns `false` when nothing is selected.
+    pub fn frame_selection(&mut self) -> bool {
+        let roots: Vec<_> = self
+            .selected_entity
+            .into_iter()
+            .chain(self.secondary_selection.iter().copied())
+            .collect();
+        let Some((center, radius)) = selection_bounds(&self.world, &roots) else {
+            return false;
+        };
+        let two_d = self.dimension.is_2d();
+        let mut target = *self.scene_cameras.active(two_d);
+        target.frame(center, radius);
+        self.scene_cameras.glide_to(two_d, target);
+        true
+    }
+
+    /// The selected entity's world position, if it's selected and has a
+    /// `Transform`: where the Scene View's gizmo draws. World, not local:
+    /// an object inside a group is drawn where it is, not at its offset
+    /// from the group. `None` hides the gizmo, including for a locked
+    /// object.
     pub fn gizmo_origin(&self) -> Option<Vec3> {
-        self.selected_entity
-            .and_then(|entity| inspector::transform_of(&self.world, entity))
-            .map(|transform| transform.translation)
+        let entity = self.selected_entity?;
+        // A locked object cannot be moved, so it shows no handles to grab.
+        if self
+            .world
+            .get::<engine_ecs::components::Lock>(entity)
+            .is_some()
+        {
+            return None;
+        }
+        inspector::transform_of(&self.world, entity)?;
+        Some(hierarchy::world_transform(&self.world, entity).translation)
     }
 
     /// Turns a clicked Problems-tab row (`problem_selected`) into a
@@ -845,6 +1377,40 @@ impl EditorState {
             .map(|transform| transform.0)
             .collect()
     }
+}
+
+/// A bounding sphere around `roots` and all their descendants, from world
+/// positions plus a per-object size (sprite size, else largest scale axis).
+fn selection_bounds(
+    world: &engine_ecs::prelude::World,
+    roots: &[engine_ecs::prelude::Entity],
+) -> Option<(Vec3, f32)> {
+    use engine_ecs::prelude::Children;
+
+    let mut objects = Vec::new();
+    let mut stack = roots.to_vec();
+    while let Some(entity) = stack.pop() {
+        if world.get_entity(entity).is_err() || objects.len() >= 10_000 {
+            continue;
+        }
+        let transform = hierarchy::world_transform(world, entity);
+        let extent = world
+            .get::<engine_ecs::components::SpriteSource>(entity)
+            .map_or(1.0, |sprite| sprite.size[0].max(sprite.size[1]) * 0.5);
+        let radius = extent * transform.scale.max_element().abs();
+        objects.push((transform.translation, radius));
+        if let Some(children) = world.get::<Children>(entity) {
+            stack.extend(children.iter());
+        }
+    }
+    let first = objects.first()?;
+    let (mut min, mut max) = (first.0, first.0);
+    for (position, radius) in &objects {
+        min = min.min(*position - Vec3::splat(*radius));
+        max = max.max(*position + Vec3::splat(*radius));
+    }
+    let center = (min + max) * 0.5;
+    Some((center, (max - min).length() * 0.5))
 }
 
 #[cfg(test)]
@@ -884,6 +1450,111 @@ mod tests {
     }
 
     #[test]
+    fn solid_tile_brush_saves_a_fixed_cell_collider() {
+        use engine_ecs::prelude::Children;
+        use engine_scene::{
+            AssetRef, BodyKind, ColliderShape, SceneCollider, SceneTilemap, TilemapData,
+        };
+
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let parent = hierarchy::spawn_entity(&mut state.world, "Tilemap", Vec3::ZERO);
+        let mut map = TilemapData::new(AssetRef {
+            id: uuid::Uuid::new_v4().to_string(),
+        });
+        map.cell_size = [2.0, 3.0];
+        map.brush_collision = true;
+        state.world.entity_mut(parent).insert(SceneTilemap(map));
+        state.select_only(parent);
+
+        assert!(state.paint_tile_cell(2, -1, false).unwrap());
+        let tile = state
+            .world
+            .get::<Children>(parent)
+            .unwrap()
+            .iter()
+            .next()
+            .copied()
+            .unwrap();
+        let collider = state.world.get::<SceneCollider>(tile).unwrap().0.clone();
+        assert_eq!(collider.body, BodyKind::Fixed);
+        assert_eq!(
+            collider.shape,
+            ColliderShape::Cuboid {
+                half_extents: [1.0, 1.5, 0.05]
+            }
+        );
+        state.save_scene().unwrap();
+        let saved = engine_scene::Scene::load_from_file(&state.scene_path).unwrap();
+        assert!(
+            saved
+                .entities
+                .iter()
+                .any(|entity| entity.name.as_deref() == Some("Tile (2, -1)")
+                    && entity.collider.as_ref() == Some(&collider))
+        );
+    }
+
+    #[test]
+    fn repainting_a_tile_changes_its_solid_state_without_duplicating_it() {
+        use engine_ecs::prelude::Children;
+        use engine_scene::{AssetRef, SceneCollider, SceneTilemap, TilemapData};
+
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let parent = hierarchy::spawn_entity(&mut state.world, "Tilemap", Vec3::ZERO);
+        let mut map = TilemapData::new(AssetRef {
+            id: uuid::Uuid::new_v4().to_string(),
+        });
+        map.brush_collision = true;
+        state.world.entity_mut(parent).insert(SceneTilemap(map));
+        state.select_only(parent);
+        assert!(state.paint_tile_cell(0, 0, false).unwrap());
+        let tile = state
+            .world
+            .get::<Children>(parent)
+            .unwrap()
+            .iter()
+            .next()
+            .copied()
+            .unwrap();
+
+        state
+            .world
+            .get_mut::<SceneTilemap>(parent)
+            .unwrap()
+            .0
+            .brush_collision = false;
+        assert!(state.paint_tile_cell(0, 0, false).unwrap());
+        assert!(state.world.get::<SceneCollider>(tile).is_none());
+        assert_eq!(state.world.get::<Children>(parent).unwrap().len(), 1);
+
+        state
+            .world
+            .get_mut::<SceneTilemap>(parent)
+            .unwrap()
+            .0
+            .brush_collision = true;
+        assert!(state.paint_tile_cell(0, 0, false).unwrap());
+        assert!(state.world.get::<SceneCollider>(tile).is_some());
+        assert_eq!(state.world.get::<Children>(parent).unwrap().len(), 1);
+
+        let custom = SceneCollider(engine_scene::ColliderData {
+            shape: engine_scene::ColliderShape::Ball { radius: 0.4 },
+            body: engine_scene::BodyKind::Dynamic,
+        });
+        state.world.entity_mut(tile).insert(custom.clone());
+        state
+            .world
+            .get_mut::<SceneTilemap>(parent)
+            .unwrap()
+            .0
+            .brush_collision = false;
+        assert!(!state.paint_tile_cell(0, 0, false).unwrap());
+        assert_eq!(state.world.get::<SceneCollider>(tile), Some(&custom));
+    }
+
+    #[test]
     fn asset_drag_builds_a_component_scene_that_round_trips() {
         use engine_asset::AssetId;
         use engine_ecs::components::{Camera, MeshSource};
@@ -920,6 +1591,137 @@ mod tests {
         assert!(names.iter(&reopened.world).any(|name| name.0 == "crate"));
         let mut meshes = reopened.world.query::<&MeshSource>();
         assert_eq!(meshes.iter(&reopened.world).count(), 1);
+    }
+
+    #[test]
+    fn dragging_texture_creates_an_authored_sprite() {
+        use engine_asset::AssetId;
+        use engine_ecs::components::{Sprite, SpriteSource};
+
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let path = PathBuf::from("sprites/hero.png");
+        let id = AssetId::new();
+        state.asset_index.insert(id, path.clone());
+
+        let entity = state.spawn_asset_entity(&path);
+        let source = state
+            .world
+            .get::<SpriteSource>(entity)
+            .expect("sprite source");
+        assert_eq!(source.atlas, id.to_string());
+        assert!(state.world.get::<Sprite>(entity).is_some());
+
+        state.save_scene().expect("save sprite scene");
+        let scene = engine_scene::Scene::load_from_file(&state.project.main_scene_path())
+            .expect("reload scene file");
+        assert_eq!(
+            scene.entities[0].sprite.as_ref().unwrap().atlas.id,
+            id.to_string()
+        );
+    }
+
+    #[test]
+    fn terrain_stroke_opens_only_an_authored_asset_inside_the_project() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let path =
+            crate::terrain_tools::write_new_terrain(&project.0.assets_dir(), &state.terrain_tools)
+                .unwrap();
+        let relative = path.strip_prefix(project.0.assets_dir()).unwrap();
+        state.assets = crate::scan_assets(&project.0.assets_dir()).unwrap();
+        state.asset_index = state
+            .importer
+            .run(&project.0.assets_dir(), &mut state.assets);
+        let entity = state.spawn_asset_entity(relative);
+        state.select_only(entity);
+
+        let stroke = state.begin_terrain_stroke().unwrap();
+        assert_eq!(stroke.entity, entity);
+        assert_eq!(stroke.heightmap.resolution(), 65);
+
+        state
+            .world
+            .entity_mut(entity)
+            .insert(AssetSource::new("../outside.gltf"));
+        assert!(state.begin_terrain_stroke().is_err());
+    }
+
+    #[test]
+    fn scatter_selected_model_creates_one_saved_instanced_foliage_group() {
+        use engine_asset::AssetId;
+
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let terrain_path =
+            crate::terrain_tools::write_new_terrain(&project.0.assets_dir(), &state.terrain_tools)
+                .unwrap();
+        let terrain_relative = terrain_path.strip_prefix(project.0.assets_dir()).unwrap();
+        state
+            .asset_index
+            .insert(AssetId::new(), terrain_relative.to_path_buf());
+        let terrain = state.spawn_asset_entity(terrain_relative);
+        state.select_only(terrain);
+
+        let model_relative = PathBuf::from("models/grass.gltf");
+        let model_path = project.0.assets_dir().join(&model_relative);
+        std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
+        std::fs::copy(&terrain_path, &model_path).unwrap();
+        let model_id = AssetId::new();
+        state.asset_index.insert(model_id, model_relative.clone());
+        state.selected_asset = Some(model_relative);
+
+        assert_eq!(state.scatter_selected_mesh_on_terrain().unwrap(), 256);
+        assert!(state.dirty.scene());
+        state.save_scene().unwrap();
+        let mut reopened = editor_state(&project);
+        reopened.load_scene().unwrap();
+        let mut foliage = reopened.world.query::<&engine_scene::SceneFoliage>();
+        let source = foliage.single(&reopened.world).unwrap();
+        assert_eq!(source.0.mesh.id, model_id.to_string());
+        assert_eq!(source.0.instances.len(), 256);
+        assert!(source.0.instances.iter().all(|pose| {
+            pose.translation[0].abs() <= 16.0
+                && pose.translation[1] == 0.0
+                && pose.translation[2].abs() <= 16.0
+        }));
+    }
+
+    #[test]
+    fn scatter_without_a_selected_model_does_not_mutate_the_scene() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        assert!(state.scatter_selected_mesh_on_terrain().is_err());
+        assert!(!state.dirty.scene());
+        assert!(
+            state
+                .world
+                .query::<&engine_scene::SceneFoliage>()
+                .iter(&state.world)
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn finished_terrain_stroke_is_discarded_after_selection_changes() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let first = state.world.spawn_empty().id();
+        let second = state.world.spawn_empty().id();
+        state.select_only(first);
+        state.terrain_stroke = Some(TerrainStroke {
+            entity: first,
+            relative_model: PathBuf::from("terrain/Terrain.gltf"),
+            heightmap: engine_renderer::Heightmap::new(9, 8.0).unwrap(),
+            centers: vec![glam::Vec2::ZERO],
+        });
+        state.select_only(second);
+
+        state.finish_terrain_stroke();
+
+        assert!(state.terrain_stroke.is_none());
+        assert!(state.terrain_sculpt_request.is_none());
     }
 
     #[test]
@@ -1011,13 +1813,121 @@ mod tests {
         assert!(state.dirty.any());
         state
             .history
-            .undo(&mut state.world, &mut state.selected_entity);
+            .undo(&mut state.world, &mut state.selected_entity)
+            .expect("history");
         assert!(
             !state
                 .world
                 .query::<&Name>()
                 .iter(&state.world)
                 .any(|name| name.0 == "Tool Cube")
+        );
+    }
+
+    #[test]
+    fn ambient_sounds_are_added_from_the_selected_sound_once() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        assert!(
+            state.add_ambient_sound_from_selection().is_err(),
+            "nothing selected"
+        );
+        let wind = std::path::PathBuf::from("audio/wind.wav");
+        state
+            .asset_index
+            .insert(engine_asset::AssetId::new(), wind.clone());
+        state.selected_asset = Some(wind);
+        state.add_ambient_sound_from_selection().expect("added");
+        assert_eq!(state.environment().ambient_sounds.len(), 1);
+        assert!(state.dirty.any());
+        assert!(
+            state.add_ambient_sound_from_selection().is_err(),
+            "no duplicates"
+        );
+
+        let image = std::path::PathBuf::from("sprites/tree.png");
+        state
+            .asset_index
+            .insert(engine_asset::AssetId::new(), image.clone());
+        state.selected_asset = Some(image);
+        assert!(
+            state.add_ambient_sound_from_selection().is_err(),
+            "images are not sounds"
+        );
+
+        state.set_environment(engine_scene::EnvironmentData::default());
+        assert!(
+            state
+                .world
+                .get_resource::<engine_scene::SceneEnvironment>()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn holding_space_gives_a_temporary_hand_tool() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        assert_eq!(state.active_view_tool(), crate::ViewTool::Select);
+        state.temporary_hand = true;
+        assert_eq!(state.active_view_tool(), crate::ViewTool::Hand);
+        state.temporary_hand = false;
+        assert_eq!(
+            state.active_view_tool(),
+            crate::ViewTool::Select,
+            "release returns"
+        );
+        state.view_tool = crate::ViewTool::Hand;
+        assert_eq!(state.active_view_tool(), crate::ViewTool::Hand);
+    }
+
+    #[test]
+    fn a_locked_selection_shows_no_gizmo() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let entity = hierarchy::spawn_entity(&mut state.world, "Terrain", Vec3::ZERO);
+        state.select_only(entity);
+        assert!(state.gizmo_origin().is_some());
+        state
+            .world
+            .entity_mut(entity)
+            .insert(engine_ecs::components::Lock);
+        assert!(state.gizmo_origin().is_none());
+    }
+
+    #[test]
+    fn frame_selection_fits_the_selected_object_and_its_children() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        assert!(!state.frame_selection(), "nothing selected");
+        let parent = hierarchy::spawn_entity(&mut state.world, "Parent", Vec3::new(10.0, 0.0, 0.0));
+        let child = hierarchy::spawn_entity(&mut state.world, "Child", Vec3::new(6.0, 0.0, 0.0));
+        state
+            .world
+            .entity_mut(child)
+            .insert(engine_ecs::prelude::ChildOf(parent));
+        state.select_only(parent);
+
+        assert!(state.frame_selection());
+        assert_eq!(
+            state.scene_camera().focus,
+            Vec3::ZERO,
+            "framing glides, not jumps"
+        );
+        while state.scene_cameras.advance_glide(false, 0.05) {}
+        let camera = *state.scene_camera();
+        assert!(
+            (camera.focus - Vec3::new(13.0, 0.0, 0.0)).length() < 1e-3,
+            "{}",
+            camera.focus
+        );
+        let wide = camera.distance;
+        state.select_only(child);
+        assert!(state.frame_selection());
+        while state.scene_cameras.advance_glide(false, 0.05) {}
+        assert!(
+            state.scene_camera().distance < wide,
+            "a single object frames closer"
         );
     }
 
@@ -1264,6 +2174,7 @@ mod tests {
             configuration_index: 99,
             overlays: crate::OverlayToggles::default(),
             last_scene: None,
+            ..EditorSession::default()
         };
         state.apply_session(session);
 
@@ -1306,6 +2217,7 @@ mod tests {
             configuration_index: 0,
             overlays: crate::OverlayToggles::default(),
             last_scene: Some(PathBuf::from("scenes/main.ron")),
+            ..EditorSession::default()
         };
         state.apply_session(session);
 
@@ -1328,6 +2240,7 @@ mod tests {
             configuration_index: 0,
             overlays: crate::OverlayToggles::default(),
             last_scene: Some(PathBuf::from("scenes/does_not_exist.ron")),
+            ..EditorSession::default()
         };
         state.apply_session(session);
 
@@ -1339,6 +2252,100 @@ mod tests {
 
     fn spawn_named(state: &mut EditorState, name: &str) -> Entity {
         state.world.spawn(Name::new(name)).id()
+    }
+
+    #[test]
+    fn opening_settings_measures_storage_with_the_limits_off() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        assert!(
+            !state.settings.storage.automatic,
+            "automatic cleanup starts off"
+        );
+        let root = state.project.root().to_path_buf();
+        state.storage.opened(&root);
+        assert!(
+            state.storage.take_save_needed(),
+            "the ledger is written after an open"
+        );
+        crate::menu::MenuCommand::OpenSettings.apply(&mut state);
+        assert!(state.settings_open);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while state.storage.measured.is_none() && std::time::Instant::now() < deadline {
+            state.tick_storage();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let measured = state
+            .storage
+            .measured
+            .as_ref()
+            .expect("measured in the background");
+        assert_eq!(
+            measured.len(),
+            1,
+            "only projects Studio opened are looked at"
+        );
+        assert!(!state.storage.busy);
+    }
+
+    #[test]
+    fn grouping_the_selection_is_one_undoable_step() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let a = crate::hierarchy::spawn_entity(&mut state.world, "Rock A", glam::Vec3::ZERO);
+        let b = crate::hierarchy::spawn_entity(&mut state.world, "Rock B", glam::Vec3::X);
+        state
+            .history
+            .settle(&mut state.world, state.selected_entity);
+        let names = |state: &mut EditorState| {
+            let mut names: Vec<String> = crate::hierarchy::roots(&mut state.world)
+                .into_iter()
+                .map(|entity| crate::hierarchy::display_name(&state.world, entity))
+                .collect();
+            names.sort();
+            names
+        };
+
+        state.select_only(a);
+        state.select_toggle(b);
+        state
+            .history
+            .begin_frame(&mut state.world, state.selected_entity);
+        assert!(state.group_selection());
+        let group = state.selected_entity.expect("the group is selected");
+        assert_eq!(names(&mut state), ["Group"]);
+        assert!(
+            state
+                .world
+                .get::<Name>(group)
+                .is_some_and(|name| name.0 == "Group"),
+            "the new group is selected, ready to rename"
+        );
+        assert!(
+            state
+                .history
+                .settle(&mut state.world, state.selected_entity)
+        );
+
+        state
+            .history
+            .undo(&mut state.world, &mut state.selected_entity)
+            .expect("history");
+        assert_eq!(names(&mut state), ["Rock A", "Rock B"]);
+
+        state
+            .history
+            .redo(&mut state.world, &mut state.selected_entity)
+            .expect("history");
+        let group = crate::hierarchy::roots(&mut state.world)[0];
+        state.select_only(group);
+        assert!(state.ungroup_selection());
+        assert_eq!(state.selection_len(), 2, "the freed objects are selected");
+        assert_eq!(names(&mut state), ["Rock A", "Rock B"]);
+        assert!(
+            !state.ungroup_selection(),
+            "plain objects cannot be ungrouped"
+        );
     }
 
     #[test]

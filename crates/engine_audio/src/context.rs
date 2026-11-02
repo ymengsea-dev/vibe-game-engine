@@ -23,6 +23,18 @@ use crate::sound::{StaticSound, StreamingSound};
 /// counterpart, `engine_renderer::GpuContext`, relies on).
 pub struct AudioContext {
     manager: AudioManager<DefaultBackend>,
+    /// The master volume the game asked for, restored on unmute.
+    master_volume: f32,
+    muted: bool,
+}
+
+fn spatial_distance_range(radius: f32) -> (f32, f32) {
+    let radius = if radius.is_finite() {
+        radius.max(0.001)
+    } else {
+        100.0
+    };
+    (if radius > 1.0 { 1.0 } else { 0.0 }, radius)
 }
 
 impl AudioContext {
@@ -37,7 +49,11 @@ impl AudioContext {
     pub fn new() -> Result<Self, AudioError> {
         let manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
             .map_err(|err| AudioError::Init(err.to_string()))?;
-        Ok(Self { manager })
+        Ok(Self {
+            manager,
+            master_volume: 0.0,
+            muted: false,
+        })
     }
 
     /// Shared access to the underlying kira manager — for querying state
@@ -122,8 +138,23 @@ impl AudioContext {
         listener: &ListenerHandle,
         position: Vec3,
     ) -> Result<SpatialTrackHandle, AudioError> {
+        self.add_spatial_track_with_radius(listener, position, 100.0)
+    }
+
+    /// Creates a spatial track that fades to silence at `radius` world units.
+    /// A zero radius is treated as a near-point sound to keep the mixer range valid.
+    pub fn add_spatial_track_with_radius(
+        &mut self,
+        listener: &ListenerHandle,
+        position: Vec3,
+        radius: f32,
+    ) -> Result<SpatialTrackHandle, AudioError> {
         self.manager
-            .add_spatial_sub_track(listener, position, SpatialTrackBuilder::default())
+            .add_spatial_sub_track(
+                listener,
+                position,
+                SpatialTrackBuilder::default().distances(spatial_distance_range(radius)),
+            )
             .map_err(|err| AudioError::ResourceLimit(err.to_string()))
     }
 
@@ -149,7 +180,31 @@ impl AudioContext {
     /// sound, however it's routed (main output directly, a [`Bus`], or a
     /// spatial track). See [`Bus::set_volume`] for what `tween` does.
     pub fn set_master_volume(&mut self, volume_decibels: f32, tween: Tween) {
-        self.manager.main_track().set_volume(volume_decibels, tween);
+        self.master_volume = volume_decibels;
+        if !self.muted {
+            self.manager.main_track().set_volume(volume_decibels, tween);
+        }
+    }
+
+    /// Silences every sound without stopping it (for a paused preview),
+    /// or restores the master volume last set with
+    /// [`AudioContext::set_master_volume`]. Sounds keep their place, so
+    /// unmuting continues them where they are.
+    pub fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+        let volume = if muted {
+            kira::Decibels::SILENCE.0
+        } else {
+            self.master_volume
+        };
+        self.manager
+            .main_track()
+            .set_volume(volume, Tween::default());
+    }
+
+    /// Whether [`AudioContext::set_muted`] silenced the output.
+    pub fn is_muted(&self) -> bool {
+        self.muted
     }
 }
 
@@ -231,6 +286,14 @@ mod tests {
         let listener = context.add_listener(Vec3::ZERO, Quat::IDENTITY).unwrap();
         let track = context.add_spatial_track(&listener, Vec3::new(5.0, 0.0, 0.0));
         assert!(track.is_ok());
+    }
+
+    #[test]
+    fn authored_radius_becomes_spatial_silence_distance() {
+        assert_eq!(spatial_distance_range(12.5), (1.0, 12.5));
+        assert_eq!(spatial_distance_range(0.5), (0.0, 0.5));
+        assert_eq!(spatial_distance_range(0.0), (0.0, 0.001));
+        assert_eq!(spatial_distance_range(f32::NAN), (1.0, 100.0));
     }
 
     #[test]

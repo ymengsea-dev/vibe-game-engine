@@ -82,8 +82,10 @@ pub enum PlatformEvent {
 /// for events this engine doesn't surface (yet).
 ///
 /// Pulled out as a pure function (no event loop involved) so the mapping
-/// is unit-testable without spinning up a real OS window.
-pub(crate) fn map_window_event(event: &winit::event::WindowEvent) -> Option<PlatformEvent> {
+/// is unit-testable without spinning up a real OS window. Public so Studio
+/// can forward its own window's input to a game playing in its Scene View
+/// with exactly the translation a game window applies.
+pub fn map_window_event(event: &winit::event::WindowEvent) -> Option<PlatformEvent> {
     use winit::event::WindowEvent as WE;
 
     match event {

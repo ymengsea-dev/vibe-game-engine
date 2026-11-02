@@ -255,11 +255,22 @@ impl Game for Island {
             .validate()
             .map_err(|err| GameError::Setup(format!("scene is invalid: {err}")))?;
 
+        // Scene-wide ambience (the island's wind) plays flat on its own bus.
+        let ambient_bus = ctx.add_bus(0.0);
         let report = {
             let parts = ctx.scene_parts();
             let mut resolver =
                 RuntimeResolver::new(&library, parts.gpu, parts.pipeline, parts.assets);
-            scene.instantiate_with_resolver(parts.world, &mut resolver)
+            let report = scene.instantiate_with_resolver(parts.world, &mut resolver);
+            if let Some(bus) = ambient_bus {
+                engine::scene::spawn_ambient_sounds(
+                    &scene.environment,
+                    parts.world,
+                    &mut resolver,
+                    bus,
+                );
+            }
+            report
         };
         if report.unresolved > 0 {
             // Not fatal — the rest of the island still loads — but a

@@ -188,11 +188,11 @@ fn sparkline(ui: &mut egui::Ui, profiler: &FrameProfiler) {
         );
         // Green under 16.7 ms (60 FPS), amber to 33 ms, red beyond.
         let color = if total_ms < 16.7 {
-            egui::Color32::from_rgb(80, 200, 120)
+            crate::theme::NIGHT.success
         } else if total_ms < 33.3 {
-            egui::Color32::from_rgb(230, 190, 90)
+            crate::theme::NIGHT.highlight
         } else {
-            egui::Color32::from_rgb(220, 90, 90)
+            crate::theme::NIGHT.danger
         };
         painter.rect_filled(bar, 0.0, color);
     }

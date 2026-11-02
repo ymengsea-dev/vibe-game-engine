@@ -50,6 +50,9 @@ pub fn capture_renderables(
             material: AssetRef {
                 id: source.material.clone(),
             },
+            material_override: world
+                .get::<crate::SceneMaterialOverride>(entity)
+                .map(|override_data| override_data.0.clone()),
         });
 
     let sprite = world.get::<SpriteSource>(entity).map(|source| {
@@ -62,6 +65,9 @@ pub fn capture_renderables(
             size: live.map_or(source.size, |sprite| sprite.size.to_array()),
             color: live.map_or(source.color, |sprite| sprite.color),
             z_order: live.map_or(source.z_order, |sprite| sprite.z_order),
+            animation: world
+                .get::<crate::SceneSpriteAnimation>(entity)
+                .map(|animation| animation.data),
         }
     });
 

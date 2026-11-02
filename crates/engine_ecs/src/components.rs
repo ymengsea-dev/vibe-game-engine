@@ -579,14 +579,14 @@ pub struct AssetSource {
     pub id: Option<String>,
 }
 
-/// A project-relative Rust script attached to an entity.
+/// A project-relative Rust or Lua script attached to an entity.
 ///
-/// The editor owns script discovery and compilation; the component is kept
+/// The editor/player own script discovery and execution; the component is kept
 /// deliberately small so scenes can carry the authoring reference without
 /// pulling a scripting runtime into the core ECS.
 #[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
 pub struct Script {
-    /// Path relative to the project root (normally under `src/`).
+    /// Path relative to the project root (`src/*.rs` or `assets/scripts/*.lua`).
     pub path: String,
 }
 
@@ -664,7 +664,8 @@ impl MeshSource {
 pub struct SpriteSource {
     /// Canonical UUID text of the atlas texture asset.
     pub atlas: String,
-    /// The named (or gridded, e.g. `"0_0"`) region within the atlas.
+    /// `full`, a legacy full-image name, or
+    /// `grid:columns,rows:column,row` for one sheet cell.
     pub region: String,
     /// World-space width/height as stored on disk.
     pub size: [f32; 2],

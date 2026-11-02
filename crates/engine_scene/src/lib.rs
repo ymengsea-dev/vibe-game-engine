@@ -24,31 +24,51 @@
 //! a live `World` any number of times.
 
 mod capture;
+mod environment;
 mod error;
 mod format;
 mod io;
 mod migration;
 mod prefab;
 mod resolve;
+mod rules;
 mod runtime;
 mod save;
+mod sprite_atlas;
+mod ui;
 mod validate;
 mod world;
 
 pub use capture::capture_renderables;
+pub use environment::{AmbientSound, spawn_ambient_sounds};
 pub use error::SceneError;
 pub use format::{
-    AssetRef, AudioEmitterData, BodyKind, CameraData, ColliderData, ColliderShape,
-    MeshRendererData, NavGridData, ProjectionData, Scene, SceneAudioEmitter, SceneCollider,
-    SceneEntity, SceneNavGrid, SiblingOrder, SpriteData, TransformData,
+    AmbientSoundData, AppliedMaterialOverride, AssetRef, AudioEmitterData, BodyKind, CameraData,
+    ColliderData, ColliderShape, EnvironmentData, FoliageData, LightingData, MaterialOverrideData,
+    MeshRendererData, NavGridData, PointLightData, ProjectionData, RuleAction, RuleCompare,
+    RuleCondition, RuleData, RuleTrigger, Scene, SceneAudioEmitter, SceneCollider, SceneEntity,
+    SceneEnvironment, SceneFoliage, SceneLighting, SceneMaterialOverride, SceneNavGrid,
+    SceneObjectId, ScenePointLight, SceneRules, SceneSpriteAnimation, SceneTilemap, SceneUi,
+    SiblingOrder, SpriteAnimationData, SpriteData, TilemapData, TransformData, UiAnchor,
+    UiElementData, UiKind, WaterData,
 };
 pub use io::write_atomic;
 pub use migration::CURRENT_SCENE_VERSION;
 pub use prefab::Prefab;
 pub use resolve::{InstantiateReport, NullResolver, SceneResolver};
+pub use rules::{
+    RuleEvent, RuleVariableError, RuleVariables, expand_variables, format_variable,
+    valid_variable_name,
+};
 pub use runtime::{
     AssetLibrary, BUNDLE_FILE, EXPORT_SCENE_FILE, ExportContent, LoadedSkinnedMesh, MeshGeometry,
     RuntimeResolver, executable_dir, load_mesh_geometry, load_skinned_mesh, material_from_imported,
     open_export,
 };
 pub use save::{CURRENT_SAVE_VERSION, SaveGame, SavedEntity, WorldSnapshot};
+pub use sprite_atlas::{
+    GridRegion, PackedSpriteAtlas, advance_sprite_animations, apply_packed_sprite_uvs,
+    next_sprite_animation_frame, pack_sprite_textures, pack_world_sprite_atlas,
+};
+pub use ui::set_authored_ui_text;
+pub use world::point_lights_from_world;

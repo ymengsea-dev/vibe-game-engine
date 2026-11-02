@@ -5,6 +5,7 @@
 //! Restored on project open: the active [`Workspace`], the current
 //! [`PanelVisibility`], and the last scene that was open.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,14 @@ pub struct EditorSession {
     /// session loads with them all off.
     #[serde(default)]
     pub overlays: OverlayToggles,
+    /// Hierarchy rows the user unfolded, by stable object id. Everything
+    /// else starts folded. Additive.
+    #[serde(default)]
+    pub hierarchy_open: BTreeSet<String>,
+    /// Asset folders the user unfolded, relative to `assets/` (empty is
+    /// the `assets` root itself). Everything else starts folded. Additive.
+    #[serde(default)]
+    pub asset_folders_open: BTreeSet<PathBuf>,
 }
 
 impl Default for EditorSession {
@@ -69,6 +78,8 @@ impl Default for EditorSession {
             preview_open: true,
             configuration_index: 0,
             overlays: OverlayToggles::default(),
+            hierarchy_open: BTreeSet::new(),
+            asset_folders_open: BTreeSet::new(),
         }
     }
 }
@@ -177,6 +188,8 @@ mod tests {
                 ..PanelVisibility::default()
             },
             last_scene: Some(PathBuf::from("scenes/level2.ron")),
+            hierarchy_open: BTreeSet::from(["4ba9d28d-97bf-41b2-a670-97eaac2bc149".to_owned()]),
+            asset_folders_open: BTreeSet::from([PathBuf::new(), PathBuf::from("models/trees")]),
             ..EditorSession::default()
         };
 

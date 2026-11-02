@@ -263,6 +263,7 @@ pub enum FocusDirection {
 pub struct Ui {
     nodes: Vec<Node>,
     root: Option<NodeId>,
+    screen_root: Option<NodeId>,
     screen: [f32; 2],
     /// The node a pointer press started over, tracked so a release only
     /// counts as a click if it lands on the same node.
@@ -321,6 +322,7 @@ impl Ui {
         Self {
             nodes: Vec::new(),
             root: None,
+            screen_root: None,
             screen: [width.max(0.0), height.max(0.0)],
             press_target: None,
             focus: None,
@@ -331,12 +333,16 @@ impl Ui {
     /// Updates the screen size used as the root node's parent rect.
     pub fn set_screen(&mut self, width: f32, height: f32) {
         self.screen = [width.max(0.0), height.max(0.0)];
+        if let Some(root) = self.screen_root {
+            self.nodes[root].style.size = self.screen;
+        }
     }
 
     /// Removes every node. Existing [`NodeId`]s become invalid.
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.root = None;
+        self.screen_root = None;
         self.press_target = None;
         // Ids are about to be reused by the next tree; keeping the old
         // one would focus an unrelated node.
@@ -374,6 +380,29 @@ impl Ui {
             None => self.root = Some(id),
         }
         id
+    }
+
+    /// Adds a screen-anchored element. Call before any regular root is added;
+    /// the first call creates a transparent full-screen parent that follows resize.
+    pub fn add_screen(&mut self, style: Style, widget: Widget) -> NodeId {
+        let root = match self.screen_root {
+            Some(root) => root,
+            None => {
+                let root = self.add(
+                    None,
+                    Style {
+                        size: self.screen,
+                        ..Style::default()
+                    },
+                    Widget::Panel {
+                        color: Color::TRANSPARENT,
+                    },
+                );
+                self.screen_root = Some(root);
+                root
+            }
+        };
+        self.add(Some(root), style, widget)
     }
 
     /// This node's laid-out rectangle (valid after [`Ui::layout`]).
@@ -799,6 +828,37 @@ mod tests {
             bg: Color::rgb(0.2, 0.2, 0.2),
             hot_bg: Color::rgb(0.4, 0.4, 0.4),
         }
+    }
+
+    #[test]
+    fn screen_elements_anchor_independently_and_follow_resize() {
+        let mut ui = Ui::new(200.0, 100.0);
+        let left = ui.add_screen(
+            Style {
+                anchor: Anchor::TopLeft,
+                offset: [10.0, 10.0],
+                size: [20.0, 10.0],
+            },
+            button(),
+        );
+        let right = ui.add_screen(
+            Style {
+                anchor: Anchor::TopRight,
+                offset: [-10.0, 10.0],
+                size: [20.0, 10.0],
+            },
+            button(),
+        );
+        ui.layout();
+        assert_eq!(ui.rect_of(left).unwrap().x, 10.0);
+        assert_eq!(ui.rect_of(right).unwrap().x, 170.0);
+        assert_eq!(ui.focusables(), vec![left, right]);
+
+        ui.set_screen(400.0, 100.0);
+        ui.layout();
+        assert_eq!(ui.rect_of(left).unwrap().x, 10.0);
+        assert_eq!(ui.rect_of(right).unwrap().x, 370.0);
+        assert_eq!(ui.hit([375.0, 15.0]), Some(right));
     }
 
     /// Four buttons in a plus shape around (100, 100), each 40x20:

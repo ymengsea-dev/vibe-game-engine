@@ -11,20 +11,7 @@ const BUNDLE_NAME: &str = "RustyEngine Studio.app";
 const BUNDLED_MARKER: &str = "VGE_BUNDLED_LAUNCH";
 const ORIGINAL_CWD: &str = "VGE_ORIGINAL_CWD";
 const ICON: &[u8] = include_bytes!("../assets/app_logo.icns");
-const PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleDevelopmentRegion</key><string>en</string>
-<key>CFBundleExecutable</key><string>editor</string>
-<key>CFBundleIconFile</key><string>app_logo.icns</string>
-<key>CFBundleIdentifier</key><string>dev.vge.RustyEngineStudio</string>
-<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-<key>CFBundleName</key><string>RustyEngine Studio</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>NSHighResolutionCapable</key><true/>
-</dict></plist>
-"#;
+const PLIST: &str = include_str!("../assets/Info.plist");
 
 fn bundled_executable(path: &Path) -> bool {
     let components: Vec<_> = path.components().collect();
@@ -119,8 +106,22 @@ fn stage_bundle(binary: &Path) -> Result<PathBuf, Box<dyn Error>> {
         Err(err) => return Err(err.into()),
     }
 
-    let linked = macos.join("editor");
-    let marker = resources.join("editor.link-id");
+    link_managed_executable(binary, &macos, &resources, "editor")?;
+    let player = binary.with_file_name("player");
+    if player.is_file() {
+        link_managed_executable(&player, &macos, &resources, "player")?;
+    }
+    Ok(bundle)
+}
+
+fn link_managed_executable(
+    binary: &Path,
+    macos: &Path,
+    resources: &Path,
+    name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let linked = macos.join(name);
+    let marker = resources.join(format!("{name}.link-id"));
     let previous_link = match fs::symlink_metadata(&marker) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
             Some(fs::read_to_string(&marker)?)
@@ -168,7 +169,7 @@ fn stage_bundle(binary: &Path) -> Result<PathBuf, Box<dyn Error>> {
         &marker,
         format!("{}:{}", linked_metadata.dev(), linked_metadata.ino()),
     )?;
-    Ok(bundle)
+    Ok(())
 }
 
 fn launch_options(cwd: &Path, args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
@@ -220,6 +221,28 @@ pub fn relaunch_from_cargo_if_needed() -> Result<bool, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_bundle_includes_player_when_it_is_built() {
+        let root = std::env::temp_dir().join(format!(
+            "vge_bundle_player_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir(&root).expect("temp root");
+        let binary = root.join("editor");
+        fs::write(&binary, b"studio").expect("editor");
+        fs::write(root.join("player"), b"game player").expect("player");
+        let bundle = stage_bundle(&binary).expect("stage");
+        assert_eq!(
+            fs::read(bundle.join("Contents/MacOS/player")).expect("bundled player"),
+            b"game player"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn launch_context_keeps_spaces_and_relative_project_path() {

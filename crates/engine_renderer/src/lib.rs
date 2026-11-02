@@ -157,6 +157,7 @@ mod lod;
 mod material;
 mod mesh;
 mod model;
+mod offscreen;
 mod particle;
 mod pipeline;
 mod post;
@@ -192,6 +193,7 @@ pub use lod::{LodLevel, LodSelector, LodSet, StreamQueue};
 pub use material::{AlphaMode, Material, MaterialUniform};
 pub use mesh::{Mesh, Vertex, cube, quad};
 pub use model::ModelUniform;
+pub use offscreen::{CapturedFrame, OFFSCREEN_FORMAT, padded_bytes_per_row, unpad_rows};
 pub use particle::{
     ParticleCameraBinding, ParticleCameraUniform, ParticleFrame, ParticleInstance,
     ParticleInstanceBuffer, ParticlePipeline, ParticlePipelines,

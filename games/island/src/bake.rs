@@ -35,8 +35,8 @@ use engine::asset::{
     GltfScene, encode_png_rgba8, encode_wav_mono16, export_gltf, export_gltf_scene,
 };
 use engine::prelude::{
-    AssetRef, AudioEmitterData, BodyKind, ColliderData, ColliderShape, MeshRendererData, Scene,
-    SceneEntity, TransformData, Vertex,
+    AmbientSoundData, AssetRef, BodyKind, ColliderData, ColliderShape, EnvironmentData,
+    MeshRendererData, Scene, SceneEntity, TransformData, Vertex,
 };
 use engine::utils::Transform;
 use engine_project::Project;
@@ -223,9 +223,9 @@ pub fn bake(root: &Path) -> Result<BakeReport, BakeError> {
     })?;
     write_asset(&audio_dir.join("footstep.wav"), &wav)?;
 
-    // Ambience, authored into the scene rather than started by code: the
-    // wind is a thing that exists at a place in the level, which is
-    // exactly what an audio emitter is for.
+    // Ambience, authored into the scene rather than started by code. The
+    // wind is everywhere at once, so it is a scene environment setting,
+    // not an object placed in the level.
     let (rate, samples) = world::wind_samples();
     let wind_wav = encode_wav_mono16(rate, &samples).map_err(|err| BakeError::Encode {
         what: "wind.wav".to_string(),
@@ -273,6 +273,7 @@ impl BakedModel {
             material: AssetRef {
                 id: self.id.clone(),
             },
+            material_override: None,
         }
     }
 }
@@ -379,56 +380,49 @@ fn build_scene(
     rocks: &[BakedModel],
     wind_id: &str,
 ) -> Scene {
-    let mut entities = vec![
-        SceneEntity {
-            name: Some("Wind".to_string()),
-            transform: Some(TransformData::from(Transform::from_translation(
-                glam::Vec3::new(0.0, 6.0, 0.0),
-            ))),
-            // Looping ambience over the middle of the island. Data, not
-            // code: moving it or muting it is a scene edit.
-            audio_emitter: Some(AudioEmitterData {
-                sound: AssetRef {
-                    id: wind_id.to_string(),
+    let mut entities = vec![SceneEntity {
+        name: Some("Terrain".to_string()),
+        transform: Some(TransformData::from(Transform::IDENTITY)),
+        mesh_renderer: Some(terrain.renderer()),
+        is_static: true,
+        // Collide against the terrain model itself, not against a
+        // separately generated approximation: whatever the hills look
+        // like is what the player walks on.
+        collider: Some(ColliderData {
+            shape: ColliderShape::TriMesh {
+                mesh: AssetRef {
+                    id: terrain.id.clone(),
                 },
-                autoplay: true,
-                looping: true,
-                gain: 0.5,
-                radius: 60.0,
-            }),
-            ..Default::default()
-        },
-        SceneEntity {
-            name: Some("Terrain".to_string()),
-            transform: Some(TransformData::from(Transform::IDENTITY)),
-            mesh_renderer: Some(terrain.renderer()),
-            is_static: true,
-            // Collide against the terrain model itself, not against a
-            // separately generated approximation: whatever the hills look
-            // like is what the player walks on.
-            collider: Some(ColliderData {
-                shape: ColliderShape::TriMesh {
-                    mesh: AssetRef {
-                        id: terrain.id.clone(),
-                    },
-                },
-                body: BodyKind::Fixed,
-            }),
-            ..Default::default()
-        },
-    ];
+            },
+            body: BodyKind::Fixed,
+        }),
+        ..Default::default()
+    }];
 
+    // Props sit in "Trees" and "Rocks" groups so the Hierarchy stays short,
+    // and each tree's trunk and canopy share a "Tree NNN" group so moving a
+    // tree moves both. The group carries the placement; its parts sit at
+    // its origin.
+    let trees = entities.len();
+    entities.push(group("Trees", Transform::IDENTITY, None));
     for (index, placement) in world::scatter(TREE_SEED, TREE_COUNT, 0.5, 0.82)
         .into_iter()
         .enumerate()
     {
-        let transform = Some(TransformData::from(transform_of(placement)));
+        let tree = entities.len();
+        entities.push(group(
+            &format!("Tree {:03}", index + 1),
+            transform_of(placement),
+            Some(trees),
+        ));
+        let transform = Some(TransformData::from(Transform::IDENTITY));
         // Deterministic variant choice: the same scatter always dresses
         // the same tree with the same trunk, so a re-bake is a no-op
         // rather than a reshuffle.
         let variant = index % trunks.len();
         entities.push(SceneEntity {
             name: Some(format!("Tree {:03} Trunk", index + 1)),
+            parent: Some(tree),
             transform,
             mesh_renderer: Some(trunks[variant].renderer()),
             is_static: true,
@@ -443,6 +437,7 @@ fn build_scene(
         });
         entities.push(SceneEntity {
             name: Some(format!("Tree {:03} Canopy", index + 1)),
+            parent: Some(tree),
             transform,
             mesh_renderer: Some(canopies[variant].renderer()),
             is_static: true,
@@ -450,12 +445,15 @@ fn build_scene(
         });
     }
 
+    let rocks_group = entities.len();
+    entities.push(group("Rocks", Transform::IDENTITY, None));
     for (index, placement) in world::scatter(ROCK_SEED, ROCK_COUNT, 0.2, 0.6)
         .into_iter()
         .enumerate()
     {
         entities.push(SceneEntity {
             name: Some(format!("Rock {:03}", index + 1)),
+            parent: Some(rocks_group),
             transform: Some(TransformData::from(transform_of(placement))),
             mesh_renderer: Some(rocks[index % rocks.len()].renderer()),
             is_static: true,
@@ -471,6 +469,26 @@ fn build_scene(
 
     Scene {
         entities,
+        // Looping ambience everywhere on the island. Data, not code:
+        // muting it or changing it is a scene edit.
+        environment: EnvironmentData {
+            ambient_sounds: vec![AmbientSoundData {
+                sound: AssetRef {
+                    id: wind_id.to_string(),
+                },
+                gain: 0.5,
+            }],
+        },
+        ..Default::default()
+    }
+}
+
+/// An empty object that only holds others: Studio shows it as a folder.
+fn group(name: &str, transform: Transform, parent: Option<usize>) -> SceneEntity {
+    SceneEntity {
+        name: Some(name.to_string()),
+        parent,
+        transform: Some(TransformData::from(transform)),
         ..Default::default()
     }
 }
@@ -521,9 +539,66 @@ mod tests {
         assert_eq!(report.textures, 5);
         assert_eq!(report.models, 2 + TREE_VARIANTS * 2 + ROCK_VARIANTS);
         assert_eq!(report.audio, 2);
-        // The wind emitter, terrain, a trunk and a canopy per tree, and
-        // every rock.
-        assert_eq!(report.scene_entities, 2 + TREE_COUNT * 2 + ROCK_COUNT);
+        // Terrain; the Trees group with a group, trunk and canopy per tree;
+        // the Rocks group with every rock. The wind is scene environment
+        // ambience, not an object.
+        assert_eq!(
+            report.scene_entities,
+            1 + 1 + TREE_COUNT * 3 + 1 + ROCK_COUNT
+        );
+        let scene =
+            engine::prelude::Scene::load_from_file(&root.join("scenes/island.ron")).expect("scene");
+        assert_eq!(scene.environment.ambient_sounds.len(), 1, "wind ambience");
+        assert!(
+            scene
+                .entities
+                .iter()
+                .all(|entity| entity.name.as_deref() != Some("Wind"))
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Indices of the entities that are some other entity's parent.
+    fn group_indices(scene: &Scene) -> Vec<usize> {
+        scene
+            .entities
+            .iter()
+            .filter_map(|entity| entity.parent)
+            .collect()
+    }
+
+    #[test]
+    fn props_are_grouped_and_keep_their_places() {
+        let (root, _) = bake_into_temp("groups");
+        let scene = Scene::load_from_file(&root.join("scenes/island.ron")).expect("scene loads");
+        let named = |name: &str| {
+            scene
+                .entities
+                .iter()
+                .position(|entity| entity.name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("{name} is missing"))
+        };
+        let trees = named("Trees");
+        let rocks = named("Rocks");
+        assert_eq!(scene.entities[trees].parent, None);
+        assert_eq!(scene.entities[rocks].parent, None);
+        let tree = named("Tree 001");
+        assert_eq!(scene.entities[tree].parent, Some(trees));
+        for part in ["Tree 001 Trunk", "Tree 001 Canopy"] {
+            assert_eq!(scene.entities[named(part)].parent, Some(tree), "{part}");
+        }
+        assert_eq!(scene.entities[named("Rock 001")].parent, Some(rocks));
+
+        // The tree group carries the scattered placement, so the trunk
+        // still stands exactly where the scatter put it.
+        let placement = world::scatter(TREE_SEED, TREE_COUNT, 0.5, 0.82)[0];
+        let expected = transform_of(placement).translation;
+        let group_at = scene.entities[tree]
+            .transform
+            .map(|transform| Transform::from(transform).translation);
+        assert_eq!(group_at, Some(expected));
+        scene.validate().expect("a grouped scene is valid");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -586,10 +661,14 @@ mod tests {
             }
         }
 
-        for entity in &scene.entities {
-            // Not every entity is a prop: the wind is a sound at a
-            // place. Whatever kind of asset an entity names, the asset
-            // has to exist.
+        let groups = group_indices(&scene);
+        for (index, entity) in scene.entities.iter().enumerate() {
+            // Not every entity is a prop: groups only hold others.
+            // Whatever kind of asset an entity names, the asset has to
+            // exist.
+            if groups.contains(&index) {
+                continue;
+            }
             if let Some(renderer) = entity.mesh_renderer.as_ref() {
                 assert!(
                     known.contains(&renderer.mesh.id),
@@ -647,10 +726,14 @@ mod tests {
             .count();
         assert_eq!(trunks, TREE_COUNT);
 
-        for entity in &scene.entities {
+        let groups = group_indices(&scene);
+        for (index, entity) in scene.entities.iter().enumerate() {
             let Some(name) = entity.name.as_deref() else {
                 continue;
             };
+            if groups.contains(&index) {
+                continue;
+            }
             // An emitter is not a prop — there is nothing to walk into.
             if entity.mesh_renderer.is_none() {
                 assert!(
@@ -715,15 +798,17 @@ mod tests {
 
         let scene = Scene::load_from_file(&root.join("scenes/island.ron")).expect("scene loads");
         assert_eq!(scene.entities.len(), report.scene_entities);
-        for entity in &scene.entities {
-            // Audio emitters are scene entities too, but intentionally have
-            // no mesh. The runtime loads their sound reference through the
-            // same indexed project, so only renderable entities need a mesh
-            // lookup here.
+        let groups = group_indices(&scene);
+        for (index, entity) in scene.entities.iter().enumerate() {
+            // Groups and audio emitters are scene entities too, but
+            // intentionally have no mesh. The runtime loads a sound through
+            // the same indexed project, so only renderable entities need a
+            // mesh lookup here.
             let Some(renderer) = entity.mesh_renderer.as_ref() else {
                 assert!(
-                    entity.audio_emitter.is_some(),
-                    "entity has no renderable or audio data"
+                    groups.contains(&index) || entity.audio_emitter.is_some(),
+                    "{:?} has no renderable or audio data",
+                    entity.name
                 );
                 continue;
             };

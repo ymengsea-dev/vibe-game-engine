@@ -168,6 +168,34 @@ impl TransformSpace {
     }
 }
 
+/// What a plain left-click or left-drag does in the Scene View.
+///
+/// Kept to two tools, as in Figma. Rotating (⌘ + drag) and zooming (pinch,
+/// scroll wheel) work with either tool, so they need no tool of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewTool {
+    /// Click selects objects; dragging a gizmo handle edits the selection.
+    #[default]
+    Select,
+    /// Drag slides the view; ⌘ + drag rotates it.
+    Hand,
+}
+
+impl ViewTool {
+    /// Every tool, in toolbar order.
+    pub const ALL: [ViewTool; 2] = [ViewTool::Select, ViewTool::Hand];
+
+    /// Tooltip text for the toolbar button.
+    pub fn tooltip(self) -> &'static str {
+        match self {
+            ViewTool::Select => "Select (V): click to select objects and drag their handles",
+            ViewTool::Hand => {
+                "Hand (H, or hold Space): drag to move the view, ⌘ + drag to rotate it"
+            }
+        }
+    }
+}
+
 /// Whether the editor is authoring in 3D (perspective viewport, X/Y/Z
 /// gizmo) or 2D (orthographic front view, gizmo constrained to the
 /// screen plane — translate/scale in X-Y, rotate about Z).

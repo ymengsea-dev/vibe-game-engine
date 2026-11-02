@@ -11,13 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::assets;
-use crate::chrome::{BottomTab, TransformSpace, Workspace};
+use crate::chrome::{BottomTab, TransformSpace, ViewTool, Workspace};
 use crate::console;
 use crate::diagnostics;
 use crate::dirty::PendingAction;
 #[cfg(feature = "dock-shell")]
 use crate::dock;
-use crate::gizmo::{self, Axis, GizmoMode};
+use crate::gizmo::{self, Axis, GizmoHandle};
 use crate::hierarchy;
 use crate::inspector;
 use crate::menu::{MenuCommand, MenuEffect, Overlay, Panel};
@@ -30,16 +30,19 @@ const STUDIO_HEADER_HEIGHT: f32 = 36.0;
 const STUDIO_STATUS_HEIGHT: f32 = 24.0;
 const PANEL_HEADER_HEIGHT: f32 = 30.0;
 
+/// The frame every Studio panel sits in: a soft card on the darker window
+/// surface (see `docs/dev/04_UI_STYLE.md`).
 fn studio_panel_frame() -> egui::Frame {
+    let palette = crate::theme::NIGHT;
     egui::Frame::NONE
-        .fill(crate::theme::PANEL_FILL)
-        .stroke(egui::Stroke::new(1.0, crate::theme::BORDER))
-        .corner_radius(egui::CornerRadius::same(9))
+        .fill(palette.panel)
+        .stroke(egui::Stroke::new(1.0, palette.border))
+        .corner_radius(egui::CornerRadius::same(10))
         .outer_margin(egui::Margin::same(3))
 }
 
 fn shell_clear_color(surface_format: wgpu::TextureFormat) -> wgpu::Color {
-    let shell = crate::theme::SHELL_FILL;
+    let shell = crate::theme::NIGHT.shell;
     if surface_format.is_srgb() {
         let [r, g, b, _] = egui::Rgba::from(shell).to_array();
         wgpu::Color {
@@ -133,10 +136,22 @@ pub struct EditorShell {
     dock: dock::Host,
 }
 
-#[derive(Default)]
 struct NewProjectDialog {
     name: String,
     error: Option<String>,
+    language: engine_project::GameplayLanguage,
+    template: engine_project::ProjectTemplate,
+}
+
+impl Default for NewProjectDialog {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            error: None,
+            language: engine_project::GameplayLanguage::Lua,
+            template: engine_project::ProjectTemplate::Blank,
+        }
+    }
 }
 
 impl EditorShell {
@@ -279,7 +294,7 @@ impl EditorShell {
                 .show_separator_line(false)
                 .frame(
                     egui::Frame::NONE
-                        .fill(crate::theme::BAR_FILL)
+                        .fill(crate::theme::NIGHT.shell)
                         .inner_margin(egui::Margin::symmetric(14, 0)),
                 )
                 .show(ui, |ui| {
@@ -291,7 +306,7 @@ impl EditorShell {
                 .show_separator_line(false)
                 .frame(
                     egui::Frame::NONE
-                        .fill(crate::theme::BAR_FILL)
+                        .fill(crate::theme::NIGHT.shell)
                         .inner_margin(egui::Margin::symmetric(14, 0)),
                 )
                 .show(ui, |ui| {
@@ -424,7 +439,7 @@ impl EditorShell {
                     // native view).
                     state.code_panel_visible = code_webview_visible(
                         state.code_panel_rect.is_some(),
-                        state.pending_action.is_some(),
+                        state.pending_action.is_some() || state.sdk_upgrade_message.is_some(),
                         ui.ctx().any_popup_open(),
                     );
 
@@ -456,6 +471,8 @@ impl EditorShell {
             }
             unsaved_changes_modal(ui, state);
             new_project_modal(ui, state, &mut self.new_project);
+            sdk_upgrade_message_modal(ui, state);
+            crate::settings_window::show(ui.ctx(), state);
         });
 
         // Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redo.
@@ -472,6 +489,48 @@ impl EditorShell {
             MenuCommand::Undo.apply(state);
         } else if redo_pressed {
             MenuCommand::Redo.apply(state);
+        }
+
+        // Cmd+, opens Settings, as in every Mac app.
+        if self
+            .context
+            .input(|input| input.modifiers.command && input.key_pressed(egui::Key::Comma))
+        {
+            MenuCommand::OpenSettings.apply(state);
+        }
+
+        // Cmd+P plays in the Scene View (or stops), Cmd+Shift+P pauses or
+        // resumes, Cmd+Option+P steps one frame. They work while the game
+        // has focus too, so the preview can always be paused or stopped.
+        let play_key = self.context.input(|input| {
+            (input.modifiers.command && input.key_pressed(egui::Key::P))
+                .then_some((input.modifiers.shift, input.modifiers.alt))
+        });
+        match play_key {
+            Some((false, false)) => {
+                MenuCommand::TogglePreview.apply(state);
+            }
+            Some((true, false)) => {
+                MenuCommand::TogglePause.apply(state);
+            }
+            Some((false, true)) => {
+                MenuCommand::StepFrame.apply(state);
+            }
+            _ => {}
+        }
+
+        // Cmd+G groups the selection, Cmd+Shift+G ungroups it.
+        let group_pressed = !state.play.is_playing()
+            && !self.context.text_edit_focused()
+            && self
+                .context
+                .input(|input| input.modifiers.command && input.key_pressed(egui::Key::G));
+        if group_pressed {
+            if self.context.input(|input| input.modifiers.shift) {
+                MenuCommand::Ungroup.apply(state);
+            } else {
+                MenuCommand::GroupSelection.apply(state);
+            }
         }
 
         // Commit the frame's edits as one undo step — but not while a
@@ -597,7 +656,7 @@ fn studio_header_contents(
         egui::MenuBar::new().ui(ui, |ui| {
             paint_brand_mark(ui);
             ui.label("VGE");
-            ui.colored_label(crate::theme::SUBTLE, "STUDIO");
+            ui.colored_label(crate::theme::NIGHT.subtle, "STUDIO");
             if shell_layout(state.workspace) == ShellLayout::Scene {
                 ui.add_space(10.0);
                 for panel in [
@@ -632,7 +691,7 @@ fn scene_panel_toggle_button(ui: &mut egui::Ui, state: &mut EditorState, panel: 
         _ => return,
     };
     let fill = if open {
-        crate::theme::PANEL_RAISED
+        crate::theme::NIGHT.raised
     } else {
         egui::Color32::TRANSPARENT
     };
@@ -650,9 +709,9 @@ fn scene_panel_toggle_button(ui: &mut egui::Ui, state: &mut EditorState, panel: 
     });
     let glyph = egui::Rect::from_center_size(response.rect.center(), egui::vec2(15.0, 13.0));
     let tint = if open {
-        crate::theme::ACCENT
+        crate::theme::NIGHT.accent
     } else {
-        crate::theme::SUBTLE
+        crate::theme::NIGHT.subtle
     };
     ui.painter().rect_stroke(
         glyph,
@@ -805,7 +864,16 @@ fn show_scene_bottom_row(
     }
 }
 
+/// While a game plays in the Scene View the scene is read-only: the game
+/// runs from the saved file, so edits could not reach it.
+fn lock_while_previewing(ui: &mut egui::Ui, state: &EditorState) {
+    if state.play.is_previewing() {
+        ui.disable();
+    }
+}
+
 fn show_hierarchy(ui: &mut egui::Ui, state: &mut EditorState) {
+    lock_while_previewing(ui, state);
     hierarchy::show(
         ui,
         &mut state.world,
@@ -816,6 +884,20 @@ fn show_hierarchy(ui: &mut egui::Ui, state: &mut EditorState) {
     if let Some(entity) = state.hierarchy.prefab_request.take() {
         state.create_prefab_request = Some(entity);
     }
+    if std::mem::take(&mut state.hierarchy.frame_request) {
+        state.frame_selection();
+        ui.ctx().request_repaint();
+    }
+}
+
+/// Narrower than this, Project Assets stacks its preview under the file
+/// tree instead of beside it, so file names are not cut short.
+const PREVIEW_BESIDE_MIN_WIDTH: f32 = 420.0;
+
+/// Whether a Project Assets panel `width` points wide shows its preview
+/// under the tree (narrow) rather than beside it (wide).
+fn preview_below_tree(width: f32) -> bool {
+    width < PREVIEW_BESIDE_MIN_WIDTH
 }
 
 fn show_asset_browser(ui: &mut egui::Ui, state: &mut EditorState) {
@@ -828,7 +910,7 @@ fn show_asset_browser(ui: &mut egui::Ui, state: &mut EditorState) {
         });
     panel_header(ui, |ui| {
         assets::folder_icon(ui);
-        ui.label("Project Assets");
+        ui.label(crate::theme::semibold("Project Assets"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(11.0);
             assets::new_folder_button(ui, &mut state.asset_browser);
@@ -841,32 +923,47 @@ fn show_asset_browser(ui: &mut egui::Ui, state: &mut EditorState) {
                 .iter()
                 .find(|entry| &entry.relative_path == path)
         });
+        let preview_body = |ui: &mut egui::Ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .min_scrolled_height(0.0)
+                .show(ui, |ui| {
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin::symmetric(8, 6))
+                        .show(ui, |ui| {
+                            crate::preview::show(
+                                ui,
+                                selected_entry,
+                                &state.importer,
+                                &mut state.preview,
+                                &state.project.assets_dir(),
+                            );
+                        });
+                });
+        };
         let panel_width = ui.available_width();
-        egui::Panel::right("studio_asset_preview")
-            .resizable(true)
-            .default_size((panel_width * 0.45).clamp(80.0, 220.0))
-            .min_size(80.0)
-            .max_size((panel_width - 100.0).max(80.0))
-            .frame(studio_panel_frame())
-            .show_separator_line(false)
-            .show_studio_collapsible(ui, &mut state.asset_browser.preview_open, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .min_scrolled_height(0.0)
-                    .show(ui, |ui| {
-                        egui::Frame::NONE
-                            .inner_margin(egui::Margin::symmetric(8, 6))
-                            .show(ui, |ui| {
-                                crate::preview::show(
-                                    ui,
-                                    selected_entry,
-                                    &state.importer,
-                                    &mut state.preview,
-                                    &state.project.assets_dir(),
-                                );
-                            });
-                    });
-            });
+        if preview_below_tree(panel_width) {
+            // A narrow panel: the tree keeps the full width and the
+            // preview sits under it.
+            let panel_height = ui.available_height();
+            egui::Panel::bottom("studio_asset_preview_below")
+                .resizable(true)
+                .default_size((panel_height * 0.4).clamp(90.0, 200.0))
+                .min_size(70.0)
+                .max_size((panel_height - 110.0).max(70.0))
+                .frame(studio_panel_frame())
+                .show_separator_line(false)
+                .show_studio_collapsible(ui, &mut state.asset_browser.preview_open, preview_body);
+        } else {
+            egui::Panel::right("studio_asset_preview")
+                .resizable(true)
+                .default_size((panel_width * 0.45).clamp(80.0, 220.0))
+                .min_size(80.0)
+                .max_size((panel_width - 100.0).max(80.0))
+                .frame(studio_panel_frame())
+                .show_separator_line(false)
+                .show_studio_collapsible(ui, &mut state.asset_browser.preview_open, preview_body);
+        }
     }
     egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(7, 4))
@@ -906,6 +1003,10 @@ fn show_scene_viewport(ui: &mut egui::Ui, viewport: &Viewport, state: &mut Edito
         .show_separator_line(false)
         .show(ui, |ui| scene_view_footer(ui, state));
     scene_view_toolbar(ui, state);
+    if state.play.is_previewing() {
+        crate::game_view::show(ui, state);
+        return;
+    }
     let (width, height) = viewport.size();
     let image_size = ui.available_size();
     request_viewport_size(ui, viewport, state, image_size);
@@ -920,7 +1021,36 @@ fn show_scene_viewport(ui: &mut egui::Ui, viewport: &Viewport, state: &mut Edito
             .sense(egui::Sense::click_and_drag()),
         )
         .on_hover_cursor(egui::CursorIcon::Default);
-    handle_gizmo_interaction(viewport, state, &image_response);
+    handle_scene_view_input(ui, viewport, state, &image_response);
+    paint_scene_ui_preview(ui, state, image_response.rect);
+    if let Some(message) = &state.game_view.error {
+        crate::game_view::paint_error(ui, image_response.rect, message);
+    }
+}
+
+/// Everything a Scene View image responds to: camera navigation first; when
+/// the camera does not own the drag, the gizmo or active brush; then asset
+/// drops and the cursor.
+fn handle_scene_view_input(
+    ui: &egui::Ui,
+    viewport: &Viewport,
+    state: &mut EditorState,
+    image_response: &egui::Response,
+) {
+    handle_view_tool_keys(ui, state, image_response);
+    let camera_gesture = handle_camera_navigation(ui, state, image_response);
+    let icons = crate::scene_icons::project(
+        &crate::scene_icons::collect(&mut state.world),
+        viewport.view_projection_matrix(),
+        Vec2::new(image_response.rect.width(), image_response.rect.height()),
+    );
+    if camera_gesture.is_none() {
+        handle_scene_interaction(viewport, state, image_response);
+        select_clicked_object(ui, viewport, state, image_response, &icons);
+        focus_double_clicked_point(ui, viewport, state, image_response);
+    }
+    paint_scene_icons(ui, state, image_response.rect, &icons);
+    let gizmo_hover = paint_gizmo(ui, viewport, state, image_response);
     if let Some(path) = image_response.dnd_release_payload::<std::path::PathBuf>() {
         let is_prefab = path
             .extension()
@@ -941,21 +1071,431 @@ fn show_scene_viewport(ui: &mut egui::Ui, viewport: &Viewport, state: &mut Edito
             state.mark_dirty();
         }
     }
-    ui.ctx().set_cursor_icon(scene_cursor_icon(
-        image_response.dragged(),
-        state.dragging_axis.is_some(),
-    ));
+    let cursor = match camera_gesture {
+        Some(CameraGesture::Pan) => egui::CursorIcon::AllScroll,
+        Some(CameraGesture::Orbit | CameraGesture::Look) => egui::CursorIcon::Grabbing,
+        None if image_response.hovered() && state.active_view_tool() == ViewTool::Hand => {
+            egui::CursorIcon::Grab
+        }
+        None => scene_cursor_icon(image_response.dragged(), state.dragging_handle, gizmo_hover),
+    };
+    ui.ctx().set_cursor_icon(cursor);
+}
+
+/// What a Scene View drag does to the camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CameraGesture {
+    /// Rotate around the focus point.
+    Orbit,
+    /// Turn in place while flying with WASD.
+    Look,
+    /// Slide the view.
+    Pan,
+}
+
+/// Which mouse buttons are dragging over the Scene View this frame.
+#[derive(Debug, Clone, Copy, Default)]
+struct DragButtons {
+    primary: bool,
+    secondary: bool,
+    middle: bool,
+}
+
+/// Maps buttons and modifiers to a camera gesture, following common editor
+/// conventions: right-drag orbits (looks around while flying), middle-drag or
+/// Shift+right-drag pans, and ⌘+left-drag orbits (for trackpads; a plain
+/// ⌘-click still adds to the selection). 2D views only pan. A plain left-drag
+/// is left to the gizmo and brushes; ⌥ (Option/Alt) has no camera role.
+///
+/// With the Hand [`ViewTool`] a plain left-drag pans instead.
+fn camera_gesture(
+    buttons: DragButtons,
+    modifiers: egui::Modifiers,
+    two_d: bool,
+    flying: bool,
+    tool: ViewTool,
+) -> Option<CameraGesture> {
+    let tool_gesture = match tool {
+        ViewTool::Select => None,
+        ViewTool::Hand => Some(CameraGesture::Pan),
+    };
+    let gesture = if buttons.middle || (buttons.secondary && modifiers.shift) {
+        CameraGesture::Pan
+    } else if buttons.secondary && flying {
+        CameraGesture::Look
+    } else if buttons.secondary || (buttons.primary && modifiers.command) {
+        CameraGesture::Orbit
+    } else if buttons.primary
+        && let Some(gesture) = tool_gesture
+    {
+        gesture
+    } else {
+        return None;
+    };
+    // The 2D view does not rotate: turning gestures pan instead.
+    Some(match gesture {
+        CameraGesture::Orbit | CameraGesture::Look if two_d => CameraGesture::Pan,
+        other => other,
+    })
+}
+
+/// WASD/QE movement while the right mouse button is held: (right, up, forward).
+fn fly_direction(input: &egui::InputState) -> glam::Vec3 {
+    let axis = |positive, negative| {
+        f32::from(u8::from(input.key_down(positive)))
+            - f32::from(u8::from(input.key_down(negative)))
+    };
+    glam::Vec3::new(
+        axis(egui::Key::D, egui::Key::A),
+        axis(egui::Key::E, egui::Key::Q),
+        axis(egui::Key::W, egui::Key::S),
+    )
+}
+
+/// Tool keys while the pointer is over the Scene View (and no text field has
+/// focus): **V** Select, **H** Hand, and holding **Space** gives Hand until
+/// it is released. Fly keys belong to right-drag, so these never clash.
+fn handle_view_tool_keys(ui: &egui::Ui, state: &mut EditorState, response: &egui::Response) {
+    let typing = ui.ctx().text_edit_focused();
+    let flying = response.dragged_by(egui::PointerButton::Secondary);
+    let (select, hand, space) = ui.input(|input| {
+        (
+            input.key_pressed(egui::Key::V),
+            input.key_pressed(egui::Key::H),
+            input.key_down(egui::Key::Space),
+        )
+    });
+    let over = response.hovered() || response.dragged();
+    if !typing && !flying && over {
+        if select {
+            state.view_tool = ViewTool::Select;
+        } else if hand {
+            state.view_tool = ViewTool::Hand;
+        }
+    }
+    let held = !typing && space && (over || state.temporary_hand);
+    if held != state.temporary_hand {
+        state.temporary_hand = held;
+        ui.ctx().request_repaint();
+    }
+}
+
+/// Orbit, pan, zoom, fly and frame-selected for the Scene View camera.
+/// Returns the drag gesture in progress, if the camera owns this drag.
+fn handle_camera_navigation(
+    ui: &egui::Ui,
+    state: &mut EditorState,
+    response: &egui::Response,
+) -> Option<CameraGesture> {
+    let two_d = state.dimension.is_2d();
+    let buttons = DragButtons {
+        primary: response.dragged_by(egui::PointerButton::Primary),
+        secondary: response.dragged_by(egui::PointerButton::Secondary),
+        middle: response.dragged_by(egui::PointerButton::Middle),
+    };
+    let typing = ui.ctx().text_edit_focused();
+    let (modifiers, dt, fly, scroll, pointer, frame) = ui.input(|input| {
+        let fly = if !two_d && buttons.secondary && !typing {
+            fly_direction(input)
+        } else {
+            glam::Vec3::ZERO
+        };
+        (
+            input.modifiers,
+            input.stable_dt,
+            fly,
+            scroll_intent(&input.events),
+            input.pointer.hover_pos(),
+            !typing && input.key_pressed(egui::Key::F),
+        )
+    });
+    let gesture = camera_gesture(
+        buttons,
+        modifiers,
+        two_d,
+        fly != glam::Vec3::ZERO,
+        state.active_view_tool(),
+    );
+    let rect = response.rect;
+    let drag = response.drag_delta();
+    let camera = state.scene_cameras.active_mut(two_d);
+    let before = *camera;
+    match gesture {
+        Some(CameraGesture::Orbit) => camera.orbit(Vec2::new(drag.x, drag.y)),
+        Some(CameraGesture::Look) => camera.look(Vec2::new(drag.x, drag.y)),
+        Some(CameraGesture::Pan) => camera.pan(Vec2::new(drag.x, drag.y), two_d, rect.height()),
+        None => {}
+    }
+    if fly != glam::Vec3::ZERO {
+        camera.fly(fly, dt, modifiers.shift);
+    }
+    if response.hovered() {
+        if scroll.pan != Vec2::ZERO {
+            camera.pan(scroll.pan, two_d, rect.height());
+        }
+        if scroll.orbit != Vec2::ZERO {
+            // The 2D view has no rotation; there the gesture pans instead.
+            if two_d {
+                camera.pan(scroll.orbit, two_d, rect.height());
+            } else {
+                camera.orbit(scroll.orbit);
+            }
+        }
+        let steps = scroll.zoom_steps;
+        if steps.abs() > f32::EPSILON {
+            let toward = pointer.map(|pointer| {
+                let ndc = Vec2::new(
+                    (pointer.x - rect.center().x) / (rect.width() * 0.5).max(1.0),
+                    (rect.center().y - pointer.y) / (rect.height() * 0.5).max(1.0),
+                );
+                camera.point_under(ndc, two_d, rect.width() / rect.height().max(1.0))
+            });
+            camera.zoom(steps, two_d, toward);
+        }
+    }
+    let moved = *camera != before;
+    if moved {
+        // The user took control; a glide in progress would fight them.
+        state.scene_cameras.stop_glide(two_d);
+    }
+    if response.hovered() && frame {
+        state.frame_selection();
+    }
+    let gliding = state.scene_cameras.advance_glide(two_d, dt);
+    if moved || frame || gliding || fly != glam::Vec3::ZERO {
+        ui.ctx().request_repaint();
+    }
+    gesture
+}
+
+/// Scroll input this frame, split by device.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ScrollIntent {
+    /// Zoom steps; positive zooms in.
+    zoom_steps: f32,
+    /// Pan distance in points, moving the scene with the fingers.
+    pan: Vec2,
+    /// Orbit distance in points (⌘ + two-finger scroll).
+    orbit: Vec2,
+}
+
+/// Mouse-wheel notches (line units) and pinches zoom. Trackpad two-finger
+/// scrolling (point units) pans, as on macOS; with ⌘/Ctrl held it orbits.
+fn scroll_intent(events: &[egui::Event]) -> ScrollIntent {
+    // One zoom step per wheel notch. A pinch reports small scale factors, so
+    // it is amplified to feel as quick as scrolling did.
+    const PINCH_GAIN: f32 = 2.5;
+    let pinch_step = (1.0f32 / 0.88).ln();
+    let mut intent = ScrollIntent::default();
+    for event in events {
+        match event {
+            egui::Event::Zoom(factor) if factor.is_finite() && *factor > 0.0 => {
+                intent.zoom_steps += factor.ln() / pinch_step * PINCH_GAIN;
+            }
+            egui::Event::MouseWheel {
+                unit,
+                delta,
+                modifiers,
+                ..
+            } => match unit {
+                egui::MouseWheelUnit::Line => intent.zoom_steps += delta.y,
+                egui::MouseWheelUnit::Page => intent.zoom_steps += delta.y * 3.0,
+                egui::MouseWheelUnit::Point if modifiers.command || modifiers.ctrl => {
+                    intent.orbit += Vec2::new(delta.x, delta.y);
+                }
+                egui::MouseWheelUnit::Point => intent.pan += Vec2::new(delta.x, delta.y),
+            },
+            _ => {}
+        }
+    }
+    intent
 }
 
 /// Cursor contract for the Scene image. The image accepts clicks and drags
-/// for gizmos, but must not advertise a grab operation while idle. Keeping
-/// this decision in one pure helper makes the interaction regression-testable
-/// without creating a GPU window in CI.
-fn scene_cursor_icon(image_dragged: bool, gizmo_dragging: bool) -> egui::CursorIcon {
-    if image_dragged && gizmo_dragging {
+/// for gizmos, but must not advertise a grab operation while idle. A rotation
+/// ring hovered or dragged hides the system cursor: egui has no rotate cursor,
+/// so [`paint_gizmo`] draws one in its place. Keeping this decision in one
+/// pure helper makes the interaction regression-testable without creating a
+/// GPU window in CI.
+fn scene_cursor_icon(
+    image_dragged: bool,
+    dragging: Option<GizmoHandle>,
+    hovered: Option<GizmoHandle>,
+) -> egui::CursorIcon {
+    if matches!(dragging.or(hovered), Some(GizmoHandle::Rotate(_))) {
+        egui::CursorIcon::None
+    } else if image_dragged && dragging.is_some() {
         egui::CursorIcon::Grabbing
     } else {
         egui::CursorIcon::Default
+    }
+}
+
+fn ui_preview_rect(screen: egui::Rect, data: &engine_scene::UiElementData) -> egui::Rect {
+    use engine_scene::UiAnchor;
+    let (x, y) = match data.anchor {
+        UiAnchor::TopLeft => (0.0, 0.0),
+        UiAnchor::Top => (0.5, 0.0),
+        UiAnchor::TopRight => (1.0, 0.0),
+        UiAnchor::Left => (0.0, 0.5),
+        UiAnchor::Center => (0.5, 0.5),
+        UiAnchor::Right => (1.0, 0.5),
+        UiAnchor::BottomLeft => (0.0, 1.0),
+        UiAnchor::Bottom => (0.5, 1.0),
+        UiAnchor::BottomRight => (1.0, 1.0),
+    };
+    let size = egui::vec2(data.size[0], data.size[1]);
+    let point = screen.min
+        + egui::vec2(screen.width() * x, screen.height() * y)
+        + egui::vec2(data.offset[0], data.offset[1]);
+    egui::Rect::from_min_size(point - egui::vec2(size.x * x, size.y * y), size)
+}
+
+fn paint_scene_ui_preview(ui: &egui::Ui, state: &mut EditorState, screen: egui::Rect) {
+    use engine_ecs::components::Disabled;
+    use engine_ecs::prelude::Entity;
+    use engine_scene::{SceneUi, UiKind};
+
+    let mut query = state.world.query::<(Entity, &SceneUi, Option<&Disabled>)>();
+    let elements: Vec<_> = query
+        .iter(&state.world)
+        .filter(|(_, _, disabled)| disabled.is_none())
+        .map(|(entity, data, _)| (entity, data.0.clone()))
+        .collect();
+    let painter = ui.painter().with_clip_rect(screen);
+    for (entity, data) in elements {
+        let rect = ui_preview_rect(screen, &data);
+        if !rect.intersects(screen) {
+            continue;
+        }
+        let color = egui::Color32::from_rgba_unmultiplied(
+            (data.color[0] * 255.0) as u8,
+            (data.color[1] * 255.0) as u8,
+            (data.color[2] * 255.0) as u8,
+            (data.color[3] * 255.0) as u8,
+        );
+        if data.kind == UiKind::Button {
+            painter.rect_filled(rect, 5.0, color);
+        }
+        painter.text(
+            rect.left_center() + egui::vec2(7.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            &data.text,
+            egui::FontId::proportional(14.0),
+            if data.kind == UiKind::Label {
+                color
+            } else {
+                egui::Color32::WHITE
+            },
+        );
+        if state.selected_entity == Some(entity) {
+            painter.rect_stroke(
+                rect,
+                5.0,
+                egui::Stroke::new(1.0, crate::theme::NIGHT.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+}
+
+fn handle_scene_interaction(
+    viewport: &Viewport,
+    state: &mut EditorState,
+    image_response: &egui::Response,
+) {
+    if state.tile_paint_active
+        && state.dimension.is_2d()
+        && state.selected_entity.is_some_and(|entity| {
+            state
+                .world
+                .get::<engine_scene::SceneTilemap>(entity)
+                .is_some()
+        })
+    {
+        state.dragging_handle = None;
+        handle_tilemap_interaction(viewport, state, image_response);
+    } else if state.terrain_sculpt_active {
+        state.dragging_handle = None;
+        handle_terrain_interaction(viewport, state, image_response);
+    } else {
+        handle_gizmo_interaction(viewport, state, image_response);
+    }
+}
+
+fn handle_tilemap_interaction(
+    viewport: &Viewport,
+    state: &mut EditorState,
+    response: &egui::Response,
+) {
+    if !(response.clicked() || response.drag_started() || response.dragged()) {
+        return;
+    }
+    let Some(parent) = state.selected_entity else {
+        return;
+    };
+    let Some(map) = state.world.get::<engine_scene::SceneTilemap>(parent) else {
+        return;
+    };
+    let Some(pointer) = response.interact_pointer_pos() else {
+        return;
+    };
+    let local = Vec2::new(
+        pointer.x - response.rect.min.x,
+        pointer.y - response.rect.min.y,
+    );
+    let size = Vec2::new(response.rect.width(), response.rect.height());
+    let model = hierarchy::world_transform(&state.world, parent).to_matrix();
+    let Some((x, y)) = crate::tilemap::cell_from_screen(
+        viewport.view_projection_matrix(),
+        model,
+        local,
+        size,
+        map.0.cell_size,
+    ) else {
+        return;
+    };
+    match state.paint_tile_cell(x, y, state.tile_erase_active) {
+        Ok(true) => response.ctx.request_repaint(),
+        Ok(false) => {}
+        Err(error) => state.asset_browser.operation_error = Some(error),
+    }
+}
+
+fn handle_terrain_interaction(
+    viewport: &Viewport,
+    state: &mut EditorState,
+    response: &egui::Response,
+) {
+    if response.drag_started() {
+        match state.begin_terrain_stroke() {
+            Ok(stroke) => state.terrain_stroke = Some(stroke),
+            Err(error) => state.asset_browser.operation_error = Some(error),
+        }
+    }
+    if (response.drag_started() || response.dragged())
+        && let Some(pointer) = response.interact_pointer_pos()
+        && let Some(stroke) = state.terrain_stroke.as_mut()
+        && state.selected_entity == Some(stroke.entity)
+    {
+        let local = Vec2::new(
+            pointer.x - response.rect.min.x,
+            pointer.y - response.rect.min.y,
+        );
+        let size = Vec2::new(response.rect.width(), response.rect.height());
+        let model = hierarchy::world_transform(&state.world, stroke.entity).to_matrix();
+        if let Some(hit) = crate::terrain_tools::terrain_hit_from_screen(
+            viewport.view_projection_matrix(),
+            model,
+            &stroke.heightmap,
+            local,
+            size,
+        ) {
+            stroke.record(hit, (state.terrain_tools.radius * 0.5).max(0.01));
+        }
+    }
+    if response.drag_stopped() {
+        state.finish_terrain_stroke();
     }
 }
 
@@ -967,93 +1507,455 @@ fn scene_cursor_icon(image_dragged: bool, gizmo_dragging: bool) -> egui::CursorI
 /// A free function (not an `EditorShell` method) — it only needs
 /// `viewport`/`state`/`image_response`, not the shell's egui context or
 /// renderer.
+/// Click-to-select in the Scene View, in priority order: an icon, then a
+/// gizmo handle (which keeps the click), then the nearest mesh or sprite under
+/// the pointer. Clicking empty space clears the selection. Cmd/Ctrl-click
+/// adds to or removes from the selection. Brush tools keep their clicks.
+fn select_clicked_object(
+    ui: &egui::Ui,
+    viewport: &Viewport,
+    state: &mut EditorState,
+    response: &egui::Response,
+    icons: &[(crate::scene_icons::SceneIcon, Vec2)],
+) {
+    let brushing = state.terrain_sculpt_active || state.tile_paint_active;
+    let navigating = state.active_view_tool() != ViewTool::Select;
+    if brushing || navigating || !response.clicked() || state.dragging_handle.is_some() {
+        return;
+    }
+    let Some(pointer) = response.interact_pointer_pos() else {
+        return;
+    };
+    let rect = response.rect;
+    let local = Vec2::new(pointer.x - rect.min.x, pointer.y - rect.min.y);
+    let view_proj = viewport.view_projection_matrix();
+    let on_gizmo = current_gizmo(viewport, state, rect).is_some_and(|layout| {
+        let rings = gizmo::rings_revealed(&layout, Some(local), state.dragging_handle);
+        gizmo::pick(&layout, local, rings).is_some()
+    });
+    if on_gizmo {
+        return;
+    }
+    let picked = crate::scene_icons::pick(icons, local).or_else(|| {
+        pick_scene(
+            state,
+            view_proj,
+            rect,
+            local,
+            crate::scene_pick::LockedObjects::Skip,
+        )
+        .map(|hit| hit.entity)
+    });
+    let additive = ui.input(|input| input.modifiers.command || input.modifiers.ctrl);
+    match (picked, additive) {
+        (Some(entity), true) => hierarchy::select_toggle(
+            &mut state.selected_entity,
+            &mut state.secondary_selection,
+            entity,
+        ),
+        (Some(entity), false) => state.select_only(entity),
+        (None, false) => state.clear_selection(),
+        (None, true) => {}
+    }
+    ui.ctx().request_repaint();
+}
+
+/// The object and surface point under viewport-local `local`, tested against
+/// imported mesh triangles and sprite quads.
+fn pick_scene(
+    state: &mut EditorState,
+    view_proj: glam::Mat4,
+    rect: egui::Rect,
+    local: Vec2,
+    locked: crate::scene_pick::LockedObjects,
+) -> Option<crate::scene_pick::PickHit> {
+    let ndc = Vec2::new(
+        local.x / rect.width().max(1.0) * 2.0 - 1.0,
+        1.0 - local.y / rect.height().max(1.0) * 2.0,
+    );
+    let ray = crate::scene_pick::ray_from_screen(view_proj, ndc)?;
+    let importer = &state.importer;
+    crate::scene_pick::pick_hit(
+        &mut state.world,
+        ray,
+        |source| {
+            let id = uuid::Uuid::parse_str(&source.mesh).ok()?;
+            match importer.get(engine_asset::AssetId::from_uuid(id))? {
+                crate::ImportedAsset::Mesh(gltf) => gltf
+                    .meshes
+                    .first()
+                    .map(|mesh| (mesh.vertices.as_slice(), mesh.indices.as_slice())),
+                _ => None,
+            }
+        },
+        locked,
+    )
+}
+
+/// Double-click a surface to glide the camera to look at that spot. Locked
+/// objects (such as a locked terrain) still count as surfaces here.
+fn focus_double_clicked_point(
+    ui: &egui::Ui,
+    viewport: &Viewport,
+    state: &mut EditorState,
+    response: &egui::Response,
+) {
+    let brushing = state.terrain_sculpt_active || state.tile_paint_active;
+    if brushing || !response.double_clicked() {
+        return;
+    }
+    let Some(pointer) = response.interact_pointer_pos() else {
+        return;
+    };
+    let rect = response.rect;
+    let local = Vec2::new(pointer.x - rect.min.x, pointer.y - rect.min.y);
+    let Some(hit) = pick_scene(
+        state,
+        viewport.view_projection_matrix(),
+        rect,
+        local,
+        crate::scene_pick::LockedObjects::Include,
+    ) else {
+        return;
+    };
+    let two_d = state.dimension.is_2d();
+    let mut target = *state.scene_camera();
+    target.focus_on(hit.point);
+    state.scene_cameras.glide_to(two_d, target);
+    ui.ctx().request_repaint();
+}
+
+/// Paints the icons for cameras, lights and sounds over the Scene View.
+fn paint_scene_icons(
+    ui: &egui::Ui,
+    state: &EditorState,
+    rect: egui::Rect,
+    icons: &[(crate::scene_icons::SceneIcon, Vec2)],
+) {
+    let painter = ui.painter().with_clip_rect(rect);
+    for (icon, at) in icons {
+        let selected = state.selected_entity == Some(icon.entity)
+            || state.secondary_selection.contains(&icon.entity);
+        crate::scene_icons::paint(
+            &painter,
+            icon.kind,
+            rect.min + egui::vec2(at.x, at.y),
+            selected,
+        );
+    }
+}
+
+/// A gizmo colour as an egui colour: faint until hovered (rings especially,
+/// so the object stays visible), bright when hovered, yellow while dragged.
+fn gizmo_color(axis: Axis, emphasis: GizmoEmphasis, faint: bool) -> egui::Color32 {
+    let [r, g, b, _] = axis.color();
+    let channel = |value: f32, lift: f32| ((value + lift).min(1.0) * 255.0) as u8;
+    match emphasis {
+        GizmoEmphasis::Active => crate::theme::NIGHT.highlight,
+        GizmoEmphasis::Hovered => {
+            egui::Color32::from_rgb(channel(r, 0.25), channel(g, 0.25), channel(b, 0.25))
+        }
+        GizmoEmphasis::Normal => {
+            let color = egui::Color32::from_rgb(channel(r, 0.0), channel(g, 0.0), channel(b, 0.0));
+            if faint {
+                color.gamma_multiply(0.55)
+            } else {
+                color
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GizmoEmphasis {
+    Normal,
+    Hovered,
+    Active,
+}
+
+/// The combined gizmo for the current selection, in viewport-local pixels;
+/// `None` when nothing movable is selected or a tool owns the viewport.
+fn current_gizmo(
+    viewport: &Viewport,
+    state: &EditorState,
+    rect: egui::Rect,
+) -> Option<gizmo::GizmoLayout> {
+    let painting_tiles = state.tile_paint_active && state.dimension.is_2d();
+    let navigating = state.active_view_tool() != ViewTool::Select;
+    if state.terrain_sculpt_active || painting_tiles || navigating {
+        return None;
+    }
+    gizmo::layout(
+        viewport.view_projection_matrix(),
+        state.gizmo_origin()?,
+        state.dimension.is_2d(),
+        Vec2::new(rect.width(), rect.height()),
+    )
+}
+
+/// Paints the combined gizmo over the Scene View image, always on top:
+/// faint rotation rings, move arrows with their scale knobs, and the centre
+/// scale square. The handle under the pointer brightens; the one being
+/// dragged turns yellow. Returns the hovered handle, for the cursor.
+fn paint_gizmo(
+    ui: &egui::Ui,
+    viewport: &Viewport,
+    state: &EditorState,
+    response: &egui::Response,
+) -> Option<GizmoHandle> {
+    let rect = response.rect;
+    let layout = current_gizmo(viewport, state, rect)?;
+    let to_screen = |point: Vec2| rect.min + egui::vec2(point.x, point.y);
+    let pointer = response
+        .hover_pos()
+        .map(|pointer| Vec2::new(pointer.x - rect.min.x, pointer.y - rect.min.y));
+    let rings_shown = gizmo::rings_revealed(&layout, pointer, state.dragging_handle);
+    let hovered = pointer
+        .filter(|_| state.dragging_handle.is_none())
+        .and_then(|pointer| gizmo::pick(&layout, pointer, rings_shown));
+    let emphasis = |handle: GizmoHandle| {
+        if state.dragging_handle == Some(handle) {
+            GizmoEmphasis::Active
+        } else if hovered == Some(handle) {
+            GizmoEmphasis::Hovered
+        } else {
+            GizmoEmphasis::Normal
+        }
+    };
+    let painter = ui.painter().with_clip_rect(rect);
+    for ring in layout.rings.iter().filter(|_| rings_shown) {
+        let level = emphasis(GizmoHandle::Rotate(ring.axis));
+        let width = if level == GizmoEmphasis::Normal {
+            1.5
+        } else {
+            3.0
+        };
+        let points = ring.points.iter().map(|point| to_screen(*point)).collect();
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(width, gizmo_color(ring.axis, level, true)),
+        ));
+    }
+    for arrow in &layout.arrows {
+        let level = emphasis(GizmoHandle::Move(arrow.axis));
+        let color = gizmo_color(arrow.axis, level, false);
+        let width = if level == GizmoEmphasis::Normal {
+            3.0
+        } else {
+            4.0
+        };
+        let start = to_screen(arrow.start);
+        let end = to_screen(arrow.end);
+        let direction = (end - start).normalized();
+        // The tip sits inside the arrow's length, so the whole shape is grabbable.
+        let base = end - direction * 14.0;
+        painter.line_segment([start, base], egui::Stroke::new(width, color));
+        let side = egui::vec2(-direction.y, direction.x) * 7.0;
+        painter.add(egui::Shape::convex_polygon(
+            vec![end, base + side, base - side],
+            color,
+            egui::Stroke::NONE,
+        ));
+        let knob_level = emphasis(GizmoHandle::ScaleAxis(arrow.axis));
+        let knob_size = if knob_level == GizmoEmphasis::Normal {
+            gizmo::SCALE_KNOB_HALF_SIZE_PX * 2.0
+        } else {
+            gizmo::SCALE_KNOB_HALF_SIZE_PX * 2.0 + 2.0
+        };
+        let knob =
+            egui::Rect::from_center_size(to_screen(arrow.knob()), egui::Vec2::splat(knob_size));
+        painter.rect_filled(knob, 1.0, gizmo_color(arrow.axis, knob_level, false));
+        painter.rect_stroke(
+            knob,
+            1.0,
+            egui::Stroke::new(1.0, crate::theme::NIGHT.shell),
+            egui::StrokeKind::Outside,
+        );
+    }
+    let centre = to_screen(layout.origin);
+    let square =
+        egui::Rect::from_center_size(centre, egui::Vec2::splat(gizmo::SCALE_HALF_SIZE_PX * 2.0));
+    let fill = match emphasis(GizmoHandle::Scale) {
+        GizmoEmphasis::Active => crate::theme::NIGHT.highlight,
+        GizmoEmphasis::Hovered => egui::Color32::WHITE,
+        GizmoEmphasis::Normal => crate::theme::NIGHT.text,
+    };
+    painter.rect_filled(square, 1.5, fill);
+    painter.rect_stroke(
+        square,
+        1.5,
+        egui::Stroke::new(1.0, crate::theme::NIGHT.shell),
+        egui::StrokeKind::Outside,
+    );
+    // egui has no rotate cursor, so while a ring is hovered or dragged the
+    // system cursor is hidden (see `scene_cursor_icon`) and a turning-arrow
+    // cursor is drawn at the pointer instead, as Photoshop does.
+    let turning = matches!(
+        state.dragging_handle.or(hovered),
+        Some(GizmoHandle::Rotate(_))
+    );
+    if turning && let Some(pointer) = response.hover_pos().or(response.interact_pointer_pos()) {
+        paint_rotate_cursor(&ui.ctx().layer_painter(cursor_layer()), pointer);
+    }
+    hovered
+}
+
+/// The topmost layer, so the drawn rotate cursor is never hidden by
+/// anything else painted over the viewport.
+fn cursor_layer() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("scene_rotate_cursor"))
+}
+
+/// The "rotate" cursor: a curved double-headed arrow around a hotspot dot at
+/// `hotspot`, white over a dark outline so it reads on any background.
+fn paint_rotate_cursor(painter: &egui::Painter, hotspot: egui::Pos2) {
+    painter.circle_filled(hotspot, 2.6, egui::Color32::from_black_alpha(170));
+    painter.circle_filled(hotspot, 1.4, egui::Color32::WHITE);
+    let centre = hotspot + egui::vec2(0.0, 4.0);
+    let arc: Vec<_> = (0..=12)
+        .map(|step| {
+            let angle = std::f32::consts::PI * (0.15 + 0.7 * step as f32 / 12.0);
+            centre + egui::vec2(-9.0 * angle.cos(), -9.0 * angle.sin())
+        })
+        .collect();
+    let (Some(&first), Some(&last)) = (arc.first(), arc.last()) else {
+        return;
+    };
+    let heads = [
+        [first, first + egui::vec2(3.0, -2.5)],
+        [first, first + egui::vec2(-0.5, -3.5)],
+        [last, last + egui::vec2(-3.0, -2.5)],
+        [last, last + egui::vec2(0.5, -3.5)],
+    ];
+    for stroke in [
+        egui::Stroke::new(3.2, egui::Color32::from_black_alpha(160)),
+        egui::Stroke::new(1.6, egui::Color32::WHITE),
+    ] {
+        painter.add(egui::Shape::line(arc.clone(), stroke));
+        for head in heads {
+            painter.line_segment(head, stroke);
+        }
+    }
+}
+
+/// One frame's change from dragging a gizmo handle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GizmoEdit {
+    /// World units along an axis.
+    Move(Axis, f32),
+    /// Radians around an axis.
+    Rotate(Axis, f32),
+    /// Scale factor along an axis.
+    ScaleAxis(Axis, f32),
+    /// Uniform scale factor.
+    Scale(f32),
+}
+
+impl GizmoEdit {
+    fn apply(self, transform: engine_utils::Transform) -> engine_utils::Transform {
+        match self {
+            GizmoEdit::Move(axis, distance) => {
+                gizmo::translate_transform(transform, axis, distance)
+            }
+            GizmoEdit::Rotate(axis, radians) => gizmo::rotate_transform(transform, axis, radians),
+            GizmoEdit::ScaleAxis(axis, factor) => gizmo::scale_along(transform, axis, factor),
+            GizmoEdit::Scale(factor) => gizmo::scale_uniform(transform, factor),
+        }
+    }
+}
+
+/// Applies one frame of a gizmo drag to every selected, unlocked object.
+/// The gizmo's axes are world axes, so each edit is made to the object's
+/// world transform and stored back relative to its parent. An object whose
+/// group is also selected moves with the group, not twice.
+fn apply_gizmo_edit(
+    world: &mut engine_ecs::prelude::World,
+    selection: &[engine_ecs::prelude::Entity],
+    edit: GizmoEdit,
+) {
+    let unlocked: Vec<_> = selection
+        .iter()
+        .copied()
+        .filter(|&entity| world.get::<engine_ecs::components::Lock>(entity).is_none())
+        .filter(|&entity| inspector::transform_of(world, entity).is_some())
+        .collect();
+    for target in hierarchy::without_descendants(world, &unlocked) {
+        let current = hierarchy::world_transform(world, target);
+        hierarchy::set_world_transform(world, target, edit.apply(current));
+    }
+}
+
+/// Drags on the combined gizmo: an arrow moves, a ring turns like a dial,
+/// an arrow's knob stretches along its axis, the centre square scales evenly. Every selected, unlocked object changes
+/// together.
 fn handle_gizmo_interaction(
     viewport: &Viewport,
     state: &mut EditorState,
     image_response: &egui::Response,
 ) {
-    let screen_size = Vec2::new(image_response.rect.width(), image_response.rect.height());
-
-    let selected_entity = state.selected_entity;
-    let Some(origin) = state.gizmo_origin() else {
-        state.dragging_axis = None;
+    let rect = image_response.rect;
+    let Some(layout) = current_gizmo(viewport, state, rect) else {
+        state.dragging_handle = None;
         return;
     };
-
-    let view_proj = viewport.view_projection_matrix();
-    let handles: Vec<(Axis, Vec2, Vec2)> =
-        gizmo::axes_for(state.gizmo_mode, state.dimension.is_2d())
-            .iter()
-            .filter_map(|&axis| {
-                let (start, end) = gizmo::axis_endpoints(origin, axis);
-                let start_screen = gizmo::project_to_screen(view_proj, start, screen_size)?;
-                let end_screen = gizmo::project_to_screen(view_proj, end, screen_size)?;
-                Some((axis, start_screen, end_screen))
-            })
-            .collect();
-
+    let local = |pointer: egui::Pos2| Vec2::new(pointer.x - rect.min.x, pointer.y - rect.min.y);
     if image_response.drag_started()
         && let Some(pointer) = image_response.interact_pointer_pos()
     {
-        let local = Vec2::new(
-            pointer.x - image_response.rect.min.x,
-            pointer.y - image_response.rect.min.y,
-        );
-        state.dragging_axis = gizmo::pick_axis(&handles, local);
+        let at = local(pointer);
+        let rings = gizmo::rings_revealed(&layout, Some(at), None);
+        state.dragging_handle = gizmo::pick(&layout, at, rings);
     }
 
     if image_response.dragged()
-        && let Some(axis) = state.dragging_axis
-        && let Some(&(_, start_screen, end_screen)) = handles
-            .iter()
-            .find(|&&(handle_axis, _, _)| handle_axis == axis)
+        && let Some(handle) = state.dragging_handle
+        && let Some(pointer) = image_response.interact_pointer_pos()
     {
-        let pixel_length = (end_screen - start_screen).length();
-        if pixel_length > f32::EPSILON && selected_entity.is_some() {
-            let delta = image_response.drag_delta();
-            let delta_along_axis =
-                gizmo::drag_delta_along_axis(start_screen, end_screen, Vec2::new(delta.x, delta.y));
-            // The same handle-drag delta is applied to every selected,
-            // unlocked entity that has a `Transform` — the batch move.
-            let targets: Vec<_> = state
-                .selection()
-                .into_iter()
-                .filter(|&e| state.world.get::<engine_ecs::components::Lock>(e).is_none())
-                .collect();
-            for target in targets {
-                let Some(transform) = inspector::transform_of(&state.world, target) else {
-                    continue;
-                };
-                let updated = match state.gizmo_mode {
-                    GizmoMode::Translate => {
-                        // Pixels along the handle → world units, scaled so
-                        // dragging the handle its full on-screen length
-                        // moves the entity one `HANDLE_LENGTH`.
-                        let world_per_pixel = gizmo::HANDLE_LENGTH / pixel_length;
-                        gizmo::translate_transform(
-                            transform,
+        let drag = image_response.drag_delta();
+        let drag = Vec2::new(drag.x, drag.y);
+        let current = local(pointer);
+        let edit = match handle {
+            GizmoHandle::Move(axis) => layout
+                .arrows
+                .iter()
+                .find(|arrow| arrow.axis == axis)
+                // Pixels along the arrow → world units at the object's depth,
+                // so the object tracks the pointer.
+                .map(|arrow| {
+                    GizmoEdit::Move(axis, gizmo::drag_along(arrow, drag) * arrow.world_per_pixel)
+                }),
+            GizmoHandle::Rotate(axis) => {
+                layout
+                    .rings
+                    .iter()
+                    .find(|ring| ring.axis == axis)
+                    .map(|ring| {
+                        GizmoEdit::Rotate(
                             axis,
-                            delta_along_axis * world_per_pixel,
+                            gizmo::dial_angle(layout.origin, current - drag, current, ring.facing),
                         )
-                    }
-                    GizmoMode::Rotate => gizmo::rotate_transform(
-                        transform,
-                        axis,
-                        delta_along_axis * gizmo::ROTATE_RADIANS_PER_PIXEL,
-                    ),
-                    GizmoMode::Scale => gizmo::scale_transform(
-                        transform,
-                        axis,
-                        1.0 + delta_along_axis * gizmo::SCALE_PER_PIXEL,
-                    ),
-                };
-                inspector::set_transform(&mut state.world, target, updated);
+                    })
             }
+            GizmoHandle::ScaleAxis(axis) => layout
+                .arrows
+                .iter()
+                .find(|arrow| arrow.axis == axis)
+                .map(|arrow| {
+                    GizmoEdit::ScaleAxis(
+                        axis,
+                        gizmo::drag_axis_scale_factor(gizmo::drag_along(arrow, drag)),
+                    )
+                }),
+            GizmoHandle::Scale => Some(GizmoEdit::Scale(gizmo::drag_scale_factor(drag))),
+        };
+        if let Some(edit) = edit {
+            let selection = state.selection();
+            apply_gizmo_edit(&mut state.world, &selection, edit);
         }
     }
 
     if image_response.drag_stopped() {
-        state.dragging_axis = None;
+        state.dragging_handle = None;
     }
 }
 
@@ -1119,6 +2021,20 @@ fn menu_file(
             dispatch_menu_command(state, new_project, MenuCommand::SaveScene);
             ui.close();
         }
+        if ui
+            .add_enabled(
+                state.project.language() == engine_project::GameplayLanguage::Rust
+                    && !state.dirty.any()
+                    && !state.play.is_playing()
+                    && !state.export_running,
+                egui::Button::new("Upgrade Rust SDK"),
+            )
+            .on_disabled_hover_text("Available for a saved, idle Rust project")
+            .clicked()
+        {
+            dispatch_menu_command(state, new_project, MenuCommand::UpgradeRustSdk);
+            ui.close();
+        }
         ui.add_enabled(false, egui::Button::new("Save Scene As…"));
         ui.separator();
         let configuration = state
@@ -1139,11 +2055,36 @@ fn menu_file(
             ui.close();
         }
         ui.separator();
+        if ui.button("Settings…   ⌘,").clicked() {
+            dispatch_menu_command(state, new_project, MenuCommand::OpenSettings);
+            ui.close();
+        }
+        ui.separator();
         if ui.button("Exit").clicked() {
             dispatch_menu_command(state, new_project, MenuCommand::Quit);
             ui.close();
         }
     });
+}
+
+fn sdk_upgrade_message_modal(ui: &mut egui::Ui, state: &mut EditorState) {
+    let Some(message) = state.sdk_upgrade_message.clone() else {
+        return;
+    };
+    let response = crate::theme::modal(ui.ctx(), egui::Id::new("studio_sdk_upgrade_modal"), |ui| {
+        ui.set_width(380.0);
+        ui.heading("Rust SDK upgrade");
+        ui.label(message);
+        if ui
+            .add(egui::Button::new("OK").fill(crate::theme::NIGHT.accent_fill))
+            .clicked()
+        {
+            state.sdk_upgrade_message = None;
+        }
+    });
+    if response.should_close() {
+        state.sdk_upgrade_message = None;
+    }
 }
 
 fn dispatch_menu_command(
@@ -1194,8 +2135,41 @@ fn new_project_modal(
         if name.changed() {
             dialog_state.error = None;
         }
+        ui.add_space(8.0);
+        ui.label("Gameplay language");
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut dialog_state.language,
+                engine_project::GameplayLanguage::Lua,
+                "Lua · recommended",
+            );
+            ui.selectable_value(
+                &mut dialog_state.language,
+                engine_project::GameplayLanguage::Rust,
+                "Rust",
+            );
+        });
+        ui.add_space(8.0);
+        ui.label("Starter scene");
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut dialog_state.template,
+                engine_project::ProjectTemplate::Blank,
+                "Blank",
+            );
+            ui.selectable_value(
+                &mut dialog_state.template,
+                engine_project::ProjectTemplate::Starter2D,
+                "2D starter",
+            );
+            ui.selectable_value(
+                &mut dialog_state.template,
+                engine_project::ProjectTemplate::Starter3D,
+                "3D starter",
+            );
+        });
         if let Some(error) = &dialog_state.error {
-            ui.colored_label(egui::Color32::from_rgb(236, 104, 104), error);
+            ui.colored_label(crate::theme::NIGHT.danger, error);
         }
         ui.add_space(8.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1203,7 +2177,7 @@ fn new_project_modal(
             if ui
                 .add_enabled(
                     valid_name,
-                    egui::Button::new("Choose Location…").fill(crate::theme::ACCENT_FILL),
+                    egui::Button::new("Choose Location…").fill(crate::theme::NIGHT.accent_fill),
                 )
                 .clicked()
                 && let Some(parent) = pick_project_directory("Choose project location")
@@ -1217,7 +2191,14 @@ fn new_project_modal(
                         ));
                     }
                     Ok(false) => {
-                        request_guarded(state, PendingAction::NewProject(target));
+                        request_guarded(
+                            state,
+                            PendingAction::NewProject(
+                                target,
+                                dialog_state.language,
+                                dialog_state.template,
+                            ),
+                        );
                         close = true;
                     }
                     Err(err) => {
@@ -1275,8 +2256,10 @@ fn apply_pending(state: &mut EditorState, action: PendingAction) {
         PendingAction::OpenProject(path) => {
             state.project_request = Some(ProjectRequest::open(path))
         }
-        PendingAction::NewProject(path) => {
-            state.project_request = Some(ProjectRequest::create(path))
+        PendingAction::NewProject(path, language, template) => {
+            state.project_request = Some(ProjectRequest::create_with_template(
+                path, language, template,
+            ))
         }
     }
 }
@@ -1330,7 +2313,7 @@ fn unsaved_changes_modal(ui: &mut egui::Ui, state: &mut EditorState) {
         ui.add_space(8.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .add(egui::Button::new("Save").fill(crate::theme::ACCENT_FILL))
+                .add(egui::Button::new("Save").fill(crate::theme::NIGHT.accent_fill))
                 .clicked()
                 && save_before_pending(state)
             {
@@ -1406,7 +2389,57 @@ fn menu_gameobject(ui: &mut egui::Ui, state: &mut EditorState) {
             MenuCommand::CreateEmpty.apply(state);
             ui.close();
         }
+        if ui
+            .add_enabled(
+                state.selected_texture_asset().is_some(),
+                egui::Button::new("Create Sprite from Selected Image"),
+            )
+            .clicked()
+        {
+            MenuCommand::CreateSprite.apply(state);
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                state.selected_texture_asset().is_some(),
+                egui::Button::new("Create Tilemap from Selected Image"),
+            )
+            .clicked()
+        {
+            MenuCommand::CreateTilemap.apply(state);
+            ui.close();
+        }
+        if ui.button("Create Water").clicked() {
+            MenuCommand::CreateWater.apply(state);
+            ui.close();
+        }
+        if ui.button("Create Point Light").clicked() {
+            MenuCommand::CreatePointLight.apply(state);
+            ui.close();
+        }
+        if ui.button("Create UI Label").clicked() {
+            MenuCommand::CreateUiLabel.apply(state);
+            ui.close();
+        }
+        if ui.button("Create UI Button").clicked() {
+            MenuCommand::CreateUiButton.apply(state);
+            ui.close();
+        }
         let has_selection = state.selection_len() > 0;
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Group Selection   ⌘G"))
+            .clicked()
+        {
+            MenuCommand::GroupSelection.apply(state);
+            ui.close();
+        }
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Ungroup   ⇧⌘G"))
+            .clicked()
+        {
+            MenuCommand::Ungroup.apply(state);
+            ui.close();
+        }
         if ui
             .add_enabled(has_selection, egui::Button::new("Delete Selected"))
             .clicked()
@@ -1427,7 +2460,7 @@ fn menu_view(ui: &mut egui::Ui, state: &mut EditorState) {
         menu_check(
             ui,
             state,
-            state.overlays.colliders,
+            state.overlays.all_colliders,
             "Colliders",
             MenuCommand::ToggleOverlay(Overlay::Colliders),
         );
@@ -1607,16 +2640,17 @@ fn menu_window(ui: &mut egui::Ui, state: &mut EditorState) {
 pub(crate) enum ShellIcon {
     Run,
     Stop,
+    Pause,
+    Step,
     Close,
     Layers,
-    Move,
-    Rotate,
-    Scale,
     Code,
     Check,
     Inspector,
     Profiler,
     Viewport,
+    Pointer,
+    Hand,
 }
 
 fn paint_brand_mark(ui: &mut egui::Ui) {
@@ -1653,19 +2687,20 @@ fn paint_brand_mark(ui: &mut egui::Ui) {
 
 impl ShellIcon {
     #[cfg(test)]
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Run,
         Self::Stop,
+        Self::Pause,
+        Self::Step,
         Self::Close,
         Self::Layers,
-        Self::Move,
-        Self::Rotate,
-        Self::Scale,
         Self::Code,
         Self::Check,
         Self::Inspector,
         Self::Profiler,
         Self::Viewport,
+        Self::Pointer,
+        Self::Hand,
     ];
 }
 
@@ -1702,6 +2737,27 @@ fn paint_shell_icon_at_color(
                 color,
             );
         }
+        ShellIcon::Pause => {
+            for x in [4.5, 9.5] {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(inset(x, 3.5), egui::vec2(2.5, 9.0)),
+                    1.0,
+                    color,
+                );
+            }
+        }
+        ShellIcon::Step => {
+            painter.add(egui::Shape::convex_polygon(
+                vec![inset(3.5, 3.5), inset(3.5, 12.5), inset(10.0, 8.0)],
+                color,
+                egui::Stroke::NONE,
+            ));
+            painter.rect_filled(
+                egui::Rect::from_min_size(inset(10.5, 3.5), egui::vec2(2.5, 9.0)),
+                1.0,
+                color,
+            );
+        }
         ShellIcon::Close => {
             painter.line_segment([inset(4.0, 4.0), inset(12.0, 12.0)], stroke);
             painter.line_segment([inset(12.0, 4.0), inset(4.0, 12.0)], stroke);
@@ -1724,52 +2780,38 @@ fn paint_shell_icon_at_color(
                 ));
             }
         }
-        ShellIcon::Move => {
-            painter.line_segment([inset(8.0, 2.0), inset(8.0, 14.0)], stroke);
-            painter.line_segment([inset(2.0, 8.0), inset(14.0, 8.0)], stroke);
-            for (a, b) in [
-                ((8.0, 2.0), (5.0, 5.0)),
-                ((8.0, 2.0), (11.0, 5.0)),
-                ((14.0, 8.0), (11.0, 5.0)),
-                ((14.0, 8.0), (11.0, 11.0)),
-                ((8.0, 14.0), (5.0, 11.0)),
-                ((8.0, 14.0), (11.0, 11.0)),
-                ((2.0, 8.0), (5.0, 5.0)),
-                ((2.0, 8.0), (5.0, 11.0)),
-            ] {
-                painter.line_segment([inset(a.0, a.1), inset(b.0, b.1)], stroke);
-            }
+        ShellIcon::Pointer => {
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    inset(4.0, 2.0),
+                    inset(4.0, 13.0),
+                    inset(7.0, 10.5),
+                    inset(9.5, 14.5),
+                    inset(11.0, 13.5),
+                    inset(8.5, 9.5),
+                    inset(12.5, 9.0),
+                ],
+                egui::Color32::TRANSPARENT,
+                stroke,
+            ));
         }
-        ShellIcon::Rotate => {
+        ShellIcon::Hand => {
+            // Four fingers and a palm.
+            for (x, top) in [(4.5, 4.0), (7.0, 2.5), (9.5, 3.0), (12.0, 5.0)] {
+                painter.line_segment([inset(x, top), inset(x, 9.0)], stroke);
+            }
             painter.add(egui::Shape::line(
                 vec![
-                    inset(13.5, 7.0),
-                    inset(12.5, 11.0),
-                    inset(9.0, 14.0),
-                    inset(5.0, 14.0),
-                    inset(2.0, 11.0),
-                    inset(2.0, 7.0),
-                    inset(4.0, 4.0),
-                    inset(8.0, 2.0),
-                    inset(12.0, 3.0),
+                    inset(4.5, 9.0),
+                    inset(4.5, 11.0),
+                    inset(6.5, 14.0),
+                    inset(10.5, 14.0),
+                    inset(12.0, 12.0),
+                    inset(12.0, 9.0),
                 ],
                 stroke,
             ));
-            painter.add(egui::Shape::line(
-                vec![inset(11.0, 1.0), inset(14.0, 3.0), inset(11.0, 6.0)],
-                stroke,
-            ));
-        }
-        ShellIcon::Scale => {
-            painter.line_segment([inset(2.0, 14.0), inset(14.0, 2.0)], stroke);
-            painter.add(egui::Shape::line(
-                vec![inset(8.0, 2.0), inset(14.0, 2.0), inset(14.0, 8.0)],
-                stroke,
-            ));
-            painter.add(egui::Shape::line(
-                vec![inset(2.0, 8.0), inset(2.0, 14.0), inset(8.0, 14.0)],
-                stroke,
-            ));
+            painter.line_segment([inset(2.0, 8.0), inset(4.5, 10.5)], stroke);
         }
         ShellIcon::Code => {
             painter.add(egui::Shape::line(
@@ -1806,39 +2848,57 @@ fn paint_shell_icon_at_color(
     }
 }
 
-fn gizmo_icon_button(ui: &mut egui::Ui, mode: GizmoMode, selected: bool) -> egui::Response {
-    let icon = match mode {
-        GizmoMode::Translate => ShellIcon::Move,
-        GizmoMode::Rotate => ShellIcon::Rotate,
-        GizmoMode::Scale => ShellIcon::Scale,
-    };
+fn view_tool_icon(tool: ViewTool) -> ShellIcon {
+    match tool {
+        ViewTool::Select => ShellIcon::Pointer,
+        ViewTool::Hand => ShellIcon::Hand,
+    }
+}
+
+/// A square toolbar button showing `icon`, highlighted when `selected`.
+fn toolbar_icon_button(
+    ui: &mut egui::Ui,
+    palette: &crate::theme::Palette,
+    icon: ShellIcon,
+    tooltip: &str,
+    selected: bool,
+) -> egui::Response {
     let response = ui
         .add_sized(
-            [25.0, 25.0],
+            [30.0, 24.0],
             egui::Button::new("")
                 .fill(if selected {
-                    egui::Color32::from_rgb(38, 65, 101)
+                    palette.selected
                 } else {
                     egui::Color32::TRANSPARENT
                 })
                 .stroke(egui::Stroke::NONE)
-                .corner_radius(5),
+                .corner_radius(7),
         )
-        .on_hover_text(mode.label());
+        .on_hover_text(tooltip);
     paint_shell_icon_at_color(
         ui,
         egui::Rect::from_center_size(response.rect.center(), egui::vec2(16.0, 16.0)),
         icon,
-        if selected {
-            crate::theme::ACCENT
+        if selected || response.hovered() {
+            palette.text
         } else {
-            crate::theme::MUTED
+            palette.muted
         },
     );
     response
 }
 
 pub(crate) fn panel_header(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
+    panel_header_in(ui, &crate::theme::NIGHT, contents);
+}
+
+/// A panel's title row with a hairline rule under it, in `palette`.
+fn panel_header_in(
+    ui: &mut egui::Ui,
+    palette: &crate::theme::Palette,
+    contents: impl FnOnce(&mut egui::Ui),
+) {
     let width = ui.available_width();
     let header = ui.horizontal(|ui| {
         ui.set_min_size(egui::vec2(width, PANEL_HEADER_HEIGHT));
@@ -1848,7 +2908,7 @@ pub(crate) fn panel_header(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::U
     let rect = header.response.rect;
     ui.painter().line_segment(
         [rect.left_bottom(), rect.right_bottom()],
-        egui::Stroke::new(1.0, crate::theme::BORDER_SOFT),
+        egui::Stroke::new(1.0, palette.rule),
     );
 }
 
@@ -1866,8 +2926,8 @@ fn icon_button(ui: &mut egui::Ui, icon: ShellIcon, label: &str) -> egui::Respons
     .corner_radius(6);
     button = if labeled {
         button
-            .fill(crate::theme::PANEL_RAISED)
-            .stroke(egui::Stroke::new(1.0, crate::theme::BORDER))
+            .fill(crate::theme::NIGHT.hover)
+            .stroke(egui::Stroke::NONE)
     } else {
         button.frame(false)
     };
@@ -1882,9 +2942,9 @@ fn icon_button(ui: &mut egui::Ui, icon: ShellIcon, label: &str) -> egui::Respons
 
 fn chrome_tab(ui: &mut egui::Ui, selected: bool, label: impl Into<String>) -> egui::Response {
     let color = if selected {
-        crate::theme::ACCENT
+        crate::theme::NIGHT.accent
     } else {
-        crate::theme::MUTED
+        crate::theme::NIGHT.muted
     };
     let response = ui.add(
         egui::Button::new(egui::RichText::new(label).color(color))
@@ -1896,7 +2956,7 @@ fn chrome_tab(ui: &mut egui::Ui, selected: bool, label: impl Into<String>) -> eg
     if selected {
         ui.painter().line_segment(
             [response.rect.left_bottom(), response.rect.right_bottom()],
-            egui::Stroke::new(2.0, crate::theme::ACCENT),
+            egui::Stroke::new(2.0, crate::theme::NIGHT.accent),
         );
     }
     response
@@ -1905,18 +2965,19 @@ fn chrome_tab(ui: &mut egui::Ui, selected: bool, label: impl Into<String>) -> eg
 /// Play and mode controls share the prototype's single top bar.
 fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // A segmented track; the bar is the darkest surface, so the track
+        // is one step lighter.
         egui::Frame::NONE
-            .fill(crate::theme::SHELL_FILL)
-            .stroke(egui::Stroke::new(1.0, crate::theme::BORDER))
-            .corner_radius(8)
-            .inner_margin(egui::Margin::same(3))
+            .fill(crate::theme::NIGHT.panel)
+            .corner_radius(9)
+            .inner_margin(egui::Margin::same(2))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     for workspace in Workspace::PRIMARY {
                         let selected = state.workspace == workspace;
                         let fill = if selected {
-                            egui::Color32::from_rgb(44, 61, 83)
+                            crate::theme::NIGHT.selected
                         } else {
                             egui::Color32::TRANSPARENT
                         };
@@ -1949,10 +3010,11 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
         }
         if playing {
             let (tint, text) = match state.play.mode() {
-                crate::play::EditorMode::Building => {
-                    (egui::Color32::from_rgb(150, 170, 210), "BUILDING")
+                crate::play::EditorMode::Building if state.play.is_compiling() => {
+                    (crate::theme::NIGHT.accent, "BUILDING")
                 }
-                crate::play::EditorMode::Play => (egui::Color32::from_rgb(235, 180, 90), "PLAYING"),
+                crate::play::EditorMode::Building => (crate::theme::NIGHT.accent, "STARTING"),
+                crate::play::EditorMode::Play => (crate::theme::NIGHT.highlight, "PLAYING"),
                 crate::play::EditorMode::Edit => (egui::Color32::GRAY, "EDITING"),
             };
             ui.colored_label(tint, text);
@@ -1967,28 +3029,28 @@ fn status_bar(ui: &mut egui::Ui, state: &EditorState) {
     ui.horizontal_centered(|ui| {
         let (dot, _) = ui.allocate_exact_size(egui::vec2(5.0, 5.0), egui::Sense::hover());
         ui.painter()
-            .circle_filled(dot.center(), 2.5, egui::Color32::from_rgb(137, 210, 169));
+            .circle_filled(dot.center(), 2.5, crate::theme::NIGHT.success);
         ui.label(format!(
             "Ln {}, Col {}",
             state.cursor_line, state.cursor_column
         ));
-        ui.colored_label(crate::theme::SUBTLE, "·");
+        ui.colored_label(crate::theme::NIGHT.subtle, "·");
         ui.label("Spaces: 4");
-        ui.colored_label(crate::theme::SUBTLE, "·");
+        ui.colored_label(crate::theme::NIGHT.subtle, "·");
         ui.label("UTF-8");
-        ui.colored_label(crate::theme::SUBTLE, "·");
+        ui.colored_label(crate::theme::NIGHT.subtle, "·");
         ui.label("Rust");
         ui.with_layout(
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| match state.dirty.summary() {
                 Some(summary) => {
                     ui.colored_label(
-                        egui::Color32::from_rgb(235, 180, 90),
+                        crate::theme::NIGHT.highlight,
                         format!("● Unsaved: {summary}"),
                     );
                 }
                 None => {
-                    ui.colored_label(crate::theme::SUBTLE, "Saved");
+                    ui.colored_label(crate::theme::NIGHT.subtle, "Saved");
                     paint_shell_icon(ui, ShellIcon::Check);
                 }
             },
@@ -2063,6 +3125,7 @@ fn terminal_tab(ui: &mut egui::Ui, state: &mut EditorState) {
 
 /// The right-side Inspector. The unimplemented Lighting tab stays hidden.
 fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
+    lock_while_previewing(ui, state);
     panel_title(ui, ShellIcon::Inspector, "Inspector");
     egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(12, 13))
@@ -2076,6 +3139,7 @@ fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
                         state.selected_entity,
                         &state.secondary_selection,
                         &mut state.batch_edit,
+                        &state.asset_index,
                         &mut state.open_script_request,
                     );
                 });
@@ -2085,7 +3149,7 @@ fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
 fn panel_title(ui: &mut egui::Ui, icon: ShellIcon, title: &str) {
     panel_header(ui, |ui| {
         paint_shell_icon(ui, icon);
-        ui.label(title);
+        ui.label(crate::theme::semibold(title));
     });
 }
 
@@ -2173,7 +3237,7 @@ fn show_code_workspace(ui: &mut egui::Ui, viewport: &Viewport, state: &mut Edito
     });
     state.code_panel_visible = code_webview_visible(
         state.code_panel_rect.is_some(),
-        state.pending_action.is_some(),
+        state.pending_action.is_some() || state.sdk_upgrade_message.is_some(),
         ui.ctx().any_popup_open(),
     );
     let pointer_down = ui.input(|input| input.pointer.any_down());
@@ -2292,47 +3356,153 @@ fn request_viewport_size(
     }
 }
 
-/// The Scene viewport header exposes only controls backed by the editor.
+/// The Scene viewport header exposes only controls backed by the editor:
+/// the title, the Play controls in the middle, the view tools on the right.
 fn scene_view_toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
-    panel_header(ui, |ui| {
-        panel_title_label(ui, ShellIcon::Viewport, "Viewport");
-        ui.weak("/ World");
+    let palette = &crate::theme::NIGHT;
+    panel_header_in(ui, palette, |ui| {
+        let header = ui.max_rect();
+        let (icon, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+        paint_shell_icon_at_color(ui, icon, ShellIcon::Viewport, palette.muted);
+        ui.label(crate::theme::semibold("Viewport").color(palette.text));
+        ui.label(egui::RichText::new("/ World").color(palette.subtle));
+        let centre = egui::Rect::from_center_size(header.center(), egui::vec2(112.0, 30.0));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(centre)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| play_controls(ui, state),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            for mode in GizmoMode::ALL.into_iter().rev() {
-                if gizmo_icon_button(ui, mode, state.gizmo_mode == mode).clicked() {
-                    state.gizmo_mode = mode;
+            ui.add_space(12.0);
+            if !state.play.is_previewing() {
+                view_tool_switch(ui, state);
+            }
+        });
+    });
+}
+
+/// Play / Stop, Pause and Step for a preview inside the Scene View, in one
+/// rounded group like the view tools.
+fn play_controls(ui: &mut egui::Ui, state: &mut EditorState) {
+    let palette = &crate::theme::NIGHT;
+    crate::widgets::segmented(palette).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let previewing = state.play.is_previewing();
+        let running_elsewhere = state.play.is_playing() && !previewing;
+        let (icon, tooltip) = if previewing {
+            (ShellIcon::Stop, "Stop (⌘P)")
+        } else {
+            (ShellIcon::Run, "Play in the Scene View (⌘P)")
+        };
+        let play = ui.add_enabled_ui(!running_elsewhere, |ui| {
+            toolbar_icon_button(ui, palette, icon, tooltip, previewing)
+        });
+        if play.inner.clicked() {
+            MenuCommand::TogglePreview.apply(state);
+        }
+        let live = previewing && state.play.mode() == crate::play::EditorMode::Play;
+        let paused = state.play.is_paused();
+        let pause = ui.add_enabled_ui(live, |ui| {
+            toolbar_icon_button(
+                ui,
+                palette,
+                ShellIcon::Pause,
+                if paused {
+                    "Resume (⇧⌘P)"
+                } else {
+                    "Pause (⇧⌘P)"
+                },
+                paused,
+            )
+        });
+        if pause.inner.clicked() {
+            MenuCommand::TogglePause.apply(state);
+        }
+        let step = ui.add_enabled_ui(live && paused, |ui| {
+            toolbar_icon_button(ui, palette, ShellIcon::Step, "Step one frame (⌥⌘P)", false)
+        });
+        if step.inner.clicked() {
+            MenuCommand::StepFrame.apply(state);
+        }
+    });
+}
+
+/// Select and Hand as one rounded segmented control: a soft pill holding
+/// both buttons, with the active tool raised inside it.
+fn view_tool_switch(ui: &mut egui::Ui, state: &mut EditorState) {
+    let palette = &crate::theme::NIGHT;
+    let active = state.active_view_tool();
+    crate::widgets::segmented(palette).show(ui, |ui| {
+        // The header lays out right to left, so add the tools in reverse:
+        // Select still reads first, as in Figma.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for tool in ViewTool::ALL.into_iter().rev() {
+                if toolbar_icon_button(
+                    ui,
+                    palette,
+                    view_tool_icon(tool),
+                    tool.tooltip(),
+                    active == tool,
+                )
+                .clicked()
+                {
+                    state.view_tool = tool;
                 }
             }
         });
     });
 }
 
-fn panel_title_label(ui: &mut egui::Ui, icon: ShellIcon, title: &str) {
-    paint_shell_icon(ui, icon);
-    ui.label(title);
-}
-
 fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
+    let palette = &crate::theme::NIGHT;
     let rect = ui.max_rect();
     ui.painter().line_segment(
         [rect.left_top(), rect.right_top()],
-        egui::Stroke::new(1.0, crate::theme::BORDER_SOFT),
+        egui::Stroke::new(1.0, palette.rule),
     );
     ui.horizontal(|ui| {
-        for dimension in crate::chrome::EditorDimension::ALL {
-            if chrome_tab(ui, state.dimension == dimension, dimension.label()).clicked() {
-                state.dimension = dimension;
-            }
-        }
-        egui::ComboBox::from_id_salt("studio_transform_space")
-            .selected_text(state.transform_space.label())
-            .show_ui(ui, |ui| {
-                for space in TransformSpace::ALL {
-                    ui.selectable_value(&mut state.transform_space, space, space.label());
+        crate::widgets::segmented(palette).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for dimension in crate::chrome::EditorDimension::ALL {
+                if crate::widgets::segment_label(
+                    ui,
+                    palette,
+                    state.dimension == dimension,
+                    dimension.label(),
+                )
+                .clicked()
+                {
+                    state.dimension = dimension;
+                    if !dimension.is_2d() {
+                        state.tile_paint_active = false;
+                    }
                 }
-            });
+            }
+        });
+        crate::widgets::segmented(palette).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for space in TransformSpace::ALL {
+                if crate::widgets::segment_label(
+                    ui,
+                    palette,
+                    state.transform_space == space,
+                    space.label(),
+                )
+                .clicked()
+                {
+                    state.transform_space = space;
+                }
+            }
+        });
+        ui.add_space(4.0);
+        // Menu titles read as quiet text until hovered, like a macOS toolbar.
+        ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+        ui.visuals_mut().widgets.inactive.fg_stroke.color = palette.muted;
         ui.menu_button("Overlays", |ui| {
-            ui.checkbox(&mut state.overlays.colliders, "Colliders");
+            ui.checkbox(&mut state.overlays.all_colliders, "All colliders")
+                .on_hover_text("The selected object's colliders are always shown");
             ui.checkbox(&mut state.overlays.lights, "Lights");
             ui.checkbox(&mut state.overlays.cameras, "Cameras");
             ui.checkbox(&mut state.overlays.grid, "Ground grid");
@@ -2340,9 +3510,192 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
             ui.checkbox(&mut state.overlays.nav, "Nav grid");
         });
         ui.menu_button("Terrain", |ui| {
+            if ui.button("Create terrain").clicked() {
+                state.create_terrain_request = true;
+                ui.close();
+            }
+            if ui.button("Create water").clicked() {
+                MenuCommand::CreateWater.apply(state);
+                ui.close();
+            }
+            if ui
+                .checkbox(&mut state.terrain_sculpt_active, "Sculpt in Scene View")
+                .changed()
+            {
+                state.terrain_stroke = None;
+                if state.terrain_sculpt_active {
+                    state.tile_paint_active = false;
+                }
+            }
             crate::terrain_tools::show_controls(ui, &mut state.terrain_tools);
+            let has_model = state.selected_asset.as_deref().is_some_and(|path| {
+                crate::assets::AssetKind::from_path(path) == crate::assets::AssetKind::Mesh
+            });
+            if ui
+                .add_enabled(
+                    has_model && state.selected_entity.is_some(),
+                    egui::Button::new("Scatter selected model on terrain"),
+                )
+                .on_hover_text("Select a terrain in Hierarchy and a model in Project Assets")
+                .clicked()
+            {
+                if let Err(error) = state.scatter_selected_mesh_on_terrain() {
+                    state.asset_browser.operation_error = Some(error);
+                }
+                ui.close();
+            }
+        });
+        ui.menu_button("Tilemap", |ui| {
+            if ui
+                .add_enabled(
+                    state.selected_texture_asset().is_some(),
+                    egui::Button::new("Create from selected image"),
+                )
+                .clicked()
+            {
+                MenuCommand::CreateTilemap.apply(state);
+                ui.close();
+            }
+            let selected_map = state.selected_entity.is_some_and(|entity| {
+                state
+                    .world
+                    .get::<engine_scene::SceneTilemap>(entity)
+                    .is_some()
+            });
+            ui.add_enabled_ui(selected_map && state.dimension.is_2d(), |ui| {
+                if ui
+                    .checkbox(&mut state.tile_paint_active, "Paint in Scene View")
+                    .changed()
+                    && state.tile_paint_active
+                {
+                    state.terrain_sculpt_active = false;
+                    state.terrain_stroke = None;
+                }
+                ui.checkbox(&mut state.tile_erase_active, "Erase cells");
+            });
+            ui.weak("Select a tilemap, then click or drag in 2D Scene View.");
+        });
+        ui.menu_button("Environment", |ui| {
+            environment_ambient_ui(ui, state);
+            ui.separator();
+            ui.label("Lighting");
+            if ui.button("Create point light").clicked() {
+                MenuCommand::CreatePointLight.apply(state);
+                ui.close();
+            }
+            ui.weak(format!(
+                "Up to {} point lights nearest the camera light the scene",
+                engine_renderer::MAX_POINT_LIGHTS
+            ));
+            let current = state
+                .world
+                .get_resource::<engine_scene::SceneLighting>()
+                .copied();
+            let mut enabled = current.is_some();
+            if ui
+                .checkbox(&mut enabled, "Override scene lighting")
+                .changed()
+            {
+                if enabled {
+                    state.world.insert_resource(engine_scene::SceneLighting(
+                        engine_scene::LightingData::default(),
+                    ));
+                } else {
+                    state.world.remove_resource::<engine_scene::SceneLighting>();
+                }
+                state.mark_dirty();
+            }
+            if enabled {
+                let mut data = state
+                    .world
+                    .get_resource::<engine_scene::SceneLighting>()
+                    .map(|value| value.0)
+                    .unwrap_or_default();
+                let mut changed = false;
+                ui.label("Sun direction");
+                for (axis, component) in ["X", "Y", "Z"].into_iter().zip(&mut data.sun_direction) {
+                    changed |= ui
+                        .add(egui::Slider::new(component, -1.0..=1.0).text(axis))
+                        .changed();
+                }
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut data.sun_intensity, 0.0..=20.0).text("Sun strength"),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(egui::Slider::new(&mut data.ambient_intensity, 0.0..=5.0).text("Ambient"))
+                    .changed();
+                ui.label("Sun color");
+                changed |= ui.color_edit_button_rgb(&mut data.sun_color).changed();
+                if data
+                    .sun_direction
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    < 0.000001
+                {
+                    ui.label("Sun direction cannot be zero");
+                } else if changed {
+                    state
+                        .world
+                        .insert_resource(engine_scene::SceneLighting(data));
+                    state.mark_dirty();
+                }
+            }
         });
     });
+}
+
+/// Scene-wide ambient sounds (wind, music): they loop at the same volume
+/// everywhere, so they are settings rather than objects placed in the map.
+fn environment_ambient_ui(ui: &mut egui::Ui, state: &mut EditorState) {
+    ui.label("Ambient sounds");
+    ui.weak("Loop everywhere in the scene, like wind or music.");
+    let mut environment = state.environment();
+    let mut changed = false;
+    let mut remove = None;
+    for (index, ambient) in environment.ambient_sounds.iter_mut().enumerate() {
+        let name = uuid::Uuid::parse_str(&ambient.sound.id)
+            .ok()
+            .and_then(|id| {
+                state
+                    .asset_index
+                    .path_for(engine_asset::AssetId::from_uuid(id))
+            })
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "Missing sound".to_owned());
+        ui.horizontal(|ui| {
+            ui.label(name);
+            changed |= ui
+                .add(egui::Slider::new(&mut ambient.gain, 0.0..=4.0).text("Volume"))
+                .changed();
+            if ui.small_button("Remove").clicked() {
+                remove = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove {
+        environment.ambient_sounds.remove(index);
+        changed = true;
+    }
+    if changed {
+        state.set_environment(environment);
+    }
+    if ui
+        .add_enabled(
+            state.selected_audio_asset().is_some(),
+            egui::Button::new("Add selected sound"),
+        )
+        .on_disabled_hover_text("Select a WAV sound in Project Assets first")
+        .clicked()
+        && let Err(error) = state.add_ambient_sound_from_selection()
+    {
+        state.asset_browser.operation_error = Some(error);
+    }
 }
 
 #[cfg(feature = "dock-shell")]
@@ -2375,13 +3728,7 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         match tab {
-            dock::Tab::Hierarchy => hierarchy::show(
-                ui,
-                &mut self.state.world,
-                &mut self.state.selected_entity,
-                &mut self.state.secondary_selection,
-                &mut self.state.hierarchy,
-            ),
+            dock::Tab::Hierarchy => show_hierarchy(ui, self.state),
             dock::Tab::Scene => {
                 scene_view_toolbar(ui, self.state);
                 ui.separator();
@@ -2395,25 +3742,7 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
                         .sense(egui::Sense::click_and_drag()),
                     )
                     .on_hover_cursor(egui::CursorIcon::Default);
-                handle_gizmo_interaction(self.viewport, self.state, &response);
-                if let Some(path) = response.dnd_release_payload::<std::path::PathBuf>() {
-                    let spawned = if path
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("prefab"))
-                    {
-                        self.state.spawn_prefab(&path).ok()
-                    } else {
-                        Some(self.state.spawn_asset_entity(&path))
-                    };
-                    if let Some(entity) = spawned {
-                        self.state.select_only(entity);
-                        self.state.mark_dirty();
-                    }
-                }
-                ui.ctx().set_cursor_icon(scene_cursor_icon(
-                    response.dragged(),
-                    self.state.dragging_axis.is_some(),
-                ));
+                handle_scene_view_input(ui, self.viewport, self.state, &response);
             }
             dock::Tab::Assets => assets::show(
                 ui,
@@ -2435,7 +3764,7 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
                 ]);
                 self.state.code_panel_visible = code_webview_visible(
                     !close,
-                    self.state.pending_action.is_some(),
+                    self.state.pending_action.is_some() || self.state.sdk_upgrade_message.is_some(),
                     ui.ctx().any_popup_open(),
                 );
             }
@@ -2472,6 +3801,9 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        if matches!(tab, StudioTab::Hierarchy) {
+            lock_while_previewing(ui, self.state);
+        }
         match tab {
             StudioTab::Hierarchy => hierarchy::show(
                 ui,
@@ -2491,7 +3823,7 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
                     ))
                     .sense(egui::Sense::click_and_drag()),
                 );
-                handle_gizmo_interaction(self.viewport, self.state, &response);
+                handle_scene_interaction(self.viewport, self.state, &response);
                 if let Some(path) = response.dnd_release_payload::<std::path::PathBuf>() {
                     let spawned = if path
                         .extension()
@@ -2546,10 +3878,35 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
 mod ui_tests {
     use super::StudioPanelExt;
     use super::{
-        ShellIcon, ShellLayout, code_panel_is_resizing, code_webview_visible, paint_shell_icon,
-        scene_cursor_icon, shell_layout, viewport_render_size,
+        CameraGesture, DragButtons, ScrollIntent, ShellIcon, ShellLayout, ViewTool, camera_gesture,
+        code_panel_is_resizing, code_webview_visible, paint_shell_icon, scene_cursor_icon,
+        scroll_intent, shell_layout, ui_preview_rect, viewport_render_size,
     };
     use crate::chrome::Workspace;
+
+    #[test]
+    fn ui_preview_uses_the_same_screen_anchor_as_play() {
+        let screen = egui::Rect::from_min_size(egui::pos2(50.0, 100.0), egui::vec2(400.0, 200.0));
+        let mut data = engine_scene::UiElementData::button();
+        assert_eq!(
+            ui_preview_rect(screen, &data),
+            egui::Rect::from_min_size(egui::pos2(160.0, 178.0), egui::vec2(180.0, 44.0))
+        );
+        data.anchor = engine_scene::UiAnchor::TopRight;
+        data.offset = [-20.0, 10.0];
+        assert_eq!(
+            ui_preview_rect(screen, &data),
+            egui::Rect::from_min_size(egui::pos2(250.0, 110.0), egui::vec2(180.0, 44.0))
+        );
+    }
+
+    #[test]
+    fn new_project_dialog_recommends_lua() {
+        assert_eq!(
+            super::NewProjectDialog::default().language,
+            engine_project::GameplayLanguage::Lua
+        );
+    }
 
     #[test]
     fn scene_split_limits_preserve_each_panels_minimum() {
@@ -2572,13 +3929,12 @@ mod ui_tests {
     }
 
     fn menu_test_state() -> (std::path::PathBuf, crate::EditorState) {
+        // A random name: tests run in parallel, and two can start within
+        // the clock's resolution.
         let root = std::env::temp_dir().join(format!(
             "vge_menu_{}_{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
+            uuid::Uuid::new_v4().simple()
         ));
         let project = engine_project::Project::create(&root, "Menu test").expect("project");
         let state = crate::EditorState::new(
@@ -2591,7 +3947,7 @@ mod ui_tests {
     }
 
     #[test]
-    fn selected_asset_preview_is_to_the_right_of_the_tree() {
+    fn the_asset_preview_sits_beside_a_wide_tree_and_under_a_narrow_one() {
         let (root, mut state) = menu_test_state();
         state.assets.push(crate::assets::AssetEntry {
             relative_path: std::path::PathBuf::from("player.png"),
@@ -2599,40 +3955,43 @@ mod ui_tests {
             id: None,
         });
         state.selected_asset = Some(std::path::PathBuf::from("player.png"));
-        let ctx = egui::Context::default();
-        let mut tree = None;
-        let mut preview = None;
-        for frame in 0..8 {
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(240.0, 260.0),
-                )),
-                time: Some(f64::from(frame) * 0.1),
-                ..Default::default()
-            };
-            let mut output = ctx.run_ui(input, |ui| super::show_asset_browser(ui, &mut state));
-            if frame == 7 {
-                for shape in &output.shapes {
-                    if let egui::epaint::Shape::Text(text) = &shape.shape {
-                        let rect = egui::Rect::from_min_size(text.pos, text.galley.size());
-                        match text.galley.text().trim() {
-                            "assets" => tree = Some(rect),
-                            "Preview" => preview = Some(rect),
-                            _ => {}
+        for (width, beside) in [(640.0, true), (240.0, false)] {
+            let ctx = egui::Context::default();
+            let mut tree = None;
+            let mut preview = None;
+            for frame in 0..8 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 320.0),
+                    )),
+                    time: Some(f64::from(frame) * 0.1),
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| super::show_asset_browser(ui, &mut state));
+                if frame == 7 {
+                    for shape in &output.shapes {
+                        if let egui::epaint::Shape::Text(text) = &shape.shape {
+                            let rect = text.visual_bounding_rect();
+                            match text.galley.text().trim() {
+                                "assets" => tree = Some(rect),
+                                "Preview" => preview = Some(rect),
+                                _ => {}
+                            }
                         }
                     }
                 }
+                output.textures_delta.clear();
             }
-            output.textures_delta.clear();
+            let tree = tree.expect("root of asset tree");
+            let preview = preview.expect("selected asset preview");
+            if beside {
+                assert!(preview.min.x > tree.max.x, "{width}: {tree:?} {preview:?}");
+                assert!((preview.min.y - tree.min.y).abs() < 30.0);
+            } else {
+                assert!(preview.min.y > tree.max.y, "{width}: {tree:?} {preview:?}");
+            }
         }
-        let tree = tree.expect("root of asset tree");
-        let preview = preview.expect("selected asset preview");
-        assert!(
-            preview.min.x > tree.max.x,
-            "tree {tree:?}, preview {preview:?}"
-        );
-        assert!((preview.min.y - tree.min.y).abs() < 30.0);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2889,14 +4248,383 @@ mod ui_tests {
     }
 
     #[test]
-    fn scene_is_neutral_until_a_gizmo_drag_is_active() {
-        assert_eq!(scene_cursor_icon(false, false), egui::CursorIcon::Default);
+    fn trackpad_scroll_pans_command_scroll_orbits_and_wheels_zoom() {
+        let wheel = |unit, delta: egui::Vec2, modifiers| egui::Event::MouseWheel {
+            unit,
+            delta,
+            phase: egui::TouchPhase::Move,
+            modifiers,
+        };
+        let none = egui::Modifiers::NONE;
+        let command = egui::Modifiers {
+            command: true,
+            ..none
+        };
+        let notch = scroll_intent(&[wheel(
+            egui::MouseWheelUnit::Line,
+            egui::vec2(0.0, 2.0),
+            none,
+        )]);
+        assert_eq!(notch.zoom_steps, 2.0);
         assert_eq!(
-            scene_cursor_icon(true, false),
+            (notch.pan, notch.orbit),
+            (glam::Vec2::ZERO, glam::Vec2::ZERO)
+        );
+
+        let trackpad = scroll_intent(&[wheel(
+            egui::MouseWheelUnit::Point,
+            egui::vec2(12.0, -30.0),
+            none,
+        )]);
+        assert_eq!(trackpad.pan, glam::Vec2::new(12.0, -30.0));
+        assert_eq!(
+            (trackpad.zoom_steps, trackpad.orbit),
+            (0.0, glam::Vec2::ZERO)
+        );
+
+        let rotate = scroll_intent(&[wheel(
+            egui::MouseWheelUnit::Point,
+            egui::vec2(8.0, 4.0),
+            command,
+        )]);
+        assert_eq!(
+            rotate.orbit,
+            glam::Vec2::new(8.0, 4.0),
+            "⌘ + two-finger scroll rotates"
+        );
+        assert_eq!((rotate.zoom_steps, rotate.pan), (0.0, glam::Vec2::ZERO));
+
+        let pinch = scroll_intent(&[egui::Event::Zoom(1.0 / 0.88)]);
+        assert!((pinch.zoom_steps - 2.5).abs() < 1e-4, "pinch is amplified");
+        assert_eq!(
+            scroll_intent(&[egui::Event::Zoom(f32::NAN)]),
+            ScrollIntent::default()
+        );
+    }
+
+    #[test]
+    fn camera_gestures_follow_editor_mouse_conventions() {
+        let none = egui::Modifiers::NONE;
+        let alt = egui::Modifiers { alt: true, ..none };
+        let shift = egui::Modifiers {
+            shift: true,
+            ..none
+        };
+        let right = DragButtons {
+            secondary: true,
+            ..DragButtons::default()
+        };
+        let middle = DragButtons {
+            middle: true,
+            ..DragButtons::default()
+        };
+        let left = DragButtons {
+            primary: true,
+            ..DragButtons::default()
+        };
+        assert_eq!(
+            camera_gesture(right, none, false, false, ViewTool::Select),
+            Some(CameraGesture::Orbit)
+        );
+        assert_eq!(
+            camera_gesture(right, none, false, true, ViewTool::Select),
+            Some(CameraGesture::Look)
+        );
+        assert_eq!(
+            camera_gesture(right, shift, false, false, ViewTool::Select),
+            Some(CameraGesture::Pan)
+        );
+        assert_eq!(
+            camera_gesture(middle, none, false, false, ViewTool::Select),
+            Some(CameraGesture::Pan)
+        );
+        assert_eq!(
+            camera_gesture(left, alt, false, false, ViewTool::Select),
+            None,
+            "⌥ + drag is not a camera gesture"
+        );
+        let command = egui::Modifiers {
+            command: true,
+            ..none
+        };
+        assert_eq!(
+            camera_gesture(left, command, false, false, ViewTool::Select),
+            Some(CameraGesture::Orbit),
+            "⌘ + drag rotates on a trackpad"
+        );
+        assert_eq!(
+            camera_gesture(left, command, true, false, ViewTool::Select),
+            Some(CameraGesture::Pan)
+        );
+        assert_eq!(
+            camera_gesture(left, none, false, false, ViewTool::Select),
+            None,
+            "left-drag stays with the gizmo"
+        );
+        assert_eq!(
+            camera_gesture(right, none, true, false, ViewTool::Select),
+            Some(CameraGesture::Pan),
+            "2D only pans"
+        );
+        assert_eq!(
+            camera_gesture(DragButtons::default(), alt, false, false, ViewTool::Select),
+            None
+        );
+
+        // The Hand tool turns a plain left-drag into a pan; ⌘ + drag still rotates.
+        assert_eq!(
+            camera_gesture(left, none, false, false, ViewTool::Hand),
+            Some(CameraGesture::Pan)
+        );
+        assert_eq!(
+            camera_gesture(left, command, false, false, ViewTool::Hand),
+            Some(CameraGesture::Orbit)
+        );
+        assert_eq!(
+            camera_gesture(DragButtons::default(), none, false, false, ViewTool::Hand),
+            None,
+            "no drag, no gesture"
+        );
+    }
+
+    /// A tree inside a group that is moved, turned a quarter around Y and
+    /// scaled 2×, like the Island's "Tree 001" groups.
+    fn tree_in_a_group() -> (
+        engine_ecs::prelude::World,
+        engine_ecs::prelude::Entity,
+        engine_ecs::prelude::Entity,
+    ) {
+        use engine_ecs::components::{Name, Transform};
+        use engine_ecs::prelude::ChildOf;
+        let mut world = engine_ecs::prelude::World::new();
+        let group = world
+            .spawn((
+                Name::new("Tree 001"),
+                Transform::from(engine_utils::Transform {
+                    translation: glam::Vec3::new(10.0, 0.0, 5.0),
+                    rotation: glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+                    scale: glam::Vec3::splat(2.0),
+                }),
+            ))
+            .id();
+        let trunk = world
+            .spawn((
+                Name::new("Trunk"),
+                Transform::from(engine_utils::Transform::from_translation(glam::Vec3::new(
+                    1.0, 0.0, 0.0,
+                ))),
+                ChildOf(group),
+            ))
+            .id();
+        (world, group, trunk)
+    }
+
+    #[test]
+    fn the_gizmo_sits_on_an_object_inside_a_group() {
+        let (_root, mut state) = menu_test_state();
+        let (world, _group, trunk) = tree_in_a_group();
+        state.world = world;
+        state.select_only(trunk);
+        let origin = state.gizmo_origin().expect("gizmo");
+        // Local x 1, scaled 2, turned to -Z, from (10, 0, 5).
+        assert!(
+            (origin - glam::Vec3::new(10.0, 0.0, 3.0)).length() < 1e-4,
+            "{origin}"
+        );
+    }
+
+    #[test]
+    fn gizmo_drags_follow_world_axes_inside_a_turned_scaled_group() {
+        use crate::gizmo::Axis;
+        let (mut world, group, trunk) = tree_in_a_group();
+        let before = crate::hierarchy::world_transform(&world, trunk);
+        super::apply_gizmo_edit(&mut world, &[trunk], super::GizmoEdit::Move(Axis::X, 3.0));
+        let after = crate::hierarchy::world_transform(&world, trunk);
+        assert!(
+            (after.translation - before.translation - glam::Vec3::new(3.0, 0.0, 0.0)).length()
+                < 1e-4,
+            "moved exactly 3 along world X: {before:?} → {after:?}"
+        );
+        super::apply_gizmo_edit(&mut world, &[trunk], super::GizmoEdit::Rotate(Axis::Y, 0.5));
+        let turned = crate::hierarchy::world_transform(&world, trunk);
+        assert!(
+            (turned.translation - after.translation).length() < 1e-4,
+            "turning in place does not move it"
+        );
+
+        // Group and trunk both selected: the trunk moves once, with the group.
+        let trunk_before = crate::hierarchy::world_transform(&world, trunk).translation;
+        super::apply_gizmo_edit(
+            &mut world,
+            &[group, trunk],
+            super::GizmoEdit::Move(Axis::Y, 1.0),
+        );
+        let trunk_after = crate::hierarchy::world_transform(&world, trunk).translation;
+        assert!(
+            (trunk_after - trunk_before - glam::Vec3::Y).length() < 1e-4,
+            "{trunk_before} → {trunk_after}"
+        );
+    }
+
+    /// Writes `studio.png`: the whole Studio window, built from the same
+    /// panel functions as the real one (the 3D view is a placeholder), for a
+    /// visual check of the shared style. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_studio_window() {
+        use engine_ecs::components::{Name, Transform};
+        use engine_ecs::prelude::ChildOf;
+        let (root, mut state) = menu_test_state();
+        let at = |x: f32| {
+            Transform::from(engine_utils::Transform::from_translation(glam::Vec3::new(
+                x, 0.0, 0.0,
+            )))
+        };
+        state.world.spawn((Name::new("Terrain"), at(0.0)));
+        let trees = state.world.spawn((Name::new("Trees"), at(0.0))).id();
+        for index in 1..=3 {
+            let tree = state
+                .world
+                .spawn((
+                    Name::new(format!("Tree {index:03}")),
+                    at(index as f32),
+                    ChildOf(trees),
+                ))
+                .id();
+            state.world.spawn((
+                Name::new(format!("Tree {index:03} Trunk")),
+                at(0.0),
+                ChildOf(tree),
+            ));
+        }
+        let camera = state.world.spawn((Name::new("Main Camera"), at(5.0))).id();
+        state.select_only(camera);
+        for (path, kind) in [
+            ("models/tree.gltf", crate::assets::AssetKind::Mesh),
+            ("models/rock.gltf", crate::assets::AssetKind::Mesh),
+            ("textures/grass.png", crate::assets::AssetKind::Texture),
+            ("audio/wind.wav", crate::assets::AssetKind::Audio),
+        ] {
+            state.assets.push(crate::assets::AssetEntry {
+                relative_path: std::path::PathBuf::from(path),
+                kind,
+                id: None,
+            });
+        }
+        state.asset_browser.open_folders = [std::path::PathBuf::new(), "models".into()].into();
+        state.hierarchy.open = ["unused".to_owned()].into();
+        state.output.write_line("[play] building 'island' (Debug)");
+        state
+            .output
+            .write_line("[build:stderr]    Compiling island v0.1.0");
+        let mut new_project = None;
+        let path = crate::ui_snapshot::snapshot_dir().join("studio.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(1280.0, 800.0), 2.0, |ui| {
+            egui::Panel::top("snapshot_header")
+                .exact_size(super::STUDIO_HEADER_HEIGHT)
+                .show_separator_line(false)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(crate::theme::NIGHT.shell)
+                        .inner_margin(egui::Margin::symmetric(14, 0)),
+                )
+                .show(ui, |ui| {
+                    super::studio_header_contents(ui, &mut state, &mut new_project, true)
+                });
+            egui::Panel::bottom("snapshot_status")
+                .exact_size(super::STUDIO_STATUS_HEIGHT)
+                .show_separator_line(false)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(crate::theme::NIGHT.shell)
+                        .inner_margin(egui::Margin::symmetric(14, 0)),
+                )
+                .show(ui, |ui| super::status_bar(ui, &state));
+            egui::Panel::left("snapshot_left")
+                .exact_size(250.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| {
+                    egui::Panel::bottom("snapshot_assets")
+                        .exact_size(260.0)
+                        .frame(super::studio_panel_frame())
+                        .show_separator_line(false)
+                        .show(ui, |ui| super::show_asset_browser(ui, &mut state));
+                    super::show_hierarchy(ui, &mut state);
+                });
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(290.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::Panel::bottom("snapshot_console")
+                .exact_size(190.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::bottom_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(super::studio_panel_frame())
+                .show(ui, |ui| {
+                    super::scene_view_toolbar(ui, &mut state);
+                    let rest = ui.available_rect_before_wrap();
+                    ui.painter().rect_filled(
+                        rest.shrink(1.0),
+                        0.0,
+                        egui::Color32::from_rgb(0x2B, 0x3A, 0x2E),
+                    );
+                });
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `scene-chrome.png`: the Scene panel's header and footer, for
+    /// a visual check. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_scene_panel_chrome() {
+        let (root, mut state) = menu_test_state();
+        let path = crate::ui_snapshot::snapshot_dir().join("scene-chrome.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(900.0, 240.0), 2.0, |ui| {
+            ui.painter()
+                .rect_filled(ui.max_rect(), 0.0, crate::theme::NIGHT.shell);
+            super::studio_panel_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                crate::theme::NIGHT.apply(ui.visuals_mut());
+                super::scene_view_toolbar(ui, &mut state);
+                ui.add_space(140.0);
+                super::scene_view_footer(ui, &mut state);
+            });
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scene_is_neutral_until_a_gizmo_drag_is_active() {
+        use crate::gizmo::{Axis, GizmoHandle};
+        assert_eq!(
+            scene_cursor_icon(false, None, None),
+            egui::CursorIcon::Default
+        );
+        assert_eq!(
+            scene_cursor_icon(true, None, None),
             egui::CursorIcon::Default,
             "click-dragging the scene without an axis must not show a grab cursor"
         );
-        assert_eq!(scene_cursor_icon(true, true), egui::CursorIcon::Grabbing);
+        assert_eq!(
+            scene_cursor_icon(true, Some(GizmoHandle::Move(Axis::X)), None),
+            egui::CursorIcon::Grabbing
+        );
+        assert_eq!(
+            scene_cursor_icon(false, None, Some(GizmoHandle::Rotate(Axis::Y))),
+            egui::CursorIcon::None,
+            "a hovered ring swaps the system cursor for the drawn rotate cursor"
+        );
+        assert_eq!(
+            scene_cursor_icon(true, Some(GizmoHandle::Rotate(Axis::Y)), None),
+            egui::CursorIcon::None
+        );
     }
 
     #[test]
@@ -3129,7 +4857,7 @@ mod ui_tests {
                 .iter()
                 .filter_map(|shape| match &shape.shape {
                     egui::epaint::Shape::Rect(rect)
-                        if rect.fill == crate::theme::ACCENT
+                        if rect.fill == crate::theme::NIGHT.accent
                             && rect.rect.width() <= 9.0
                             && rect.rect.height() <= 9.0
                             && rect.rect.min.x > studio_right
@@ -3279,7 +5007,7 @@ mod ui_tests {
         );
         let assets_card = output.shapes.iter().find_map(|shape| match &shape.shape {
             egui::epaint::Shape::Rect(rect)
-                if rect.fill == crate::theme::PANEL_FILL && rect.rect.height() > 180.0 =>
+                if rect.fill == crate::theme::NIGHT.panel && rect.rect.height() > 180.0 =>
             {
                 Some(rect.rect)
             }
@@ -3338,12 +5066,21 @@ mod ui_tests {
     }
 
     #[test]
-    fn dock_panels_use_the_approved_prototype_card_boundary() {
+    fn a_narrow_asset_panel_stacks_its_preview_under_the_tree() {
+        assert!(super::preview_below_tree(250.0), "the default left dock");
+        assert!(
+            !super::preview_below_tree(600.0),
+            "a wide panel keeps it beside"
+        );
+    }
+
+    #[test]
+    fn panels_are_soft_cards_on_the_window_surface() {
         let frame = super::studio_panel_frame();
-        assert_eq!(frame.fill, egui::Color32::from_rgb(21, 29, 41));
-        assert_eq!(frame.corner_radius, egui::CornerRadius::same(9));
+        assert_eq!(frame.fill, crate::theme::NIGHT.panel);
+        assert_eq!(frame.corner_radius, egui::CornerRadius::same(10));
         assert_eq!(frame.stroke.width, 1.0);
-        assert_eq!(frame.stroke.color, egui::Color32::from_rgb(43, 59, 80));
+        assert_eq!(frame.stroke.color, crate::theme::NIGHT.border);
         assert_eq!(frame.inner_margin, egui::Margin::ZERO);
         assert_eq!(frame.outer_margin, egui::Margin::same(3));
     }
@@ -3351,18 +5088,20 @@ mod ui_tests {
     #[test]
     fn srgb_surface_clear_matches_the_dark_shell_gap() {
         let clear = super::shell_clear_color(wgpu::TextureFormat::Bgra8UnormSrgb);
-        assert!((clear.r - 0.003_347).abs() < 0.000_01);
-        assert!((clear.g - 0.005_605).abs() < 0.000_01);
-        assert!((clear.b - 0.010_330).abs() < 0.000_01);
+        let [r, g, b, _] = egui::Rgba::from(crate::theme::NIGHT.shell).to_array();
+        assert!((clear.r - f64::from(r)).abs() < 0.000_01);
+        assert!((clear.g - f64::from(g)).abs() < 0.000_01);
+        assert!((clear.b - f64::from(b)).abs() < 0.000_01);
         assert_eq!(clear.a, 1.0);
     }
 
     #[test]
     fn linear_surface_clear_keeps_the_shell_rgb_values() {
         let clear = super::shell_clear_color(wgpu::TextureFormat::Bgra8Unorm);
-        assert!((clear.r - 11.0 / 255.0).abs() < f64::EPSILON);
-        assert!((clear.g - 17.0 / 255.0).abs() < f64::EPSILON);
-        assert!((clear.b - 26.0 / 255.0).abs() < f64::EPSILON);
+        let shell = crate::theme::NIGHT.shell;
+        assert!((clear.r - f64::from(shell.r()) / 255.0).abs() < f64::EPSILON);
+        assert!((clear.g - f64::from(shell.g()) / 255.0).abs() < f64::EPSILON);
+        assert!((clear.b - f64::from(shell.b()) / 255.0).abs() < f64::EPSILON);
         assert_eq!(clear.a, 1.0);
     }
 
@@ -3400,8 +5139,8 @@ mod ui_tests {
             .iter()
             .find_map(|clipped| match &clipped.shape {
                 egui::epaint::Shape::Rect(rect)
-                    if rect.fill == crate::theme::PANEL_FILL
-                        && rect.stroke.color == crate::theme::BORDER
+                    if rect.fill == crate::theme::NIGHT.panel
+                        && rect.stroke.color == crate::theme::NIGHT.border
                         && rect.rect.width() > 400.0 =>
                 {
                     Some((rect.rect, clipped.clip_rect))

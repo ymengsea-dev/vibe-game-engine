@@ -20,15 +20,19 @@
 //! Everything appends into one [`DebugDraw`], which is one vertex buffer
 //! and one draw call however many overlays are on.
 
-use engine_ecs::prelude::{Camera, Entity, GlobalTransform, Transform, World};
-use engine_renderer::{DebugDraw, LightSet};
+use engine_ecs::prelude::{Camera, Children, Entity, GlobalTransform, Transform, World};
+use engine_renderer::{Aabb, DebugDraw, LightSet};
 use engine_scene::{ColliderShape, SceneAudioEmitter, SceneCollider, SceneNavGrid};
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// Colour of collider wireframes: rapier-green, the convention every
-/// physics debug view uses.
-const COLLIDER_COLOR: [f32; 4] = [0.35, 0.9, 0.45, 1.0];
+/// physics debug view uses. Dimmed, because it is background information.
+const COLLIDER_COLOR: [f32; 4] = [0.35, 0.9, 0.45, 0.55];
+/// Colour of everything that marks the selection: bounds and colliders.
+const SELECTION_COLOR: [f32; 4] = [0.88, 0.69, 0.41, 1.0];
+/// Most selected objects (including descendants) outlined per frame.
+const MAX_OUTLINED: usize = 4_096;
 /// Colour of camera frusta.
 const CAMERA_COLOR: [f32; 4] = [0.45, 0.7, 1.0, 1.0];
 /// Colour of light markers.
@@ -60,9 +64,12 @@ const GRID_CELL_SIZE: f32 = 1.0;
 /// toggles independently; persisted per project in the editor session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlayToggles {
-    /// Collider shapes declared by the scene.
+    /// Every collider in the scene. The selection's colliders are always
+    /// drawn, so this is for debugging physics across the whole level. Off
+    /// by default; sessions saved before the rename (`colliders`) start off,
+    /// so the Scene View looks like the game.
     #[serde(default)]
-    pub colliders: bool,
+    pub all_colliders: bool,
     /// Directional-light headings and point-light positions.
     #[serde(default)]
     pub lights: bool,
@@ -85,23 +92,35 @@ impl OverlayToggles {
     /// Whether any overlay is on. All off draws nothing at all — no
     /// vertices, and the caller skips the draw call.
     pub fn any(self) -> bool {
-        self.colliders || self.lights || self.cameras || self.grid || self.audio || self.nav
+        self.all_colliders || self.lights || self.cameras || self.grid || self.audio || self.nav
     }
 }
 
-/// Draws every enabled overlay into `draw`.
+/// Draws the selection outline and every enabled overlay into `draw`.
+///
+/// `selection` is the selected objects; they and their descendants get an
+/// orange box around their geometry and their colliders, whatever the
+/// toggles say. `mesh_bounds` gives an entity's local mesh bounds, if it
+/// has an uploaded mesh.
 ///
 /// Appends; the caller clears `draw` once per frame and may add its own
 /// geometry (the gizmo, placeholder boxes) to the same buffer.
-pub fn build(world: &mut World, lights: &LightSet, toggles: OverlayToggles, draw: &mut DebugDraw) {
+pub fn build(
+    world: &mut World,
+    lights: &LightSet,
+    toggles: OverlayToggles,
+    selection: &[Entity],
+    mesh_bounds: impl Fn(&World, Entity) -> Option<Aabb>,
+    draw: &mut DebugDraw,
+) {
+    let selected = selected_with_descendants(world, selection);
+    draw_selection_bounds(world, &selected, &mesh_bounds, draw);
+    draw_colliders(world, draw, &selected, toggles.all_colliders);
     if !toggles.any() {
         return;
     }
     if toggles.grid {
         draw.grid(Vec3::ZERO, GRID_CELLS, GRID_CELL_SIZE, GRID_COLOR);
-    }
-    if toggles.colliders {
-        draw_colliders(world, draw);
     }
     if toggles.cameras {
         draw_cameras(world, draw);
@@ -202,35 +221,107 @@ fn world_matrix(world: &World, entity: Entity) -> Mat4 {
         .map_or(Mat4::IDENTITY, |local| local.0.to_matrix())
 }
 
-/// One wireframe per collider the scene declared.
-fn draw_colliders(world: &mut World, draw: &mut DebugDraw) {
-    let carriers: Vec<(Entity, ColliderShape)> = world
+/// The selected entities plus all their descendants (bounded), in no
+/// particular order and without duplicates.
+fn selected_with_descendants(world: &World, selection: &[Entity]) -> Vec<Entity> {
+    let mut found = Vec::new();
+    let mut stack: Vec<Entity> = selection.to_vec();
+    while let Some(entity) = stack.pop() {
+        if found.len() >= MAX_OUTLINED || found.contains(&entity) {
+            continue;
+        }
+        if world.get_entity(entity).is_err() {
+            continue;
+        }
+        found.push(entity);
+        if let Some(children) = world.get::<Children>(entity) {
+            stack.extend(children.iter());
+        }
+    }
+    found
+}
+
+/// An orange box around each selected object's geometry: its mesh bounds,
+/// else its sprite quad, else a small marker at its origin.
+fn draw_selection_bounds(
+    world: &World,
+    selected: &[Entity],
+    mesh_bounds: &impl Fn(&World, Entity) -> Option<Aabb>,
+    draw: &mut DebugDraw,
+) {
+    for &entity in selected {
+        let matrix = world_matrix(world, entity);
+        let local = mesh_bounds(world, entity).or_else(|| {
+            world
+                .get::<engine_ecs::components::SpriteSource>(entity)
+                .map(|sprite| {
+                    let half = Vec3::new(sprite.size[0] * 0.5, sprite.size[1] * 0.5, 0.0);
+                    Aabb {
+                        min: -half,
+                        max: half,
+                    }
+                })
+        });
+        match local {
+            Some(bounds) => {
+                let centre = (bounds.min + bounds.max) * 0.5;
+                let half = (bounds.max - bounds.min) * 0.5;
+                draw.wire_box_transformed(
+                    matrix * Mat4::from_translation(centre),
+                    half,
+                    SELECTION_COLOR,
+                );
+            }
+            None => draw.cross(
+                matrix.transform_point3(Vec3::ZERO),
+                LIGHT_MARKER_SIZE,
+                SELECTION_COLOR,
+            ),
+        }
+    }
+}
+
+/// Collider wireframes, when `all` is on: green, with the selection's in
+/// orange. Off, nothing is drawn: the selection box already marks the
+/// selection, and a second outline on top of it only adds clutter.
+fn draw_colliders(world: &mut World, draw: &mut DebugDraw, selected: &[Entity], all: bool) {
+    if !all {
+        return;
+    }
+    let carriers: Vec<(Entity, ColliderShape, [f32; 4])> = world
         .query::<(Entity, &SceneCollider)>()
         .iter(world)
-        .map(|(entity, collider)| (entity, collider.0.shape.clone()))
+        .map(|(entity, collider)| {
+            let color = if selected.contains(&entity) {
+                SELECTION_COLOR
+            } else {
+                COLLIDER_COLOR
+            };
+            (entity, collider.0.shape.clone(), color)
+        })
         .collect();
 
-    for (entity, shape) in carriers {
+    for (entity, shape, color) in carriers {
         let matrix = world_matrix(world, entity);
         let centre = matrix.transform_point3(Vec3::ZERO);
         match shape {
-            ColliderShape::Ball { radius } => draw.wire_sphere(centre, radius, COLLIDER_COLOR),
+            ColliderShape::Ball { radius } => draw.wire_sphere(centre, radius, color),
             ColliderShape::Cuboid { half_extents } => {
-                draw.wire_box_transformed(matrix, Vec3::from_array(half_extents), COLLIDER_COLOR)
+                draw.wire_box_transformed(matrix, Vec3::from_array(half_extents), color)
             }
             ColliderShape::Cylinder {
                 half_height,
                 radius,
-            } => draw.wire_cylinder(centre, half_height, radius, COLLIDER_COLOR),
+            } => draw.wire_cylinder(centre, half_height, radius, color),
             ColliderShape::Capsule {
                 half_height,
                 radius,
-            } => draw.wire_capsule(centre, half_height, radius, COLLIDER_COLOR),
+            } => draw.wire_capsule(centre, half_height, radius, color),
             // A triangle-mesh collider is the render mesh: drawing its
             // triangles as lines would bury the scene in wireframe, so
             // it gets a marker saying "there is a mesh collider here".
             ColliderShape::TriMesh { .. } => {
-                draw.cross(centre, LIGHT_MARKER_SIZE, COLLIDER_COLOR);
+                draw.cross(centre, LIGHT_MARKER_SIZE, color);
             }
         }
     }
@@ -326,7 +417,14 @@ mod tests {
     fn disabled_overlay_emits_nothing() {
         let mut world = world_with_a_box_collider(4);
         let mut draw = DebugDraw::new();
-        build(&mut world, &lit(), OverlayToggles::default(), &mut draw);
+        build(
+            &mut world,
+            &lit(),
+            OverlayToggles::default(),
+            &[],
+            |_, _| None,
+            &mut draw,
+        );
         assert!(
             draw.is_empty(),
             "every overlay off must cost no vertices, so the draw call is skipped"
@@ -350,12 +448,12 @@ mod tests {
 
         let mut count = |toggles: OverlayToggles| {
             let mut draw = DebugDraw::new();
-            build(&mut world, &lights, toggles, &mut draw);
+            build(&mut world, &lights, toggles, &[], |_, _| None, &mut draw);
             draw.len()
         };
 
         let colliders = count(OverlayToggles {
-            colliders: true,
+            all_colliders: true,
             ..Default::default()
         });
         let cameras = count(OverlayToggles {
@@ -388,7 +486,7 @@ mod tests {
         // And everything together is exactly the sum — no overlay
         // suppresses or duplicates another.
         let all = count(OverlayToggles {
-            colliders: true,
+            all_colliders: true,
             cameras: true,
             lights: true,
             grid: true,
@@ -428,6 +526,8 @@ mod tests {
                     audio: true,
                     ..Default::default()
                 },
+                &[],
+                |_, _| None,
                 &mut draw,
             );
             draw.len()
@@ -445,6 +545,8 @@ mod tests {
                 nav: true,
                 ..Default::default()
             },
+            &[],
+            |_, _| None,
             &mut draw,
         );
         // 4 lines each way for a 3x3 grid, plus a cross on the one
@@ -470,6 +572,8 @@ mod tests {
                 nav: true,
                 ..Default::default()
             },
+            &[],
+            |_, _| None,
             &mut draw,
         );
         assert!(draw.is_empty());
@@ -483,9 +587,11 @@ mod tests {
             &mut world,
             &LightSet::default(),
             OverlayToggles {
-                colliders: true,
+                all_colliders: true,
                 ..Default::default()
             },
+            &[],
+            |_, _| None,
             &mut draw,
         );
         // One vertex list, so one draw call — 1000 boxes, 24 vertices
@@ -502,9 +608,11 @@ mod tests {
             &mut world,
             &LightSet::default(),
             OverlayToggles {
-                colliders: true,
+                all_colliders: true,
                 ..Default::default()
             },
+            &[],
+            |_, _| None,
             &mut draw,
         );
         // The single entity sits at the origin with half-extents of 1,
@@ -513,5 +621,93 @@ mod tests {
             assert!(vertex.position[0].abs() <= 1.0 + f32::EPSILON);
             assert!(vertex.position[1].abs() <= 1.0 + f32::EPSILON);
         }
+    }
+
+    #[test]
+    fn the_selection_is_outlined_with_overlays_off_and_colliders_need_the_overlay() {
+        let mut world = world_with_a_box_collider(3);
+        let selected = world
+            .query::<(Entity, &SceneCollider)>()
+            .iter(&world)
+            .map(|(entity, _)| entity)
+            .next()
+            .expect("collider entity");
+        let mut draw = DebugDraw::new();
+        let bounds = |_: &World, entity: Entity| {
+            (entity == selected).then_some(Aabb {
+                min: Vec3::splat(-1.0),
+                max: Vec3::splat(1.0),
+            })
+        };
+        build(
+            &mut world,
+            &lit(),
+            OverlayToggles::default(),
+            &[selected],
+            bounds,
+            &mut draw,
+        );
+        let selection_only = draw.len();
+        assert!(
+            selection_only > 0,
+            "the selection is visible with every overlay off"
+        );
+        assert!(
+            draw.vertices()
+                .iter()
+                .all(|vertex| vertex.color == SELECTION_COLOR),
+            "only the selection is drawn"
+        );
+
+        let mut everything = DebugDraw::new();
+        build(
+            &mut world,
+            &lit(),
+            OverlayToggles {
+                all_colliders: true,
+                ..OverlayToggles::default()
+            },
+            &[selected],
+            bounds,
+            &mut everything,
+        );
+        assert!(
+            everything.len() > selection_only,
+            "All colliders adds the rest"
+        );
+    }
+
+    #[test]
+    fn selecting_a_parent_outlines_its_children() {
+        let mut world = World::new();
+        let parent = world.spawn(Transform::default()).id();
+        let child = world
+            .spawn((Transform::default(), engine_ecs::prelude::ChildOf(parent)))
+            .id();
+        assert_eq!(
+            {
+                let mut found = selected_with_descendants(&world, &[parent]);
+                found.sort();
+                found
+            },
+            {
+                let mut expected = vec![parent, child];
+                expected.sort();
+                expected
+            }
+        );
+        let mut draw = DebugDraw::new();
+        build(
+            &mut world,
+            &lit(),
+            OverlayToggles::default(),
+            &[parent],
+            |_, _| None,
+            &mut draw,
+        );
+        assert!(
+            !draw.is_empty(),
+            "objects without a mesh still get a marker"
+        );
     }
 }

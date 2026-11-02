@@ -9,11 +9,14 @@ repository.workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 ron.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 engine_scene.workspace = true
 engine_asset.workspace = true
+engine_renderer.workspace = true
 
 [lints]
 workspace = true

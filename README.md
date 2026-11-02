@@ -10,7 +10,7 @@ VGE is a Rust-first 2D/3D game-engine workspace for Windows, macOS, and Linux. I
 - RustyEngine Studio: scene authoring, asset browsing/import, project settings, code editing, an integrated terminal, play/export workflows, and diagnostics.
 - An exported-game player and the Island vertical-slice sample.
 
-For the code-verified capability list and known limits, see [docs/FEATURES.md](docs/FEATURES.md).
+For the code-verified capability list and known limits, see [docs/dev/02_ENGINE_FEATURES.md](docs/dev/02_ENGINE_FEATURES.md). User guides are in [docs/user/](docs/user/00_README.md).
 
 ## Requirements
 

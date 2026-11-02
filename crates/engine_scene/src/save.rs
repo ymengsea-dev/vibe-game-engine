@@ -37,12 +37,14 @@ use std::path::Path;
 
 use bevy_ecs::hierarchy::ChildOf;
 use bevy_ecs::prelude::{Entity, World};
-use engine_ecs::components::{AssetSource, Camera, Disabled, Name, Static, Transform};
+use engine_ecs::components::{AssetSource, Camera, Disabled, Name, Static, Transform, WaterVolume};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::capture::capture_renderables;
 use crate::error::SceneError;
-use crate::format::{CameraData, MeshRendererData, SpriteData, TransformData};
+use crate::format::{
+    CameraData, FoliageData, MeshRendererData, PointLightData, SpriteData, TransformData, WaterData,
+};
 use crate::resolve::{InstantiateReport, SceneResolver, insert_components};
 
 /// The save format version this engine writes and understands.
@@ -76,6 +78,9 @@ pub struct SavedEntity {
     /// Mesh and material references, so geometry comes back on load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_renderer: Option<MeshRendererData>,
+    /// Authored foliage group and its baked instance poses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foliage: Option<FoliageData>,
     /// Sprite reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sprite: Option<SpriteData>,
@@ -91,6 +96,12 @@ pub struct SavedEntity {
     /// Whether the entity was marked static.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_static: bool,
+    /// Authored water settings, including waves and buoyancy properties.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub water: Option<WaterData>,
+    /// Authored point-light settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point_light: Option<PointLightData>,
 }
 
 /// Every entity in a world, captured for saving.
@@ -113,6 +124,8 @@ impl WorldSnapshot {
                 .map(SavedEntity::as_scene_entity)
                 .collect(),
             nav_grid: None,
+            lighting: None,
+            environment: Default::default(),
         }
         .validate()
     }
@@ -134,15 +147,35 @@ impl WorldSnapshot {
             Option<&AssetSource>,
             Option<&Disabled>,
             Option<&Static>,
+            Option<&WaterVolume>,
+            Option<&crate::ScenePointLight>,
+            Option<&crate::SceneFoliage>,
         )>();
 
         let collected: Vec<(Entity, SavedEntity)> = query
             .iter(world)
             .filter_map(
-                |(entity, name, transform, camera, asset_source, disabled, is_static)| {
+                |(
+                    entity,
+                    name,
+                    transform,
+                    camera,
+                    asset_source,
+                    disabled,
+                    is_static,
+                    water,
+                    light,
+                    foliage,
+                )| {
                     // Something must be worth saving, or this is
                     // bookkeeping rather than game state.
-                    if name.is_none() && transform.is_none() && camera.is_none() {
+                    if name.is_none()
+                        && transform.is_none()
+                        && camera.is_none()
+                        && water.is_none()
+                        && light.is_none()
+                        && foliage.is_none()
+                    {
                         return None;
                     }
                     Some((
@@ -153,11 +186,14 @@ impl WorldSnapshot {
                             transform: transform.map(|t| TransformData::from(t.0)),
                             camera: camera.map(|c| CameraData::from(c.0)),
                             mesh_renderer: None,
+                            foliage: None,
                             sprite: None,
                             asset_source: asset_source.map(|source| source.path.clone()),
                             asset_id: asset_source.and_then(|source| source.id.clone()),
                             disabled: disabled.is_some(),
                             is_static: is_static.is_some(),
+                            water: water.map(|volume| volume.surface.into()),
+                            point_light: light.map(|light| light.0),
                         },
                     ))
                 },
@@ -177,6 +213,9 @@ impl WorldSnapshot {
             .map(|(entity, mut saved)| {
                 let (mesh_renderer, sprite) = capture_renderables(world, entity);
                 saved.mesh_renderer = mesh_renderer;
+                saved.foliage = world
+                    .get::<crate::SceneFoliage>(entity)
+                    .map(|source| source.0.clone());
                 saved.sprite = sprite;
                 // A parent that was itself skipped leaves this entity a
                 // root, rather than dangling at an index that means
@@ -241,13 +280,17 @@ impl SavedEntity {
     /// capture path — respawning components is genuinely the same job.
     fn as_scene_entity(&self) -> crate::SceneEntity {
         crate::SceneEntity {
+            object_id: None,
+            script: None,
             name: self.name.clone(),
             parent: None,
             sibling_order: None,
             transform: self.transform,
             camera: self.camera,
             mesh_renderer: self.mesh_renderer.clone(),
+            foliage: self.foliage.clone(),
             sprite: self.sprite.clone(),
+            tilemap: None,
             asset_source: self.asset_source.clone(),
             asset_id: self.asset_id.clone(),
             disabled: self.disabled,
@@ -261,6 +304,10 @@ impl SavedEntity {
             // the scene that spawned it already described its collider,
             // and rebuilding one here would double it up.
             collider: None,
+            water: self.water,
+            point_light: self.point_light,
+            ui: None,
+            rules: Vec::new(),
         }
     }
 }
@@ -440,6 +487,84 @@ mod tests {
                 .filter(|e| e.name.is_none())
                 .count(),
             2,
+        );
+    }
+
+    #[test]
+    fn water_survives_a_runtime_save_restore() {
+        let mut world = World::new();
+        let surface = engine_physics::WaterSurface {
+            base_height: 2.5,
+            ..Default::default()
+        };
+        world.spawn((
+            Name::new("Pond"),
+            engine_ecs::components::WaterVolume { surface },
+        ));
+
+        let save = SaveGame::capture(&mut world, ());
+        let text = save.to_ron_string().unwrap();
+        let loaded = SaveGame::<()>::from_ron_str(&text).unwrap();
+        let mut restored = World::new();
+        let report = loaded.restore(&mut restored, &mut NullResolver);
+
+        assert_eq!(report.spawned.len(), 1);
+        assert_eq!(
+            restored
+                .get::<engine_ecs::components::WaterVolume>(report.spawned[0])
+                .map(|volume| volume.surface),
+            Some(surface)
+        );
+    }
+
+    #[test]
+    fn point_light_survives_a_runtime_save_restore() {
+        let mut world = World::new();
+        let settings = crate::PointLightData {
+            color: [0.4, 0.6, 0.9],
+            intensity: 4.0,
+            range: 9.0,
+        };
+        world.spawn((Name::new("Lamp"), crate::ScenePointLight(settings)));
+        let save = SaveGame::capture(&mut world, ());
+        let text = save.to_ron_string().unwrap();
+        let loaded = SaveGame::<()>::from_ron_str(&text).unwrap();
+        let mut restored = World::new();
+        let report = loaded.restore(&mut restored, &mut NullResolver);
+        assert_eq!(report.spawned.len(), 1);
+        assert_eq!(
+            restored
+                .get::<crate::ScenePointLight>(report.spawned[0])
+                .map(|light| light.0),
+            Some(settings)
+        );
+    }
+
+    #[test]
+    fn foliage_survives_a_runtime_save_restore() {
+        let authored = crate::FoliageData {
+            mesh: crate::AssetRef {
+                id: uuid::Uuid::new_v4().to_string(),
+            },
+            material: crate::AssetRef {
+                id: uuid::Uuid::new_v4().to_string(),
+            },
+            instances: vec![crate::TransformData::from(MathTransform::from_translation(
+                Vec3::new(2.0, 1.0, 3.0),
+            ))],
+        };
+        let mut world = World::new();
+        world.spawn(crate::SceneFoliage(authored.clone()));
+        let save = SaveGame::capture(&mut world, ());
+        let loaded = SaveGame::<()>::from_ron_str(&save.to_ron_string().unwrap()).unwrap();
+        let mut restored = World::new();
+        let report = loaded.restore(&mut restored, &mut NullResolver);
+        assert_eq!(report.spawned.len(), 1);
+        assert_eq!(
+            restored
+                .get::<crate::SceneFoliage>(report.spawned[0])
+                .map(|value| &value.0),
+            Some(&authored)
         );
     }
 

@@ -633,6 +633,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "built"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1089,6 +1099,9 @@ name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "dasp_sample"
@@ -1228,6 +1241,9 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "dtoa"
@@ -1284,6 +1300,8 @@ dependencies = [
  "muda",
  "rfd",
  "serde_json",
+ "toml_edit 0.25.13+spec-1.1.0",
+ "uuid",
 ]
 
 [[package]]
@@ -1447,8 +1465,12 @@ dependencies = [
  "engine_ui",
  "engine_utils",
  "glam 0.33.6",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tracing",
+ "uuid",
+ "wgpu",
 ]
 
 [[package]]
@@ -1538,6 +1560,7 @@ dependencies = [
  "engine_audio",
  "engine_ecs",
  "engine_editor_derive",
+ "engine_physics",
  "engine_platform",
  "engine_project",
  "engine_renderer",
@@ -1594,11 +1617,14 @@ name = "engine_project"
 version = "0.1.0"
 dependencies = [
  "engine_asset",
+ "engine_renderer",
  "engine_scene",
  "ron",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1624,7 +1650,9 @@ dependencies = [
  "engine_asset",
  "engine_audio",
  "engine_ecs",
+ "engine_physics",
  "engine_renderer",
+ "engine_ui",
  "engine_utils",
  "glam 0.33.6",
  "ron",
@@ -1637,6 +1665,13 @@ dependencies = [
 [[package]]
 name = "engine_scripting"
 version = "0.1.0"
+dependencies = [
+ "mlua",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
+]
 
 [[package]]
 name = "engine_ui"
@@ -3217,6 +3252,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lua-src"
+version = "551.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d400ffef0e3d4d29287092bdc5a276d0bf468b2c69709d5bab0d469312d9f947"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "luajit-src"
+version = "210.7.4+c6ffc14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1db548b001f0b7da416daf0ffae963912bae6cad1799fa9f4eaba09da6dba837"
+dependencies = [
+ "cc",
+ "which",
+]
+
+[[package]]
 name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3366,6 +3420,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mlua"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a7ae6b65bf54b7fdd4cf5b6f44f60862350ebf3fe3779b3a9cc005e7fa14f81"
+dependencies = [
+ "bstr",
+ "either",
+ "libc",
+ "mlua-sys",
+ "num-traits",
+ "parking_lot",
+ "rustc-hash 2.1.3",
+]
+
+[[package]]
+name = "mlua-sys"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1631cda17bd6486410ab751d91f5fd4484f441589278cdad879eb3afc721a285"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "lua-src",
+ "luajit-src",
+ "pkg-config",
 ]
 
 [[package]]
@@ -4417,9 +4500,11 @@ name = "player"
 version = "0.1.0"
 dependencies = [
  "engine",
+ "serde_json",
  "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -5649,6 +5734,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "studio_packager"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "symphonia"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6056,6 +6148,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 
@@ -6067,6 +6160,12 @@ checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow 1.0.4",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "tracing"
@@ -6879,6 +6978,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "which"
+version = "8.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "wide"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7392,6 +7500,7 @@ dependencies = [
  "redox_syscall 0.4.1",
  "rustix 0.38.44",
  "sctk-adwaita",
+ "serde",
  "smithay-client-toolkit 0.19.2",
  "smol_str",
  "tracing",

@@ -14,15 +14,14 @@
 //!   `SceneEntity`, so a selected entity's children are not captured.
 //! - No prefab linking: an instantiated prefab is a plain detached copy,
 //!   with no back-reference to the file and no override tracking.
-//! - `mesh_renderer` is not captured (it holds live GPU handles, not
-//!   describable data yet).
+//! - Live GPU handles are not captured; asset references are.
 
 use std::path::{Path, PathBuf};
 
 use engine_ecs::components::{AssetSource, Camera, Disabled, Name, Static, Transform};
 use engine_ecs::prelude::{Entity, World};
 use engine_scene::{
-    CameraData, Prefab, SceneEntity, SceneError, TransformData, capture_renderables,
+    CameraData, Prefab, SceneCollider, SceneEntity, SceneError, TransformData, capture_renderables,
 };
 
 use crate::error::EditorError;
@@ -36,7 +35,7 @@ const DEFAULT_STEM: &str = "Prefab";
 
 /// Builds a single-entity [`Prefab`] from `entity`'s editor-relevant
 /// components (`Name` / `Transform` / `Camera` / `AssetSource` /
-/// `Disabled` / `Static`). Mirrors the per-entity mapping in
+/// `SceneCollider` / `Disabled` / `Static`). Mirrors the per-entity mapping in
 /// `engine_scene::Scene::from_world`; `parent` is left unset — a lone
 /// prefab has no sibling list to index into.
 ///
@@ -64,8 +63,23 @@ pub fn capture(world: &World, entity: Entity) -> Result<Prefab, EditorError> {
         asset_id: asset_source.and_then(|source| source.id.clone()),
         disabled: world.get::<Disabled>(entity).is_some(),
         is_static: world.get::<Static>(entity).is_some(),
+        collider: world
+            .get::<SceneCollider>(entity)
+            .map(|value| value.0.clone()),
+        ui: world
+            .get::<engine_scene::SceneUi>(entity)
+            .map(|value| value.0.clone()),
         mesh_renderer,
+        foliage: world
+            .get::<engine_scene::SceneFoliage>(entity)
+            .map(|source| source.0.clone()),
         sprite,
+        tilemap: world
+            .get::<engine_scene::SceneTilemap>(entity)
+            .map(|source| source.0.clone()),
+        rules: world
+            .get::<engine_scene::SceneRules>(entity)
+            .map_or_else(Vec::new, |source| source.0.clone()),
         ..Default::default()
     };
     Ok(Prefab::new(scene_entity))
@@ -192,6 +206,30 @@ mod tests {
     }
 
     #[test]
+    fn capture_keeps_an_instanced_foliage_group() {
+        let foliage = engine_scene::FoliageData {
+            mesh: engine_scene::AssetRef {
+                id: uuid::Uuid::new_v4().to_string(),
+            },
+            material: engine_scene::AssetRef {
+                id: uuid::Uuid::new_v4().to_string(),
+            },
+            instances: vec![engine_scene::TransformData::from(
+                engine_utils::Transform::IDENTITY,
+            )],
+        };
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                Name::new("Grass"),
+                engine_scene::SceneFoliage(foliage.clone()),
+            ))
+            .id();
+        let prefab = capture(&world, entity).unwrap();
+        assert_eq!(prefab.entity().foliage, Some(foliage));
+    }
+
+    #[test]
     fn capture_copies_name_transform_and_asset_source() {
         let mut world = World::new();
         let entity = world
@@ -211,6 +249,25 @@ mod tests {
         assert_eq!(data.asset_id.as_deref(), Some("abc"));
         assert!(data.is_static);
         assert!(!data.disabled);
+    }
+
+    #[test]
+    fn capture_preserves_a_scene_collider_for_runtime_prefab_spawns() {
+        let mut world = World::new();
+        let collider = engine_scene::ColliderData {
+            shape: engine_scene::ColliderShape::Cuboid {
+                half_extents: [0.5, 1.0, 0.5],
+            },
+            body: engine_scene::BodyKind::Dynamic,
+        };
+        let entity = world
+            .spawn((
+                Name::new("Crate"),
+                engine_scene::SceneCollider(collider.clone()),
+            ))
+            .id();
+        let prefab = capture(&world, entity).expect("capture");
+        assert_eq!(prefab.entity().collider, Some(collider));
     }
 
     #[test]

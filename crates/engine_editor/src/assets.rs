@@ -388,6 +388,10 @@ pub struct AssetBrowser {
     delete_confirmation: Option<PathBuf>,
     /// Whether the selected-asset preview pane is visible.
     pub preview_open: bool,
+    /// Folders the user unfolded, relative to the assets root (empty is
+    /// the `assets` root itself). Every other folder starts folded. Saved
+    /// with the project's editor session.
+    pub open_folders: std::collections::BTreeSet<PathBuf>,
 }
 
 impl Default for AssetBrowser {
@@ -409,6 +413,7 @@ impl Default for AssetBrowser {
             renaming: None,
             delete_confirmation: None,
             preview_open: true,
+            open_folders: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -573,20 +578,21 @@ pub fn show_scene(
         .max_height(ui.available_height().max(0.0))
         .min_scrolled_height(0.0)
         .show(ui, |ui| {
-            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
-                ui.ctx(),
-                ui.make_persistent_id("scene_asset_root"),
-                true,
+            let root_id = ui.make_persistent_id("scene_asset_root");
+            let mut state = folder_fold(
+                ui,
+                browser,
+                root_id,
+                Path::new(""),
+                browser.new_folder.is_some(),
             );
-            if browser.new_folder.is_some() {
-                state.set_open(true);
-            }
             let selected_root = selected.is_none() && browser.target_dir.as_os_str().is_empty();
             let selection_shape = ui.painter().add(egui::Shape::Noop);
             let header = ui.horizontal(|ui| {
                 tree_disclosure(ui, &mut state);
                 folder_label(ui, "assets")
             });
+            remember_fold(browser, Path::new(""), &state);
             paint_folder_row(ui, selection_shape, header.response.rect, selected_root);
             if header.inner.clicked()
                 || dropped_on_folder(ui, header.response.rect, browser.drop_position)
@@ -937,7 +943,12 @@ fn delete_confirmation(ui: &mut egui::Ui, browser: &mut AssetBrowser) {
             ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add(egui::Button::new("Delete").fill(egui::Color32::from_rgb(115, 47, 56)))
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("Delete").color(crate::theme::NIGHT.danger),
+                        )
+                        .fill(crate::theme::NIGHT.danger.gamma_multiply(0.18)),
+                    )
                     .clicked()
                 {
                     browser.operation_request = Some(AssetOperation::Delete { path: path.clone() });
@@ -967,7 +978,7 @@ fn operation_error_dialog(ui: &mut egui::Ui, browser: &mut AssetBrowser) {
             ui.label(error);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add(egui::Button::new("OK").fill(crate::theme::ACCENT_FILL))
+                    .add(egui::Button::new("OK").fill(crate::theme::NIGHT.accent_fill))
                     .clicked()
                 {
                     browser.operation_error = None;
@@ -1049,14 +1060,15 @@ fn show_folder_contents(
         new_folder_prompt(ui, browser);
     }
     for child in &folder.folders {
-        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
-            ui.ctx(),
+        let creating_inside =
+            browser.new_folder.is_some() && browser.new_folder_parent.starts_with(&child.path);
+        let mut state = folder_fold(
+            ui,
+            browser,
             ui.make_persistent_id(&child.path),
-            true,
+            &child.path,
+            creating_inside,
         );
-        if browser.new_folder.is_some() && browser.new_folder_parent.starts_with(&child.path) {
-            state.set_open(true);
-        }
         let is_renaming = browser
             .renaming
             .as_ref()
@@ -1074,6 +1086,7 @@ fn show_folder_contents(
                 response
             }
         });
+        remember_fold(browser, &child.path, &state);
         if !is_renaming {
             paint_folder_row(ui, selection_shape, header.response.rect, selected_folder);
             if header.inner.clicked()
@@ -1106,6 +1119,39 @@ fn dropped_on_folder(ui: &egui::Ui, rect: egui::Rect, drop_position: Option<(i32
                 .or_else(|| input.pointer.hover_pos())
                 .is_some_and(|pos| rect.contains(pos))
     })
+}
+
+/// The fold state for the asset folder `path`: folded unless the user
+/// unfolded it before ([`AssetBrowser::open_folders`]) or `force_open`
+/// (a new folder is being named inside it).
+fn folder_fold(
+    ui: &egui::Ui,
+    browser: &mut AssetBrowser,
+    id: egui::Id,
+    path: &Path,
+    force_open: bool,
+) -> egui::collapsing_header::CollapsingState {
+    if force_open {
+        browser.open_folders.insert(path.to_path_buf());
+    }
+    let open = browser.open_folders.contains(path);
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
+    state.set_open(open);
+    state
+}
+
+/// Records whether the user left the folder at `path` unfolded.
+fn remember_fold(
+    browser: &mut AssetBrowser,
+    path: &Path,
+    state: &egui::collapsing_header::CollapsingState,
+) {
+    if state.is_open() {
+        browser.open_folders.insert(path.to_path_buf());
+    } else {
+        browser.open_folders.remove(path);
+    }
 }
 
 pub(crate) fn tree_disclosure(
@@ -1403,6 +1449,22 @@ fn asset_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unfolds the assets root, every listed folder and every folder that
+    /// holds one of `entries`, as if the user had opened them all. For
+    /// tests about what happens inside the tree, not about folding.
+    fn unfold_everything(browser: &mut AssetBrowser, entries: &[AssetEntry]) {
+        browser.open_folders.insert(PathBuf::new());
+        let folders = browser.folders.clone();
+        let parents = entries
+            .iter()
+            .filter_map(|entry| entry.relative_path.parent().map(Path::to_path_buf));
+        for folder in folders.into_iter().chain(parents) {
+            for ancestor in folder.ancestors() {
+                browser.open_folders.insert(ancestor.to_path_buf());
+            }
+        }
+    }
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[derive(Debug)]
@@ -1450,6 +1512,7 @@ mod tests {
             folders: vec![PathBuf::from("empty")],
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &[]);
         let mut selected = None;
         let mut open_request = None;
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -1497,6 +1560,7 @@ mod tests {
             new_folder: Some(String::new()),
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &[]);
         let mut selected = None;
         let mut open_request = None;
         for (time, events) in [
@@ -1533,6 +1597,7 @@ mod tests {
             new_folder: Some("draft".to_owned()),
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &[]);
         let mut selected = None;
         let mut open_request = None;
         let mut draw = |time, events, browser: &mut AssetBrowser| {
@@ -1574,6 +1639,7 @@ mod tests {
             new_folder_needs_focus: true,
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &[]);
         let mut selected = None;
         let mut open_request = None;
         for (time, events) in [
@@ -1617,6 +1683,7 @@ mod tests {
             new_folder_parent: PathBuf::from("audio"),
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &entries);
         let mut selected = None;
         let mut open_request = None;
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -1647,6 +1714,7 @@ mod tests {
         }];
         let ctx = egui::Context::default();
         let mut browser = AssetBrowser::default();
+        unfold_everything(&mut browser, &entries);
         let mut selected = None;
         let mut open_request = None;
         let mut draw = |time, events, dropped_files, browser: &mut AssetBrowser| {
@@ -1697,6 +1765,7 @@ mod tests {
         }];
         let ctx = egui::Context::default();
         let mut browser = AssetBrowser::default();
+        unfold_everything(&mut browser, &entries);
         let mut selected = None;
         let mut open_request = None;
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -1741,6 +1810,7 @@ mod tests {
             folders: vec![PathBuf::from("target")],
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &entries);
         let mut selected = None;
         let mut open_request = None;
         let mut draw = |time, events, browser: &mut AssetBrowser| {
@@ -1810,6 +1880,7 @@ mod tests {
             operation_error: Some("An item named test already exists in that folder.".into()),
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &[]);
         let mut selected = None;
         let mut open_request = None;
         let mut output = ctx.run_ui(
@@ -1854,6 +1925,7 @@ mod tests {
             operation_error: Some("An item already exists in that folder.".into()),
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &[]);
         let mut selected = None;
         let mut open_request = None;
         let mut draw = || {
@@ -1915,12 +1987,61 @@ mod tests {
     }
 
     #[test]
+    fn folders_start_folded_and_remember_being_unfolded() {
+        let entries = vec![AssetEntry {
+            relative_path: PathBuf::from("sprites/player.png"),
+            kind: AssetKind::Texture,
+            id: None,
+        }];
+        let ctx = egui::Context::default();
+        let mut browser = AssetBrowser::default();
+        let (mut selected, mut open_request) = (None, None);
+        let mut time = 0.0;
+        // Several frames, so an opening fold finishes its animation.
+        let mut shows = |browser: &mut AssetBrowser, label: &str| {
+            let mut output = Default::default();
+            for _ in 0..10 {
+                time += 0.1;
+                let mut frame = ctx.run_ui(
+                    egui::RawInput {
+                        time: Some(time),
+                        ..Default::default()
+                    },
+                    |ui| show_scene(ui, &entries, browser, &mut selected, &mut open_request),
+                );
+                frame.textures_delta.clear();
+                output = frame;
+            }
+            let output: egui::FullOutput = output;
+            output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.text() == label)
+            })
+        };
+        assert!(shows(&mut browser, "assets"));
+        assert!(!shows(&mut browser, "sprites"), "the root starts folded");
+
+        browser.open_folders.insert(PathBuf::new());
+        assert!(
+            shows(&mut browser, "sprites"),
+            "an unfolded root shows its folders"
+        );
+        assert!(
+            browser.open_folders.contains(Path::new("")),
+            "and stays remembered"
+        );
+        assert!(!browser.open_folders.contains(Path::new("sprites")));
+    }
+
+    #[test]
     fn dragging_a_folder_over_another_folder_highlights_and_queues_move() {
         let ctx = egui::Context::default();
         let mut browser = AssetBrowser {
             folders: vec![PathBuf::from("source"), PathBuf::from("target")],
+            // The user unfolded the assets root.
+            open_folders: [PathBuf::new()].into(),
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &[]);
         let mut selected = None;
         let mut open_request = None;
         let mut draw = |time, events, browser: &mut AssetBrowser| {
@@ -1987,6 +2108,7 @@ mod tests {
             folders: vec![PathBuf::from("source")],
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &[]);
         let mut selected = None;
         let mut open_request = None;
         let mut draw = |time, events| {
@@ -2045,6 +2167,7 @@ mod tests {
             id: None,
         }];
         let mut browser = AssetBrowser::default();
+        unfold_everything(&mut browser, &entries);
         let mut selected = None;
         let mut open_request = None;
         let mut draw = |time, events| {
@@ -2118,6 +2241,7 @@ mod tests {
             }),
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &[]);
         let mut selected = None;
         let mut open_request = None;
         let mut draw = |time, events| {
@@ -2184,6 +2308,7 @@ mod tests {
             target_dir: PathBuf::from("audio"),
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &[]);
         let mut selected = None;
         let mut open_request = None;
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -2303,6 +2428,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         let mut browser = AssetBrowser::default();
+        unfold_everything(&mut browser, &entries);
         let mut selected = Some(PathBuf::from("player.png"));
         let mut open_request = None;
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -2349,6 +2475,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         let mut browser = AssetBrowser::default();
+        unfold_everything(&mut browser, &[]);
         let mut selected = Some(PathBuf::from("player.png"));
         let mut open_request = None;
         let mut draw = |time, events| {
@@ -2405,8 +2532,10 @@ mod tests {
         crate::theme::install(&ctx);
         let mut browser = AssetBrowser {
             folders: vec![PathBuf::from("behind_menu")],
+            open_folders: [PathBuf::new()].into(),
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &[]);
         let mut selected = Some(PathBuf::from("other.png"));
         let mut open_request = None;
         let mut draw = |time, events| {
@@ -2483,6 +2612,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
         let mut browser = AssetBrowser::default();
+        unfold_everything(&mut browser, &[]);
         let mut selected = None;
         let mut open_request = None;
         let mut draw = |time, events| {
@@ -2544,6 +2674,7 @@ mod tests {
         }];
         let ctx = egui::Context::default();
         let mut browser = AssetBrowser::default();
+        unfold_everything(&mut browser, &entries);
         let mut selected = Some(PathBuf::from("player.png"));
         let mut open_request = None;
         let mut draw = |time, events, selected: &mut Option<PathBuf>| {
@@ -2581,6 +2712,7 @@ mod tests {
         }];
         let ctx = egui::Context::default();
         let mut browser = AssetBrowser::default();
+        unfold_everything(&mut browser, &entries);
         let mut selected = None;
         let mut open_request = None;
         let mut labels = Vec::new();
@@ -2623,6 +2755,7 @@ mod tests {
         }];
         let ctx = egui::Context::default();
         let mut browser = AssetBrowser::default();
+        unfold_everything(&mut browser, &entries);
         let mut selected = None;
         let mut open_request = None;
         let mut output = ctx.run_ui(
@@ -2658,7 +2791,12 @@ mod tests {
             id: None,
         }];
         let ctx = egui::Context::default();
-        let mut browser = AssetBrowser::default();
+        let mut browser = AssetBrowser {
+            // The user unfolded the root and `sprites`.
+            open_folders: [PathBuf::new(), PathBuf::from("sprites")].into(),
+            ..AssetBrowser::default()
+        };
+        unfold_everything(&mut browser, &entries);
         let mut selected = None;
         let mut open_request = None;
         let mut file_label = None;
@@ -2721,6 +2859,7 @@ mod tests {
             target_dir: PathBuf::from("sprites"),
             ..AssetBrowser::default()
         };
+        unfold_everything(&mut browser, &entries);
         let mut selected = None;
         let mut open_request = None;
         let mut draw =
@@ -2769,6 +2908,7 @@ mod tests {
         }];
         let ctx = egui::Context::default();
         let mut browser = AssetBrowser::default();
+        unfold_everything(&mut browser, &entries);
         let mut selected = None;
         let mut open_request = None;
         let mut widths = Vec::new();

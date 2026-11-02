@@ -13,13 +13,60 @@
 //! user stops interacting and the world actually changed. The editor
 //! shell drives both around its per-frame UI pass, so no panel needs to
 //! know about undo at all.
+//!
+//! Terrain sculpting changes files on disk, not the world, so a stroke is
+//! recorded explicitly with [`History::record_terrain`]. It shares the same
+//! stack, so undo always reverses the most recent edit of either kind.
+
+use std::path::PathBuf;
 
 use engine_ecs::components::Name;
 use engine_ecs::prelude::{Entity, World};
 use engine_scene::Scene;
 
+use crate::terrain_tools::{TerrainEdit, write_terrain};
+
 /// Most undo steps kept — the oldest is dropped past this.
 const DEFAULT_LIMIT: usize = 128;
+/// Memory budget for terrain steps on the undo stack; the oldest terrain
+/// steps are dropped past this so long sculpting sessions stay bounded.
+const TERRAIN_BYTE_BUDGET: usize = 64 * 1024 * 1024;
+
+/// What an undo or redo changed, so the caller can refresh dependent views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistoryChange {
+    /// The world was replaced; entity ids changed.
+    World,
+    /// A terrain's files were rewritten; its mesh must be reloaded.
+    Terrain {
+        /// Absolute path of the terrain's `.gltf` model.
+        model_path: PathBuf,
+    },
+}
+
+/// An undo or redo step that could not be applied. The step stays on its
+/// stack, so the user can retry once the cause is fixed.
+#[derive(Debug, thiserror::Error)]
+#[error("could not restore terrain {}: {source}", path.display())]
+pub struct HistoryError {
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
+enum Step {
+    World(Snapshot),
+    Terrain(TerrainEdit),
+}
+
+impl Step {
+    fn terrain_bytes(&self) -> usize {
+        match self {
+            Self::World(_) => 0,
+            Self::Terrain(edit) => edit.byte_size(),
+        }
+    }
+}
 
 /// One restorable editor state: the world as a [`Scene`], plus the name
 /// of whatever was selected (ids don't survive a restore).
@@ -53,10 +100,10 @@ impl Snapshot {
     }
 }
 
-/// An undo/redo stack of world snapshots.
+/// An undo/redo stack of world snapshots and terrain strokes.
 pub struct History {
-    undo: Vec<Snapshot>,
-    redo: Vec<Snapshot>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
     /// Pre-edit state for the sequence currently in progress — taken at
     /// the first frame after the last settle, committed to `undo` by
     /// [`History::settle`] once the world changes and interaction stops.
@@ -114,41 +161,106 @@ impl History {
         };
         let current = Snapshot::capture(world, selected);
         if current.scene != pending.scene {
-            self.undo.push(pending);
-            if self.undo.len() > self.limit {
-                self.undo.remove(0);
-            }
-            self.redo.clear();
+            self.push_new(Step::World(pending));
             true
         } else {
             false
         }
     }
 
-    /// Reverts to the previous undo snapshot, moving the current state
-    /// onto the redo stack. Returns whether anything was undone.
-    pub fn undo(&mut self, world: &mut World, selected: &mut Option<Entity>) -> bool {
-        let Some(snapshot) = self.undo.pop() else {
-            return false;
-        };
-        self.redo.push(Snapshot::capture(world, *selected));
-        snapshot.restore(world, selected);
-        self.pending = None;
-        true
+    /// Records a finished terrain stroke as one undo step.
+    pub fn record_terrain(&mut self, edit: TerrainEdit) {
+        self.push_new(Step::Terrain(edit));
     }
 
-    /// Re-applies the most recently undone snapshot, moving the current
-    /// state back onto the undo stack. Returns whether anything was
-    /// redone.
-    pub fn redo(&mut self, world: &mut World, selected: &mut Option<Entity>) -> bool {
-        let Some(snapshot) = self.redo.pop() else {
-            return false;
-        };
-        self.undo.push(Snapshot::capture(world, *selected));
-        snapshot.restore(world, selected);
-        self.pending = None;
-        true
+    /// Pushes a fresh edit: clears redo and enforces the step and memory limits.
+    fn push_new(&mut self, step: Step) {
+        self.undo.push(step);
+        self.redo.clear();
+        if self.undo.len() > self.limit {
+            self.undo.remove(0);
+        }
+        let mut terrain_bytes: usize = self.undo.iter().map(Step::terrain_bytes).sum();
+        while terrain_bytes > TERRAIN_BYTE_BUDGET {
+            let Some(oldest) = self
+                .undo
+                .iter()
+                .position(|step| matches!(step, Step::Terrain(_)))
+            else {
+                break;
+            };
+            terrain_bytes -= self.undo.remove(oldest).terrain_bytes();
+        }
     }
+
+    /// Reverts the most recent edit, moving it onto the redo stack.
+    /// Returns what changed, or `None` when there was nothing to undo.
+    pub fn undo(
+        &mut self,
+        world: &mut World,
+        selected: &mut Option<Entity>,
+    ) -> Result<Option<HistoryChange>, HistoryError> {
+        self.replay(Direction::Undo, world, selected)
+    }
+
+    /// Re-applies the most recently undone edit, moving it back onto the
+    /// undo stack. Returns what changed, or `None` when there was nothing to redo.
+    pub fn redo(
+        &mut self,
+        world: &mut World,
+        selected: &mut Option<Entity>,
+    ) -> Result<Option<HistoryChange>, HistoryError> {
+        self.replay(Direction::Redo, world, selected)
+    }
+
+    fn replay(
+        &mut self,
+        direction: Direction,
+        world: &mut World,
+        selected: &mut Option<Entity>,
+    ) -> Result<Option<HistoryChange>, HistoryError> {
+        let (from, to) = match direction {
+            Direction::Undo => (&mut self.undo, &mut self.redo),
+            Direction::Redo => (&mut self.redo, &mut self.undo),
+        };
+        let Some(step) = from.pop() else {
+            return Ok(None);
+        };
+        match step {
+            Step::World(snapshot) => {
+                to.push(Step::World(Snapshot::capture(world, *selected)));
+                snapshot.restore(world, selected);
+                self.pending = None;
+                Ok(Some(HistoryChange::World))
+            }
+            Step::Terrain(edit) => {
+                let target = match direction {
+                    Direction::Undo => &edit.before,
+                    Direction::Redo => &edit.after,
+                };
+                match write_terrain(&edit.model_path, target) {
+                    Ok(()) => {
+                        let change = HistoryChange::Terrain {
+                            model_path: edit.model_path.clone(),
+                        };
+                        to.push(Step::Terrain(edit));
+                        Ok(Some(change))
+                    }
+                    Err(source) => {
+                        let path = edit.model_path.clone();
+                        from.push(Step::Terrain(edit));
+                        Err(HistoryError { path, source })
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Undo,
+    Redo,
 }
 
 #[cfg(test)]
@@ -187,7 +299,12 @@ mod tests {
         history.settle(&mut world, selected);
 
         assert!(history.can_undo());
-        assert!(history.undo(&mut world, &mut selected));
+        assert!(
+            history
+                .undo(&mut world, &mut selected)
+                .expect("history")
+                .is_some()
+        );
         assert_eq!(only_x(&mut world), 0.0);
     }
 
@@ -203,10 +320,15 @@ mod tests {
             query.iter_mut(&mut world).next().unwrap().0.translation.x = 5.0;
         }
         history.settle(&mut world, selected);
-        history.undo(&mut world, &mut selected);
+        history.undo(&mut world, &mut selected).expect("history");
 
         assert!(history.can_redo());
-        assert!(history.redo(&mut world, &mut selected));
+        assert!(
+            history
+                .redo(&mut world, &mut selected)
+                .expect("history")
+                .is_some()
+        );
         assert_eq!(only_x(&mut world), 5.0);
     }
 
@@ -233,7 +355,7 @@ mod tests {
             query.iter_mut(&mut world).next().unwrap().0.translation.x = 5.0;
         }
         history.settle(&mut world, selected);
-        history.undo(&mut world, &mut selected);
+        history.undo(&mut world, &mut selected).expect("history");
         assert!(history.can_redo());
 
         // A fresh edit after an undo drops the redo history.
@@ -257,7 +379,7 @@ mod tests {
         world.spawn(Name::new("Extra")); // a change, so settle records
         history.settle(&mut world, selected);
 
-        history.undo(&mut world, &mut selected);
+        history.undo(&mut world, &mut selected).expect("history");
         // Selection survives as a (new-id) entity still named "Cube".
         let name = selected
             .and_then(|entity| world.get::<Name>(entity))
@@ -270,6 +392,105 @@ mod tests {
         let mut history = History::new();
         let mut world = world_with("Cube", 0.0);
         let mut selected = None;
-        assert!(!history.undo(&mut world, &mut selected));
+        assert!(
+            history
+                .undo(&mut world, &mut selected)
+                .expect("history")
+                .is_none()
+        );
+    }
+
+    fn terrain_fixture(tag: &str) -> (PathBuf, PathBuf, TerrainEdit) {
+        use crate::terrain_tools::{TerrainToolState, sculpt_terrain, write_new_terrain};
+        let root = std::env::temp_dir().join(format!("vge-history-{tag}-{}", uuid::Uuid::new_v4()));
+        let assets = root.join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        let model = write_new_terrain(&assets, &TerrainToolState::default()).unwrap();
+        let edit = sculpt_terrain(&model, &TerrainToolState::default(), &[glam::Vec2::ZERO])
+            .unwrap()
+            .expect("stroke changes the terrain");
+        (root, model, edit)
+    }
+
+    fn saved_terrain(model: &std::path::Path) -> crate::terrain_tools::TerrainAsset {
+        crate::terrain_tools::TerrainAsset::load(&model.with_extension("terrain")).unwrap()
+    }
+
+    #[test]
+    fn terrain_strokes_and_world_edits_undo_in_reverse_order() {
+        let (root, model, edit) = terrain_fixture("order");
+        let (before, after) = (edit.before.clone(), edit.after.clone());
+        let mut history = History::new();
+        let mut world = world_with("Cube", 0.0);
+        let mut selected = None;
+
+        history.record_terrain(edit);
+        history.begin_frame(&mut world, selected);
+        {
+            let mut query = world.query::<&mut Transform>();
+            query.iter_mut(&mut world).next().unwrap().0.translation.x = 5.0;
+        }
+        assert!(history.settle(&mut world, selected));
+
+        assert_eq!(
+            history.undo(&mut world, &mut selected).unwrap(),
+            Some(HistoryChange::World)
+        );
+        assert_eq!(only_x(&mut world), 0.0);
+        assert_eq!(
+            saved_terrain(&model),
+            after,
+            "terrain untouched by the world undo"
+        );
+        assert_eq!(
+            history.undo(&mut world, &mut selected).unwrap(),
+            Some(HistoryChange::Terrain {
+                model_path: model.clone()
+            })
+        );
+        assert_eq!(saved_terrain(&model), before);
+        assert_eq!(
+            history.redo(&mut world, &mut selected).unwrap(),
+            Some(HistoryChange::Terrain {
+                model_path: model.clone()
+            })
+        );
+        assert_eq!(saved_terrain(&model), after);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_failed_terrain_restore_keeps_the_step_for_retry() {
+        let (root, model, edit) = terrain_fixture("failure");
+        let mut history = History::new();
+        let mut world = World::new();
+        let mut selected = None;
+        history.record_terrain(edit);
+        // A directory where the source file belongs makes the restore fail.
+        let source = model.with_extension("terrain");
+        std::fs::remove_file(&source).unwrap();
+        std::fs::create_dir(&source).unwrap();
+
+        assert!(history.undo(&mut world, &mut selected).is_err());
+        assert!(history.can_undo(), "step is kept");
+        assert!(!history.can_redo());
+        std::fs::remove_dir(&source).unwrap();
+        assert!(history.undo(&mut world, &mut selected).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn terrain_steps_are_dropped_oldest_first_past_the_memory_budget() {
+        let (root, _model, edit) = terrain_fixture("budget");
+        let mut history = History::new();
+        let per_step = edit.byte_size();
+        let fits = TERRAIN_BYTE_BUDGET / per_step;
+        for _ in 0..fits + 3 {
+            history.record_terrain(edit.clone());
+        }
+        let kept: usize = history.undo.iter().map(Step::terrain_bytes).sum();
+        assert!(kept <= TERRAIN_BYTE_BUDGET);
+        assert_eq!(history.undo.len(), fits.min(DEFAULT_LIMIT));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

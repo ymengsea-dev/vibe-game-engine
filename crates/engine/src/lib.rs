@@ -29,6 +29,8 @@ pub use engine_ui as ui;
 pub use engine_utils as utils;
 
 pub mod app;
+pub mod embed;
+pub mod gameplay;
 
 /// Commonly used engine types, re-exported for convenient glob imports.
 ///
@@ -37,6 +39,9 @@ pub mod prelude {
     pub use crate::app::{
         FrameDemand, Game, GameConfig, GameContext, GameError, MAX_FRAME_SECONDS, SavePolicy,
         SceneParts, Time, run_game,
+    };
+    pub use crate::gameplay::{
+        CollisionEvent, ContactKind, GameplayError, GameplayRuntime, SceneSource, SpawnedObject,
     };
     pub use engine_ai::{
         GridCoord, NavError, NavGrid, find_path, find_path_world, follow_path, line_of_sight,
@@ -91,7 +96,9 @@ pub mod prelude {
         InputState, KeyCode, MouseButton, PlatformError, PlatformEvent, PlatformHandler, Stick,
         Window, WindowConfig, WindowEvent, run_windowed,
     };
-    pub use engine_project::{CURRENT_PROJECT_VERSION, Project, ProjectError, ProjectManifest};
+    pub use engine_project::{
+        CURRENT_PROJECT_VERSION, GameplayLanguage, Project, ProjectError, ProjectManifest,
+    };
     pub use engine_renderer::{
         Aabb, AlphaMode, AmbientLight, AtlasLayout, BloomSettings, Brush, BrushFalloff, Camera,
         CameraBinding, CameraRig, CameraUniform, ColorGrade, DEFAULT_EXPOSURE, DebugLinePipeline,
@@ -110,14 +117,19 @@ pub mod prelude {
         directional_light_view_projection, quad, scatter, skybox_uniform,
     };
     pub use engine_scene::{
-        AssetLibrary, AssetRef, AudioEmitterData, BUNDLE_FILE, BodyKind, CURRENT_SCENE_VERSION,
-        CameraData, ColliderData, ColliderShape, EXPORT_SCENE_FILE, ExportContent,
-        InstantiateReport, LoadedSkinnedMesh, MeshRendererData, NavGridData, NullResolver, Prefab,
-        ProjectionData, RuntimeResolver, SaveGame, SavedEntity, Scene, SceneAudioEmitter,
-        SceneCollider, SceneEntity, SceneError, SceneNavGrid, SceneResolver, SpriteData,
-        TransformData, WorldSnapshot, capture_renderables, executable_dir, load_mesh_geometry,
-        load_skinned_mesh, open_export,
+        AmbientSoundData, AssetLibrary, AssetRef, AudioEmitterData, BUNDLE_FILE, BodyKind,
+        CURRENT_SCENE_VERSION, CameraData, ColliderData, ColliderShape, EXPORT_SCENE_FILE,
+        EnvironmentData, ExportContent, InstantiateReport, LoadedSkinnedMesh, MeshRendererData,
+        NavGridData, NullResolver, Prefab, ProjectionData, RuleAction, RuleCompare, RuleCondition,
+        RuleData, RuleEvent, RuleTrigger, RuleVariables, RuntimeResolver, SaveGame, SavedEntity,
+        Scene, SceneAudioEmitter, SceneCollider, SceneEntity, SceneError, SceneNavGrid,
+        SceneResolver, SceneSpriteAnimation, SpriteAnimationData, SpriteData, TransformData,
+        WorldSnapshot, capture_renderables, executable_dir, load_mesh_geometry, load_skinned_mesh,
+        open_export,
     };
+    pub use engine_scripting::GameCommand;
+    #[cfg(feature = "lua")]
+    pub use engine_scripting::{LuaRuntime, ScriptError};
     pub use engine_ui::{
         Anchor, Color as UiColor, DrawCommand, DrawKind, FocusDirection, FocusRing, Node as UiNode,
         NodeId, PointerInput, Rect as UiRect, Style as UiStyle, Ui, Widget as UiWidget,
@@ -167,6 +179,8 @@ mod tests {
             version: crate::scene::CURRENT_SCENE_VERSION,
             entities: Vec::new(),
             nav_grid: Some(data),
+            lighting: None,
+            environment: Default::default(),
         };
         scene.validate().expect("a well-formed grid validates");
 

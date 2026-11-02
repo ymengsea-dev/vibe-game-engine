@@ -12,15 +12,18 @@
 //! [`Project::main_scene_path`], …) hand back resolved absolute paths so
 //! callers never hand-join project-relative strings.
 
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 pub mod build;
+mod starter;
+pub mod storage;
 
 /// On-disk format version for `project.ron`. Bump on any breaking
 /// manifest change; [`Project::open`] refuses a file newer than this.
-pub const CURRENT_PROJECT_VERSION: u32 = 1;
+pub const CURRENT_PROJECT_VERSION: u32 = 3;
 
 /// Manifest file name at the project root.
 pub const MANIFEST_FILE: &str = "project.ron";
@@ -36,6 +39,110 @@ pub const STUDIO_DIR: &str = ".studio";
 
 /// Default relative path of the scene the editor opens for a new project.
 const DEFAULT_MAIN_SCENE: &str = "scenes/main.ron";
+const STARTER_LUA: &str = "-- The engine calls these functions while your game runs.\nreturn {\n    start = function()\n        engine.log(\"Game started\")\n    end,\n    update = function(dt)\n        -- Add your game rules here.\n    end,\n}\n";
+/// Annotations exactly as first shipped, before files carried a version line.
+/// Frozen: projects created then are recognised as untouched by this text.
+const STUDIO_API_LUA_V0: &str = r#"---@meta
+---Studio's Lua gameplay API. This file is for editor help; the player never executes it.
+---@class StudioPosition
+---@field x number Parent-relative X coordinate.
+---@field y number Parent-relative Y coordinate.
+---@field z number Parent-relative Z coordinate.
+
+---@class StudioEngine
+---@field log fun(message: string)
+---@field object_id fun(): string? Current attached scene object; nil in the global script.
+---@field set_position fun(object_id: string, x: number, y: number, z: number) Set a parent-relative position.
+---@field translate fun(object_id: string, dx: number, dy: number, dz: number) Move by a parent-relative delta.
+---@field find_object fun(name: string): string? Find the first scene object with this name.
+---@field get_position fun(object_id: string): StudioPosition? Read a parent-relative position; nil if missing.
+---@field spawn_empty fun(name: string, x: number, y: number, z: number): string Create a named runtime object without a mesh and return its UUID.
+---@field spawn_prefab fun(path: string, x: number, y: number, z: number): string Spawn a packaged assets/prefabs/*.prefab object and return its UUID.
+---@field key_down fun(key: string): boolean Whether a supported key is held.
+---@field key_pressed fun(key: string): boolean Whether a supported key went down this frame.
+---@field play_audio fun(object_id: string) Trigger an authored audio emitter on a scene object (up to 32 times per callback dispatch).
+---@field set_animation_playing fun(object_id: string, playing: boolean) Pause or resume an authored sprite-sheet animation.
+---@field ui_set_text fun(object_id: string, text: string) Change an authored label or button caption (at most 1024 bytes).
+---@field emit_event fun(name: string) Send a named event to authored visual rules (1–64 printable bytes).
+---@field change_scene fun(path: string) Load a packaged scenes/*.ron scene after this frame; the new scene runs start before its first update.
+---@field save_get fun(key: string): string|number|boolean|nil Read a restored gameplay value.
+---@field save_set fun(key: string, value: string|number|boolean|nil) Set a gameplay value; nil removes it.
+---@field save fun() Request an atomic save at the end of the frame.
+---@type StudioEngine
+engine = {}
+
+---@class StudioScript
+---@field start? fun()
+---@field update? fun(dt: number)
+---@field fixed_update? fun(dt: number)
+---@field on_event? fun(kind: string, value: string) Keyboard events use key_pressed/key_released.
+---@field on_collision? fun(kind: string, self_id: string, other_id: string) Contact enter/exit after a physics step; global script receives the sorted pair.
+"#;
+/// Current annotations. Never edit in place without bumping
+/// [`STUDIO_API_VERSION`] and freezing the previous text; see `refresh_lua_annotations`.
+const STUDIO_API_LUA: &str = r#"---@meta
+---Studio's Lua gameplay API. This file is for editor help; the player never executes it.
+---@class StudioPosition
+---@field x number Parent-relative X coordinate.
+---@field y number Parent-relative Y coordinate.
+---@field z number Parent-relative Z coordinate.
+
+---@class StudioEngine
+---@field log fun(message: string)
+---@field object_id fun(): string? Current attached scene object; nil in the global script.
+---@field set_position fun(object_id: string, x: number, y: number, z: number) Set a parent-relative position.
+---@field translate fun(object_id: string, dx: number, dy: number, dz: number) Move by a parent-relative delta.
+---@field find_object fun(name: string): string? Find the first scene object with this name.
+---@field get_position fun(object_id: string): StudioPosition? Read a parent-relative position; nil if missing.
+---@field spawn_empty fun(name: string, x: number, y: number, z: number): string Create a named runtime object without a mesh and return its UUID.
+---@field spawn_prefab fun(path: string, x: number, y: number, z: number): string Spawn a packaged assets/prefabs/*.prefab object and return its UUID.
+---@field key_down fun(key: string): boolean Whether a supported key is held.
+---@field key_pressed fun(key: string): boolean Whether a supported key went down this frame.
+---@field play_audio fun(object_id: string) Trigger an authored audio emitter on a scene object (up to 32 times per callback dispatch).
+---@field set_animation_playing fun(object_id: string, playing: boolean) Pause or resume an authored sprite-sheet animation.
+---@field ui_set_text fun(object_id: string, text: string) Change an authored label or button caption (at most 1024 bytes).
+---@field emit_event fun(name: string) Send a named event to authored visual rules (1–64 printable bytes).
+---@field change_scene fun(path: string) Load a packaged scenes/*.ron scene after this frame; the new scene runs start before its first update.
+---@field save_get fun(key: string): string|number|boolean|nil Read a restored gameplay value.
+---@field save_set fun(key: string, value: string|number|boolean|nil) Set a gameplay value; nil removes it.
+---@field save fun() Request an atomic save at the end of the frame.
+---@field get_var fun(name: string): number Read a gameplay variable shared with visual rules; unset variables are 0.
+---@field set_var fun(name: string, value: number) Set a gameplay variable shared with visual rules (finite number; name 1–64 printable bytes).
+---@type StudioEngine
+engine = {}
+
+---@class StudioScript
+---@field start? fun()
+---@field update? fun(dt: number)
+---@field fixed_update? fun(dt: number)
+---@field on_event? fun(kind: string, value: string) Keyboard events use key_pressed/key_released.
+---@field on_collision? fun(kind: string, self_id: string, other_id: string) Contact enter/exit after a physics step; global script receives the sorted pair.
+"#;
+const STUDIO_API_VERSION: u32 = 2;
+
+fn versioned_studio_api_lua() -> String {
+    with_version_line(STUDIO_API_LUA, STUDIO_API_VERSION)
+}
+
+fn with_version_line(text: &str, version: u32) -> String {
+    text.replacen(
+        "---@meta\n",
+        &format!("---@meta\n-- Studio API annotations v{version}\n"),
+        1,
+    )
+}
+
+/// The backup name for a generated annotation file Studio may replace, or
+/// `None` when the file is not byte-identical to any earlier generated version.
+fn generated_annotation_backup(existing: &str) -> Option<&'static str> {
+    if existing == STUDIO_API_LUA_V0 {
+        Some("src/studio_api.lua.legacy.bak")
+    } else if existing == with_version_line(STUDIO_API_LUA_V0, 1) {
+        Some("src/studio_api.lua.v1.bak")
+    } else {
+        None
+    }
+}
 
 /// The standard subdirectories every project root is expected to have.
 const STANDARD_DIRS: [&str; 4] = [SRC_DIR, ASSETS_DIR, SCENES_DIR, STUDIO_DIR];
@@ -81,6 +188,10 @@ pub enum ProjectError {
     #[error("path {0} escapes the project root")]
     PathEscapesRoot(PathBuf),
 
+    /// A Lua API annotation file or migration backup has user changes.
+    #[error("Lua API annotations were customized; refusing to replace {0}")]
+    AnnotationsModified(PathBuf),
+
     /// [`Project::create`] was asked to scaffold where a project already
     /// exists.
     #[error("a project already exists at {0}")]
@@ -90,8 +201,12 @@ pub enum ProjectError {
     #[error(transparent)]
     Scene(#[from] engine_scene::SceneError),
 
-    /// A build/export step failed — cargo couldn't launch, the compile
-    /// failed, or staging the output directory failed. See
+    /// Generating a starter image or model failed.
+    #[error(transparent)]
+    Asset(#[from] engine_asset::AssetError),
+
+    /// A build/export step failed — the player or Cargo was unavailable,
+    /// compilation failed, or staging the output directory failed. See
     /// [`crate::build`].
     #[error("build/export failed: {0}")]
     Build(String),
@@ -160,6 +275,28 @@ fn default_configurations() -> Vec<BuildConfiguration> {
     ]
 }
 
+/// Gameplay authoring path selected for a project. The engine itself remains Rust.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GameplayLanguage {
+    /// Existing projects without a language field keep their Cargo workflow.
+    #[default]
+    Rust,
+    /// Gameplay is loaded by the bundled Lua-capable player.
+    Lua,
+}
+
+/// Creation-only scene choice; it is not stored in the manifest after creation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProjectTemplate {
+    /// An empty scene, matching previous project creation behavior.
+    #[default]
+    Blank,
+    /// A sprite, orthographic camera, and clickable game UI.
+    Starter2D,
+    /// A model, perspective camera, lighting, and clickable game UI.
+    Starter3D,
+}
+
 /// Turns a project name into a plausible cargo package name: ASCII
 /// alphanumerics lowercased, everything else an underscore, and a
 /// leading digit prefixed (cargo rejects a crate starting with one).
@@ -203,9 +340,15 @@ pub struct ProjectManifest {
     pub version: u32,
     /// Human-readable project name (window title, `EngineConfig`).
     pub name: String,
+    /// Stable identity for save files across renamed or moved exports.
+    #[serde(default)]
+    pub project_id: uuid::Uuid,
     /// The scene the editor opens by default, as a path relative to the
     /// project root. Must stay inside the root.
     pub main_scene: PathBuf,
+    /// Missing in older manifests, which were always Rust projects.
+    #[serde(default)]
+    pub gameplay_language: GameplayLanguage,
     /// The project's build/run configurations, in toolbar order. A
     /// manifest written before this field existed loads with an empty
     /// list, which [`Project::open`] fills with a default Debug/Release
@@ -220,6 +363,10 @@ impl ProjectManifest {
     /// Returns whether the manifest changed and should be saved.
     pub fn migrate(&mut self) -> bool {
         let mut changed = false;
+        if self.project_id.is_nil() {
+            self.project_id = uuid::Uuid::new_v4();
+            changed = true;
+        }
         if self.configurations.is_empty() {
             self.configurations = default_configurations();
             changed = true;
@@ -249,9 +396,28 @@ impl Project {
         root: impl Into<PathBuf>,
         name: impl Into<String>,
     ) -> Result<Self, ProjectError> {
+        Self::create_new_with_language(root, name, GameplayLanguage::Lua)
+    }
+
+    /// Reserves a fresh project root with the requested gameplay language.
+    pub fn create_new_with_language(
+        root: impl Into<PathBuf>,
+        name: impl Into<String>,
+        language: GameplayLanguage,
+    ) -> Result<Self, ProjectError> {
+        Self::create_new_with_template(root, name, language, ProjectTemplate::Blank)
+    }
+
+    /// Reserves a fresh project root and creates its selected scene template.
+    pub fn create_new_with_template(
+        root: impl Into<PathBuf>,
+        name: impl Into<String>,
+        language: GameplayLanguage,
+        template: ProjectTemplate,
+    ) -> Result<Self, ProjectError> {
         let root = absolute_root(root.into());
         match std::fs::create_dir(&root) {
-            Ok(()) => Self::create(root, name),
+            Ok(()) => Self::create_with_template(root, name, language, template),
             Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
                 Err(ProjectError::AlreadyExists(root))
             }
@@ -269,6 +435,25 @@ impl Project {
     /// `project.ron`; [`ProjectError::Io`] on any filesystem failure;
     /// [`ProjectError::Scene`] if the starter scene can't be written.
     pub fn create(root: impl Into<PathBuf>, name: impl Into<String>) -> Result<Self, ProjectError> {
+        Self::create_with_language(root, name, GameplayLanguage::Lua)
+    }
+
+    /// Scaffolds a project using the selected gameplay language.
+    pub fn create_with_language(
+        root: impl Into<PathBuf>,
+        name: impl Into<String>,
+        language: GameplayLanguage,
+    ) -> Result<Self, ProjectError> {
+        Self::create_with_template(root, name, language, ProjectTemplate::Blank)
+    }
+
+    /// Scaffolds a project with a blank or guided starter scene.
+    pub fn create_with_template(
+        root: impl Into<PathBuf>,
+        name: impl Into<String>,
+        language: GameplayLanguage,
+        template: ProjectTemplate,
+    ) -> Result<Self, ProjectError> {
         let root = absolute_root(root.into());
         let manifest_path = root.join(MANIFEST_FILE);
         if manifest_path.exists() {
@@ -283,7 +468,9 @@ impl Project {
         let manifest = ProjectManifest {
             version: CURRENT_PROJECT_VERSION,
             name: name.into(),
+            project_id: uuid::Uuid::new_v4(),
             main_scene: PathBuf::from(DEFAULT_MAIN_SCENE),
+            gameplay_language: language,
             configurations: default_configurations(),
         };
         validate_project_paths(&root, &manifest)?;
@@ -294,10 +481,31 @@ impl Project {
             source,
         })?;
 
+        if language == GameplayLanguage::Lua {
+            let scripts = root.join(ASSETS_DIR).join("scripts");
+            std::fs::create_dir_all(&scripts).map_err(|source| ProjectError::Io {
+                path: scripts.clone(),
+                source,
+            })?;
+            let main_script = scripts.join("main.lua");
+            std::fs::write(&main_script, STARTER_LUA).map_err(|source| ProjectError::Io {
+                path: main_script,
+                source,
+            })?;
+            let annotations = root.join(SRC_DIR).join("studio_api.lua");
+            std::fs::write(&annotations, versioned_studio_api_lua()).map_err(|source| {
+                ProjectError::Io {
+                    path: annotations,
+                    source,
+                }
+            })?;
+        }
+
         let project = Self { root, manifest };
         project.save_manifest()?;
 
-        engine_scene::Scene::default().save_to_file(&project.main_scene_path())?;
+        let scene = starter::create_scene(&project.root, language, template)?;
+        scene.save_to_file(&project.main_scene_path())?;
 
         tracing::info!(root = %project.root.display(), name = %project.manifest.name, "project created");
         Ok(project)
@@ -339,6 +547,7 @@ impl Project {
             });
         }
         validate_project_paths(&root, &manifest)?;
+        let previous_version = manifest.version;
         let migrated = manifest.migrate();
 
         for dir in STANDARD_DIRS {
@@ -352,10 +561,136 @@ impl Project {
 
         let project = Self { root, manifest };
         if migrated {
+            if previous_version < CURRENT_PROJECT_VERSION {
+                let backup = project
+                    .root
+                    .join(format!("{MANIFEST_FILE}.v{previous_version}.bak"));
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&backup)
+                {
+                    Ok(mut file) => {
+                        file.write_all(text.as_bytes())
+                            .and_then(|()| file.sync_all())
+                            .map_err(|source| ProjectError::Io {
+                                path: backup.clone(),
+                                source,
+                            })?;
+                    }
+                    Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let existing = std::fs::read_to_string(&backup).map_err(|source| {
+                            ProjectError::Io {
+                                path: backup.clone(),
+                                source,
+                            }
+                        })?;
+                        if existing != text {
+                            return Err(ProjectError::Io {
+                                path: backup,
+                                source: std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "existing migration backup differs from the project manifest",
+                                ),
+                            });
+                        }
+                    }
+                    Err(source) => {
+                        return Err(ProjectError::Io {
+                            path: backup,
+                            source,
+                        });
+                    }
+                }
+            }
             project.save_manifest()?;
             tracing::info!(path = %project.root.join(MANIFEST_FILE).display(), "migrated project manifest");
         }
         Ok(project)
+    }
+
+    /// Refreshes an unmodified legacy annotation file without losing its old version.
+    /// Customized files are kept intact so users can merge the new API by hand.
+    /// This editor-only operation is explicit: opening a project for Play must not write it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a path or I/O error if the annotation or backup cannot be read or written.
+    pub fn refresh_lua_annotations(&self) -> Result<(), ProjectError> {
+        if self.language() != GameplayLanguage::Lua {
+            return Ok(());
+        }
+        let relative = Path::new("src/studio_api.lua");
+        let path = self.resolve(relative)?;
+        let current = versioned_studio_api_lua();
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(ProjectError::AnnotationsModified(path));
+            }
+            Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
+                return Err(ProjectError::Io { path, source });
+            }
+            _ => {}
+        }
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .and_then(|mut file| file.write_all(current.as_bytes()))
+                    .map_err(|source| ProjectError::Io { path, source })?;
+                return Ok(());
+            }
+            Err(source) => return Err(ProjectError::Io { path, source }),
+        };
+        if existing == current {
+            return Ok(());
+        }
+        let Some(backup) = generated_annotation_backup(&existing) else {
+            return Err(ProjectError::AnnotationsModified(path));
+        };
+        let backup = self.resolve(Path::new(backup))?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+        {
+            Ok(mut file) => {
+                file.write_all(existing.as_bytes())
+                    .and_then(|()| file.sync_all())
+                    .map_err(|source| ProjectError::Io {
+                        path: backup.clone(),
+                        source,
+                    })?;
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata =
+                    std::fs::symlink_metadata(&backup).map_err(|source| ProjectError::Io {
+                        path: backup.clone(),
+                        source,
+                    })?;
+                if !metadata.file_type().is_file() {
+                    return Err(ProjectError::AnnotationsModified(backup));
+                }
+                if std::fs::read_to_string(&backup).map_err(|source| ProjectError::Io {
+                    path: backup.clone(),
+                    source,
+                })? != existing
+                {
+                    return Err(ProjectError::AnnotationsModified(backup));
+                }
+            }
+            Err(source) => {
+                return Err(ProjectError::Io {
+                    path: backup,
+                    source,
+                });
+            }
+        }
+        engine_scene::write_atomic(&path, current.as_bytes())
+            .map_err(|source| ProjectError::Io { path, source })
     }
 
     /// [`Project::open`] if `root` holds a `project.ron`, else
@@ -407,6 +742,11 @@ impl Project {
     /// The parsed manifest.
     pub fn manifest(&self) -> &ProjectManifest {
         &self.manifest
+    }
+
+    /// The project's gameplay language; legacy projects return Rust.
+    pub fn language(&self) -> GameplayLanguage {
+        self.manifest.gameplay_language
     }
 
     /// The manifest, mutably — to rename the project or point it at a
@@ -553,6 +893,303 @@ mod tests {
         assert_eq!(project.name(), "Demo");
         assert_eq!(project.manifest().version, CURRENT_PROJECT_VERSION);
 
+        cleanup(&root);
+    }
+
+    #[test]
+    fn new_project_defaults_to_lua_and_reopens_as_lua() {
+        let root = temp_root("lua-default");
+        let created = Project::create(&root, "Lua Game").expect("create");
+        assert_eq!(created.language(), GameplayLanguage::Lua);
+        assert_eq!(
+            Project::open(&root).expect("reopen").language(),
+            GameplayLanguage::Lua
+        );
+        assert!(root.join("assets/scripts/main.lua").is_file());
+        assert!(
+            std::fs::read_to_string(root.join("assets/scripts/main.lua"))
+                .expect("starter script")
+                .contains("return")
+        );
+        let annotations = std::fs::read_to_string(root.join("src/studio_api.lua"))
+            .expect("Lua editor API annotations");
+        assert!(annotations.contains("set_position"));
+        assert!(annotations.contains("translate"));
+        assert!(annotations.contains("key_pressed"));
+        assert!(annotations.contains("play_audio"));
+        assert!(annotations.contains("change_scene"));
+        assert!(!root.join("Cargo.toml").exists());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn opening_legacy_lua_project_upgrades_pristine_annotations_with_backup() {
+        let root = temp_root("lua-api-upgrade");
+        Project::create(&root, "Lua API Upgrade").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        std::fs::write(&annotations, STUDIO_API_LUA_V0).expect("legacy annotations");
+
+        let project = Project::open(&root).expect("open");
+        project.refresh_lua_annotations().expect("upgrade");
+
+        let updated = std::fs::read_to_string(&annotations).expect("updated annotations");
+        assert!(updated.starts_with("---@meta\n-- Studio API annotations v2\n"));
+        assert!(updated.contains("get_var"));
+        assert!(updated.contains("---@field change_scene"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/studio_api.lua.legacy.bak"))
+                .expect("legacy backup"),
+            STUDIO_API_LUA_V0
+        );
+        Project::open(&root)
+            .expect("reopen")
+            .refresh_lua_annotations()
+            .expect("already current");
+        assert_eq!(
+            std::fs::read_to_string(&annotations).expect("same annotations"),
+            updated
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn v1_annotations_upgrade_even_after_an_earlier_legacy_backup() {
+        let root = temp_root("lua-api-v1-upgrade");
+        Project::create(&root, "Lua API v1").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let v1 = with_version_line(STUDIO_API_LUA_V0, 1);
+        std::fs::write(&annotations, &v1).expect("v1 annotations");
+        // Left by the earlier v0 → v1 refresh; it must not block this one.
+        std::fs::write(
+            root.join("src/studio_api.lua.legacy.bak"),
+            STUDIO_API_LUA_V0,
+        )
+        .expect("old backup");
+
+        Project::open(&root)
+            .expect("open")
+            .refresh_lua_annotations()
+            .expect("upgrade");
+
+        assert_eq!(
+            std::fs::read_to_string(&annotations).expect("updated"),
+            versioned_studio_api_lua()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/studio_api.lua.v1.bak")).expect("v1 backup"),
+            v1
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn edited_v1_annotations_are_not_replaced() {
+        let root = temp_root("lua-api-v1-custom");
+        Project::create(&root, "Lua API v1 custom").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let edited = format!("{}-- my note\n", with_version_line(STUDIO_API_LUA_V0, 1));
+        std::fs::write(&annotations, &edited).expect("edited annotations");
+
+        let project = Project::open(&root).expect("open");
+        assert!(project.refresh_lua_annotations().is_err());
+        assert_eq!(
+            std::fs::read_to_string(&annotations).expect("untouched"),
+            edited
+        );
+        assert!(!root.join("src/studio_api.lua.v1.bak").exists());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn opening_lua_project_keeps_custom_annotations_untouched() {
+        let root = temp_root("lua-api-custom");
+        Project::create(&root, "Custom Lua API").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let custom = "---@meta\n-- My own API annotations\n";
+        std::fs::write(&annotations, custom).expect("custom annotations");
+
+        let project = Project::open(&root).expect("custom annotations do not block opening");
+        assert!(project.refresh_lua_annotations().is_err());
+
+        assert_eq!(
+            std::fs::read_to_string(&annotations).expect("untouched"),
+            custom
+        );
+        assert!(!root.join("src/studio_api.lua.legacy.bak").exists());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn opening_project_for_play_does_not_write_editor_annotations() {
+        let root = temp_root("lua-api-readonly-open");
+        Project::create(&root, "Play Without Editor Writes").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        std::fs::write(&annotations, STUDIO_API_LUA_V0).expect("legacy annotations");
+
+        Project::open(&root).expect("open for player");
+
+        assert_eq!(
+            std::fs::read_to_string(&annotations).expect("unchanged annotations"),
+            STUDIO_API_LUA_V0
+        );
+        assert!(!root.join("src/studio_api.lua.legacy.bak").exists());
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn annotation_backup_symlink_cannot_masquerade_as_a_safe_backup() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("lua-api-backup-link");
+        let project = Project::create(&root, "Lua API Backup Link").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let backup = root.join("src/studio_api.lua.legacy.bak");
+        std::fs::write(&annotations, STUDIO_API_LUA_V0).expect("legacy annotations");
+        symlink(&annotations, &backup).expect("link backup to source");
+
+        assert!(project.refresh_lua_annotations().is_err());
+        assert_eq!(
+            std::fs::read_to_string(&annotations).expect("source unchanged"),
+            STUDIO_API_LUA_V0
+        );
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn annotation_source_symlink_is_not_replaced_during_refresh() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("lua-api-source-link");
+        let project = Project::create(&root, "Lua API Source Link").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let custom = root.join("src/custom.lua");
+        std::fs::write(&custom, STUDIO_API_LUA_V0).expect("custom source");
+        std::fs::remove_file(&annotations).expect("remove generated annotations");
+        symlink(&custom, &annotations).expect("link annotations");
+
+        assert!(project.refresh_lua_annotations().is_err());
+        assert!(
+            std::fs::symlink_metadata(&annotations)
+                .expect("link remains")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&custom).expect("custom remains"),
+            STUDIO_API_LUA_V0
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn project_identity_survives_reopen_and_v2_migration_keeps_backup() {
+        let root = temp_root("save-identity");
+        let created = Project::create(&root, "Save Game").expect("create");
+        let id = created.manifest().project_id;
+        assert!(!id.is_nil());
+        assert_eq!(
+            Project::open(&root).expect("reopen").manifest().project_id,
+            id
+        );
+        cleanup(&root);
+
+        std::fs::create_dir_all(&root).expect("root");
+        let old = "(version: 2, name: \"Old Lua\", main_scene: \"scenes/main.ron\", gameplay_language: Lua)";
+        std::fs::write(root.join(MANIFEST_FILE), old).expect("old manifest");
+        let migrated = Project::open(&root).expect("migrate");
+        assert!(!migrated.manifest().project_id.is_nil());
+        assert_eq!(
+            std::fs::read_to_string(root.join("project.ron.v2.bak")).expect("backup"),
+            old
+        );
+        assert_eq!(
+            Project::open(&root)
+                .expect("reopen migrated")
+                .manifest()
+                .project_id,
+            migrated.manifest().project_id
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn explicit_rust_project_reopens_as_rust() {
+        let root = temp_root("rust-option");
+        Project::create_with_language(&root, "Rust Game", GameplayLanguage::Rust).expect("create");
+        assert_eq!(
+            Project::open(&root).expect("reopen").language(),
+            GameplayLanguage::Rust
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn guided_starters_reopen_with_importable_scene_assets_in_both_languages() {
+        for language in [GameplayLanguage::Lua, GameplayLanguage::Rust] {
+            for template in [ProjectTemplate::Starter2D, ProjectTemplate::Starter3D] {
+                let root = temp_root(&format!("starter-{language:?}-{template:?}"));
+                let project =
+                    Project::create_with_template(&root, "First Game", language, template)
+                        .expect("create guided project");
+                let reopened = Project::open(&root).expect("reopen guided project");
+                assert_eq!(reopened.language(), language);
+                let scene = engine_scene::Scene::load_from_file(&project.main_scene_path())
+                    .expect("load generated scene");
+                assert!(scene.entities.iter().any(|entity| entity.camera.is_some()));
+                assert!(scene.entities.iter().any(|entity| !entity.rules.is_empty()));
+                let assets = engine_scene::AssetLibrary::index(&project.assets_dir())
+                    .expect("index generated assets");
+                match template {
+                    ProjectTemplate::Starter2D => {
+                        let sprite = scene
+                            .entities
+                            .iter()
+                            .find_map(|entity| entity.sprite.as_ref())
+                            .expect("2D sprite");
+                        let bytes = assets
+                            .read(&sprite.atlas.id)
+                            .expect("read sprite")
+                            .expect("sprite asset exists");
+                        engine_asset::import_texture_bytes(&bytes).expect("import starter PNG");
+                    }
+                    ProjectTemplate::Starter3D => {
+                        let model = scene
+                            .entities
+                            .iter()
+                            .find_map(|entity| entity.mesh_renderer.as_ref())
+                            .expect("3D model");
+                        assets
+                            .import_mesh(&model.mesh.id)
+                            .expect("import starter model")
+                            .expect("model asset exists");
+                    }
+                    ProjectTemplate::Blank => unreachable!(),
+                }
+                assert!(root.join("START_HERE.md").is_file());
+                cleanup(&root);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_manifest_without_language_remains_rust() {
+        let root = temp_root("legacy-language");
+        std::fs::create_dir_all(&root).expect("root");
+        let original = "(version: 1, name: \"Old\", main_scene: \"scenes/main.ron\")";
+        std::fs::write(root.join(MANIFEST_FILE), original).expect("legacy manifest");
+        let project = Project::open(&root).expect("open legacy");
+        assert_eq!(project.language(), GameplayLanguage::Rust);
+        assert_eq!(project.manifest().version, CURRENT_PROJECT_VERSION);
+        assert_eq!(
+            std::fs::read_to_string(root.join("project.ron.v1.bak")).expect("rollback copy"),
+            original
+        );
+        assert_eq!(
+            Project::open(&root).expect("reopen migrated").language(),
+            GameplayLanguage::Rust
+        );
         cleanup(&root);
     }
 

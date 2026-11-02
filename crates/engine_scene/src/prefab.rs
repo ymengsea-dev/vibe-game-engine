@@ -152,6 +152,7 @@ impl Prefab {
         let mut unresolved = 0;
         let mut entity_mut = world.spawn_empty();
         insert_components(&mut entity_mut, &self.entity, resolver, &mut unresolved);
+        entity_mut.insert(crate::SceneObjectId(uuid::Uuid::new_v4().to_string()));
         configure(&mut entity_mut);
         (entity_mut.id(), unresolved)
     }
@@ -187,6 +188,21 @@ mod tests {
     use super::*;
     use crate::format::TransformData;
     use engine_ecs::components::{Camera as EcsCamera, Name as EcsName, Transform as EcsTransform};
+
+    #[test]
+    fn prefab_copies_receive_distinct_object_ids() {
+        let prefab = Prefab::new(SceneEntity {
+            object_id: Some(uuid::Uuid::new_v4().to_string()),
+            ..Default::default()
+        });
+        let mut world = World::new();
+        let first = prefab.instantiate(&mut world);
+        let second = prefab.instantiate(&mut world);
+        assert_ne!(
+            world.get::<crate::SceneObjectId>(first),
+            world.get::<crate::SceneObjectId>(second)
+        );
+    }
 
     fn transform_data_at(x: f32) -> TransformData {
         TransformData {

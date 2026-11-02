@@ -43,7 +43,8 @@ engine_utils = { path = "crates/engine_utils", version = "0.1.0" }
 # the latest release at that point.
 # ---------------------------------------------------------------------------
 # Platform / rendering
-winit = "0.30"
+# `serde`: key and mouse-button codes travel in the Play-in-viewport protocol.
+winit = { version = "0.30", features = ["serde"] }
 wgpu = "30"
 # ECS / math
 bevy_ecs = "0.19"
@@ -82,6 +83,7 @@ proc-macro2 = "1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml_edit = "0.25"
 ron = "0.12"
 # Assets
 # `extras` so animation clips can carry their own events; glTF has no
@@ -97,6 +99,8 @@ pollster = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 thiserror = "2"
+mlua = { version = "0.12", default-features = false, features = ["lua54", "vendored"] }
+sha2 = "0.10"
 # Tooling
 notify = "8"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -122,12 +126,17 @@ print_stdout = "warn"
 
 [profile.dev]
 opt-level = 1
+# Line numbers only: panics and backtraces still show file:line, but every
+# test binary and game no longer carries full debugger data, which kept
+# `target/` growing by hundreds of GB.
+debug = "line-tables-only"
 
 # Fast iteration: fully optimize dependencies even in dev builds so wgpu,
 # physics, and asset decoding stay usable while the engine itself compiles
-# quickly.
+# quickly. No debug info for third-party code.
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 [profile.release]
 lto = "thin"

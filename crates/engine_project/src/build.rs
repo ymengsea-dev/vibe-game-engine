@@ -1,23 +1,28 @@
-//! Build & export: compile a project's game crate and stage a shippable
-//! folder — the game binary, a packed asset bundle, and the main scene.
+//! Build & export: stage a native game binary, packed assets, and a scene.
 //!
-//! [`ExportPlan`] is pure (all the paths and the exact `cargo` argument
-//! list, testable without touching the toolchain); [`export`] runs it:
-//! `cargo build` in the project root, then copy the binary, pack
-//! `assets/` plus its metadata into `assets.pak` (see
-//! [`engine_asset::pack_dir_with_metadata`]), and
-//! copy the main scene next to it.
+//! Rust projects compile their game crate with Cargo. Lua projects copy the
+//! bundled player without invoking Cargo. Both pack `assets/` into
+//! `assets.pak` and stage the selected scene beside the executable.
 //!
 //! Cross-compilation is out of scope — you export for the OS you build
 //! on. "Windows and macOS first-class" means the binary name and the
 //! `cargo` invocation are correct on both.
 
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{BuildConfiguration, Project, ProjectError};
+use crate::{BuildConfiguration, GameplayLanguage, Project, ProjectError};
+
+/// Versioned marker read by the bundled player for Lua exports.
+pub const LUA_EXPORT_MARKER: &str = "lua.game";
+/// Legacy v1 marker; current exports write `2\n<project-id>\n`.
+pub const LUA_EXPORT_VERSION: &[u8] = b"1\n";
+/// Every authored scene, packed so exported games (Lua or Rust) can change scene.
+/// `main.ron` is still written beside it for older players.
+pub const SCENE_BUNDLE_FILE: &str = "scenes.pak";
 
 /// Which cargo profile to compile the export with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -73,9 +78,12 @@ pub struct ExportPlan {
     pub profile: BuildProfile,
     /// Directory the staged output is written into.
     pub export_dir: PathBuf,
-    /// `--target-dir` passed to cargo (defaults to the project's
-    /// `target/`).
-    pub target_dir: PathBuf,
+    /// `--target-dir` passed to cargo. `None` (the default) leaves the
+    /// choice to Cargo: the enclosing workspace's `target/`,
+    /// `CARGO_TARGET_DIR`, or `.cargo/config.toml`. A game inside a
+    /// workspace then reuses the engine build already there instead of
+    /// compiling it again.
+    pub target_dir: Option<PathBuf>,
     /// Cargo features to enable, from the configuration. Empty passes no
     /// `--features` flag at all, which is not the same as passing an
     /// empty one.
@@ -88,7 +96,7 @@ pub struct ExportPlan {
 
 impl ExportPlan {
     /// A plan to export `project`'s `crate_name` crate at `profile` into
-    /// `export_dir`. `target_dir` defaults to `<project>/target`.
+    /// `export_dir`. Cargo chooses the target directory.
     pub fn new(
         project: &Project,
         crate_name: impl Into<String>,
@@ -99,7 +107,7 @@ impl ExportPlan {
             crate_name: crate_name.into(),
             profile,
             export_dir: export_dir.into(),
-            target_dir: project.root().join("target"),
+            target_dir: None,
             features: Vec::new(),
             assets_src: project.assets_dir(),
             scene_src: project.main_scene_path(),
@@ -129,14 +137,16 @@ impl ExportPlan {
             crate_name: configuration.crate_name(project),
             profile: configuration.profile,
             export_dir: export_dir.into(),
-            target_dir: project.root().join("target"),
+            target_dir: None,
             features: configuration.features.clone(),
             assets_src: project.assets_dir(),
             scene_src,
         }
     }
 
-    /// The exact `cargo` argument list this plan runs.
+    /// The exact `cargo` argument list this plan runs. Cargo reports what
+    /// it built as JSON lines on stdout (read them with [`BuiltExecutables`]);
+    /// progress and compiler errors stay readable text on stderr.
     pub fn cargo_args(&self) -> Vec<String> {
         let mut args = vec!["build".to_string()];
         if let Some(flag) = self.profile.cargo_flag() {
@@ -144,8 +154,11 @@ impl ExportPlan {
         }
         args.push("-p".to_string());
         args.push(self.crate_name.clone());
-        args.push("--target-dir".to_string());
-        args.push(self.target_dir.display().to_string());
+        args.push(CARGO_MESSAGE_FORMAT.to_string());
+        if let Some(target_dir) = &self.target_dir {
+            args.push("--target-dir".to_string());
+            args.push(target_dir.display().to_string());
+        }
         if !self.features.is_empty() {
             args.push("--features".to_string());
             args.push(self.features.join(","));
@@ -156,13 +169,6 @@ impl ExportPlan {
     /// The binary file name (`<crate>` plus the host `.exe` suffix).
     pub fn binary_name(&self) -> String {
         format!("{}{}", self.crate_name, exe_suffix())
-    }
-
-    /// Where cargo writes the compiled binary.
-    pub fn compiled_binary(&self) -> PathBuf {
-        self.target_dir
-            .join(self.profile.target_subdir())
-            .join(self.binary_name())
     }
 
     /// Where [`export`] copies the binary in the staged folder.
@@ -178,6 +184,81 @@ impl ExportPlan {
     /// Where [`export`] copies the main scene.
     pub fn scene_dest(&self) -> PathBuf {
         self.export_dir.join(engine_scene::EXPORT_SCENE_FILE)
+    }
+}
+
+/// Cargo's machine-readable output mode. `-render-diagnostics` keeps
+/// compiler errors as the usual readable text on stderr.
+const CARGO_MESSAGE_FORMAT: &str = "--message-format=json-render-diagnostics";
+
+/// The programs one `cargo build` produced, read from its JSON messages.
+///
+/// Cargo says where every executable it built (or found up to date) lives,
+/// so nothing has to guess the target directory, the profile folder or the
+/// binary's file name — that works for any game crate, wherever its
+/// workspace or `CARGO_TARGET_DIR` puts the output.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BuiltExecutables {
+    /// `(binary target name, executable path)`, in the order Cargo reported.
+    found: Vec<(String, PathBuf)>,
+}
+
+impl BuiltExecutables {
+    /// Reads one line of Cargo's stdout, keeping any executable it reports.
+    /// Lines that are not Cargo JSON are ignored.
+    pub fn observe(&mut self, line: &str) {
+        #[derive(Deserialize)]
+        struct Message {
+            reason: String,
+            #[serde(default)]
+            target: Option<Target>,
+            #[serde(default)]
+            executable: Option<PathBuf>,
+        }
+        #[derive(Deserialize)]
+        struct Target {
+            name: String,
+            #[serde(default)]
+            kind: Vec<String>,
+        }
+        let Ok(message) = serde_json::from_str::<Message>(line) else {
+            return;
+        };
+        if message.reason != "compiler-artifact" {
+            return;
+        }
+        if let (Some(target), Some(executable)) = (message.target, message.executable)
+            && target.kind.iter().any(|kind| kind == "bin")
+        {
+            self.found.push((target.name, executable));
+        }
+    }
+
+    /// The game program for `crate_name`: the binary named after the crate,
+    /// or the crate's only binary.
+    ///
+    /// # Errors
+    ///
+    /// A readable message when the build produced no program, or several
+    /// with none named after the crate.
+    pub fn executable(&self, crate_name: &str) -> Result<PathBuf, String> {
+        if let Some((_, path)) = self.found.iter().find(|(name, _)| name == crate_name) {
+            return Ok(path.clone());
+        }
+        match self.found.as_slice() {
+            [(_, path)] => Ok(path.clone()),
+            [] => Err(format!(
+                "cargo built no program for '{crate_name}'; does the crate have a src/main.rs?"
+            )),
+            several => Err(format!(
+                "'{crate_name}' builds several programs ({}); name one of them '{crate_name}'",
+                several
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
     }
 }
 
@@ -213,6 +294,12 @@ fn io(path: &Path, err: std::io::Error) -> ProjectError {
 /// fails; [`ProjectError::Io`] if staging a file fails; the packing
 /// error is wrapped in [`ProjectError::Build`].
 pub fn export(project: &Project, plan: &ExportPlan) -> Result<ExportReport, ProjectError> {
+    if project.language() == GameplayLanguage::Lua {
+        let studio = std::env::current_exe()
+            .map_err(|err| ProjectError::Build(format!("could not locate Studio: {err}")))?;
+        let player = studio.with_file_name(format!("player{}", exe_suffix()));
+        return export_lua(project, plan, &player);
+    }
     tracing::info!(
         crate_name = %plan.crate_name,
         profile = plan.profile.label(),
@@ -220,18 +307,37 @@ pub fn export(project: &Project, plan: &ExportPlan) -> Result<ExportReport, Proj
         "starting export build"
     );
 
-    let status = Command::new("cargo")
+    let mut cargo = Command::new("cargo")
         .args(plan.cargo_args())
         .current_dir(project.root())
-        .status()
+        .stdout(Stdio::piped())
+        .spawn()
         .map_err(|err| ProjectError::Build(format!("could not launch cargo: {err}")))?;
+    let mut built = BuiltExecutables::default();
+    if let Some(stdout) = cargo.stdout.take() {
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => built.observe(&line),
+                Err(err) => {
+                    return Err(ProjectError::Build(format!(
+                        "could not read cargo output: {err}"
+                    )));
+                }
+            }
+        }
+    }
+    let status = cargo
+        .wait()
+        .map_err(|err| ProjectError::Build(format!("could not wait for cargo: {err}")))?;
     if !status.success() {
         return Err(ProjectError::Build(format!(
             "cargo build failed ({status})"
         )));
     }
 
-    let compiled = plan.compiled_binary();
+    let compiled = built
+        .executable(&plan.crate_name)
+        .map_err(ProjectError::Build)?;
     if !compiled.exists() {
         return Err(ProjectError::Build(format!(
             "cargo reported success but {} is missing",
@@ -239,10 +345,58 @@ pub fn export(project: &Project, plan: &ExportPlan) -> Result<ExportReport, Proj
         )));
     }
 
+    stage_export(project, plan, &compiled, false)
+}
+
+fn export_lua(
+    project: &Project,
+    plan: &ExportPlan,
+    player: &Path,
+) -> Result<ExportReport, ProjectError> {
+    if !player.is_file() {
+        return Err(ProjectError::Build(format!(
+            "bundled player is missing at {}; install the complete Studio package",
+            player.display()
+        )));
+    }
+    let scene = engine_scene::Scene::load_from_file(&plan.scene_src)?;
+    scene.validate()?;
+    for script in std::iter::once("assets/scripts/main.lua").chain(
+        scene
+            .entities
+            .iter()
+            .filter_map(|entity| entity.script.as_deref()),
+    ) {
+        if !script.ends_with(".lua") {
+            return Err(ProjectError::Build(format!(
+                "Lua project cannot export Rust script {script}"
+            )));
+        }
+        let path = project.resolve(Path::new(script))?;
+        if !path.is_file() {
+            return Err(ProjectError::Build(format!(
+                "Lua script is missing: {script}"
+            )));
+        }
+    }
+    stage_export(project, plan, player, true)
+}
+
+fn stage_export(
+    project: &Project,
+    plan: &ExportPlan,
+    compiled: &Path,
+    lua: bool,
+) -> Result<ExportReport, ProjectError> {
     std::fs::create_dir_all(&plan.export_dir).map_err(|err| io(&plan.export_dir, err))?;
+    // Invalidate an old export identity before replacing any game content.
+    let marker = plan.export_dir.join(LUA_EXPORT_MARKER);
+    if marker.exists() {
+        std::fs::remove_file(&marker).map_err(|err| io(&marker, err))?;
+    }
 
     let binary_dest = plan.binary_dest();
-    std::fs::copy(&compiled, &binary_dest).map_err(|err| io(&binary_dest, err))?;
+    std::fs::copy(compiled, &binary_dest).map_err(|err| io(&binary_dest, err))?;
 
     let bundle_dest = plan.bundle_dest();
     let stats = engine_asset::pack_dir_with_metadata(
@@ -259,6 +413,14 @@ pub fn export(project: &Project, plan: &ExportPlan) -> Result<ExportReport, Proj
     } else {
         None
     };
+
+    let scenes = project.resolve(Path::new(crate::SCENES_DIR))?;
+    engine_asset::pack_dir(&scenes, &plan.export_dir.join(SCENE_BUNDLE_FILE))
+        .map_err(|err| ProjectError::Build(format!("packing scenes: {err}")))?;
+    if lua {
+        std::fs::write(&marker, format!("2\n{}\n", project.manifest().project_id))
+            .map_err(|err| io(&marker, err))?;
+    }
 
     tracing::info!(
         binary = %binary_dest.display(),
@@ -277,6 +439,7 @@ pub fn export(project: &Project, plan: &ExportPlan) -> Result<ExportReport, Proj
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GameplayLanguage;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn temp_project() -> Project {
@@ -286,7 +449,181 @@ mod tests {
             "vge-engine_project-build-{}-{n}",
             std::process::id()
         ));
-        Project::create(&root, "Demo").expect("scaffold project")
+        Project::create_with_language(&root, "Demo", GameplayLanguage::Rust)
+            .expect("scaffold Rust project")
+    }
+
+    #[test]
+    fn lua_export_stages_player_scripts_and_scene_without_cargo() {
+        let root = std::env::temp_dir().join(format!("vge-lua-export-{}", std::process::id()));
+        let project = Project::create_with_language(&root, "Lua Export", GameplayLanguage::Lua)
+            .expect("project");
+        let player = root.join("bundled-player");
+        std::fs::write(&player, b"player binary").expect("fake player");
+        let plan = ExportPlan::for_configuration(
+            &project,
+            &BuildConfiguration::new("Debug", BuildProfile::Debug),
+            root.join("out"),
+        );
+        let report = export_lua(&project, &plan, &player).expect("export Lua project");
+        assert_eq!(
+            std::fs::read(&report.binary).expect("binary"),
+            b"player binary"
+        );
+        assert!(report.scene.as_ref().is_some_and(|path| path.is_file()));
+        assert!(plan.export_dir.join(LUA_EXPORT_MARKER).is_file());
+        assert_eq!(
+            std::fs::read_to_string(plan.export_dir.join(LUA_EXPORT_MARKER)).expect("marker"),
+            format!("2\n{}\n", project.manifest().project_id)
+        );
+        let content = engine_scene::open_export(&plan.export_dir)
+            .expect("packed bundle")
+            .expect("open export");
+        assert!(
+            content
+                .library
+                .read_path("scripts/main.lua")
+                .expect("read")
+                .is_some()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lua_export_packs_additional_scenes_and_removes_stale_entries_on_reexport() {
+        let root =
+            std::env::temp_dir().join(format!("vge-lua-export-scenes-{}", std::process::id()));
+        let project =
+            Project::create_with_language(&root, "Scenes", GameplayLanguage::Lua).expect("project");
+        let second = project.scenes_dir().join("level2.ron");
+        engine_scene::Scene::default()
+            .save_to_file(&second)
+            .expect("second scene");
+        let player = root.join("bundled-player");
+        std::fs::write(&player, b"player binary").expect("fake player");
+        let plan = ExportPlan::for_configuration(
+            &project,
+            &BuildConfiguration::new("Debug", BuildProfile::Debug),
+            root.join("out"),
+        );
+        export_lua(&project, &plan, &player).expect("first export");
+        let packed =
+            engine_asset::Bundle::open(&plan.export_dir.join("scenes.pak")).expect("packed scenes");
+        assert!(packed.get("main.ron").is_some());
+        assert!(packed.get("level2.ron").is_some());
+
+        std::fs::remove_file(&second).expect("remove second source");
+        export_lua(&project, &plan, &player).expect("re-export");
+        let packed = engine_asset::Bundle::open(&plan.export_dir.join("scenes.pak"))
+            .expect("repacked scenes");
+        assert!(packed.get("level2.ron").is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rust_export_packs_scenes_for_scene_changes_without_a_lua_marker() {
+        let root =
+            std::env::temp_dir().join(format!("vge-rust-export-scenes-{}", std::process::id()));
+        let project = Project::create_with_language(&root, "Rust Game", GameplayLanguage::Rust)
+            .expect("project");
+        engine_scene::Scene::default()
+            .save_to_file(&project.scenes_dir().join("level2.ron"))
+            .expect("second scene");
+        let binary = root.join("compiled-game");
+        std::fs::write(&binary, b"game").expect("binary");
+        let plan = ExportPlan::for_configuration(
+            &project,
+            &BuildConfiguration::new("Debug", BuildProfile::Debug),
+            root.join("out"),
+        );
+
+        stage_export(&project, &plan, &binary, false).expect("export");
+
+        let packed = engine_asset::Bundle::open(&plan.export_dir.join(SCENE_BUNDLE_FILE))
+            .expect("packed scenes");
+        assert!(packed.get("level2.ron").is_some());
+        assert!(!plan.export_dir.join(LUA_EXPORT_MARKER).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_reexport_never_keeps_the_previous_games_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "vge-lua-export-marker-failure-{}",
+            std::process::id()
+        ));
+        let project = Project::create_with_language(&root, "New Game", GameplayLanguage::Lua)
+            .expect("project");
+        let binary = root.join("bundled-player");
+        std::fs::write(&binary, b"player").expect("binary");
+        let mut plan = ExportPlan::for_configuration(
+            &project,
+            &BuildConfiguration::new("Debug", BuildProfile::Debug),
+            root.join("out"),
+        );
+        std::fs::create_dir_all(&plan.export_dir).expect("export dir");
+        let marker = plan.export_dir.join(LUA_EXPORT_MARKER);
+        std::fs::write(&marker, b"2\n00000000-0000-4000-8000-000000000001\n").expect("old marker");
+        plan.assets_src = root.join("missing-assets");
+
+        assert!(stage_export(&project, &plan, &binary, true).is_err());
+        assert!(
+            !marker.exists(),
+            "old save identity must be invalidated first"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lua_export_rejects_missing_starter_script() {
+        let root =
+            std::env::temp_dir().join(format!("vge-lua-export-missing-{}", std::process::id()));
+        let project = Project::create_with_language(&root, "Lua Export", GameplayLanguage::Lua)
+            .expect("project");
+        std::fs::remove_file(root.join("assets/scripts/main.lua")).expect("remove starter");
+        let player = root.join("bundled-player");
+        std::fs::write(&player, b"player binary").expect("fake player");
+        let plan = ExportPlan::for_configuration(
+            &project,
+            &BuildConfiguration::new("Debug", BuildProfile::Debug),
+            root.join("out"),
+        );
+        assert!(matches!(
+            export_lua(&project, &plan, &player),
+            Err(ProjectError::Build(_))
+        ));
+        assert!(!plan.export_dir.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lua_export_rejects_missing_attached_script() {
+        let root = std::env::temp_dir().join(format!(
+            "vge-lua-export-missing-attached-{}",
+            std::process::id()
+        ));
+        let project = Project::create_with_language(&root, "Lua Export", GameplayLanguage::Lua)
+            .expect("project");
+        let mut scene = engine_scene::Scene::default();
+        scene.entities.push(engine_scene::SceneEntity {
+            script: Some("assets/scripts/missing.lua".into()),
+            ..Default::default()
+        });
+        scene
+            .save_to_file(&project.main_scene_path())
+            .expect("scene");
+        let player = root.join("bundled-player");
+        std::fs::write(&player, b"player binary").expect("fake player");
+        let plan = ExportPlan::for_configuration(
+            &project,
+            &BuildConfiguration::new("Debug", BuildProfile::Debug),
+            root.join("out"),
+        );
+        assert!(
+            matches!(export_lua(&project, &plan, &player), Err(ProjectError::Build(message)) if message.contains("missing.lua"))
+        );
+        assert!(!plan.export_dir.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -310,10 +647,6 @@ mod tests {
             .position(|a| a == "--features")
             .map(|i| args[i + 1].clone());
         assert_eq!(features, Some("steam,no_console".to_owned()));
-        assert!(
-            plan.compiled_binary().to_string_lossy().contains("release"),
-            "the profile also decides where cargo puts the binary"
-        );
 
         // A configuration that names no crate builds the project's own.
         let defaulted = BuildConfiguration::new("Debug", BuildProfile::Debug);
@@ -340,6 +673,49 @@ mod tests {
         );
     }
 
+    fn artifact(name: &str, kind: &str, executable: Option<&str>) -> String {
+        serde_json::json!({
+            "reason": "compiler-artifact",
+            "package_id": format!("path+file:///games/{name}#0.1.0"),
+            "target": { "name": name, "kind": [kind] },
+            "executable": executable,
+            "fresh": true,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn the_built_program_comes_from_cargo_not_a_guessed_path() {
+        let mut built = BuiltExecutables::default();
+        built.observe(&artifact("engine", "lib", None));
+        built.observe(r#"{"reason":"build-finished","success":true}"#);
+        built.observe("Compiling engine v0.1.0"); // Not JSON: ignored.
+        assert!(built.executable("my-game").is_err(), "no program yet");
+
+        built.observe(&artifact(
+            "my-game",
+            "bin",
+            Some("/work/target/debug/my-game"),
+        ));
+        assert_eq!(
+            built.executable("my-game"),
+            Ok(PathBuf::from("/work/target/debug/my-game"))
+        );
+
+        // A crate whose only binary has another name still runs.
+        let mut renamed = BuiltExecutables::default();
+        renamed.observe(&artifact("launcher", "bin", Some("/t/debug/launcher")));
+        assert_eq!(
+            renamed.executable("my-game"),
+            Ok(PathBuf::from("/t/debug/launcher"))
+        );
+
+        // Several binaries and none named after the crate: ask, don't guess.
+        renamed.observe(&artifact("tool", "bin", Some("/t/debug/tool")));
+        let message = renamed.executable("my-game").expect_err("ambiguous");
+        assert!(message.contains("launcher, tool"), "{message}");
+    }
+
     #[test]
     fn cargo_args_differ_by_profile() {
         let project = temp_project();
@@ -361,7 +737,20 @@ mod tests {
             &["build".to_string(), "-p".to_string(), "game".to_string()]
         );
         assert!(plan_rel.cargo_args().contains(&"--release".to_string()));
-        assert!(plan_rel.cargo_args().contains(&"--target-dir".to_string()));
+        assert!(
+            !plan_rel.cargo_args().contains(&"--target-dir".to_string()),
+            "Cargo picks the target dir, so a workspace member reuses its build"
+        );
+        assert!(
+            plan_rel
+                .cargo_args()
+                .contains(&CARGO_MESSAGE_FORMAT.to_string())
+        );
+        let mut forced = plan_rel.clone();
+        forced.target_dir = Some(PathBuf::from("/tmp/shared-target"));
+        let args = forced.cargo_args();
+        let at = args.iter().position(|arg| arg == "--target-dir");
+        assert_eq!(at.map(|i| args[i + 1].as_str()), Some("/tmp/shared-target"));
 
         std::fs::remove_dir_all(project.root()).ok();
     }
@@ -378,10 +767,6 @@ mod tests {
         );
         assert_eq!(plan.bundle_dest(), out.join("assets.pak"));
         assert_eq!(plan.scene_dest(), out.join("main.ron"));
-        assert!(
-            plan.compiled_binary()
-                .starts_with(project.root().join("target/release"))
-        );
 
         std::fs::remove_dir_all(project.root()).ok();
     }

@@ -1,4 +1,4 @@
-//! rust-analyzer LSP bridge: spawns the server for a project, syncs open
+//! Language-server bridge: spawns the server for a project, syncs open
 //! documents with full-text updates, drains `publishDiagnostics` into an
 //! owned shape the editor can show in Monaco and the Problems tab, and
 //! answers the language requests the editor raises — `textDocument/`
@@ -12,7 +12,7 @@
 //! waiting on the server.
 //!
 //! Still later iterations: `prepareRename` validation, formatting, code
-//! actions, call hierarchy, and bundling the server binary.
+//! actions, and call hierarchy.
 //!
 //! Editor-only: the `editor` binary depends on this crate directly, so
 //! nothing from the LSP stack reaches a runtime build.
@@ -31,6 +31,32 @@ const MAX_LSP_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 256;
 const MAX_QUEUED_RESPONSES: usize = 256;
 const MAX_QUEUED_DIAGNOSTICS: usize = 1024;
+
+/// Gameplay source language served by this client instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspLanguage {
+    /// Rust source files served by rust-analyzer.
+    Rust,
+    /// Lua source files served by LuaLS.
+    Lua,
+}
+
+impl LspLanguage {
+    fn server_name(self) -> &'static str {
+        match self {
+            Self::Rust => "rust-analyzer",
+            Self::Lua => "lua-language-server",
+        }
+    }
+
+    fn id_for(self, path: &Path) -> Option<&'static str> {
+        match (self, path.extension().and_then(|ext| ext.to_str())) {
+            (Self::Rust, Some("rs")) => Some("rust"),
+            (Self::Lua, Some("lua")) => Some("lua"),
+            _ => None,
+        }
+    }
+}
 
 /// A diagnostic's severity, mapped from LSP's numeric `DiagnosticSeverity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,9 +311,10 @@ enum PendingKind {
     WorkspaceSymbol,
 }
 
-/// A running rust-analyzer, with the documents it has been told about and
+/// A running language server, with the documents it has been told about and
 /// the thread draining its output.
 pub struct LspClient {
+    language: LspLanguage,
     child: Child,
     stdin: Arc<Mutex<ChildStdin>>,
     next_request_id: i64,
@@ -303,21 +330,34 @@ pub struct LspClient {
 }
 
 impl LspClient {
-    /// Starts rust-analyzer with its working directory at `root` (which
-    /// must contain a `Cargo.toml`), performs the `initialize` /
+    /// Starts rust-analyzer with its working directory at `root`, performs the `initialize` /
     /// `initialized` handshake, and begins reading its output.
     ///
     /// Returns `None` — with a logged reason — if the server binary
     /// can't be found or won't start; the editor stays fully usable
     /// without it.
     pub fn start(root: &Path) -> Option<Self> {
-        Self::start_with_wake(root, || {})
+        Self::start_for_language(root, LspLanguage::Rust)
+    }
+
+    /// Starts the server selected for this project's gameplay language.
+    pub fn start_for_language(root: &Path, language: LspLanguage) -> Option<Self> {
+        Self::start_for_language_with_wake(root, language, || {})
     }
 
     /// Starts rust-analyzer and wakes the supplied UI scheduler after a
     /// diagnostic or response is queued.
     pub fn start_with_wake(root: &Path, wake: impl Fn() + Send + Sync + 'static) -> Option<Self> {
-        let program = resolve_server()?;
+        Self::start_for_language_with_wake(root, LspLanguage::Rust, wake)
+    }
+
+    /// Starts the selected server and wakes the UI when a response arrives.
+    pub fn start_for_language_with_wake(
+        root: &Path,
+        language: LspLanguage,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Option<Self> {
+        let program = resolve_server(language)?;
         let mut child = match Command::new(&program)
             .current_dir(root)
             .stdin(Stdio::piped())
@@ -327,7 +367,7 @@ impl LspClient {
         {
             Ok(child) => child,
             Err(err) => {
-                tracing::warn!(program = %program.display(), error = %err, "could not start rust-analyzer");
+                tracing::warn!(program = %program.display(), error = %err, "could not start language server");
                 return None;
             }
         };
@@ -351,6 +391,7 @@ impl LspClient {
         .ok()?;
 
         let mut client = Self {
+            language,
             child,
             stdin,
             next_request_id: 1,
@@ -388,12 +429,20 @@ impl LspClient {
             }),
         );
         client.notify("initialized", serde_json::json!({}));
-        tracing::info!(root = %root.display(), "rust-analyzer started");
+        tracing::info!(root = %root.display(), server = language.server_name(), "language server started");
         Some(client)
+    }
+
+    /// Whether this server should receive document events for `path`.
+    pub fn accepts_path(&self, path: &Path) -> bool {
+        self.language.id_for(path).is_some()
     }
 
     /// Tells the server a document is now open, with its full text.
     pub fn did_open(&mut self, path: &Path, text: &str) {
+        let Some(language_id) = self.language.id_for(path) else {
+            return;
+        };
         let version = 1;
         self.doc_versions.insert(path.to_path_buf(), version);
         let uri = path_to_uri(path);
@@ -402,7 +451,7 @@ impl LspClient {
             serde_json::json!({
                 "textDocument": {
                     "uri": uri,
-                    "languageId": "rust",
+                    "languageId": language_id,
                     "version": version,
                     "text": text,
                 }
@@ -673,13 +722,37 @@ impl Drop for LspClient {
     }
 }
 
+fn find_bundled_luals(editor_executable: &Path) -> Option<PathBuf> {
+    let executable_dir = editor_executable.parent()?;
+    let adjacent = executable_dir.join("lua-language-server");
+    let resources = executable_dir.join("../Resources/lua-language-server");
+    for root in [adjacent, resources] {
+        let binary = root.join(format!(
+            "bin/lua-language-server{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        if root.join("main.lua").is_file() && binary.is_file() {
+            return std::fs::canonicalize(binary).ok();
+        }
+    }
+    None
+}
+
 /// Finds the rust-analyzer binary, in order: `rustup which
 /// rust-analyzer` (active toolchain), `rustup which --toolchain stable
 /// rust-analyzer`, any `~/.rustup/toolchains/*/bin/rust-analyzer`, then a
 /// bare `rust-analyzer` on `PATH`. Each `rustup which` returns an
 /// absolute path to the real binary, so the result is safe to spawn from
 /// any working directory.
-fn resolve_server() -> Option<PathBuf> {
+fn resolve_server(language: LspLanguage) -> Option<PathBuf> {
+    if language == LspLanguage::Lua {
+        return Some(
+            std::env::current_exe()
+                .ok()
+                .and_then(|editor| find_bundled_luals(&editor))
+                .unwrap_or_else(|| PathBuf::from(language.server_name())),
+        );
+    }
     let via_rustup = |args: &[&str]| -> Option<PathBuf> {
         let output = Command::new("rustup").args(args).output().ok()?;
         if !output.status.success() {
@@ -1276,6 +1349,56 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_server_only_accepts_its_gameplay_sources() {
+        assert_eq!(LspLanguage::Rust.server_name(), "rust-analyzer");
+        assert_eq!(LspLanguage::Lua.server_name(), "lua-language-server");
+        assert_eq!(
+            LspLanguage::Rust.id_for(Path::new("src/main.rs")),
+            Some("rust")
+        );
+        assert_eq!(
+            LspLanguage::Rust.id_for(Path::new("assets/scripts/main.lua")),
+            None
+        );
+        assert_eq!(
+            LspLanguage::Lua.id_for(Path::new("assets/scripts/main.lua")),
+            Some("lua")
+        );
+        assert_eq!(LspLanguage::Lua.id_for(Path::new("src/main.rs")), None);
+    }
+
+    #[test]
+    fn bundled_luals_is_found_in_macos_app_resources() {
+        let root = std::env::temp_dir().join(format!(
+            "vge-luals-resolve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let executable = root.join("Studio.app/Contents/MacOS/editor");
+        let luals = root.join("Studio.app/Contents/Resources/lua-language-server");
+        std::fs::create_dir_all(executable.parent().expect("executable directory"))
+            .expect("app executable directory");
+        std::fs::create_dir_all(luals.join("bin")).expect("LuaLS directory");
+        std::fs::write(luals.join("main.lua"), b"return true").expect("main script");
+        let binary = luals.join(format!(
+            "bin/lua-language-server{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        std::fs::write(&binary, b"LuaLS").expect("binary");
+
+        assert_eq!(
+            find_bundled_luals(&executable),
+            Some(std::fs::canonicalize(binary).expect("canonical LuaLS binary"))
+        );
+        std::fs::remove_file(luals.join("main.lua")).expect("remove main script");
+        assert_eq!(find_bundled_luals(&executable), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn file_uri_round_trips_a_path_with_spaces() {

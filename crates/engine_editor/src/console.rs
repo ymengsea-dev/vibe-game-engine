@@ -287,11 +287,11 @@ fn short_target(target: &str) -> String {
 
 fn level_color(level: Level) -> egui::Color32 {
     match level {
-        Level::ERROR => egui::Color32::from_rgb(220, 80, 80),
-        Level::WARN => egui::Color32::from_rgb(220, 180, 80),
-        Level::INFO => egui::Color32::from_rgb(200, 200, 200),
-        Level::DEBUG => egui::Color32::from_rgb(120, 160, 220),
-        Level::TRACE => egui::Color32::from_rgb(140, 140, 140),
+        Level::ERROR => crate::theme::NIGHT.danger,
+        Level::WARN => crate::theme::NIGHT.highlight,
+        Level::INFO => crate::theme::NIGHT.text,
+        Level::DEBUG => crate::theme::NIGHT.info,
+        Level::TRACE => crate::theme::NIGHT.subtle,
     }
 }
 

@@ -15,10 +15,12 @@
 //! "Delete" buttons — the only way to actually create or remove an
 //! entity in the editor so far.
 
-use std::collections::HashSet;
+use std::any::TypeId;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use engine_ecs::components::{
-    AssetSource, Camera, Disabled, Lock, Name, Transform as TransformComponent,
+    AssetSource, Camera, Disabled, GlobalTransform, Lock, Name, Sprite, SpriteSource, Static,
+    Transform as TransformComponent,
 };
 use engine_ecs::prelude::{ChildOf, Children, Entity, With, Without, World};
 use engine_scene::SiblingOrder;
@@ -44,9 +46,49 @@ pub struct HierarchyState {
     /// [`crate::EditorState::create_prefab_request`] for the host to
     /// write the `.prefab` file.
     pub(crate) prefab_request: Option<Entity>,
+    /// Set by double-clicking a row; the shell frames the selection in the
+    /// Scene View.
+    pub(crate) frame_request: bool,
+    /// The primary selection when the panel last drew, to notice selections
+    /// made elsewhere (such as clicking in the Scene View).
+    last_selected: Option<Entity>,
+    /// A newly selected entity to scroll into view this frame.
+    reveal: Option<Entity>,
+    /// Its ancestors, whose rows are expanded so it is visible.
+    reveal_ancestors: Vec<Entity>,
     /// The visible rows in draw order, rebuilt each [`show`] — the basis
     /// for shift-click range selection.
     pub(crate) flat_order: Vec<Entity>,
+    /// Rows the user unfolded, by stable object id ([`engine_scene::SceneObjectId`]).
+    /// Every other row starts folded. Saved with the project's editor
+    /// session, so folders stay as the user left them.
+    pub(crate) open: BTreeSet<String>,
+}
+
+impl HierarchyState {
+    /// Starts renaming `entity` inline, as F2 does.
+    pub(crate) fn start_rename(&mut self, world: &World, entity: Entity) {
+        self.renaming = Some(Renaming {
+            entity,
+            draft: display_name(world, entity),
+            focus: true,
+        });
+        self.reveal = Some(entity);
+    }
+}
+
+/// `entity`'s parent chain, nearest first (bounded against cycles).
+fn ancestors(world: &World, entity: Entity) -> Vec<Entity> {
+    let mut chain = Vec::new();
+    let mut current = world.get::<ChildOf>(entity).map(ChildOf::parent);
+    while let Some(parent) = current {
+        if chain.len() as u64 >= u64::from(MAX_HIERARCHY_DEPTH) || chain.contains(&parent) {
+            break;
+        }
+        chain.push(parent);
+        current = world.get::<ChildOf>(parent).map(ChildOf::parent);
+    }
+    chain
 }
 
 /// An inline rename in progress.
@@ -181,6 +223,127 @@ pub fn spawn_entity(world: &mut World, name: impl Into<String>, position: Vec3) 
         .id()
 }
 
+/// The name a new group gets.
+pub const GROUP_NAME: &str = "Group";
+
+/// Whether `entity` is a group: an object with children and nothing of its
+/// own to show or run — only a name, a place, and the hierarchy, scene and
+/// editor bookkeeping. The Hierarchy draws it as a folder, and only a group
+/// can be ungrouped. Anything else (a mesh, a light, a script…) makes it an
+/// ordinary object that happens to have children.
+pub fn is_group(world: &World, entity: Entity) -> bool {
+    let bookkeeping = [
+        TypeId::of::<Name>(),
+        TypeId::of::<TransformComponent>(),
+        TypeId::of::<GlobalTransform>(),
+        TypeId::of::<ChildOf>(),
+        TypeId::of::<Children>(),
+        TypeId::of::<SiblingOrder>(),
+        TypeId::of::<engine_scene::SceneObjectId>(),
+        TypeId::of::<Disabled>(),
+        TypeId::of::<Lock>(),
+        TypeId::of::<Static>(),
+    ];
+    !children_of(world, entity).is_empty()
+        && world.inspect_entity(entity).is_ok_and(|mut components| {
+            components.all(|info| info.type_id().is_some_and(|id| bookkeeping.contains(&id)))
+        })
+}
+
+/// Every entity in the tree, parents before children, in sibling order.
+fn tree_order(world: &mut World) -> Vec<Entity> {
+    let mut order = Vec::new();
+    for root in roots(world) {
+        flatten_visible(world, root, None, &mut order);
+    }
+    order
+}
+
+/// Puts `entities` (that are not locked) into a new, empty [`GROUP_NAME`]
+/// object at their centre, and returns the group. Nothing moves on screen.
+///
+/// An entity whose parent is also being grouped stays inside that parent.
+/// When every entity shares one parent, the group goes under it, where the
+/// first of them was; otherwise it becomes a root. Returns `None` when
+/// there is nothing to group.
+pub fn group_entities(world: &mut World, entities: &[Entity]) -> Option<Entity> {
+    let chosen: HashSet<Entity> = entities
+        .iter()
+        .copied()
+        .filter(|&entity| world.get_entity(entity).is_ok() && world.get::<Lock>(entity).is_none())
+        .collect();
+    let members: Vec<Entity> = tree_order(world)
+        .into_iter()
+        .filter(|entity| chosen.contains(entity))
+        .filter(|&entity| {
+            !ancestors(world, entity)
+                .iter()
+                .any(|ancestor| chosen.contains(ancestor))
+        })
+        .collect();
+    let first = *members.first()?;
+    let parent_of = |world: &World, entity| world.get::<ChildOf>(entity).map(ChildOf::parent);
+    let first_parent = parent_of(world, first);
+    let parent = members
+        .iter()
+        .all(|&member| parent_of(world, member) == first_parent)
+        .then_some(first_parent)
+        .flatten();
+
+    let centre = members
+        .iter()
+        .map(|&member| world_transform(world, member).translation)
+        .sum::<Vec3>()
+        / members.len() as f32;
+    let group = spawn_entity(world, GROUP_NAME, centre);
+    if parent.is_some() && !reparent(world, group, parent) {
+        despawn_entity(world, group);
+        return None;
+    }
+    // The group takes the first member's place among its new siblings.
+    let mut siblings = siblings_of(world, parent);
+    siblings.retain(|&entity| entity != group);
+    let at = siblings
+        .iter()
+        .position(|&entity| entity == first)
+        .unwrap_or(siblings.len());
+    siblings.insert(at, group);
+    for &member in &members {
+        reparent(world, member, Some(group));
+    }
+    siblings.retain(|entity| !members.contains(entity));
+    set_sibling_order(world, &siblings);
+    set_sibling_order(world, &members);
+    Some(group)
+}
+
+/// Moves a group's children out to the group's own parent, in its place
+/// and order, then deletes the empty group. Nothing moves on screen.
+/// Returns the freed children, or `None` if `group` is not an unlocked
+/// [`is_group`].
+pub fn ungroup(world: &mut World, group: Entity) -> Option<Vec<Entity>> {
+    if !is_group(world, group) || world.get::<Lock>(group).is_some() {
+        return None;
+    }
+    let parent = world.get::<ChildOf>(group).map(ChildOf::parent);
+    let children = children_of(world, group);
+    let mut siblings = siblings_of(world, parent);
+    let at = siblings
+        .iter()
+        .position(|&entity| entity == group)
+        .unwrap_or(siblings.len());
+    for &child in &children {
+        reparent(world, child, parent);
+    }
+    siblings.retain(|&entity| entity != group);
+    for (offset, &child) in children.iter().enumerate() {
+        siblings.insert((at + offset).min(siblings.len()), child);
+    }
+    set_sibling_order(world, &siblings);
+    despawn_entity(world, group);
+    Some(children)
+}
+
 /// Despawns `entity` and its descendants — `bevy_ecs` recurses into
 /// `Children`. A harmless no-op if `entity` doesn't exist (e.g. it was
 /// already deleted, or the caller's `selected` was stale).
@@ -218,7 +381,27 @@ fn rename(world: &mut World, entity: Entity, name: &str) {
 /// round-tripped component set (`Name`, `Transform`, `Camera`,
 /// `AssetSource`, `Disabled`) — the same one `engine_scene` saves.
 pub fn duplicate_entity(world: &mut World, entity: Entity) -> Entity {
-    let copy = clone_subtree(world, entity, None);
+    let mut copied_ids = HashMap::new();
+    let mut copies = Vec::new();
+    let copy = clone_subtree(world, entity, None, &mut copied_ids, &mut copies);
+    for copied in copies {
+        if let Some(mut rules) = world.get_mut::<engine_scene::SceneRules>(copied) {
+            for rule in &mut rules.0 {
+                let target = match &mut rule.action {
+                    engine_scene::RuleAction::SetUiText { target, .. }
+                    | engine_scene::RuleAction::PlayAudio { target } => Some(target),
+                    engine_scene::RuleAction::EmitEvent { .. }
+                    | engine_scene::RuleAction::SetVariable { .. }
+                    | engine_scene::RuleAction::AddToVariable { .. } => None,
+                };
+                if let Some(target) = target
+                    && let Some(new_id) = copied_ids.get(target)
+                {
+                    *target = new_id.clone();
+                }
+            }
+        }
+    }
     if let Some(mut name) = world.get_mut::<Name>(copy) {
         name.0.push_str(" Copy");
     }
@@ -303,6 +486,37 @@ pub fn reparent(world: &mut World, child: Entity, new_parent: Option<Entity>) ->
     true
 }
 
+/// Gives `entity` the world-space transform `target`, by setting the
+/// local transform that produces it under its parent (the inverse of
+/// [`world_transform`]). Edits made in world space, like a gizmo drag,
+/// then land correctly for an object inside a moved, turned or scaled
+/// group.
+pub fn set_world_transform(world: &mut World, entity: Entity, target: MathTransform) {
+    let parent_world = world
+        .get::<ChildOf>(entity)
+        .map_or(MathTransform::IDENTITY, |child_of| {
+            world_transform(world, child_of.parent())
+        });
+    let local = parent_world.inverse().mul_transform(&target);
+    if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+        entity_mut.insert(TransformComponent::from(local));
+    }
+}
+
+/// `entities` without any whose parent, grandparent… is also listed:
+/// moving a group already moves what is inside it.
+pub fn without_descendants(world: &World, entities: &[Entity]) -> Vec<Entity> {
+    entities
+        .iter()
+        .copied()
+        .filter(|&entity| {
+            !ancestors(world, entity)
+                .iter()
+                .any(|ancestor| entities.contains(ancestor))
+        })
+        .collect()
+}
+
 /// Every entity in the selection: the `primary` (if any) first, then the
 /// `secondary` set.
 pub fn selection_list(primary: Option<Entity>, secondary: &[Entity]) -> Vec<Entity> {
@@ -369,11 +583,27 @@ pub fn select_toggle(primary: &mut Option<Entity>, secondary: &mut Vec<Entity>, 
 }
 
 /// Recursively clones `src` under `parent`, returning the clone.
-fn clone_subtree(world: &mut World, src: Entity, parent: Option<Entity>) -> Entity {
+fn clone_subtree(
+    world: &mut World,
+    src: Entity,
+    parent: Option<Entity>,
+    copied_ids: &mut HashMap<String, String>,
+    copies: &mut Vec<Entity>,
+) -> Entity {
     let name = world.get::<Name>(src).map(|n| n.0.clone());
     let transform = world.get::<TransformComponent>(src).copied();
     let camera = world.get::<Camera>(src).copied();
     let asset = world.get::<AssetSource>(src).cloned();
+    let sprite_source = world.get::<SpriteSource>(src).cloned();
+    let sprite = world.get::<Sprite>(src).copied();
+    let sprite_animation = world
+        .get::<engine_scene::SceneSpriteAnimation>(src)
+        .copied();
+    let tilemap = world.get::<engine_scene::SceneTilemap>(src).cloned();
+    let rules = world.get::<engine_scene::SceneRules>(src).cloned();
+    let ui = world.get::<engine_scene::SceneUi>(src).cloned();
+    let audio = world.get::<engine_scene::SceneAudioEmitter>(src).cloned();
+    let object_id = world.get::<engine_scene::SceneObjectId>(src).cloned();
     let disabled = is_disabled(world, src);
     let children = children_of(world, src);
 
@@ -390,6 +620,32 @@ fn clone_subtree(world: &mut World, src: Entity, parent: Option<Entity>) -> Enti
     if let Some(asset) = asset {
         clone.insert(asset);
     }
+    if let Some(source) = sprite_source {
+        clone.insert(source);
+    }
+    if let Some(sprite) = sprite {
+        clone.insert(sprite);
+    }
+    if let Some(animation) = sprite_animation {
+        clone.insert(animation);
+    }
+    if let Some(tilemap) = tilemap {
+        clone.insert(tilemap);
+    }
+    if let Some(rules) = rules {
+        clone.insert(rules);
+    }
+    if let Some(ui) = ui {
+        clone.insert(ui);
+    }
+    if let Some(audio) = audio {
+        clone.insert(audio);
+    }
+    if let Some(object_id) = object_id {
+        let new_id = uuid::Uuid::new_v4().to_string();
+        copied_ids.insert(object_id.0, new_id.clone());
+        clone.insert(engine_scene::SceneObjectId(new_id));
+    }
     if disabled {
         clone.insert(Disabled);
     }
@@ -397,9 +653,10 @@ fn clone_subtree(world: &mut World, src: Entity, parent: Option<Entity>) -> Enti
         clone.insert(ChildOf(parent));
     }
     let new_entity = clone.id();
+    copies.push(new_entity);
 
     for child in children {
-        clone_subtree(world, child, Some(new_entity));
+        clone_subtree(world, child, Some(new_entity), copied_ids, copies);
     }
     new_entity
 }
@@ -440,7 +697,7 @@ pub fn show(
 ) {
     crate::shell::panel_header(ui, |ui| {
         crate::shell::paint_shell_icon(ui, crate::shell::ShellIcon::Layers);
-        ui.label("Hierarchy");
+        ui.label(crate::theme::semibold("Hierarchy"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(14.0);
             ui.menu_button("+", |ui| {
@@ -502,6 +759,23 @@ pub fn show(
                     }
                     ui.close();
                 }
+                if ui
+                    .add_enabled(has_selection, egui::Button::new("Group Selection   ⌘G"))
+                    .on_hover_text("Put the selected objects into a new group, like a folder")
+                    .clicked()
+                {
+                    group_selection(world, selected, secondary, state);
+                    ui.close();
+                }
+                let any_group = selection.iter().any(|&entity| is_group(world, entity));
+                if ui
+                    .add_enabled(any_group, egui::Button::new("Ungroup   ⇧⌘G"))
+                    .on_hover_text("Move the group's objects out and remove the empty group")
+                    .clicked()
+                {
+                    ungroup_selection(world, selected, secondary);
+                    ui.close();
+                }
                 // Prefabs are single-entity: acts on the primary only.
                 if ui
                     .add_enabled(selected.is_some(), egui::Button::new("Make Prefab"))
@@ -519,9 +793,8 @@ pub fn show(
         .inner_margin(egui::Margin::symmetric(9, 6))
         .show(ui, |ui| {
             egui::Frame::NONE
-                .fill(crate::theme::SHELL_FILL)
-                .stroke(egui::Stroke::new(1.0, crate::theme::BORDER_SOFT))
-                .corner_radius(6)
+                .fill(crate::theme::NIGHT.shell)
+                .corner_radius(8)
                 .inner_margin(egui::Margin::symmetric(9, 4))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -565,6 +838,15 @@ pub fn show(
                 Some(set)
             };
 
+            // A selection made elsewhere (the Scene View) is revealed once:
+            // its parents expand and its row scrolls into view.
+            if *selected != state.last_selected {
+                state.last_selected = *selected;
+                state.reveal = *selected;
+                state.reveal_ancestors =
+                    selected.map_or_else(Vec::new, |entity| ancestors(world, entity));
+            }
+
             // Rebuild the flat visible order (drives shift-click range select).
             state.flat_order.clear();
             for root in roots(world) {
@@ -590,6 +872,8 @@ pub fn show(
                         end_drop_target(ui, world, last, selected, secondary);
                     }
                 });
+            state.reveal = None;
+            state.reveal_ancestors.clear();
         });
 }
 
@@ -646,12 +930,32 @@ fn show_entity(
         return;
     }
 
-    let id = ui.make_persistent_id(("hierarchy_row", entity));
+    // Folded unless the user unfolded it (remembered by object id), a
+    // selection inside it is being revealed, or a search is showing its
+    // matches. A search only opens rows for as long as it lasts.
+    let key = world
+        .get::<engine_scene::SceneObjectId>(entity)
+        .map(|id| id.0.clone());
+    if state.reveal_ancestors.contains(&entity)
+        && let Some(key) = &key
+    {
+        state.open.insert(key.clone());
+    }
+    let remembered = key.as_ref().is_some_and(|key| state.open.contains(key));
+    let searching = visible.is_some();
+    let id = match &key {
+        Some(key) => ui.make_persistent_id(("hierarchy_row", key)),
+        None => ui.make_persistent_id(("hierarchy_row", entity)),
+    };
     let mut collapsing =
-        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
-    if visible.is_some() {
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, remembered);
+    // A row with no id yet (new since the last save or undo step) keeps
+    // egui's own in-session fold state until it gets one.
+    let revealing = state.reveal_ancestors.contains(&entity);
+    if key.is_some() || searching {
+        collapsing.set_open(remembered || searching);
+    } else if revealing {
         collapsing.set_open(true);
-        collapsing.store(ui.ctx());
     }
     let header = ui.horizontal(|ui| {
         ui.set_min_width(ui.available_width());
@@ -659,6 +963,13 @@ fn show_entity(
         crate::assets::tree_disclosure(ui, &mut collapsing);
         entity_row(ui, world, entity, selected, secondary, state);
     });
+    if !searching && let Some(key) = key {
+        if collapsing.is_open() {
+            state.open.insert(key);
+        } else {
+            state.open.remove(&key);
+        }
+    }
     let drop_into =
         entity_drop_target(ui, world, entity, header.response.rect, selected, secondary);
     paint_hierarchy_row(
@@ -796,7 +1107,7 @@ fn handle_entity_drop(
                     egui::pos2(hit_rect.left() + 4.0, line_y),
                     egui::pos2(hit_rect.right() - 6.0, line_y),
                 ],
-                egui::Stroke::new(2.0, crate::theme::ACCENT),
+                egui::Stroke::new(2.0, crate::theme::NIGHT.accent),
             );
             false
         }
@@ -811,9 +1122,9 @@ fn paint_hierarchy_row(
     selected: bool,
 ) {
     let fill = if selected {
-        Some(crate::theme::ACCENT_FILL)
+        Some(crate::theme::NIGHT.accent_fill)
     } else if ui.rect_contains_pointer(rect) {
-        Some(crate::theme::PANEL_HOVER)
+        Some(crate::theme::NIGHT.hover)
     } else {
         None
     };
@@ -826,7 +1137,7 @@ fn paint_hierarchy_row(
 fn paint_search_icon(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
     let center = rect.min + egui::vec2(6.0, 6.0);
-    let stroke = egui::Stroke::new(1.3, crate::theme::MUTED);
+    let stroke = egui::Stroke::new(1.3, crate::theme::NIGHT.muted);
     ui.painter().circle_stroke(center, 4.0, stroke);
     ui.painter().line_segment(
         [center + egui::vec2(3.0, 3.0), center + egui::vec2(6.0, 6.0)],
@@ -834,12 +1145,67 @@ fn paint_search_icon(ui: &mut egui::Ui) {
     );
 }
 
-fn paint_entity_icon(ui: &mut egui::Ui, camera: bool) {
+/// The symbol at the start of a Hierarchy row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowIcon {
+    Camera,
+    /// A folder: an [`is_group`] object.
+    Group,
+    Object,
+}
+
+/// Groups the panel's selection (the panel-side twin of
+/// [`crate::EditorState::group_selection`]).
+fn group_selection(
+    world: &mut World,
+    selected: &mut Option<Entity>,
+    secondary: &mut Vec<Entity>,
+    state: &mut HierarchyState,
+) {
+    if let Some(group) = group_entities(world, &selection_list(*selected, secondary)) {
+        select_only(selected, secondary, group);
+        state.start_rename(world, group);
+    }
+}
+
+/// Ungroups the panel's selection (the panel-side twin of
+/// [`crate::EditorState::ungroup_selection`]).
+fn ungroup_selection(
+    world: &mut World,
+    selected: &mut Option<Entity>,
+    secondary: &mut Vec<Entity>,
+) {
+    let freed: Vec<Entity> = selection_list(*selected, secondary)
+        .into_iter()
+        .filter_map(|entity| ungroup(world, entity))
+        .flatten()
+        .collect();
+    if let Some((&first, rest)) = freed.split_first() {
+        *selected = Some(first);
+        *secondary = rest.to_vec();
+    }
+}
+
+fn paint_entity_icon(ui: &mut egui::Ui, icon: RowIcon) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
     let at = |x: f32, y: f32| rect.min + egui::vec2(x, y);
-    let stroke = egui::Stroke::new(1.2, crate::theme::MUTED);
+    let stroke = egui::Stroke::new(1.2, crate::theme::NIGHT.muted);
     let painter = ui.painter();
-    if camera {
+    if icon == RowIcon::Group {
+        painter.add(egui::Shape::line(
+            vec![
+                at(1.0, 3.0),
+                at(5.5, 3.0),
+                at(7.0, 4.5),
+                at(13.0, 4.5),
+                at(13.0, 12.0),
+                at(1.0, 12.0),
+                at(1.0, 3.0),
+            ],
+            stroke,
+        ));
+        painter.line_segment([at(1.0, 6.5), at(13.0, 6.5)], stroke);
+    } else if icon == RowIcon::Camera {
         painter.add(egui::Shape::line(
             vec![
                 at(1.0, 3.0),
@@ -876,7 +1242,7 @@ fn paint_entity_icon(ui: &mut egui::Ui, camera: bool) {
 fn paint_lock_icon(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
     let at = |x: f32, y: f32| rect.min + egui::vec2(x, y);
-    let stroke = egui::Stroke::new(1.2, crate::theme::SUBTLE);
+    let stroke = egui::Stroke::new(1.2, crate::theme::NIGHT.subtle);
     ui.painter().add(egui::Shape::line(
         vec![
             at(4.0, 6.0),
@@ -941,12 +1307,12 @@ fn entity_row(
     let name = display_name(world, entity);
     let text = if disabled {
         egui::RichText::new(name)
-            .color(crate::theme::SUBTLE)
+            .color(crate::theme::NIGHT.subtle)
             .italics()
     } else if *selected == Some(entity) || secondary.contains(&entity) {
-        egui::RichText::new(name).color(crate::theme::TEXT)
+        egui::RichText::new(name).color(crate::theme::NIGHT.text)
     } else {
-        egui::RichText::new(name).color(crate::theme::MUTED)
+        egui::RichText::new(name).color(crate::theme::NIGHT.muted)
     };
 
     let row_id = egui::Id::new(("hierarchy_dnd", entity));
@@ -955,7 +1321,14 @@ fn entity_row(
             let row_rect =
                 egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 27.0));
             ui.horizontal(|ui| {
-                paint_entity_icon(ui, world.get::<Camera>(entity).is_some());
+                let icon = if world.get::<Camera>(entity).is_some() {
+                    RowIcon::Camera
+                } else if is_group(world, entity) {
+                    RowIcon::Group
+                } else {
+                    RowIcon::Object
+                };
+                paint_entity_icon(ui, icon);
                 ui.allocate_ui_with_layout(
                     egui::vec2(
                         (ui.available_width() - if locked { 20.0 } else { 0.0 }).max(0.0),
@@ -978,6 +1351,9 @@ fn entity_row(
         })
         .inner;
     let response = ui.interact(row_rect, row_id, egui::Sense::click_and_drag());
+    if state.reveal == Some(entity) {
+        response.scroll_to_me(Some(egui::Align::Center));
+    }
     if response.clicked() {
         let (multi, range) =
             ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
@@ -989,7 +1365,16 @@ fn entity_row(
             select_only(selected, secondary, entity);
         }
     }
+    // Editor convention: double-click frames the object; F2 renames it.
     if response.double_clicked() {
+        select_only(selected, secondary, entity);
+        state.frame_request = true;
+    }
+    if *selected == Some(entity)
+        && state.renaming.is_none()
+        && ui.input(|input| input.key_pressed(egui::Key::F2))
+        && !ui.ctx().text_edit_focused()
+    {
         state.renaming = Some(Renaming {
             entity,
             draft: display_name(world, entity),
@@ -1011,6 +1396,22 @@ fn entity_row(
             select_only(selected, secondary, duplicate_entity(world, entity));
             ui.close();
         }
+        // Group acts on the whole selection when this row is part of it,
+        // otherwise on this row alone.
+        if ui.button("Group").clicked() {
+            if *selected != Some(entity) && !secondary.contains(&entity) {
+                select_only(selected, secondary, entity);
+            }
+            group_selection(world, selected, secondary, state);
+            ui.close();
+        }
+        if is_group(world, entity) && !locked && ui.button("Ungroup").clicked() {
+            if *selected != Some(entity) && !secondary.contains(&entity) {
+                select_only(selected, secondary, entity);
+            }
+            ungroup_selection(world, selected, secondary);
+            ui.close();
+        }
         if ui.button("Make Prefab").clicked() {
             state.prefab_request = Some(entity);
             ui.close();
@@ -1020,6 +1421,18 @@ fn entity_row(
             .clicked()
         {
             set_disabled(world, entity, !disabled);
+            ui.close();
+        }
+        if ui
+            .button(if locked { "Unlock" } else { "Lock" })
+            .on_hover_text("A locked object cannot be moved or clicked in the Scene View")
+            .clicked()
+        {
+            if locked {
+                world.entity_mut(entity).remove::<Lock>();
+            } else {
+                world.entity_mut(entity).insert(Lock);
+            }
             ui.close();
         }
         ui.separator();
@@ -1038,6 +1451,16 @@ fn entity_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ancestors_list_the_parent_chain_nearest_first() {
+        let mut world = World::new();
+        let root = world.spawn_empty().id();
+        let middle = world.spawn(ChildOf(root)).id();
+        let leaf = world.spawn(ChildOf(middle)).id();
+        assert_eq!(ancestors(&world, leaf), vec![middle, root]);
+        assert!(ancestors(&world, root).is_empty());
+    }
     use engine_ecs::prelude::ChildOf;
 
     #[test]
@@ -1251,7 +1674,8 @@ mod tests {
         let target_label = row("Target").expect("target row");
         let target_row = output.shapes.iter().find_map(|shape| match &shape.shape {
             egui::epaint::Shape::Rect(rect)
-                if rect.fill == crate::theme::ACCENT_FILL && rect.rect.contains(target_label) =>
+                if rect.fill == crate::theme::NIGHT.accent_fill
+                    && rect.rect.contains(target_label) =>
             {
                 Some(rect.rect)
             }
@@ -1301,7 +1725,7 @@ mod tests {
             if time == 0.3 {
                 let drop_highlight = output.shapes.iter().any(|shape| match &shape.shape {
                     egui::epaint::Shape::Rect(rect) => {
-                        rect.fill == crate::theme::ACCENT_FILL && rect.rect.contains(to)
+                        rect.fill == crate::theme::NIGHT.accent_fill && rect.rect.contains(to)
                     }
                     _ => false,
                 });
@@ -1343,7 +1767,7 @@ mod tests {
         let target_text = row(&target_name).unwrap();
         let target_row = output.shapes.iter().find_map(|shape| match &shape.shape {
             egui::epaint::Shape::Rect(rect)
-                if rect.fill == crate::theme::ACCENT_FILL
+                if rect.fill == crate::theme::NIGHT.accent_fill
                     && rect.rect.contains(target_text.center()) =>
             {
                 Some(rect.rect)
@@ -1391,7 +1815,7 @@ mod tests {
             if time == 0.3 {
                 let line = frame.shapes.iter().any(|shape| match &shape.shape {
                     egui::epaint::Shape::LineSegment { points, stroke } => {
-                        stroke.color == crate::theme::ACCENT
+                        stroke.color == crate::theme::NIGHT.accent
                             && stroke.width >= 2.0
                             && (points[0].y - target_row.unwrap().top()).abs() < 4.0
                     }
@@ -1433,7 +1857,7 @@ mod tests {
         let last_text = row(&last_name).unwrap();
         let last_row = output.shapes.iter().find_map(|shape| match &shape.shape {
             egui::epaint::Shape::Rect(rect)
-                if rect.fill == crate::theme::ACCENT_FILL
+                if rect.fill == crate::theme::NIGHT.accent_fill
                     && rect.rect.contains(last_text.center()) =>
             {
                 Some(rect.rect)
@@ -1566,7 +1990,7 @@ mod tests {
         let arrow = egui::pos2(name.left() - 32.0, name.center().y);
         let selected_fill = output.shapes.iter().any(|shape| match &shape.shape {
             egui::epaint::Shape::Rect(rect) => {
-                rect.fill == crate::theme::ACCENT_FILL
+                rect.fill == crate::theme::NIGHT.accent_fill
                     && rect.rect.contains(arrow)
                     && rect.rect.contains(name.center())
             }
@@ -1574,6 +1998,53 @@ mod tests {
         });
         output.textures_delta.clear();
         assert!(selected_fill, "selection must wrap the arrow and label");
+    }
+
+    #[test]
+    fn rows_start_folded_and_open_when_remembered() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        let trees = world
+            .spawn((
+                Name::new("Trees"),
+                engine_scene::SceneObjectId("trees-id".to_owned()),
+            ))
+            .id();
+        world.spawn((Name::new("Tree 001"), ChildOf(trees)));
+        let mut state = HierarchyState::default();
+        let (mut selected, mut secondary) = (None, Vec::new());
+        let mut time = 0.0;
+        let mut shows = |world: &mut World, state: &mut HierarchyState, label: &str| {
+            let mut output = egui::FullOutput::default();
+            for _ in 0..10 {
+                time += 0.1;
+                output.textures_delta.clear();
+                output = ctx.run_ui(
+                    egui::RawInput {
+                        time: Some(time),
+                        ..Default::default()
+                    },
+                    |ui| show(ui, world, &mut selected, &mut secondary, state),
+                );
+            }
+            output.textures_delta.clear();
+            output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.text() == label)
+            })
+        };
+        assert!(shows(&mut world, &mut state, "Trees"));
+        assert!(
+            !shows(&mut world, &mut state, "Tree 001"),
+            "groups start folded"
+        );
+        assert!(state.open.is_empty());
+
+        state.open.insert("trees-id".to_owned());
+        assert!(
+            shows(&mut world, &mut state, "Tree 001"),
+            "a row the user unfolded opens again"
+        );
+        assert!(state.open.contains("trees-id"), "and stays remembered");
     }
 
     #[test]
@@ -1585,18 +2056,27 @@ mod tests {
         let leaf = world.spawn((Name::new("Leaf"), ChildOf(parent))).id();
         let mut secondary = Vec::new();
         let mut state = HierarchyState::default();
+        let mut time = 0.0;
         for (entity, label) in [(parent, "Parent"), (leaf, "Leaf")] {
             let mut selected = Some(entity);
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(360.0, 280.0),
-                    )),
-                    ..Default::default()
-                },
-                |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
-            );
+            // Several frames: selecting the leaf unfolds its parent, which
+            // animates open.
+            let mut output = egui::FullOutput::default();
+            for _ in 0..10 {
+                time += 0.1;
+                output.textures_delta.clear();
+                output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(360.0, 280.0),
+                        )),
+                        time: Some(time),
+                        ..Default::default()
+                    },
+                    |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+                );
+            }
             let name = output.shapes.iter().find_map(|shape| match &shape.shape {
                 egui::epaint::Shape::Text(text) if text.galley.text() == label => {
                     Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center())
@@ -1606,7 +2086,7 @@ mod tests {
             let name = name.unwrap();
             let selected_right = output.shapes.iter().find_map(|shape| match &shape.shape {
                 egui::epaint::Shape::Rect(rect)
-                    if rect.fill == crate::theme::ACCENT_FILL && rect.rect.contains(name) =>
+                    if rect.fill == crate::theme::NIGHT.accent_fill && rect.rect.contains(name) =>
                 {
                     Some(rect.rect.right())
                 }
@@ -1651,7 +2131,7 @@ mod tests {
         );
         let hover_fill = hovered.shapes.iter().any(|shape| match &shape.shape {
             egui::epaint::Shape::Rect(rect) => {
-                rect.fill == crate::theme::PANEL_HOVER
+                rect.fill == crate::theme::NIGHT.hover
                     && rect.rect.contains(arrow)
                     && rect.rect.contains(name.center())
             }
@@ -1869,6 +2349,137 @@ mod tests {
     }
 
     #[test]
+    fn duplicating_tilemap_keeps_grid_and_painted_sprite() {
+        let mut world = World::new();
+        let id = uuid::Uuid::new_v4().to_string();
+        let parent = world
+            .spawn((
+                Name::new("Tilemap"),
+                engine_scene::SceneTilemap(engine_scene::TilemapData::new(
+                    engine_scene::AssetRef { id: id.clone() },
+                )),
+            ))
+            .id();
+        world.spawn((
+            Name::new("Tile (0, 0)"),
+            ChildOf(parent),
+            engine_ecs::components::SpriteSource {
+                atlas: id,
+                region: "grid:4,4:1,0".into(),
+                size: [1.0, 1.0],
+                color: [1.0; 4],
+                z_order: 0.0,
+            },
+        ));
+
+        let copy = duplicate_entity(&mut world, parent);
+        assert!(world.get::<engine_scene::SceneTilemap>(copy).is_some());
+        let copied_child = children_of(&world, copy)[0];
+        assert_eq!(
+            world
+                .get::<engine_ecs::components::SpriteSource>(copied_child)
+                .unwrap()
+                .region,
+            "grid:4,4:1,0"
+        );
+    }
+
+    #[test]
+    fn duplicating_an_animated_sprite_keeps_its_flipbook() {
+        let mut world = World::new();
+        let data = engine_scene::SpriteAnimationData {
+            frames: 4,
+            fps: 8.0,
+            looping: true,
+        };
+        let original = world
+            .spawn((
+                Name::new("Coin"),
+                engine_scene::SceneSpriteAnimation::new(data),
+            ))
+            .id();
+        let copy = duplicate_entity(&mut world, original);
+        assert_eq!(
+            world
+                .get::<engine_scene::SceneSpriteAnimation>(copy)
+                .unwrap()
+                .data,
+            data
+        );
+    }
+
+    #[test]
+    fn duplicating_a_button_rule_keeps_a_valid_independent_target() {
+        let mut world = World::new();
+        let original_id = uuid::Uuid::new_v4().to_string();
+        let original = world
+            .spawn((
+                Name::new("Start"),
+                engine_scene::SceneObjectId(original_id.clone()),
+                engine_scene::SceneUi(engine_scene::UiElementData::button()),
+                engine_scene::SceneRules(vec![engine_scene::RuleData {
+                    trigger: engine_scene::RuleTrigger::UiClicked,
+                    action: engine_scene::RuleAction::SetUiText {
+                        target: original_id.clone(),
+                        text: "Ready".into(),
+                    },
+                    condition: None,
+                    graph_position: None,
+                }]),
+            ))
+            .id();
+
+        let copy = duplicate_entity(&mut world, original);
+        let copy_id = &world.get::<engine_scene::SceneObjectId>(copy).unwrap().0;
+        assert_ne!(copy_id, &original_id);
+        assert!(world.get::<engine_scene::SceneUi>(copy).is_some());
+        assert!(matches!(
+            &world.get::<engine_scene::SceneRules>(copy).unwrap().0[0].action,
+            engine_scene::RuleAction::SetUiText { target, .. } if target == copy_id
+        ));
+        engine_scene::Scene::from_world(&mut world)
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn duplicating_a_rule_subtree_targets_its_copied_child() {
+        let mut world = World::new();
+        let label_id = uuid::Uuid::new_v4().to_string();
+        let button = world
+            .spawn((
+                Name::new("Start"),
+                engine_scene::SceneObjectId(uuid::Uuid::new_v4().to_string()),
+                engine_scene::SceneUi(engine_scene::UiElementData::button()),
+                engine_scene::SceneRules(vec![engine_scene::RuleData {
+                    trigger: engine_scene::RuleTrigger::UiClicked,
+                    action: engine_scene::RuleAction::SetUiText {
+                        target: label_id.clone(),
+                        text: "Ready".into(),
+                    },
+                    condition: None,
+                    graph_position: None,
+                }]),
+            ))
+            .id();
+        world.spawn((
+            Name::new("Status"),
+            ChildOf(button),
+            engine_scene::SceneObjectId(label_id.clone()),
+            engine_scene::SceneUi(engine_scene::UiElementData::label()),
+        ));
+
+        let copy = duplicate_entity(&mut world, button);
+        let child = children_of(&world, copy)[0];
+        let copied_label_id = &world.get::<engine_scene::SceneObjectId>(child).unwrap().0;
+        assert_ne!(copied_label_id, &label_id);
+        assert!(matches!(
+            &world.get::<engine_scene::SceneRules>(copy).unwrap().0[0].action,
+            engine_scene::RuleAction::SetUiText { target, .. } if target == copied_label_id
+        ));
+    }
+
+    #[test]
     fn collect_matches_includes_ancestors_of_a_match() {
         let mut world = World::new();
         let root = world.spawn(Name::new("World")).id();
@@ -2071,5 +2682,161 @@ mod tests {
         select_range(&mut primary, &mut secondary, &order, order[2]);
         assert_eq!(primary, Some(order[2]));
         assert!(secondary.is_empty());
+    }
+
+    fn named_at(world: &mut World, name: &str, x: f32) -> Entity {
+        spawn_entity(world, name, Vec3::new(x, 0.0, 0.0))
+    }
+
+    fn names(world: &World, entities: &[Entity]) -> Vec<String> {
+        entities.iter().map(|&e| display_name(world, e)).collect()
+    }
+
+    #[test]
+    fn grouping_keeps_positions_order_and_place() {
+        let mut world = World::new();
+        let first = named_at(&mut world, "First", 0.0);
+        let tree_a = named_at(&mut world, "Tree A", 2.0);
+        let tree_b = named_at(&mut world, "Tree B", 4.0);
+        let last = named_at(&mut world, "Last", 9.0);
+        set_sibling_order(&mut world, &[first, tree_a, tree_b, last]);
+
+        // Selection order does not matter; the tree's order is kept.
+        let group = group_entities(&mut world, &[tree_b, tree_a]).expect("grouped");
+        assert_eq!(display_name(&world, group), GROUP_NAME);
+        assert_eq!(
+            roots(&mut world),
+            vec![first, group, last],
+            "in the trees' place"
+        );
+        assert_eq!(children_of(&world, group), vec![tree_a, tree_b]);
+        assert_eq!(
+            world_transform(&world, group).translation,
+            Vec3::new(3.0, 0.0, 0.0),
+            "the group sits at their centre"
+        );
+        for (entity, x) in [(tree_a, 2.0), (tree_b, 4.0)] {
+            assert!(
+                (world_transform(&world, entity).translation - Vec3::new(x, 0.0, 0.0)).length()
+                    < 1e-5,
+                "nothing moves on screen"
+            );
+        }
+        assert!(is_group(&world, group));
+    }
+
+    #[test]
+    fn grouping_skips_locked_and_nested_picks_and_stays_under_a_shared_parent() {
+        let mut world = World::new();
+        let forest = named_at(&mut world, "Forest", 10.0);
+        let tree = named_at(&mut world, "Tree", 12.0);
+        let canopy = named_at(&mut world, "Canopy", 12.0);
+        let rock = named_at(&mut world, "Rock", 14.0);
+        let pinned = named_at(&mut world, "Pinned", 16.0);
+        world.entity_mut(pinned).insert(Lock);
+        for child in [tree, rock, pinned] {
+            reparent_at_end(&mut world, child, Some(forest));
+        }
+        reparent_at_end(&mut world, canopy, Some(tree));
+
+        let group = group_entities(&mut world, &[tree, canopy, rock, pinned]).expect("grouped");
+        assert_eq!(
+            world.get::<ChildOf>(group).map(ChildOf::parent),
+            Some(forest),
+            "all picks shared a parent, so the group goes under it"
+        );
+        assert_eq!(children_of(&world, group), vec![tree, rock]);
+        assert_eq!(
+            children_of(&world, tree),
+            vec![canopy],
+            "a picked child stays with its parent"
+        );
+        assert_eq!(
+            world.get::<ChildOf>(pinned).map(ChildOf::parent),
+            Some(forest),
+            "a locked object is left alone"
+        );
+        assert_eq!(group_entities(&mut world, &[pinned]), None);
+        assert_eq!(group_entities(&mut world, &[]), None);
+
+        // Picks from different parents make a root group.
+        let loose = named_at(&mut world, "Loose", 0.0);
+        let mixed = group_entities(&mut world, &[loose, rock]).expect("grouped");
+        assert!(world.get::<ChildOf>(mixed).is_none());
+    }
+
+    #[test]
+    fn only_empty_objects_with_children_are_groups_even_after_saving() {
+        let mut world = World::new();
+        let folder = named_at(&mut world, "Folder", 0.0);
+        let child = named_at(&mut world, "Child", 1.0);
+        reparent(&mut world, child, Some(folder));
+        let barrel = world
+            .spawn((
+                Name::new("Barrel"),
+                AssetSource::new("props/barrel.gltf"),
+                TransformComponent::default(),
+            ))
+            .id();
+        let lid = named_at(&mut world, "Lid", 0.0);
+        reparent(&mut world, lid, Some(barrel));
+        world.entity_mut(folder).insert((Lock, Disabled));
+
+        assert!(is_group(&world, folder));
+        assert!(
+            !is_group(&world, barrel),
+            "an object with its own content is not a group"
+        );
+        assert!(!is_group(&world, child), "no children, nothing to ungroup");
+
+        // A saved and reloaded group is still a group.
+        let scene = engine_scene::Scene::from_world(&mut world);
+        let mut reloaded = World::new();
+        scene.instantiate(&mut reloaded);
+        let mut query = reloaded.query::<(Entity, &Name)>();
+        let folder = query
+            .iter(&reloaded)
+            .find(|(_, name)| name.0 == "Folder")
+            .map(|(entity, _)| entity)
+            .expect("folder reloaded");
+        assert!(is_group(&reloaded, folder));
+    }
+
+    #[test]
+    fn ungrouping_puts_the_children_back_in_the_groups_place() {
+        let mut world = World::new();
+        let first = named_at(&mut world, "First", 0.0);
+        let a = named_at(&mut world, "A", 2.0);
+        let b = named_at(&mut world, "B", 4.0);
+        let last = named_at(&mut world, "Last", 9.0);
+        set_sibling_order(&mut world, &[first, a, b, last]);
+        let group = group_entities(&mut world, &[a, b]).expect("grouped");
+        // Move the group so the children's world positions differ from
+        // their local ones; ungrouping must keep them where they are seen.
+        world
+            .entity_mut(group)
+            .insert(TransformComponent::from(MathTransform::from_translation(
+                Vec3::new(3.0, 5.0, 0.0),
+            )));
+        let seen = world_transform(&world, a).translation;
+
+        assert_eq!(ungroup(&mut world, a), None, "not a group");
+        assert_eq!(ungroup(&mut world, group), Some(vec![a, b]));
+        assert!(
+            world.get_entity(group).is_err(),
+            "the empty group is removed"
+        );
+        assert_eq!(
+            {
+                let order = roots(&mut world);
+                names(&world, &order)
+            },
+            ["First", "A", "B", "Last"]
+        );
+        assert!((world_transform(&world, a).translation - seen).length() < 1e-5);
+
+        let again = group_entities(&mut world, &[a, b]).expect("grouped");
+        world.entity_mut(again).insert(Lock);
+        assert_eq!(ungroup(&mut world, again), None, "a locked group stays");
     }
 }

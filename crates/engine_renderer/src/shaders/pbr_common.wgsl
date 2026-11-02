@@ -107,7 +107,7 @@ struct PointLight {
 };
 
 const MAX_DIRECTIONAL_LIGHTS: u32 = 2u;
-const MAX_POINT_LIGHTS: u32 = 4u;
+const MAX_POINT_LIGHTS: u32 = 16u;
 
 struct LightsUniform {
     directional_count: u32,

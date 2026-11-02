@@ -1,17 +1,23 @@
 (
-    version: 1,
+    version: 3,
     name: "Island",
+    project_id: "b7ef6759-e00c-4ded-b065-bdb610309a46",
     main_scene: "scenes/island.ron",
+    gameplay_language: Rust,
     configurations: [
         (
             name: "Debug",
             profile: Debug,
             crate_name: Some("island"),
+            scene: None,
+            features: [],
         ),
         (
             name: "Release",
             profile: Release,
             crate_name: Some("island"),
+            scene: None,
+            features: [],
         ),
     ],
 )

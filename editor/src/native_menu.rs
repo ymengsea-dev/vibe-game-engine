@@ -27,14 +27,24 @@ fn command_for_id(id: &str, recent: &[PathBuf]) -> Option<MenuCommand> {
         "new_scene" => MenuCommand::NewScene,
         "revert_scene" => MenuCommand::RevertScene,
         "save_scene" => MenuCommand::SaveScene,
+        "upgrade_rust_sdk" => MenuCommand::UpgradeRustSdk,
         "export" => MenuCommand::Export,
+        "settings" => MenuCommand::OpenSettings,
         "quit" => MenuCommand::Quit,
         "undo" => MenuCommand::Undo,
         "redo" => MenuCommand::Redo,
         "import" => MenuCommand::Import,
         "refresh" => MenuCommand::Refresh,
         "create_empty" => MenuCommand::CreateEmpty,
+        "create_sprite" => MenuCommand::CreateSprite,
+        "create_tilemap" => MenuCommand::CreateTilemap,
+        "create_water" => MenuCommand::CreateWater,
+        "create_point_light" => MenuCommand::CreatePointLight,
+        "create_ui_label" => MenuCommand::CreateUiLabel,
+        "create_ui_button" => MenuCommand::CreateUiButton,
         "delete_selected" => MenuCommand::DeleteSelected,
+        "group_selection" => MenuCommand::GroupSelection,
+        "ungroup" => MenuCommand::Ungroup,
         "overlay_colliders" => MenuCommand::ToggleOverlay(MenuOverlay::Colliders),
         "overlay_lights" => MenuCommand::ToggleOverlay(MenuOverlay::Lights),
         "overlay_cameras" => MenuCommand::ToggleOverlay(MenuOverlay::Cameras),
@@ -67,7 +77,7 @@ fn command_for_id(id: &str, recent: &[PathBuf]) -> Option<MenuCommand> {
 
 fn checked(id: &str, state: &EditorState) -> bool {
     match id {
-        "overlay_colliders" => state.overlays.colliders,
+        "overlay_colliders" => state.overlays.all_colliders,
         "overlay_lights" => state.overlays.lights,
         "overlay_cameras" => state.overlays.cameras,
         "overlay_grid" => state.overlays.grid,
@@ -97,6 +107,13 @@ fn enabled(id: &str, state: &EditorState) -> bool {
         "undo" => state.history.can_undo(),
         "redo" => state.history.can_redo(),
         "delete_selected" => state.selection_len() > 0,
+        "create_sprite" | "create_tilemap" => state.selected_texture_asset().is_some(),
+        "upgrade_rust_sdk" => {
+            state.project.language() == engine::project::GameplayLanguage::Rust
+                && !state.dirty.any()
+                && !state.play.is_playing()
+                && !state.export_running
+        }
         "export" => {
             state.selected_configuration().is_some()
                 && !state.export_running
@@ -131,8 +148,11 @@ impl NativeMenu {
         add_item(&file, &mut items, "new_scene", "New Scene")?;
         add_item(&file, &mut items, "revert_scene", "Revert Scene")?;
         add_item(&file, &mut items, "save_scene", "Save Scene")?;
+        add_item(&file, &mut items, "upgrade_rust_sdk", "Upgrade Rust SDK")?;
         file.append(&PredefinedMenuItem::separator())?;
         add_item(&file, &mut items, "export", "Build & Export…")?;
+        file.append(&PredefinedMenuItem::separator())?;
+        add_item(&file, &mut items, "settings", "Settings… (⌘,)")?;
         menu.append(&file)?;
 
         let edit = Submenu::new("Edit", true);
@@ -157,6 +177,44 @@ impl NativeMenu {
 
         let gameobject = Submenu::new("GameObject", true);
         add_item(&gameobject, &mut items, "create_empty", "Create Empty")?;
+        add_item(
+            &gameobject,
+            &mut items,
+            "create_sprite",
+            "Create Sprite from Selected Image",
+        )?;
+        add_item(
+            &gameobject,
+            &mut items,
+            "create_tilemap",
+            "Create Tilemap from Selected Image",
+        )?;
+        add_item(&gameobject, &mut items, "create_water", "Create Water")?;
+        add_item(
+            &gameobject,
+            &mut items,
+            "create_point_light",
+            "Create Point Light",
+        )?;
+        add_item(
+            &gameobject,
+            &mut items,
+            "create_ui_label",
+            "Create UI Label",
+        )?;
+        add_item(
+            &gameobject,
+            &mut items,
+            "create_ui_button",
+            "Create UI Button",
+        )?;
+        add_item(
+            &gameobject,
+            &mut items,
+            "group_selection",
+            "Group Selection (⌘G)",
+        )?;
+        add_item(&gameobject, &mut items, "ungroup", "Ungroup (⇧⌘G)")?;
         add_item(
             &gameobject,
             &mut items,
@@ -360,6 +418,22 @@ mod tests {
     fn native_menu_ids_map_only_to_live_commands() {
         assert_eq!(command_for_id("quit", &[]), Some(MenuCommand::Quit));
         assert_eq!(
+            command_for_id("create_point_light", &[]),
+            Some(MenuCommand::CreatePointLight)
+        );
+        assert_eq!(
+            command_for_id("create_water", &[]),
+            Some(MenuCommand::CreateWater)
+        );
+        assert_eq!(
+            command_for_id("create_sprite", &[]),
+            Some(MenuCommand::CreateSprite)
+        );
+        assert_eq!(
+            command_for_id("create_tilemap", &[]),
+            Some(MenuCommand::CreateTilemap)
+        );
+        assert_eq!(
             command_for_id("recent_0", &[PathBuf::from("my project")]),
             Some(MenuCommand::OpenRecent(PathBuf::from("my project")))
         );
@@ -372,6 +446,7 @@ mod tests {
         let (root, mut state) = state();
         assert!(!enabled("undo", &state));
         assert!(!enabled("delete_selected", &state));
+        assert!(!enabled("create_sprite", &state));
         assert!(enabled("export", &state));
         assert!(checked("workspace_scene", &state));
         state.history.begin_frame(&mut state.world, None);

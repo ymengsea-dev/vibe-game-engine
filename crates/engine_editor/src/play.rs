@@ -18,8 +18,29 @@ pub enum EditorMode {
     Edit,
     /// The selected project configuration is compiling.
     Building,
-    /// The compiled game is running in its own window.
+    /// The compiled game is running, in its own window or in the Scene
+    /// View (see [`PlayKind`]).
     Play,
+}
+
+/// Where a running game is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayKind {
+    /// Run: the game's own window, exactly as players get it.
+    Window,
+    /// Play: inside the Scene View, with Pause and Step.
+    Viewport,
+}
+
+/// A request from the Scene View's Play controls to the running preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameControl {
+    /// Freeze the game.
+    Pause,
+    /// Continue a paused game.
+    Resume,
+    /// Advance a paused game by one frame.
+    Step,
 }
 
 /// Owns the editor mode and the pre-play scene snapshot.
@@ -28,6 +49,14 @@ pub enum EditorMode {
 /// fails, it calls [`PlayState::stop`] to restore this snapshot exactly.
 pub struct PlayState {
     mode: EditorMode,
+    kind: PlayKind,
+    /// Whether the previewed game confirmed it is paused.
+    paused: bool,
+    /// Controls waiting for the editor binary to send them.
+    controls: Vec<GameControl>,
+    /// Whether the build is compiling code, not just checking that nothing
+    /// changed (set by the editor binary from Cargo's output).
+    compiling: bool,
     snapshot: Option<Scene>,
 }
 
@@ -42,6 +71,10 @@ impl PlayState {
     pub fn new() -> Self {
         Self {
             mode: EditorMode::Edit,
+            kind: PlayKind::Window,
+            paused: false,
+            controls: Vec::new(),
+            compiling: false,
             snapshot: None,
         }
     }
@@ -56,17 +89,80 @@ impl PlayState {
         self.mode != EditorMode::Edit
     }
 
-    /// Snapshots `world` and enters the building phase.
+    /// Snapshots `world` and enters the building phase for Run (the
+    /// game's own window).
     ///
     /// This is a no-op when Play is already active, preserving the first
     /// snapshot so repeated button or keyboard events cannot move the rewind
     /// point.
     pub fn start(&mut self, world: &mut World) {
+        self.start_as(world, PlayKind::Window);
+    }
+
+    /// Like [`PlayState::start`], for a preview inside the Scene View.
+    pub fn start_in_viewport(&mut self, world: &mut World) {
+        self.start_as(world, PlayKind::Viewport);
+    }
+
+    fn start_as(&mut self, world: &mut World, kind: PlayKind) {
         if self.is_playing() {
             return;
         }
         self.snapshot = Some(Scene::from_world(world));
         self.mode = EditorMode::Building;
+        self.kind = kind;
+        self.paused = false;
+        self.controls.clear();
+        self.compiling = false;
+    }
+
+    /// Records whether the build is compiling code right now.
+    pub fn set_compiling(&mut self, compiling: bool) {
+        self.compiling = compiling && self.mode == EditorMode::Building;
+    }
+
+    /// Whether the game is being compiled, as opposed to checked and
+    /// started. Only then is "Building" shown.
+    pub fn is_compiling(&self) -> bool {
+        self.compiling && self.mode == EditorMode::Building
+    }
+
+    /// Where the game is shown, while one is building or running.
+    pub fn kind(&self) -> Option<PlayKind> {
+        self.is_playing().then_some(self.kind)
+    }
+
+    /// Whether a game is building or running in the Scene View.
+    pub fn is_previewing(&self) -> bool {
+        self.kind() == Some(PlayKind::Viewport)
+    }
+
+    /// Whether the previewed game is paused.
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Records the game's acknowledgement of a pause or resume.
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused && self.mode == EditorMode::Play;
+    }
+
+    /// Queues `control` for a running preview. Ignored when it does not
+    /// apply: nothing is previewing, Pause while paused, Resume or Step
+    /// while running.
+    pub fn request(&mut self, control: GameControl) {
+        let applies = match control {
+            GameControl::Pause => !self.paused,
+            GameControl::Resume | GameControl::Step => self.paused,
+        };
+        if applies && self.is_previewing() && self.mode == EditorMode::Play {
+            self.controls.push(control);
+        }
+    }
+
+    /// The queued controls, oldest first, for the editor binary to send.
+    pub fn take_controls(&mut self) -> Vec<GameControl> {
+        std::mem::take(&mut self.controls)
     }
 
     /// Marks a successfully launched project game as running.
@@ -91,6 +187,9 @@ impl PlayState {
             *world = fresh;
         }
         self.mode = EditorMode::Edit;
+        self.paused = false;
+        self.controls.clear();
+        self.compiling = false;
     }
 }
 
@@ -183,5 +282,58 @@ mod tests {
         play.stop(&mut world);
         play.mark_running();
         assert_eq!(play.mode(), EditorMode::Edit);
+    }
+
+    #[test]
+    fn preview_controls_queue_only_when_they_apply() {
+        let mut world = World::new();
+        let mut play = PlayState::new();
+        play.request(GameControl::Pause);
+        assert!(play.take_controls().is_empty(), "nothing is running");
+
+        play.start_in_viewport(&mut world);
+        assert_eq!(play.kind(), Some(PlayKind::Viewport));
+        play.request(GameControl::Pause);
+        assert!(play.take_controls().is_empty(), "still building");
+
+        play.mark_running();
+        play.request(GameControl::Step);
+        play.request(GameControl::Pause);
+        assert_eq!(
+            play.take_controls(),
+            [GameControl::Pause],
+            "Step needs a pause"
+        );
+        play.set_paused(true);
+        play.request(GameControl::Pause);
+        play.request(GameControl::Step);
+        play.request(GameControl::Resume);
+        assert_eq!(
+            play.take_controls(),
+            [GameControl::Step, GameControl::Resume]
+        );
+
+        play.stop(&mut world);
+        assert!(!play.is_paused());
+        assert_eq!(play.kind(), None);
+        play.start(&mut world);
+        assert_eq!(play.kind(), Some(PlayKind::Window), "Run never previews");
+    }
+
+    #[test]
+    fn building_is_shown_only_while_code_compiles() {
+        let mut world = World::new();
+        let mut play = PlayState::new();
+        play.set_compiling(true);
+        assert!(!play.is_compiling(), "nothing is building");
+        play.start_in_viewport(&mut world);
+        assert!(
+            !play.is_compiling(),
+            "checking, not compiling, until Cargo says so"
+        );
+        play.set_compiling(true);
+        assert!(play.is_compiling());
+        play.mark_running();
+        assert!(!play.is_compiling(), "a running game is not building");
     }
 }

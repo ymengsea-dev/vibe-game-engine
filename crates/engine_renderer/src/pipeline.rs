@@ -1314,13 +1314,11 @@ impl GpuContext {
         water: Option<crate::WaterFrame<'_>>,
         ui: Option<(&crate::UiPipeline, &[crate::UiQuad])>,
     ) -> Result<(), crate::error::RendererError> {
-        let Some(surface_texture) = self.acquire_frame() else {
+        let Some(frame) = self.acquire_frame() else {
             return Ok(());
         };
 
-        let view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame.view();
 
         self.render_scene_to(
             RenderTarget::new(&view),
@@ -1349,7 +1347,7 @@ impl GpuContext {
             ui,
         )?;
 
-        self.present(surface_texture);
+        self.present(frame);
         Ok(())
     }
 

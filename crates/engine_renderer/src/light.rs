@@ -11,9 +11,10 @@ use glam::Vec3;
 /// How many directional lights [`LightSet::to_uniform`] uploads. Extra
 /// lights beyond this are silently dropped — see [`LightSet::to_uniform`].
 pub const MAX_DIRECTIONAL_LIGHTS: usize = 2;
-/// How many point lights [`LightSet::to_uniform`] uploads. Extra lights
-/// beyond this are silently dropped — see [`LightSet::to_uniform`].
-pub const MAX_POINT_LIGHTS: usize = 4;
+/// How many point lights are uploaded per frame. With more in the scene,
+/// [`LightSet::to_uniform_for_view`] keeps the ones that matter most to the
+/// camera. Must match `MAX_POINT_LIGHTS` in `shaders/pbr_common.wgsl`.
+pub const MAX_POINT_LIGHTS: usize = 16;
 
 /// A light with parallel rays and no falloff (e.g. sunlight) — direction
 /// only, no position.
@@ -46,6 +47,16 @@ pub struct PointLight {
     /// that fades to exactly zero at this distance instead of just
     /// getting very dim.
     pub range: f32,
+}
+
+impl PointLight {
+    /// Approximate brightness this light adds at `point`: its strongest colour
+    /// channel times intensity, with inverse-square falloff (softened so a
+    /// light at the eye does not divide by zero).
+    pub fn influence_at(&self, point: Vec3) -> f32 {
+        let brightness = self.intensity.max(0.0) * self.color.max_element().max(0.0);
+        brightness / (1.0 + self.position.distance_squared(point))
+    }
 }
 
 /// Indirect light approximated as two hemispheres: one colour arriving
@@ -142,19 +153,36 @@ impl LightSet {
     /// than erroring, since exceeding a soft rendering-resource cap isn't
     /// a correctness problem the way e.g. malformed asset data is.
     pub fn to_uniform(&self) -> LightsUniform {
+        self.pack(&self.point)
+    }
+
+    /// Packs this light set for a camera at `eye`. When there are more point
+    /// lights than [`MAX_POINT_LIGHTS`], the ones contributing most at the eye
+    /// (brightness over squared distance) are kept; ties keep authored order.
+    pub fn to_uniform_for_view(&self, eye: Vec3) -> LightsUniform {
+        if self.point.len() <= MAX_POINT_LIGHTS {
+            return self.to_uniform();
+        }
+        let mut ranked: Vec<PointLight> = self.point.clone();
+        ranked.sort_by(|a, b| b.influence_at(eye).total_cmp(&a.influence_at(eye)));
+        ranked.truncate(MAX_POINT_LIGHTS);
+        self.pack(&ranked)
+    }
+
+    fn pack(&self, point: &[PointLight]) -> LightsUniform {
         let mut directional_lights = [DirectionalLightUniform::ZERO; MAX_DIRECTIONAL_LIGHTS];
         for (slot, light) in directional_lights.iter_mut().zip(&self.directional) {
             *slot = DirectionalLightUniform::from(*light);
         }
 
         let mut point_lights = [PointLightUniform::ZERO; MAX_POINT_LIGHTS];
-        for (slot, light) in point_lights.iter_mut().zip(&self.point) {
+        for (slot, light) in point_lights.iter_mut().zip(point) {
             *slot = PointLightUniform::from(*light);
         }
 
         LightsUniform {
             directional_count: self.directional.len().min(MAX_DIRECTIONAL_LIGHTS) as u32,
-            point_count: self.point.len().min(MAX_POINT_LIGHTS) as u32,
+            point_count: point.len().min(MAX_POINT_LIGHTS) as u32,
             _padding: [0; 2],
             directional_lights,
             point_lights,
@@ -381,6 +409,47 @@ mod tests {
         }
         let uniform = lights.to_uniform();
         assert_eq!(uniform.directional_count as usize, MAX_DIRECTIONAL_LIGHTS);
+    }
+
+    #[test]
+    fn a_busy_view_keeps_the_point_lights_that_matter_most_to_the_camera() {
+        let light = |x: f32, intensity: f32| PointLight {
+            position: Vec3::new(x, 0.0, 0.0),
+            color: Vec3::ONE,
+            intensity,
+            range: 10.0,
+        };
+        let mut lights = LightSet::new();
+        // Far, dim lights first in authored order, then the near ones.
+        for index in 0..MAX_POINT_LIGHTS {
+            lights.point.push(light(100.0 + index as f32, 1.0));
+        }
+        let near = light(1.0, 1.0);
+        let bright_far = light(50.0, 1_000_000.0);
+        lights.point.push(near);
+        lights.point.push(bright_far);
+
+        let uniform = lights.to_uniform_for_view(Vec3::ZERO);
+        assert_eq!(uniform.point_count as usize, MAX_POINT_LIGHTS);
+        let kept: Vec<_> = uniform.point_lights.iter().map(|l| l.position).collect();
+        assert!(kept.contains(&near.position.to_array()));
+        assert!(kept.contains(&bright_far.position.to_array()));
+        assert_eq!(kept[0], bright_far.position.to_array(), "strongest first");
+
+        // Within capacity nothing is reordered or dropped.
+        lights.point.truncate(3);
+        assert_eq!(lights.to_uniform_for_view(Vec3::ZERO), lights.to_uniform());
+    }
+
+    #[test]
+    fn shader_point_light_capacity_matches_the_rust_constant() {
+        let shader = include_str!("shaders/pbr_common.wgsl");
+        assert!(
+            shader.contains(&format!(
+                "const MAX_POINT_LIGHTS: u32 = {MAX_POINT_LIGHTS}u;"
+            )),
+            "pbr_common.wgsl must declare the same MAX_POINT_LIGHTS"
+        );
     }
 
     #[test]

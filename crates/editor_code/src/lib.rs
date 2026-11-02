@@ -595,6 +595,7 @@ fn json_field(value: &serde_json::Value, key: &str) -> String {
 fn language_for(path: &Path) -> &'static str {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some("rs") => "rust",
+        Some("lua") => "lua",
         Some("toml") => "toml",
         Some("md") => "markdown",
         Some("json") => "json",
@@ -803,6 +804,7 @@ mod tests {
     #[test]
     fn language_ids_by_extension() {
         assert_eq!(language_for(Path::new("player.rs")), "rust");
+        assert_eq!(language_for(Path::new("main.lua")), "lua");
         assert_eq!(language_for(Path::new("Cargo.toml")), "toml");
         assert_eq!(language_for(Path::new("notes.md")), "markdown");
         assert_eq!(language_for(Path::new("shader.wgsl")), "wgsl");

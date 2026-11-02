@@ -116,6 +116,10 @@ pub enum GameError {
     /// game-supplied message.
     #[error("game setup failed: {0}")]
     Setup(String),
+    /// Running inside Studio's Scene View failed: the connection, the
+    /// handshake, or the protocol (see [`crate::embed`]).
+    #[error("Studio preview error: {0}")]
+    Embed(String),
 }
 
 /// Read-only per-frame timing, from [`GameContext::time`].
@@ -316,6 +320,13 @@ pub trait Game {
     /// [`GameError::Setup`].
     fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError>;
 
+    /// Runs after `setup` and saved game data have loaded, before any gameplay callback.
+    /// A game whose startup needs restored values can initialize here.
+    fn on_ready(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+        let _ = ctx;
+        Ok(())
+    }
+
     /// Per-frame update. `dt` is the real seconds since the last frame.
     fn update(&mut self, ctx: &mut GameContext<'_>, dt: f32);
 
@@ -336,6 +347,12 @@ pub trait Game {
     /// So a `Transform` read *here* is the pose from the end of the
     /// previous step, while one read in [`Game::update`] is current.
     fn fixed_update(&mut self, ctx: &mut GameContext<'_>, step: f32) {
+        let _ = (ctx, step);
+    }
+
+    /// Called after each fixed physics step, with simulated poses already synchronized.
+    /// Use this for contact transitions that must not be missed between rendered frames.
+    fn post_fixed_update(&mut self, ctx: &mut GameContext<'_>, step: f32) {
         let _ = (ctx, step);
     }
 
@@ -500,6 +517,18 @@ pub struct GameContext<'a> {
     runtime: &'a mut Runtime,
 }
 
+fn collider_world_transform(world: &engine_ecs::prelude::World, entity: Entity) -> Transform {
+    world
+        .get::<engine_ecs::components::GlobalTransform>(entity)
+        .map(|global| global.0)
+        .or_else(|| {
+            world
+                .get::<engine_ecs::components::Transform>(entity)
+                .map(|local| local.0)
+        })
+        .unwrap_or(Transform::IDENTITY)
+}
+
 fn collider_scale(scale: glam::Vec3) -> glam::Vec3 {
     scale.abs()
 }
@@ -586,6 +615,33 @@ impl GameContext<'_> {
         );
     }
 
+    /// Packs the live scene's authored sprite images into the renderer's
+    /// shared atlas. A scene with no sprites clears the previous atlas.
+    pub fn set_scene_sprite_atlas(
+        &mut self,
+        library: &engine_scene::AssetLibrary,
+    ) -> Result<(), GameError> {
+        let packed = engine_scene::pack_world_sprite_atlas(
+            self.runtime.ecs.world_mut(),
+            library,
+            self.runtime.gpu.device().limits().max_texture_dimension_2d,
+        )
+        .map_err(|error| GameError::Setup(error.to_string()))?;
+        self.runtime.sprite_atlas = packed.map(|packed| {
+            let texture = self.runtime.gpu.create_texture_from_rgba(
+                "scene sprites",
+                packed.width,
+                packed.height,
+                &packed.rgba,
+            );
+            self.runtime.gpu.create_sprite_atlas_binding(
+                &self.runtime.sprite_pipeline,
+                &engine_renderer::TextureAtlas::new(texture, packed.layout),
+            )
+        });
+        Ok(())
+    }
+
     /// Builds a physics body for every entity in `scene` that carries
     /// [`engine_scene::ColliderData`], attaching it to the matching
     /// entity from `report`.
@@ -619,6 +675,7 @@ impl GameContext<'_> {
     ) -> usize {
         use engine_scene::{BodyKind, ColliderShape};
 
+        engine_ecs::propagate_transforms(self.runtime.ecs.world_mut());
         let mut built = 0;
         for (index, scene_entity) in scene.entities.iter().enumerate() {
             let Some(collider) = &scene_entity.collider else {
@@ -627,10 +684,7 @@ impl GameContext<'_> {
             let Some(&entity) = report.spawned.get(index) else {
                 continue;
             };
-            let transform = scene_entity
-                .transform
-                .map(engine_utils::Transform::from)
-                .unwrap_or(engine_utils::Transform::IDENTITY);
+            let transform = collider_world_transform(self.runtime.ecs.world(), entity);
             // One number for shapes with a single radius: a sphere
             // scaled 2x on X only is not a sphere, and silently picking
             // the wrong axis would put collision where the art is not.
@@ -728,6 +782,11 @@ impl GameContext<'_> {
     /// it out, feeds it pointer input, and draws it.
     pub fn ui_mut(&mut self) -> &mut engine_ui::Ui {
         &mut self.runtime.ui
+    }
+
+    /// ECS objects and mounted UI together for applying authored scene rules.
+    pub fn rule_targets_mut(&mut self) -> (&mut engine_ecs::prelude::World, &mut engine_ui::Ui) {
+        (self.runtime.ecs.world_mut(), &mut self.runtime.ui)
     }
 
     /// The UI tree, for reading node rects.
@@ -1069,7 +1128,11 @@ impl GameContext<'_> {
 /// The internal [`PlatformHandler`]. Owns the game and (once the window is
 /// ready) the [`Runtime`]; stashes any fatal error into `error_slot` for
 /// [`run_game`] to surface after the loop exits.
-struct GameRunner<G: Game> {
+///
+/// Driven by the winit event loop for a windowed game, or by
+/// [`crate::embed`] for a game shown in Studio's Scene View; both deliver
+/// the same [`PlatformEvent`]s, so a game behaves the same either way.
+pub(crate) struct GameRunner<G: Game> {
     config: Option<GameConfig>,
     game: G,
     runtime: Option<Runtime>,
@@ -1079,32 +1142,59 @@ struct GameRunner<G: Game> {
 }
 
 impl<G: Game> GameRunner<G> {
+    pub(crate) fn new(
+        config: GameConfig,
+        game: G,
+        error_slot: Rc<Cell<Option<GameError>>>,
+    ) -> Self {
+        Self {
+            config: Some(config),
+            game,
+            runtime: None,
+            error_slot,
+            last_frame: None,
+            finished: false,
+        }
+    }
+
     fn fail(&mut self, error: GameError) {
         self.error_slot.set(Some(error));
         self.finished = true;
     }
-}
 
-impl<G: Game> PlatformHandler for GameRunner<G> {
-    fn on_window_ready(&mut self, window: std::sync::Arc<Window>) {
+    /// Builds the runtime on `gpu` and runs the game's setup, as
+    /// [`PlatformHandler::on_window_ready`] does for a window.
+    pub(crate) fn start_with_gpu(&mut self, gpu: GpuContext, width: u32, height: u32) {
         let Some(config) = self.config.take() else {
             return;
         };
-        let mut runtime = match build_runtime(window, &config) {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                self.fail(err);
-                return;
-            }
-        };
+        match build_runtime_with(gpu, width, height, &config) {
+            Ok(runtime) => self.start(runtime),
+            Err(err) => self.fail(err),
+        }
+    }
+
+    /// Loads any save, runs [`Game::setup`] and [`Game::on_ready`], and
+    /// keeps `runtime` for the frame loop.
+    fn start(&mut self, mut runtime: Runtime) {
         // Read before `setup` so the snapshot is available to it, but
         // hand the game's own data over *after*, so a game applies saved
         // state to a world it has finished building.
-        let saved_data = runtime.save_path.clone().and_then(|path| {
-            let save = load_save(&path)?;
-            runtime.loaded_world = Some(save.world);
-            Some(save.game)
-        });
+        let saved_data = match runtime.save_path.clone() {
+            Some(path) => match load_save(&path) {
+                Ok(Some(save)) => {
+                    runtime.loaded_world = Some(save.world);
+                    Some(save.game)
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(error = %error, path = %path.display(), "saving disabled to preserve unreadable save");
+                    runtime.save_path = None;
+                    None
+                }
+            },
+            None => None,
+        };
 
         if let Err(err) = self.game.setup(&mut GameContext {
             runtime: &mut runtime,
@@ -1117,7 +1207,53 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
         {
             self.game.load_data(&data);
         }
+        if let Err(err) = self.game.on_ready(&mut GameContext {
+            runtime: &mut runtime,
+        }) {
+            self.fail(err);
+            return;
+        }
         self.runtime = Some(runtime);
+    }
+
+    /// The newest finished frame of a headless runtime (see
+    /// [`GpuContext::take_frame`]).
+    pub(crate) fn take_frame(&self) -> Option<engine_renderer::CapturedFrame> {
+        self.runtime.as_ref()?.gpu.take_frame()
+    }
+
+    /// Mutes audio while paused, and restarts the frame clock, so the
+    /// first frame after a pause does not see the paused time as one huge
+    /// step.
+    pub(crate) fn set_paused(&mut self, paused: bool) {
+        self.last_frame = None;
+        if let Some(audio) = self
+            .runtime
+            .as_mut()
+            .and_then(|runtime| runtime.audio.as_mut())
+        {
+            audio.set_muted(paused);
+        }
+    }
+
+    /// Makes the next frame advance exactly `seconds` of game time.
+    pub(crate) fn prepare_step(&mut self, seconds: f32) {
+        let now = Instant::now();
+        self.last_frame = now
+            .checked_sub(std::time::Duration::from_secs_f32(seconds))
+            .or(Some(now));
+    }
+}
+
+impl<G: Game> PlatformHandler for GameRunner<G> {
+    fn on_window_ready(&mut self, window: std::sync::Arc<Window>) {
+        let Some(config) = self.config.take() else {
+            return;
+        };
+        match build_runtime(window, &config) {
+            Ok(runtime) => self.start(runtime),
+            Err(err) => self.fail(err),
+        }
     }
 
     fn on_event(&mut self, event: PlatformEvent) {
@@ -1180,6 +1316,12 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
                         step_seconds,
                     );
                     step_physics(runtime, step_seconds);
+                    self.game.post_fixed_update(
+                        &mut GameContext {
+                            runtime: &mut *runtime,
+                        },
+                        step_seconds,
+                    );
                 }
                 // UI laid out and hit-tested before `update`, so a game
                 // reading "was this button clicked" sees this frame's
@@ -1240,6 +1382,7 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
                 // Animation before propagation: a pose written here is
                 // what this frame's transforms and rendering see.
                 engine_ecs::update_animations(runtime.ecs.world_mut(), &runtime.gpu, frame_seconds);
+                engine_scene::advance_sprite_animations(runtime.ecs.world_mut(), frame_seconds);
                 engine_ecs::propagate_transforms(runtime.ecs.world_mut());
                 update_audio(runtime);
                 update_shadow_fit(runtime);
@@ -1282,11 +1425,18 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
         if self.should_exit() {
             engine_platform::RedrawPolicy::Wait
         } else {
-            match self.game.frame_demand(Instant::now()) {
-                FrameDemand::Idle => engine_platform::RedrawPolicy::Wait,
-                FrameDemand::AnimateUntil(deadline) => {
-                    engine_platform::RedrawPolicy::WaitUntil(deadline)
-                }
+            let now = Instant::now();
+            let game_deadline = match self.game.frame_demand(now) {
+                FrameDemand::Idle => None,
+                FrameDemand::AnimateUntil(deadline) => Some(deadline),
+            };
+            let sprite_deadline = self.runtime.as_ref().and_then(|runtime| {
+                engine_scene::next_sprite_animation_frame(runtime.ecs.world())
+                    .map(|delay| now + delay)
+            });
+            match game_deadline.into_iter().chain(sprite_deadline).min() {
+                Some(deadline) => engine_platform::RedrawPolicy::WaitUntil(deadline),
+                None => engine_platform::RedrawPolicy::Wait,
             }
         }
     }
@@ -1322,23 +1472,17 @@ fn persist<G: Game>(runtime: &mut Runtime, game: &G) {
 
 /// Reads the save at `path`, if one is there.
 ///
-/// A missing file is the normal first-run case, not an error. A corrupt
-/// or newer-than-supported file *is* reported, then ignored — starting
-/// fresh beats refusing to launch.
-fn load_save(path: &std::path::Path) -> Option<engine_scene::SaveGame<String>> {
+/// A missing file is the normal first-run case. Corrupt or newer saves
+/// return an error so the caller can keep them from being overwritten.
+fn load_save(
+    path: &std::path::Path,
+) -> Result<Option<engine_scene::SaveGame<String>>, engine_scene::SceneError> {
     if !path.is_file() {
-        return None;
+        return Ok(None);
     }
-    match engine_scene::SaveGame::<String>::load_from_file(path) {
-        Ok(save) => {
-            tracing::info!(path = %path.display(), "loaded save");
-            Some(save)
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, path = %path.display(), "ignoring unreadable save");
-            None
-        }
-    }
+    let save = engine_scene::SaveGame::<String>::load_from_file(path)?;
+    tracing::info!(path = %path.display(), "loaded save");
+    Ok(Some(save))
 }
 
 /// One fixed physics step: integrate, then write the simulated poses
@@ -1536,16 +1680,27 @@ fn ui_quads(
     quads
 }
 
-/// Builds the standard 3D render setup and an empty world from `config`.
+/// Builds the standard 3D render setup and an empty world from `config`,
+/// rendering into `window`.
 fn build_runtime(
     window: std::sync::Arc<Window>,
     config: &GameConfig,
 ) -> Result<Runtime, GameError> {
     let size = window.inner_size();
-    let width = size.width.max(1);
-    let height = size.height.max(1);
-
     let gpu = GpuContext::new(window)?;
+    build_runtime_with(gpu, size.width, size.height, config)
+}
+
+/// [`build_runtime`] on an existing GPU context of `width`×`height`
+/// pixels, which may be windowless ([`GpuContext::headless`]).
+fn build_runtime_with(
+    gpu: GpuContext,
+    width: u32,
+    height: u32,
+    config: &GameConfig,
+) -> Result<Runtime, GameError> {
+    let width = width.max(1);
+    let height = height.max(1);
 
     let pipeline = gpu.create_pbr_pipeline("pbr");
     let shadow_pipeline = gpu.create_shadow_pipeline(&pipeline, "shadow");
@@ -1839,9 +1994,10 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
     runtime
         .gpu
         .write_uniform_buffer(&runtime.camera_binding.buffer, &runtime.camera.to_uniform());
-    runtime
-        .gpu
-        .write_uniform_buffer(&runtime.lights_binding.buffer, &runtime.lights.to_uniform());
+    runtime.gpu.write_uniform_buffer(
+        &runtime.lights_binding.buffer,
+        &runtime.lights.to_uniform_for_view(runtime.camera.eye),
+    );
     let (sun_direction, sun_color) = runtime.sun();
     runtime.gpu.write_uniform_buffer(
         &runtime.skybox.buffer,
@@ -1935,8 +2091,15 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
 /// [`GameContext::request_exit`] or the window is closed. Blocks the
 /// calling thread; call it from `main`.
 ///
+/// When Studio's Play button started the process (the `VGE_EMBED`
+/// environment variable is set, see [`crate::embed`]), no window opens:
+/// frames stream into Studio's Scene View and input comes back from it.
+/// The game runs exactly the same code either way.
+///
 /// # Errors
 ///
+/// - [`GameError::Embed`] if `VGE_EMBED` is malformed or Studio cannot be
+///   reached.
 /// - [`GameError::InvalidConfig`] if [`GameConfig::validate`] fails.
 /// - [`GameError::Platform`] if the event loop or window can't be created.
 /// - [`GameError::Renderer`] if GPU initialization fails.
@@ -1951,16 +2114,15 @@ pub fn run_game(config: GameConfig, game: impl Game + 'static) -> Result<(), Gam
     // slot (single-threaded; genuine shared ownership between here and the
     // moved-in handler).
     let error_slot: Rc<Cell<Option<GameError>>> = Rc::new(Cell::new(None));
-    let runner = GameRunner {
-        config: Some(config),
-        game,
-        runtime: None,
-        error_slot: Rc::clone(&error_slot),
-        last_frame: None,
-        finished: false,
-    };
+    let mut runner = GameRunner::new(config, game, Rc::clone(&error_slot));
 
-    run_windowed(window_config, runner)?;
+    // Started by Studio's Play button: render into the Scene View instead
+    // of opening a window.
+    match crate::embed::EmbedTarget::from_env() {
+        Ok(Some(target)) => crate::embed::run(&mut runner, &target)?,
+        Ok(None) => run_windowed(window_config, runner)?,
+        Err(err) => return Err(err),
+    }
 
     match error_slot.take() {
         Some(err) => Err(err),
@@ -1973,11 +2135,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unreadable_save_is_distinct_from_a_missing_save() {
+        let path = std::env::temp_dir().join(format!(
+            "vge-corrupt-save-{}-{}.ron",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        assert!(matches!(load_save(&path), Ok(None)));
+        std::fs::write(&path, b"broken save").expect("corrupt file");
+        assert!(load_save(&path).is_err());
+        assert_eq!(std::fs::read(&path).expect("preserved"), b"broken save");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn collider_scale_uses_positive_magnitudes_for_mirrored_entities() {
         assert_eq!(
             collider_scale(glam::Vec3::new(-2.0, 3.0, -4.0)),
             glam::Vec3::new(2.0, 3.0, 4.0)
         );
+    }
+
+    #[test]
+    fn collider_pose_includes_parent_translation() {
+        use engine_ecs::prelude::{ChildOf, World};
+
+        let mut world = World::new();
+        let parent = world
+            .spawn(EcsTransform(engine_utils::Transform::from_translation(
+                glam::Vec3::new(5.0, 0.0, 0.0),
+            )))
+            .id();
+        let child = world
+            .spawn((
+                EcsTransform(engine_utils::Transform::from_translation(glam::Vec3::new(
+                    1.0, 2.0, 0.0,
+                ))),
+                ChildOf(parent),
+            ))
+            .id();
+
+        engine_ecs::propagate_transforms(&mut world);
+        let pose = collider_world_transform(&world, child);
+        assert_eq!(pose.translation, glam::Vec3::new(6.0, 2.0, 0.0));
     }
 
     struct TestGame;

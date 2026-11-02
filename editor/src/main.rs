@@ -14,6 +14,7 @@
 //! panel), AI Assistant (placeholder), Console/Problems/Output,
 //! Profiler, and the central Scene panel.
 
+mod embedded_session;
 #[cfg(target_os = "macos")]
 mod mac_app;
 #[cfg(target_os = "macos")]
@@ -27,16 +28,19 @@ use std::time::{Duration, Instant};
 
 use editor_code::{CodeEditor, CodeEvent, LspKind, Marker, MarkerSeverity, PanelRect};
 use editor_lsp::{
-    CompletionOut, DefinitionOut, FileDiagnostics, HoverOut, LspClient, LspDiagnostic, LspPayload,
-    LspResponse, ReferencesOut, RenameOut, SignatureHelpOut, SymbolOut, TextEditOut,
+    CompletionOut, DefinitionOut, FileDiagnostics, HoverOut, LspClient, LspDiagnostic, LspLanguage,
+    LspPayload, LspResponse, ReferencesOut, RenameOut, SignatureHelpOut, SymbolOut, TextEditOut,
     WorkspaceSymbolsOut,
 };
+use embedded_session::{EmbeddedSession, SessionEvent};
 use engine::ecs::components as ecs_components;
 use engine::ecs::components::Name;
 use engine::ecs::prelude::{ChildOf, World};
 use engine::editor::{
-    Diagnostic, EditorMode, MAX_TEXT_HITS, Severity as ProblemSeverity, SymbolHit,
+    Diagnostic, EditorMode, GameControl, GameFrameTexture, MAX_TEXT_HITS,
+    Severity as ProblemSeverity, SymbolHit,
 };
+use engine::embed::protocol::{InputEvent, ToGame};
 use engine::platform::{RedrawPolicy, WakeHandle};
 use engine::prelude::*;
 use engine::project::build::ExportPlan;
@@ -47,6 +51,20 @@ use play_process::{PlayEvent, PlayProcess};
 /// argument — created on first run, reopened afterwards. Relative to the
 /// working directory; git-ignored.
 const DEFAULT_PROJECT_DIR: &str = "RustyEngineProject";
+
+fn lsp_language(project: &Project) -> LspLanguage {
+    match project.language() {
+        GameplayLanguage::Rust => LspLanguage::Rust,
+        GameplayLanguage::Lua => LspLanguage::Lua,
+    }
+}
+
+fn starter_code_path(project: &Project) -> &'static Path {
+    match project.language() {
+        GameplayLanguage::Rust => Path::new("src/main.rs"),
+        GameplayLanguage::Lua => Path::new("assets/scripts/main.lua"),
+    }
+}
 
 fn editor_redraw_policy(
     playing: bool,
@@ -62,8 +80,33 @@ fn editor_redraw_policy(
     }
 }
 
+/// Per-user Studio settings, in the user's config folder.
+const SETTINGS_FILE: &str = "settings.ron";
+
+/// Every project Studio has opened, for storage cleaning.
+const LEDGER_FILE: &str = "storage.ron";
+
+/// How long a previewed game may take to quit by itself after Stop
+/// before it is ended forcibly.
+const PREVIEW_STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// The configuration Play in the Scene View builds: the project's first
+/// Debug configuration, or a plain Debug one.
+fn debug_configuration(project: &engine::project::Project) -> engine::project::BuildConfiguration {
+    use engine::project::build::BuildProfile;
+    project
+        .manifest()
+        .configurations
+        .iter()
+        .find(|configuration| configuration.profile == BuildProfile::Debug)
+        .cloned()
+        .unwrap_or_else(|| engine::project::BuildConfiguration::new("Debug", BuildProfile::Debug))
+}
+
 /// Starter `src/main.rs` written into a freshly created project.
-const STARTER_MAIN: &str = "//! Entry point for your RustyEngine game.\n\nfn main() {\n    println!(\"Hello from RustyEngine Studio.\");\n}\n";
+const STARTER_MAIN: &str = include_str!("../assets/rust_starter.rs");
+
+include!(concat!(env!("OUT_DIR"), "/sdk_files.rs"));
 
 /// Starter `src/lib.rs` written into a freshly created project.
 const STARTER_LIB: &str = "//! Game components and systems.\n\n/// Marker component for the entity the player controls.\npub struct Player;\n";
@@ -79,22 +122,108 @@ fn directory_name(root: &std::path::Path) -> String {
 
 /// package to load. `project_name` is sanitised into a valid crate name.
 fn starter_cargo_toml(project_name: &str) -> String {
-    let mut crate_name: String = project_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if crate_name.is_empty() || crate_name.starts_with(|c: char| c.is_ascii_digit()) {
-        crate_name.insert(0, '_');
-    }
+    let crate_name = engine::project::crate_name_from(project_name);
+    let sdk = format!("sdk/{SDK_VERSION}/crates/engine");
     format!(
-        "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n"
+        "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nengine = {{ path = \"{sdk}\", default-features = false }}\n"
     )
+}
+
+fn seed_engine_sdk(project: &Project) -> std::io::Result<()> {
+    let sdk = Path::new("sdk").join(SDK_VERSION);
+    for &(relative, bytes) in SDK_FILES {
+        let path = project
+            .resolve(&sdk.join(relative))
+            .map_err(std::io::Error::other)?;
+        if path.exists() {
+            if std::fs::read(&path)? != bytes {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("existing SDK file differs: {}", path.display()),
+                ));
+            }
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?
+            .write_all(bytes)?;
+    }
+    Ok(())
+}
+
+/// Pins a Rust project to this Studio build's source SDK without touching game code.
+/// Returns the manifest backup path, or `None` when already current.
+fn upgrade_engine_sdk(project: &Project) -> Result<Option<PathBuf>, String> {
+    if project.language() != GameplayLanguage::Rust {
+        return Err("SDK upgrades apply only to Rust projects".into());
+    }
+    let manifest_path = project
+        .resolve(Path::new("Cargo.toml"))
+        .map_err(|error| error.to_string())?;
+    let original = std::fs::read_to_string(&manifest_path).map_err(|error| error.to_string())?;
+    let mut manifest: toml_edit::DocumentMut = original
+        .parse()
+        .map_err(|error: toml_edit::TomlError| error.to_string())?;
+    let engine = manifest
+        .get_mut("dependencies")
+        .and_then(|dependencies| dependencies.get_mut("engine"))
+        .ok_or("Cargo.toml has no [dependencies].engine entry")?;
+    let path = engine
+        .get("path")
+        .and_then(toml_edit::Item::as_str)
+        .ok_or("engine dependency must have a project-local SDK path")?;
+    let parts: Vec<_> = path.split('/').collect();
+    if !matches!(parts.as_slice(), ["sdk", version, "crates", "engine"] if !version.is_empty() && *version != "." && *version != "..")
+    {
+        return Err(
+            "engine dependency is not a pinned Studio SDK; Cargo.toml was not changed".into(),
+        );
+    }
+    let new_path = format!("sdk/{SDK_VERSION}/crates/engine");
+    if path == new_path {
+        seed_engine_sdk(project).map_err(|error| error.to_string())?;
+        return Ok(None);
+    }
+    let path_item = engine
+        .get_mut("path")
+        .ok_or("engine dependency path disappeared")?;
+    *path_item = toml_edit::value(new_path);
+
+    // Stage every source before switching the dependency; a failed copy leaves
+    // the old manifest and SDK active. Never replace an existing snapshot.
+    seed_engine_sdk(project).map_err(|error| error.to_string())?;
+    let backup = project
+        .resolve(Path::new(&format!("Cargo.toml.sdk-{SDK_VERSION}.bak")))
+        .map_err(|error| error.to_string())?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(original.as_bytes())
+                .map_err(|error| error.to_string())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if std::fs::read_to_string(&backup).map_err(|error| error.to_string())? != original {
+                return Err(format!(
+                    "backup already exists with different contents: {}",
+                    backup.display()
+                ));
+            }
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    engine::scene::write_atomic(&manifest_path, manifest.to_string().as_bytes())
+        .map_err(|error| error.to_string())?;
+    Ok(Some(backup))
 }
 
 /// Writes `contents` to `path` unless a file is already there. Best
@@ -106,6 +235,30 @@ fn seed_file(path: &std::path::Path, contents: &str) {
     }
     if let Err(err) = std::fs::write(path, contents) {
         tracing::warn!(error = %err, path = %path.display(), "could not seed starter file");
+    }
+}
+
+fn seed_project_sources(project: &Project) {
+    if project.language() != engine::project::GameplayLanguage::Rust {
+        return;
+    }
+    if !project.root().join("Cargo.toml").exists()
+        && let Err(err) = seed_engine_sdk(project)
+    {
+        tracing::warn!(error = %err, "could not install the Rust engine SDK");
+        return;
+    }
+    seed_file(&project.src_dir().join("main.rs"), STARTER_MAIN);
+    seed_file(&project.src_dir().join("lib.rs"), STARTER_LIB);
+    seed_file(
+        &project.root().join("Cargo.toml"),
+        &starter_cargo_toml(project.name()),
+    );
+}
+
+fn refresh_project_annotations(project: &Project) {
+    if let Err(error) = project.refresh_lua_annotations() {
+        tracing::warn!(error = %error, "kept existing Lua API annotations unchanged");
     }
 }
 
@@ -141,7 +294,9 @@ fn placeholder_world() -> World {
 }
 
 /// Text-file extensions the code editor's Files tree lists.
-const CODE_TREE_EXTENSIONS: [&str; 8] = ["rs", "toml", "ron", "wgsl", "glsl", "md", "json", "txt"];
+const CODE_TREE_EXTENSIONS: [&str; 9] = [
+    "rs", "lua", "toml", "ron", "wgsl", "glsl", "md", "json", "txt",
+];
 
 /// Directories the code editor's Files tree never descends into.
 ///
@@ -201,6 +356,17 @@ fn project_file_list(root: &std::path::Path) -> Vec<PathBuf> {
     }
     let mut out = Vec::new();
     walk(root, root, 0, &mut out);
+    let asset_root = root.join("assets");
+    let scripts = asset_root.join("scripts");
+    if [asset_root.as_path(), scripts.as_path()]
+        .iter()
+        .all(|path| {
+            std::fs::symlink_metadata(path)
+                .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+        })
+    {
+        walk(&scripts, root, 0, &mut out);
+    }
     out.sort();
     out
 }
@@ -287,6 +453,7 @@ fn sync_code_editor(
     lsp_symbol_request: &mut Option<i64>,
     lsp_script_request: &mut Option<(i64, String)>,
     open_docs: &mut HashSet<PathBuf>,
+    code_problems: &mut HashMap<PathBuf, Vec<Diagnostic>>,
     scale: f64,
 ) {
     let Some(code) = code else {
@@ -318,7 +485,10 @@ fn sync_code_editor(
                     continue;
                 };
                 state.dirty.mark_document(&path);
-                if let Some(lsp) = lsp.as_mut() {
+                set_lua_syntax_diagnostics(code, state, code_problems, &path, &text);
+                if let Some(lsp) = lsp.as_mut()
+                    && lsp.accepts_path(&path)
+                {
                     lsp.did_change(&path, &text);
                 }
             }
@@ -328,10 +498,17 @@ fn sync_code_editor(
             }
             CodeEvent::SaveRequested { path, contents } => {
                 match resolve_code_path(&state.project, &path) {
-                    Ok(path) => match std::fs::write(&path, contents) {
+                    Ok(path) => match std::fs::write(&path, &contents) {
                         Ok(()) => {
                             state.dirty.clear_document(&path);
                             code.notify_saved(&path);
+                            set_lua_syntax_diagnostics(
+                                code,
+                                state,
+                                code_problems,
+                                &path,
+                                &contents,
+                            );
                             tracing::info!(path = %path.display(), "file saved");
                         }
                         Err(err) => {
@@ -344,7 +521,10 @@ fn sync_code_editor(
                 }
             }
             CodeEvent::OpenRequested { path } => match resolve_code_path(&state.project, &path) {
-                Ok(absolute) => open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute),
+                Ok(absolute) => {
+                    open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
+                    check_lua_syntax_on_disk(code, state, code_problems, &absolute);
+                }
                 Err(err) => {
                     tracing::warn!(error = %err, path = %path.display(), "refused code open outside the project")
                 }
@@ -355,6 +535,7 @@ fn sync_code_editor(
                     && let Ok(absolute) = resolve_code_path(&state.project, &rel)
                 {
                     open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
+                    check_lua_syntax_on_disk(code, state, code_problems, &absolute);
                 }
             }
             CodeEvent::CreateRequested { path, folder } => {
@@ -362,6 +543,7 @@ fn sync_code_editor(
                     push_file_tree(code, state);
                     if !folder {
                         open_in_code_editor(code, lsp.as_mut(), open_docs, &created);
+                        check_lua_syntax_on_disk(code, state, code_problems, &created);
                     }
                 }
             }
@@ -371,10 +553,17 @@ fn sync_code_editor(
                     continue;
                 };
                 open_docs.remove(&path);
-                if let Some(lsp) = lsp.as_mut() {
+                if let Some(lsp) = lsp.as_mut()
+                    && lsp.accepts_path(&path)
+                {
                     lsp.did_close(&path);
                 }
                 state.dirty.clear_document(&path);
+                if path.extension().is_some_and(|extension| extension == "lua")
+                    && let Ok(contents) = std::fs::read_to_string(&path)
+                {
+                    set_lua_syntax_diagnostics(code, state, code_problems, &path, &contents);
+                }
                 tracing::debug!(path = %path.display(), "code editor tab closed");
             }
             CodeEvent::LspRequest {
@@ -390,6 +579,9 @@ fn sync_code_editor(
                         tracing::warn!(path = %path.display(), "refused LSP request outside the project");
                         continue;
                     };
+                    if !lsp.accepts_path(&absolute) {
+                        continue;
+                    }
                     let request_id = match kind {
                         LspKind::Completion => lsp.request_completion(&absolute, line, col),
                         LspKind::Hover => lsp.request_hover(&absolute, line, col),
@@ -413,7 +605,10 @@ fn sync_code_editor(
 
     if let Some(relative) = state.file_open_request.take() {
         match state.project.resolve(&Path::new(ASSETS_DIR).join(relative)) {
-            Ok(absolute) => open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute),
+            Ok(absolute) => {
+                open_in_code_editor(code, lsp.as_mut(), open_docs, &absolute);
+                check_lua_syntax_on_disk(code, state, code_problems, &absolute);
+            }
             Err(err) => tracing::warn!(error = %err, "refused asset code open outside the project"),
         }
     }
@@ -497,6 +692,143 @@ fn handle_prefab_request(state: &mut EditorState) {
         }
         Err(err) => tracing::warn!(error = %err, "could not save prefab"),
     }
+}
+
+fn handle_terrain_request(state: &mut EditorState) {
+    if !std::mem::take(&mut state.create_terrain_request) {
+        return;
+    }
+    let assets_dir = match state.project.resolve(Path::new("assets")) {
+        Ok(path) => path,
+        Err(error) => {
+            state.asset_browser.operation_error = Some(error.to_string());
+            return;
+        }
+    };
+    if let Err(error) = state.project.resolve(Path::new("assets/terrain")) {
+        state.asset_browser.operation_error = Some(error.to_string());
+        return;
+    }
+    let path =
+        match engine_editor::terrain_tools::write_new_terrain(&assets_dir, &state.terrain_tools) {
+            Ok(path) => path,
+            Err(error) => {
+                state.asset_browser.operation_error =
+                    Some(format!("Could not create terrain: {error}"));
+                return;
+            }
+        };
+    if !rescan_assets(state) {
+        state.asset_browser.operation_error =
+            Some("Terrain was written, but assets could not be refreshed".into());
+        return;
+    }
+    let Ok(relative) = path.strip_prefix(&assets_dir) else {
+        state.asset_browser.operation_error = Some("Terrain path is outside assets".into());
+        return;
+    };
+    let Some(mesh_id) = state.asset_index.id_for(relative) else {
+        state.asset_browser.operation_error =
+            Some("Terrain was written, but its mesh could not be imported".into());
+        return;
+    };
+    let entity = state.spawn_asset_entity(relative);
+    state
+        .world
+        .entity_mut(entity)
+        .insert(engine::scene::SceneCollider(engine::scene::ColliderData {
+            shape: engine::scene::ColliderShape::TriMesh {
+                mesh: engine::scene::AssetRef {
+                    id: mesh_id.to_string(),
+                },
+            },
+            body: engine::scene::BodyKind::Fixed,
+        }));
+    state.select_only(entity);
+    state.selected_asset = Some(relative.to_path_buf());
+    state.mark_dirty();
+}
+
+/// Commits one completed gesture after the UI frame, never during painting.
+/// Returns whether live mesh renderers need to be rebuilt.
+fn handle_terrain_sculpt_request(state: &mut EditorState) -> Option<engine::asset::AssetId> {
+    let stroke = state.terrain_sculpt_request.take()?;
+    if stroke.centers.is_empty() {
+        return None;
+    }
+    let source_matches = state
+        .world
+        .get::<ecs_components::AssetSource>(stroke.entity)
+        .is_some_and(|source| Path::new(&source.path) == stroke.relative_model);
+    if !source_matches {
+        state.asset_browser.operation_error = Some("Terrain changed during the stroke".into());
+        return None;
+    }
+    let model = match state
+        .project
+        .resolve(&Path::new(ASSETS_DIR).join(&stroke.relative_model))
+    {
+        Ok(path) => path,
+        Err(error) => {
+            state.asset_browser.operation_error = Some(error.to_string());
+            return None;
+        }
+    };
+    if let Err(error) = state
+        .project
+        .resolve(&Path::new(ASSETS_DIR).join(stroke.relative_model.with_extension("terrain")))
+    {
+        state.asset_browser.operation_error = Some(error.to_string());
+        return None;
+    }
+    match engine_editor::terrain_tools::sculpt_terrain(
+        &model,
+        &state.terrain_tools,
+        &stroke.centers,
+    ) {
+        Ok(Some(edit)) => {
+            state.history.record_terrain(edit);
+            refresh_terrain_mesh(state, &stroke.relative_model)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            state.asset_browser.operation_error =
+                Some(format!("Could not sculpt terrain: {error}"));
+            None
+        }
+    }
+}
+
+/// Re-imports a terrain rewritten by undo/redo and returns its asset id so
+/// live mesh renderers can be rebuilt.
+fn handle_terrain_refresh_request(state: &mut EditorState) -> Option<engine::asset::AssetId> {
+    let model = state.terrain_refresh_request.take()?;
+    let assets = state.project.resolve(Path::new(ASSETS_DIR)).ok()?;
+    let Ok(relative) = model.strip_prefix(&assets) else {
+        state.asset_browser.operation_error =
+            Some("Restored terrain is outside the project".into());
+        return None;
+    };
+    let relative = relative.to_path_buf();
+    refresh_terrain_mesh(state, &relative)
+}
+
+/// Re-imports a terrain's regenerated `.gltf` and returns its asset id.
+fn refresh_terrain_mesh(
+    state: &mut EditorState,
+    relative_model: &Path,
+) -> Option<engine::asset::AssetId> {
+    if !rescan_assets(state) {
+        state.asset_browser.operation_error =
+            Some("Terrain changed, but its mesh could not be refreshed".into());
+        return None;
+    }
+    let Some(id) = state.asset_index.id_for(relative_model) else {
+        state.asset_browser.operation_error = Some("Terrain mesh was not imported".into());
+        return None;
+    };
+    state.asset_browser.operation_error = None;
+    Some(id)
 }
 
 /// Whether `path` is an `engine_asset` `.meta` sidecar — the file the
@@ -815,10 +1147,15 @@ fn reveal_asset(project: &Project, relative: &Path) -> Result<(), String> {
     if !metadata.is_file() && !metadata.is_dir() {
         return Err("Symlinked assets cannot be revealed".to_owned());
     }
+    reveal_in_file_manager(&path)
+}
+
+/// Shows `path` selected in Finder (or the platform's file manager).
+fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let status = std::process::Command::new("open")
         .arg("-R")
-        .arg(&path)
+        .arg(path)
         .status();
     #[cfg(target_os = "windows")]
     let status = std::process::Command::new("explorer")
@@ -826,7 +1163,7 @@ fn reveal_asset(project: &Project, relative: &Path) -> Result<(), String> {
         .status();
     #[cfg(target_os = "linux")]
     let status = std::process::Command::new("xdg-open")
-        .arg(path.parent().ok_or("Asset has no parent folder")?)
+        .arg(path.parent().ok_or("The file has no parent folder")?)
         .status();
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     return Err("Reveal is unavailable on this platform".to_owned());
@@ -838,6 +1175,11 @@ fn reveal_asset(project: &Project, relative: &Path) -> Result<(), String> {
 }
 
 fn handle_asset_reveal(state: &mut EditorState) {
+    if let Some(path) = state.storage.reveal.take()
+        && let Err(error) = reveal_in_file_manager(&path)
+    {
+        tracing::warn!(path = %path.display(), %error, "could not show the file");
+    }
     let Some(relative) = state.asset_browser.reveal_request.take() else {
         return;
     };
@@ -1223,8 +1565,8 @@ fn to_symbol_hits(result: &WorkspaceSymbolsOut, root: &Path) -> Vec<SymbolHit> {
         .collect()
 }
 
-/// Reads `absolute`, hands it to the Monaco webview, and — for a Rust
-/// file — tells rust-analyzer it's open. Records it in `open_docs` so a
+/// Reads `absolute`, hands it to the Monaco webview, and tells the
+/// project's language server when it owns the file. Records it in `open_docs` so a
 /// later go-to-definition into the same file doesn't reopen (and reset)
 /// it. Logs either way.
 fn open_in_code_editor(
@@ -1237,7 +1579,7 @@ fn open_in_code_editor(
         Ok(contents) => {
             code.open_file(absolute, &contents);
             if let Some(lsp) = lsp
-                && absolute.extension().is_some_and(|ext| ext == "rs")
+                && lsp.accepts_path(absolute)
             {
                 lsp.did_open(absolute, &contents);
             }
@@ -1479,6 +1821,121 @@ fn to_problem(diagnostic: &LspDiagnostic, file: &Path) -> Diagnostic {
     }
 }
 
+fn lua_syntax_problem(path: &Path, source: &str) -> Option<(Diagnostic, Marker)> {
+    let error = engine::scripting::check_lua_syntax(&path.to_string_lossy(), source).err()?;
+    let marker = Marker {
+        severity: MarkerSeverity::Error,
+        message: error.message.clone(),
+        start_line: error.line,
+        start_col: 1,
+        end_line: error.line,
+        end_col: 2,
+    };
+    let problem = Diagnostic {
+        severity: ProblemSeverity::Error,
+        code: Some("lua.syntax".to_owned()),
+        message: error.message,
+        file: Some(path.to_path_buf()),
+        line: Some(error.line),
+    };
+    Some((problem, marker))
+}
+
+fn lua_runtime_problem(
+    project: &Project,
+    diagnostic: &engine::scripting::LuaScriptDiagnostic,
+) -> Option<(PathBuf, Diagnostic, Marker)> {
+    let relative = Path::new(&diagnostic.path);
+    if project.language() != GameplayLanguage::Lua
+        || !relative.starts_with("assets/scripts")
+        || relative
+            .extension()
+            .is_none_or(|extension| extension != "lua")
+        || diagnostic.line == 0
+    {
+        return None;
+    }
+    let absolute = project.resolve(relative).ok()?;
+    let message: String = diagnostic.message.chars().take(2_000).collect();
+    let problem = Diagnostic {
+        severity: ProblemSeverity::Error,
+        code: Some("lua.runtime".to_owned()),
+        message: message.clone(),
+        file: Some(relative.to_path_buf()),
+        line: Some(diagnostic.line),
+    };
+    let marker = Marker {
+        severity: MarkerSeverity::Error,
+        message,
+        start_line: diagnostic.line,
+        start_col: 1,
+        end_line: diagnostic.line,
+        end_col: 2,
+    };
+    Some((absolute, problem, marker))
+}
+
+fn refresh_code_problem_rows(
+    state: &EditorState,
+    code_problems: &HashMap<PathBuf, Vec<Diagnostic>>,
+) {
+    let mut all: Vec<Diagnostic> = code_problems.values().flatten().cloned().collect();
+    all.sort_by(|a, b| a.severity.cmp(&b.severity).then(a.message.cmp(&b.message)));
+    state.diagnostics.set(all);
+}
+
+fn clear_lua_runtime_problems(
+    code_problems: &mut HashMap<PathBuf, Vec<Diagnostic>>,
+) -> Vec<PathBuf> {
+    let mut changed = Vec::new();
+    code_problems.retain(|path, rows| {
+        let before = rows.len();
+        rows.retain(|row| row.code.as_deref() != Some("lua.runtime"));
+        if rows.len() != before {
+            changed.push(path.clone());
+        }
+        !rows.is_empty()
+    });
+    changed
+}
+
+fn set_lua_syntax_diagnostics(
+    code: &CodeEditor,
+    state: &EditorState,
+    code_problems: &mut HashMap<PathBuf, Vec<Diagnostic>>,
+    path: &Path,
+    source: &str,
+) {
+    if state.project.language() != GameplayLanguage::Lua
+        || !path.extension().is_some_and(|extension| extension == "lua")
+    {
+        return;
+    }
+    let relative = path.strip_prefix(state.project.root()).unwrap_or(path);
+    if let Some((problem, marker)) = lua_syntax_problem(relative, source) {
+        code.set_diagnostics(path, &[marker]);
+        code_problems.insert(path.to_path_buf(), vec![problem]);
+    } else {
+        code.set_diagnostics(path, &[]);
+        code_problems.remove(path);
+    }
+    refresh_code_problem_rows(state, code_problems);
+}
+
+fn check_lua_syntax_on_disk(
+    code: &CodeEditor,
+    state: &EditorState,
+    code_problems: &mut HashMap<PathBuf, Vec<Diagnostic>>,
+    path: &Path,
+) {
+    if state.project.language() == GameplayLanguage::Lua
+        && path.extension().is_some_and(|extension| extension == "lua")
+        && let Ok(source) = std::fs::read_to_string(path)
+    {
+        set_lua_syntax_diagnostics(code, state, code_problems, path, &source);
+    }
+}
+
 /// [`PlatformHandler`] that stands up a GPU context, an [`EditorShell`],
 /// and a [`Viewport`], and draws the shell's UI every frame. Owns the
 /// editor state and the path its session is persisted to.
@@ -1538,6 +1995,18 @@ struct EditorHandler {
     export: Option<std::sync::mpsc::Receiver<Result<ExportSummary, String>>>,
     /// Cargo/game child owned by the Play toolbar lifecycle.
     play_process: PlayProcess,
+    /// The Scene View preview's connection to its game, while Play runs one.
+    preview: Option<EmbeddedSession>,
+    /// The texture preview frames are uploaded into, kept between sessions.
+    preview_texture: Option<GameFrameTexture>,
+    /// Player input for the previewed game, gathered from window events.
+    preview_input: Vec<ToGame>,
+    /// Whether the cursor was over the game frame at its last move, so
+    /// clicks and scrolls outside it stay with Studio.
+    preview_cursor_inside: bool,
+    /// Whether ⌘ or Ctrl is held: the Play shortcuts stay with Studio even
+    /// while the game has the keyboard.
+    command_held: bool,
 }
 
 /// What a finished export produced, in the form the editor logs it.
@@ -1556,6 +2025,9 @@ impl EditorHandler {
             match event {
                 PlayEvent::Started => {
                     self.state.play.mark_running();
+                    if let Some(session) = self.preview.as_mut() {
+                        session.game_launched();
+                    }
                     tracing::info!("project game started");
                 }
                 PlayEvent::Finished => {
@@ -1566,15 +2038,49 @@ impl EditorHandler {
                 PlayEvent::Failed(message) => {
                     self.state.output.write_line(format!("[play] {message}"));
                     tracing::error!(error = %message, "project game stopped");
+                    if self.state.play.is_previewing() {
+                        self.state.game_view.error = Some(message);
+                    }
                     self.state.play.stop(&mut self.state.world);
                     self.state.clear_selection();
                 }
             }
         }
+        self.state
+            .play
+            .set_compiling(self.play_process.is_compiling());
+        let mut received_problem = false;
+        for diagnostic in self.play_process.take_script_diagnostics() {
+            if let Some((absolute, problem, marker)) =
+                lua_runtime_problem(&self.state.project, &diagnostic)
+            {
+                if let Some(code) = self.code.as_ref() {
+                    code.set_diagnostics(&absolute, &[marker]);
+                }
+                self.lsp_problems.insert(absolute, vec![problem]);
+                received_problem = true;
+            } else {
+                tracing::warn!(path = %diagnostic.path, "ignored invalid Lua diagnostic path");
+            }
+        }
+        if received_problem {
+            refresh_code_problem_rows(&self.state, &self.lsp_problems);
+        }
 
         match self.state.play.mode() {
             EditorMode::Edit => {
-                if let Err(message) = self.play_process.stop(&self.state.output) {
+                let stopped = match self.preview.take() {
+                    // Ask the previewed game to quit so it can save, then
+                    // make sure it is gone.
+                    Some(mut session) => {
+                        let _ = session.send(&ToGame::Stop);
+                        self.end_preview();
+                        self.play_process
+                            .stop_within(&self.state.output, PREVIEW_STOP_GRACE)
+                    }
+                    None => self.play_process.stop(&self.state.output),
+                };
+                if let Err(message) = stopped {
                     tracing::error!(error = %message, "could not stop project game");
                 }
             }
@@ -1591,23 +2097,190 @@ impl EditorHandler {
                     self.state.play.stop(&mut self.state.world);
                     return;
                 }
-                let Some(configuration) = self.state.selected_configuration().cloned() else {
+                let previewing = self.state.play.is_previewing();
+                // Play always builds Debug, the fastest to compile; Run
+                // uses the selected configuration.
+                let configuration = if previewing {
+                    Some(debug_configuration(&self.state.project))
+                } else {
+                    self.state.selected_configuration().cloned()
+                };
+                let Some(configuration) = configuration else {
                     let message = "no build configuration selected".to_owned();
                     self.state.output.write_line(format!("[play] {message}"));
                     tracing::error!(error = %message, "project game could not start");
                     self.state.play.stop(&mut self.state.world);
                     return;
                 };
-                if let Err(message) =
-                    self.play_process
-                        .start(&self.state.project, &configuration, &self.state.output)
-                {
+                let changed = clear_lua_runtime_problems(&mut self.lsp_problems);
+                for path in &changed {
+                    if let Some(code) = self.code.as_ref() {
+                        let markers: Vec<Marker> = self
+                            .lsp_problems
+                            .get(path)
+                            .into_iter()
+                            .flatten()
+                            .map(|row| Marker {
+                                severity: MarkerSeverity::Error,
+                                message: row.message.clone(),
+                                start_line: row.line.unwrap_or(1),
+                                start_col: 1,
+                                end_line: row.line.unwrap_or(1),
+                                end_col: 2,
+                            })
+                            .collect();
+                        code.set_diagnostics(path, &markers);
+                    }
+                }
+                if !changed.is_empty() {
+                    refresh_code_problem_rows(&self.state, &self.lsp_problems);
+                }
+                // Build progress and the game's own output appear here.
+                self.state.bottom_tab = engine::editor::BottomTab::Output;
+                let mut env = Vec::new();
+                if previewing {
+                    match EmbeddedSession::listen(self.wake.clone()) {
+                        Ok(session) => {
+                            env.push((engine::embed::EMBED_ENV.to_owned(), session.env_value()));
+                            self.preview = Some(session);
+                        }
+                        Err(message) => {
+                            self.fail_preview(message);
+                            return;
+                        }
+                    }
+                }
+                if let Err(message) = self.play_process.start(
+                    &self.state.project,
+                    &configuration,
+                    &self.state.output,
+                    &env,
+                ) {
                     self.state.output.write_line(format!("[play] {message}"));
                     tracing::error!(error = %message, "project game could not start");
+                    if previewing {
+                        self.state.game_view.error = Some(message);
+                    }
                     self.state.play.stop(&mut self.state.world);
                 }
             }
             EditorMode::Building | EditorMode::Play => {}
+        }
+        self.drive_preview();
+    }
+
+    /// Talks to a game playing in the Scene View: completes the connection,
+    /// applies the game's acknowledgements, and sends the size, Play
+    /// controls and player input gathered since the last frame.
+    fn drive_preview(&mut self) {
+        let Some(session) = self.preview.as_mut() else {
+            return;
+        };
+        let mut failure = None;
+        for event in session.poll() {
+            match event {
+                SessionEvent::Connected => {
+                    // The game waits for its first size before rendering.
+                    let (width, height) = self.state.game_view.requested.unwrap_or((1280, 720));
+                    self.state.game_view.size_request = None;
+                    if let Err(message) = session.send(&ToGame::Resize { width, height }) {
+                        failure = Some(message);
+                    }
+                }
+                SessionEvent::Paused => self.state.play.set_paused(true),
+                SessionEvent::Resumed => self.state.play.set_paused(false),
+                // The process exit (reported by `PlayProcess`) says how.
+                SessionEvent::Closed => {}
+                SessionEvent::Failed(message) => failure = Some(message),
+            }
+        }
+        if session.is_connected() && failure.is_none() {
+            let mut outgoing = Vec::new();
+            if let Some((width, height)) = self.state.game_view.size_request.take() {
+                outgoing.push(ToGame::Resize { width, height });
+            }
+            outgoing.extend(self.state.play.take_controls().into_iter().map(
+                |control| match control {
+                    GameControl::Pause => ToGame::Pause,
+                    GameControl::Resume => ToGame::Resume,
+                    GameControl::Step => ToGame::Step,
+                },
+            ));
+            if self.state.game_view.focused {
+                outgoing.append(&mut self.preview_input);
+            } else {
+                self.preview_input.clear();
+            }
+            for message in &outgoing {
+                if let Err(message) = session.send(message) {
+                    failure = Some(message);
+                    break;
+                }
+            }
+        }
+        if let Some(message) = failure {
+            self.fail_preview(message);
+        }
+    }
+
+    /// Ends a preview with `message` shown in the Scene View and Output.
+    /// The next frame's Edit-mode pass stops the process.
+    fn fail_preview(&mut self, message: String) {
+        self.state.output.write_line(format!("[play] {message}"));
+        tracing::error!(error = %message, "Scene View preview stopped");
+        self.state.game_view.error = Some(message);
+        self.state.play.stop(&mut self.state.world);
+        self.state.clear_selection();
+    }
+
+    /// Forgets the preview's per-session state (the texture is reused).
+    fn end_preview(&mut self) {
+        self.preview = None;
+        self.preview_input.clear();
+        self.preview_cursor_inside = false;
+        self.state.game_view.reset();
+    }
+
+    /// Sends player input to a focused game preview. Returns whether egui
+    /// should still handle `event`: keys go to the game alone (except the
+    /// ⌘P shortcuts), while the mouse also stays with Studio so its panels
+    /// keep working.
+    fn forward_to_preview(&mut self, window: &Window, event: &WindowEvent) -> bool {
+        if !self.state.play.is_previewing() || !self.state.game_view.focused {
+            return true;
+        }
+        let Some(input) = engine::platform::map_window_event(event)
+            .and_then(|event| InputEvent::from_platform(&event))
+        else {
+            return true;
+        };
+        match input {
+            InputEvent::Key { key, .. } => {
+                if self.command_held && key == KeyCode::KeyP {
+                    return true;
+                }
+                self.preview_input.push(ToGame::Input(input));
+                false
+            }
+            InputEvent::CursorMoved { x, y } => {
+                let inside =
+                    self.state
+                        .game_view
+                        .frame_position_from_window(x, y, window.scale_factor());
+                self.preview_cursor_inside = inside.is_some();
+                if let Some((x, y)) = inside {
+                    self.preview_input
+                        .push(ToGame::Input(InputEvent::CursorMoved { x, y }));
+                }
+                true
+            }
+            InputEvent::MouseButton { .. } | InputEvent::Wheel { .. } => {
+                if self.preview_cursor_inside {
+                    self.preview_input.push(ToGame::Input(input));
+                }
+                true
+            }
+            InputEvent::Focus { .. } => true,
         }
     }
 
@@ -1779,16 +2452,23 @@ impl PlatformHandler for EditorHandler {
             Err(err) => tracing::warn!(error = %err, "code editor unavailable"),
         }
 
-        // rust-analyzer for the project. `None` (not installed / no
-        // Cargo.toml) just means no completion or inline errors.
+        // The project's language server is optional; syntax checks still
+        // work without a locally installed server.
         self.lsp = match &self.wake {
             Some(wake) => {
                 let wake = wake.clone();
-                LspClient::start_with_wake(self.state.project.root(), move || {
-                    let _ = wake.wake();
-                })
+                LspClient::start_for_language_with_wake(
+                    self.state.project.root(),
+                    lsp_language(&self.state.project),
+                    move || {
+                        let _ = wake.wake();
+                    },
+                )
             }
-            None => LspClient::start(self.state.project.root()),
+            None => LspClient::start_for_language(
+                self.state.project.root(),
+                lsp_language(&self.state.project),
+            ),
         };
 
         let assets_dir = self.state.project.assets_dir();
@@ -1813,6 +2493,13 @@ impl PlatformHandler for EditorHandler {
     }
 
     fn on_raw_window_event(&mut self, window: &Window, event: &WindowEvent) {
+        if let WindowEvent::ModifiersChanged(modifiers) = event {
+            let held = modifiers.state();
+            self.command_held = held.super_key() || held.control_key();
+        }
+        if !self.forward_to_preview(window, event) {
+            return;
+        }
         if let Some(shell) = &mut self.shell {
             // Consumed-or-not is unused for now — there's no other
             // input-reactive system in this binary yet to defer to egui.
@@ -1874,6 +2561,7 @@ impl PlatformHandler for EditorHandler {
                 self.sync_window_title();
 
                 self.render_frame();
+                self.drive_sdk_upgrade();
                 // After the frame, so a menu click this frame is acted
                 // on with no half-drawn UI referring to a project that
                 // has already been torn down.
@@ -1928,7 +2616,12 @@ impl EditorHandler {
         };
 
         let opened = if request.create {
-            Project::create_new(&request.root, directory_name(&request.root))
+            Project::create_new_with_template(
+                &request.root,
+                directory_name(&request.root),
+                request.language,
+                request.template,
+            )
         } else {
             Project::open(&request.root)
         };
@@ -1947,6 +2640,9 @@ impl EditorHandler {
                 return;
             }
         };
+        if request.create {
+            seed_project_sources(&project);
+        }
 
         let scene_path = project.main_scene_path();
         if let Err(err) = Scene::load_from_file(&scene_path).and_then(|scene| scene.validate()) {
@@ -1957,6 +2653,7 @@ impl EditorHandler {
             );
             return;
         }
+        refresh_project_annotations(&project);
 
         // The outgoing project's layout, before it stops being current.
         self.save_session();
@@ -1996,13 +2693,31 @@ impl EditorHandler {
         self.saved_session = session.clone();
         self.state.apply_session(session);
 
-        // rust-analyzer is rooted at a project directory, so it has to
-        // be restarted rather than re-pointed.
-        self.lsp = LspClient::start(&root);
-        // The code editor keeps whatever file it had open; pointing it
-        // at the new project's `src/main.rs` is what makes the swap look
-        // like an open rather than a half-move.
-        self.pending_open = Some(PathBuf::from("src/main.rs"));
+        // Language servers are rooted at a project directory and must restart.
+        self.lsp = match &self.wake {
+            Some(wake) => {
+                let wake = wake.clone();
+                LspClient::start_for_language_with_wake(
+                    &root,
+                    lsp_language(&self.state.project),
+                    move || {
+                        let _ = wake.wake();
+                    },
+                )
+            }
+            None => LspClient::start_for_language(&root, lsp_language(&self.state.project)),
+        };
+        let starter = starter_code_path(&self.state.project);
+        if let Some(code) = &self.code {
+            push_file_tree(code, &self.state);
+            if let Ok(absolute) = resolve_code_path(&self.state.project, starter) {
+                open_in_code_editor(code, self.lsp.as_mut(), &mut self.open_docs, &absolute);
+                check_lua_syntax_on_disk(code, &self.state, &mut self.lsp_problems, &absolute);
+            }
+            self.pending_open = None;
+        } else {
+            self.pending_open = Some(starter.to_path_buf());
+        }
 
         self.save_recent_projects();
         if let Some(window) = &self.window {
@@ -2012,6 +2727,22 @@ impl EditorHandler {
             ));
         }
         tracing::info!(root = %root.display(), "switched project");
+    }
+
+    /// Runs the storage limits, applies background cleaning results, and
+    /// writes the settings and storage ledger when they changed.
+    fn drive_storage(&mut self) {
+        self.state.tick_storage();
+        if self.state.storage.take_save_needed()
+            && let Some(dir) = engine::editor::storage::config_dir()
+        {
+            if let Err(err) = self.state.settings.save(&dir.join(SETTINGS_FILE)) {
+                tracing::warn!(error = %err, "could not save Studio settings");
+            }
+            if let Err(err) = self.state.storage.ledger.save(&dir.join(LEDGER_FILE)) {
+                tracing::warn!(error = %err, "could not save the storage ledger");
+            }
+        }
     }
 
     /// Writes the recent-projects list to the user's config directory.
@@ -2038,6 +2769,7 @@ impl EditorHandler {
         // Before the GPU/shell borrow below: this touches all of `self`.
         self.drive_play();
         self.drive_export();
+        self.drive_storage();
         let changed_paths = handle_asset_changes(&mut self.state, self.asset_watcher.as_ref());
         {
             let (Some(gpu), Some(shell), Some(viewport), Some(window)) =
@@ -2045,6 +2777,8 @@ impl EditorHandler {
             else {
                 return;
             };
+
+            viewport.sync_instanced_handles(&mut self.state.world);
 
             if !changed_paths.is_empty() {
                 let invalidated = viewport.invalidate_all_meshes(&mut self.state.world);
@@ -2061,6 +2795,7 @@ impl EditorHandler {
             let span = std::time::Instant::now();
             let resolved =
                 viewport.resolve_pending(&mut self.state.world, &self.state.importer, gpu);
+            viewport.sync_instanced_handles(&mut self.state.world);
             if resolved.failed > 0 {
                 tracing::warn!(
                     failed = resolved.failed,
@@ -2070,15 +2805,31 @@ impl EditorHandler {
             self.state.profiler.record_span("resolve", span.elapsed());
 
             let span = std::time::Instant::now();
-            viewport.set_dimension(gpu, self.state.dimension.is_2d());
-            let gizmo_origin = self.state.gizmo_origin();
-            viewport.render(
-                gpu,
-                &mut self.state.world,
-                self.state.gizmo_mode,
-                gizmo_origin,
-                self.state.overlays,
-            );
+            viewport.sync_camera(gpu, self.state.scene_camera(), self.state.dimension.is_2d());
+            let selection: Vec<_> = self
+                .state
+                .selected_entity
+                .into_iter()
+                .chain(self.state.secondary_selection.iter().copied())
+                .collect();
+            if self.state.play.is_previewing() {
+                // The game replaces the scene image; only its newest frame
+                // needs uploading.
+                if let Some(frame) = self.preview.as_mut().and_then(EmbeddedSession::take_frame)
+                    && let Some(texture) = GameFrameTexture::upload(
+                        &mut self.preview_texture,
+                        gpu,
+                        shell,
+                        frame.width,
+                        frame.height,
+                        &frame.rgba,
+                    )
+                {
+                    self.state.game_view.texture = Some(texture);
+                }
+            } else {
+                viewport.render(gpu, &mut self.state.world, self.state.overlays, &selection);
+            }
             self.state.profiler.record_span("viewport", span.elapsed());
 
             let span = std::time::Instant::now();
@@ -2100,10 +2851,24 @@ impl EditorHandler {
                 &mut self.lsp_symbol_request,
                 &mut self.lsp_script_request,
                 &mut self.open_docs,
+                &mut self.lsp_problems,
                 window.scale_factor(),
             );
 
             handle_prefab_request(&mut self.state);
+            let terrain_requested = self.state.create_terrain_request;
+            handle_terrain_request(&mut self.state);
+            if terrain_requested {
+                window.request_redraw();
+            }
+            let changed_terrain = handle_terrain_sculpt_request(&mut self.state)
+                .into_iter()
+                .chain(handle_terrain_refresh_request(&mut self.state))
+                .collect::<HashSet<_>>();
+            if !changed_terrain.is_empty() {
+                viewport.invalidate_changed_assets(&mut self.state.world, &changed_terrain);
+                window.request_redraw();
+            }
             let asset_operation_requested = self.state.asset_browser.operation_request.is_some()
                 || self.state.asset_browser.reveal_request.is_some();
             handle_asset_operation(&mut self.state, &self.open_docs);
@@ -2112,6 +2877,7 @@ impl EditorHandler {
                 window.request_redraw();
             }
             handle_asset_requests(&mut self.state);
+            viewport.sync_instanced_handles(&mut self.state.world);
 
             // Unconditional, even though the frame itself might not
             // get drawn below (surface acquisition can skip a frame) —
@@ -2147,6 +2913,48 @@ impl EditorHandler {
             if let Some((width, height)) = self.state.viewport_size_request.take() {
                 viewport.resize(gpu, shell, width, height);
             }
+        }
+    }
+
+    fn drive_sdk_upgrade(&mut self) {
+        if !std::mem::take(&mut self.state.sdk_upgrade_request) {
+            return;
+        }
+        if self.state.dirty.any() || self.state.play.is_playing() || self.state.export_running {
+            self.state.sdk_upgrade_message =
+                Some("Save your changes and stop Play or export before upgrading the SDK.".into());
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            return;
+        }
+        let message = match upgrade_engine_sdk(&self.state.project) {
+            Ok(Some(backup)) => {
+                let manifest = self.state.project.root().join("Cargo.toml");
+                if self.open_docs.contains(&manifest)
+                    && let Ok(contents) = std::fs::read_to_string(&manifest)
+                {
+                    if let Some(code) = &self.code {
+                        code.open_file(&manifest, &contents);
+                    }
+                    if let Some(lsp) = &mut self.lsp
+                        && lsp.accepts_path(&manifest)
+                    {
+                        lsp.did_change(&manifest, &contents);
+                    }
+                }
+                format!(
+                    "SDK upgraded. Your game code and old SDK were kept. To roll back, restore {} over Cargo.toml.",
+                    backup.display()
+                )
+            }
+            Ok(None) => "This project already uses the current Studio SDK.".into(),
+            Err(error) => format!("SDK upgrade failed: {error}"),
+        };
+        self.state.output.write_line(format!("[sdk] {message}"));
+        self.state.sdk_upgrade_message = Some(message);
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
     }
 
@@ -2371,10 +3179,7 @@ impl EditorHandler {
                 self.lsp_problems.insert(file.path.clone(), rows);
             }
         }
-        let mut all: Vec<Diagnostic> = self.lsp_problems.values().flatten().cloned().collect();
-        all.sort_by(|a, b| a.severity.cmp(&b.severity).then(a.message.cmp(&b.message)));
-        tracing::debug!(count = all.len(), "diagnostics updated");
-        self.state.diagnostics.set(all);
+        refresh_code_problem_rows(&self.state, &self.lsp_problems);
     }
 }
 
@@ -2403,6 +3208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or("Untitled")
         .to_string();
     let project = Project::open_or_create(&root, project_name)?;
+    refresh_project_annotations(&project);
     engine_editor::crash::install_report_hook(project.root());
     if is_new_project {
         // Seed the fresh project's main scene with the demo world, so the
@@ -2410,16 +3216,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let scene = Scene::from_world(&mut placeholder_world());
         scene.save_to_file(&project.main_scene_path())?;
         tracing::info!(path = %project.main_scene_path().display(), "seeded starter scene");
-        // Seed a starter source tree so the code editor has real files.
-        seed_file(&project.src_dir().join("main.rs"), STARTER_MAIN);
-        seed_file(&project.src_dir().join("lib.rs"), STARTER_LIB);
     }
-    // Ensure a `Cargo.toml` exists (also for projects created before this)
-    // so rust-analyzer has a package to analyse.
-    seed_file(
-        &project.root().join("Cargo.toml"),
-        &starter_cargo_toml(project.name()),
-    );
+    // Existing Rust projects also need a manifest for rust-analyzer.
+    seed_project_sources(&project);
 
     let config = EngineConfig::new(project.name(), env!("CARGO_PKG_VERSION"));
     let mut app = App::new(config)?;
@@ -2445,6 +3244,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The recent-projects list lives in the user's config, not in a
     // project — a list of projects cannot live inside one of them. The
     // project opened at startup counts as the newest entry.
+    // Per-user settings and the storage ledger, next to the recent list.
+    if let Some(dir) = engine::editor::storage::config_dir() {
+        state.settings = engine::editor::storage::StudioSettings::load(&dir.join(SETTINGS_FILE));
+        state.storage.ledger = engine::editor::storage::StorageLedger::load(&dir.join(LEDGER_FILE));
+    }
+    let root = state.project.root().to_path_buf();
+    state.storage.opened(&root);
     if let Some(path) = RecentProjects::default_path() {
         state.recent_projects = RecentProjects::load(&path);
         state.recent_projects.push(state.project.root());
@@ -2493,11 +3299,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window_config = WindowConfig::new(app.config().app_name.clone(), 1280, 720)
         .min_size(900, 600)
         .maximized(true);
+    let pending_open = Some(starter_code_path(&state.project).to_path_buf());
     run_windowed(
         window_config,
         EditorHandler {
             export: None,
             play_process: PlayProcess::default(),
+            preview: None,
+            preview_texture: None,
+            preview_input: Vec::new(),
+            preview_cursor_inside: false,
+            command_held: false,
             gpu: None,
             shell: None,
             #[cfg(target_os = "macos")]
@@ -2508,7 +3320,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state,
             session_path,
             title_dirty: false,
-            pending_open: Some(PathBuf::from("src/main.rs")),
+            pending_open,
             saved_session,
             next_session_save: std::time::Instant::now(),
             next_scene_autosave: std::time::Instant::now(),
@@ -2530,6 +3342,231 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_terrain_request_adds_a_saved_collidable_scene_object() {
+        let root = scratch_project("create-terrain");
+        let project = Project::create(&root, "Terrain").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.create_terrain_request = true;
+
+        handle_terrain_request(&mut state);
+
+        let selected = state.selected_entity.expect("terrain is selected");
+        let source = state
+            .world
+            .get::<ecs_components::AssetSource>(selected)
+            .unwrap();
+        let mesh = state
+            .world
+            .get::<ecs_components::MeshSource>(selected)
+            .unwrap();
+        assert!(source.path.ends_with(".gltf"));
+        assert_eq!(source.id.as_deref(), Some(mesh.mesh.as_str()));
+        assert!(state.project.assets_dir().join(&source.path).is_file());
+        assert!(state.dirty.scene());
+        state.save_scene().unwrap();
+        let scene = Scene::load_from_file(&state.scene_path).unwrap();
+        assert_eq!(scene.entities.len(), 1);
+        assert!(scene.entities[0].mesh_renderer.is_some());
+        let collider = scene.entities[0]
+            .collider
+            .as_ref()
+            .expect("terrain collider");
+        assert_eq!(collider.body, engine::scene::BodyKind::Fixed);
+        assert!(matches!(
+            &collider.shape,
+            engine::scene::ColliderShape::TriMesh { mesh }
+                if mesh.id == scene.entities[0].mesh_renderer.as_ref().unwrap().mesh.id
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_terrain_refuses_a_symlinked_folder_outside_the_project() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch_project("terrain-symlink");
+        let outside = scratch_project("terrain-symlink-outside");
+        let project = Project::create(&root, "Terrain").unwrap();
+        symlink(&outside, project.assets_dir().join("terrain")).unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.create_terrain_request = true;
+
+        handle_terrain_request(&mut state);
+
+        assert!(state.asset_browser.operation_error.is_some());
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+        assert!(state.selected_entity.is_none());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn sculpt_request_updates_imported_mesh_after_one_finished_stroke() {
+        let root = scratch_project("sculpt-terrain");
+        let project = Project::create(&root, "Terrain").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.create_terrain_request = true;
+        handle_terrain_request(&mut state);
+        let entity = state.selected_entity.unwrap();
+        let source = state
+            .world
+            .get::<ecs_components::AssetSource>(entity)
+            .unwrap()
+            .clone();
+        let mut stroke = state.begin_terrain_stroke().unwrap();
+        stroke.record(glam::Vec2::ZERO, 1.0);
+        state.terrain_sculpt_request = Some(stroke);
+
+        assert!(handle_terrain_sculpt_request(&mut state).is_some());
+        assert!(state.terrain_sculpt_request.is_none());
+        assert!(state.asset_browser.operation_error.is_none());
+        let path = state.project.assets_dir().join(&source.path);
+        let saved =
+            engine_editor::terrain_tools::TerrainAsset::load(&path.with_extension("terrain"))
+                .unwrap();
+        assert!(saved.heights.iter().any(|height| *height > 0.0));
+        let imported = engine::asset::import_gltf_file(&path, &state.project.assets_dir()).unwrap();
+        assert!(
+            imported.meshes[0]
+                .vertices
+                .iter()
+                .any(|vertex| vertex.position[1] > 0.0)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn undoing_a_sculpt_stroke_restores_the_terrain_and_refreshes_its_mesh() {
+        let root = scratch_project("sculpt-undo");
+        let project = Project::create(&root, "Terrain Undo").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.create_terrain_request = true;
+        handle_terrain_request(&mut state);
+        let source = state
+            .world
+            .get::<ecs_components::AssetSource>(state.selected_entity.unwrap())
+            .unwrap()
+            .clone();
+        let mut stroke = state.begin_terrain_stroke().unwrap();
+        stroke.record(glam::Vec2::ZERO, 1.0);
+        state.terrain_sculpt_request = Some(stroke);
+        let sculpted = handle_terrain_sculpt_request(&mut state).expect("sculpted");
+        let path = state.project.assets_dir().join(&source.path);
+        let heights = || {
+            engine_editor::terrain_tools::TerrainAsset::load(&path.with_extension("terrain"))
+                .unwrap()
+                .heights
+        };
+
+        state.undo();
+        assert!(state.terrain_refresh_request.is_some());
+        assert_eq!(handle_terrain_refresh_request(&mut state), Some(sculpted));
+        assert!(
+            heights().iter().all(|height| *height == 0.0),
+            "stroke undone"
+        );
+        assert!(state.asset_browser.operation_error.is_none());
+
+        state.redo();
+        assert_eq!(handle_terrain_refresh_request(&mut state), Some(sculpted));
+        assert!(
+            heights().iter().any(|height| *height > 0.0),
+            "stroke redone"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sculpt_request_rejects_a_deleted_terrain_before_writing() {
+        let root = scratch_project("sculpt-deleted-terrain");
+        let project = Project::create(&root, "Terrain").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.create_terrain_request = true;
+        handle_terrain_request(&mut state);
+        let mut stroke = state.begin_terrain_stroke().unwrap();
+        let path = state.project.assets_dir().join(&stroke.relative_model);
+        stroke.record(glam::Vec2::ZERO, 1.0);
+        state.world.despawn(stroke.entity);
+        state.terrain_sculpt_request = Some(stroke);
+
+        assert!(handle_terrain_sculpt_request(&mut state).is_none());
+        assert!(state.asset_browser.operation_error.is_some());
+        let saved =
+            engine_editor::terrain_tools::TerrainAsset::load(&path.with_extension("terrain"))
+                .unwrap();
+        assert!(saved.heights.iter().all(|height| *height == 0.0));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lua_syntax_problem_points_to_the_source_line_and_clears_when_fixed() {
+        let path = Path::new("assets/scripts/main.lua");
+        let broken = "return {\n  update = function(]\n}";
+        let (problem, marker) = lua_syntax_problem(path, broken).expect("syntax problem");
+        assert_eq!(problem.file.as_deref(), Some(path));
+        assert_eq!(problem.line, Some(2));
+        assert_eq!(marker.start_line, 2);
+        assert_eq!(problem.severity, ProblemSeverity::Error);
+        assert!(lua_syntax_problem(path, "return {}").is_none());
+    }
+
+    #[test]
+    fn lua_runtime_problem_validates_project_script_path() {
+        let root = scratch_project("lua-runtime-problem");
+        let project = Project::create(&root, "Lua Problem").expect("project");
+        let diagnostic = engine::scripting::LuaScriptDiagnostic {
+            path: "assets/scripts/main.lua".into(),
+            line: 7,
+            message: "bad callback".into(),
+        };
+        let (absolute, problem, marker) =
+            lua_runtime_problem(&project, &diagnostic).expect("valid script problem");
+        assert_eq!(absolute, root.join("assets/scripts/main.lua"));
+        assert_eq!(
+            problem.file.as_deref(),
+            Some(Path::new("assets/scripts/main.lua"))
+        );
+        assert_eq!(problem.line, Some(7));
+        assert_eq!(marker.start_line, 7);
+
+        let escaping = engine::scripting::LuaScriptDiagnostic {
+            path: "../outside.lua".into(),
+            ..diagnostic
+        };
+        assert!(lua_runtime_problem(&project, &escaping).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn new_play_clears_old_runtime_errors_but_keeps_syntax_errors() {
+        let path = PathBuf::from("/project/assets/scripts/main.lua");
+        let mut problems = HashMap::from([(
+            path.clone(),
+            vec![
+                Diagnostic {
+                    severity: ProblemSeverity::Error,
+                    code: Some("lua.runtime".into()),
+                    message: "old callback error".into(),
+                    file: Some(PathBuf::from("assets/scripts/main.lua")),
+                    line: Some(2),
+                },
+                Diagnostic {
+                    severity: ProblemSeverity::Error,
+                    code: Some("lua.syntax".into()),
+                    message: "current syntax error".into(),
+                    file: Some(PathBuf::from("assets/scripts/main.lua")),
+                    line: Some(3),
+                },
+            ],
+        )]);
+        let cleared = clear_lua_runtime_problems(&mut problems);
+        assert_eq!(cleared, vec![path.clone()]);
+        assert_eq!(problems[&path].len(), 1);
+        assert_eq!(problems[&path][0].code.as_deref(), Some("lua.syntax"));
+    }
     use editor_lsp::RangeOut;
 
     #[test]
@@ -2591,6 +3628,7 @@ mod tests {
             ("src/main.rs", "fn main() {}"),
             ("src/systems/movement.rs", "pub fn step() {}"),
             ("scenes/main.ron", "()"),
+            ("assets/scripts/main.lua", "return {}"),
             ("assets/textures/grass.png", "not really a png"),
             ("target/debug/build.rs", "generated"),
             (".studio/session.ron", "()"),
@@ -2611,14 +3649,226 @@ mod tests {
             listed,
             vec![
                 "Cargo.toml",
+                "assets/scripts/main.lua",
                 "project.ron",
                 "scenes/main.ron",
                 "src/main.rs",
                 "src/systems/movement.rs",
             ],
-            "config and sources are the tree; build output, assets and editor state are not"
+            "Lua sources and project files are listed without binary assets or build output"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn starter_files_follow_the_project_language() {
+        let lua_root = scratch_project("lua-seed");
+        let lua = Project::create(&lua_root, "Lua").expect("lua project");
+        assert_eq!(
+            starter_code_path(&lua),
+            Path::new("assets/scripts/main.lua")
+        );
+        assert_eq!(lsp_language(&lua), editor_lsp::LspLanguage::Lua);
+        seed_project_sources(&lua);
+        assert!(lua_root.join("assets/scripts/main.lua").is_file());
+        assert!(!lua_root.join("Cargo.toml").exists());
+
+        let rust_root = scratch_project("rust-seed");
+        let rust = Project::create_with_language(
+            &rust_root,
+            "Rust",
+            engine::project::GameplayLanguage::Rust,
+        )
+        .expect("rust project");
+        assert_eq!(starter_code_path(&rust), Path::new("src/main.rs"));
+        assert_eq!(lsp_language(&rust), editor_lsp::LspLanguage::Rust);
+        seed_project_sources(&rust);
+        assert!(rust_root.join("Cargo.toml").is_file());
+        assert!(rust_root.join("src/main.rs").is_file());
+        let starter = std::fs::read_to_string(rust_root.join("src/main.rs")).expect("starter");
+        assert!(
+            starter.contains("run_game("),
+            "Rust starter must launch a game"
+        );
+        assert!(
+            starter.contains("Scene::load_from_file"),
+            "Rust starter must load its authored scene"
+        );
+        let cargo = std::fs::read_to_string(rust_root.join("Cargo.toml")).expect("manifest");
+        assert!(
+            cargo.contains("engine = { path ="),
+            "Rust starter must link the engine SDK"
+        );
+        assert!(
+            rust_root
+                .join(format!("sdk/{}/crates/engine/Cargo.toml", SDK_VERSION))
+                .is_file()
+        );
+        let metadata = std::process::Command::new("cargo")
+            .args(["metadata", "--no-deps", "--format-version", "1"])
+            .current_dir(&rust_root)
+            .output()
+            .expect("Cargo starts");
+        assert!(
+            metadata.status.success(),
+            "generated project must have valid Cargo metadata: {}",
+            String::from_utf8_lossy(&metadata.stderr)
+        );
+        std::fs::write(rust_root.join("src/main.rs"), "fn main() {}\n").expect("custom source");
+        std::fs::write(
+            rust_root.join("Cargo.toml"),
+            "[package]\nname = \"custom\"\nversion = \"1.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("custom manifest");
+        seed_project_sources(&rust);
+        assert_eq!(
+            std::fs::read_to_string(rust_root.join("src/main.rs")).expect("source"),
+            "fn main() {}\n"
+        );
+        assert!(
+            std::fs::read_to_string(rust_root.join("Cargo.toml"))
+                .expect("manifest")
+                .contains("name = \"custom\"")
+        );
+
+        let _ = std::fs::remove_dir_all(lua_root);
+        let _ = std::fs::remove_dir_all(rust_root);
+    }
+
+    #[test]
+    fn rust_sdk_upgrade_preserves_game_code_and_original_manifest() {
+        let root = scratch_project("rust-sdk-upgrade");
+        let project = Project::create_with_language(&root, "Rust Upgrade", GameplayLanguage::Rust)
+            .expect("project creates");
+        seed_project_sources(&project);
+        let old_manifest = "[package]\nname = \"custom_game\"\nversion = \"1.2.3\"\nedition = \"2024\"\n\n[dependencies]\nengine = { path = \"sdk/old/crates/engine\", default-features = false } # keep comment\n";
+        std::fs::write(root.join("Cargo.toml"), old_manifest).expect("old manifest");
+        std::fs::write(root.join("src/main.rs"), "fn main() { /* mine */ }\n")
+            .expect("custom source");
+        std::fs::create_dir_all(root.join("sdk/old/crates/engine")).expect("old sdk");
+        std::fs::write(root.join("sdk/old/crates/engine/marker"), b"old").expect("old sdk marker");
+
+        let backup = upgrade_engine_sdk(&project)
+            .expect("upgrade succeeds")
+            .expect("manifest changed");
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("backup"),
+            old_manifest
+        );
+        let upgraded = std::fs::read_to_string(root.join("Cargo.toml")).expect("manifest");
+        assert!(upgraded.contains(&format!("sdk/{SDK_VERSION}/crates/engine")));
+        assert!(upgraded.contains("# keep comment"));
+        assert!(upgraded.contains("name = \"custom_game\""));
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/main.rs")).expect("source"),
+            "fn main() { /* mine */ }\n"
+        );
+        assert_eq!(
+            std::fs::read(root.join("sdk/old/crates/engine/marker")).expect("old sdk"),
+            b"old"
+        );
+        assert!(
+            root.join(format!("sdk/{SDK_VERSION}/crates/engine/Cargo.toml"))
+                .is_file()
+        );
+        assert!(upgrade_engine_sdk(&project).expect("idempotent").is_none());
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("backup"),
+            old_manifest
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rust_sdk_upgrade_rejects_non_sdk_dependency_without_writing() {
+        let root = scratch_project("rust-sdk-external");
+        let project = Project::create_with_language(&root, "Rust External", GameplayLanguage::Rust)
+            .expect("project creates");
+        let original = "[package]\nname = \"custom_game\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nengine = { path = \"../other-engine\" }\n";
+        std::fs::write(root.join("Cargo.toml"), original).expect("manifest");
+
+        assert!(upgrade_engine_sdk(&project).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join("Cargo.toml")).expect("manifest"),
+            original
+        );
+        assert!(!root.join("sdk").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "compiles a copied SDK and takes several minutes"]
+    fn generated_rust_game_compiles_against_its_sdk() {
+        let root = scratch_project("rust-sdk-build");
+        let project = Project::create_with_language(
+            &root,
+            "Rust SDK Build",
+            engine::project::GameplayLanguage::Rust,
+        )
+        .expect("project creates");
+        seed_project_sources(&project);
+        let result = std::process::Command::new("cargo")
+            .args(["check", "--offline"])
+            .current_dir(&root)
+            .output()
+            .expect("Cargo starts");
+        assert!(
+            result.status.success(),
+            "generated Rust game must compile: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "builds a copied SDK and a native executable"]
+    fn generated_rust_game_exports_its_scene_and_assets() {
+        let root = scratch_project("rust-sdk-export");
+        let project = Project::create_with_language(
+            &root,
+            "Rust SDK Export",
+            engine::project::GameplayLanguage::Rust,
+        )
+        .expect("project creates");
+        seed_project_sources(&project);
+        let plan = ExportPlan::new(
+            &project,
+            engine::project::crate_name_from(project.name()),
+            engine::project::build::BuildProfile::Debug,
+            root.join("out"),
+        );
+        let report = engine::project::build::export(&project, &plan).expect("export succeeds");
+        assert!(report.binary.is_file());
+        assert!(report.bundle.is_file());
+        assert!(report.scene.as_ref().is_some_and(|path| path.is_file()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_sdk_seed_rejects_a_symlink_outside_the_project() {
+        use std::os::unix::fs::symlink;
+
+        let root = scratch_project("rust-sdk-link");
+        let outside = scratch_project("rust-sdk-outside");
+        let project = Project::create_with_language(
+            &root,
+            "Rust SDK Link",
+            engine::project::GameplayLanguage::Rust,
+        )
+        .expect("project creates");
+        symlink(&outside, root.join("sdk")).expect("link");
+
+        assert!(seed_engine_sdk(&project).is_err());
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("outside readable")
+                .next()
+                .is_none()
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
     }
 
     #[cfg(unix)]

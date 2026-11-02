@@ -42,6 +42,10 @@ pub struct ProjectRequest {
     /// Whether to scaffold it first. `false` requires it to exist
     /// already.
     pub create: bool,
+    /// Language chosen in the New Project dialog; ignored when opening.
+    pub language: engine_project::GameplayLanguage,
+    /// Creation-only starter scene choice; ignored when opening.
+    pub template: engine_project::ProjectTemplate,
 }
 
 impl ProjectRequest {
@@ -50,14 +54,35 @@ impl ProjectRequest {
         Self {
             root: root.into(),
             create: false,
+            language: engine_project::GameplayLanguage::Rust,
+            template: engine_project::ProjectTemplate::Blank,
         }
     }
 
     /// Create a project at `root`, then open it.
     pub fn create(root: impl Into<PathBuf>) -> Self {
+        Self::create_with_language(root, engine_project::GameplayLanguage::Lua)
+    }
+
+    /// Create a project in the requested gameplay language.
+    pub fn create_with_language(
+        root: impl Into<PathBuf>,
+        language: engine_project::GameplayLanguage,
+    ) -> Self {
+        Self::create_with_template(root, language, engine_project::ProjectTemplate::Blank)
+    }
+
+    /// Create a project with a guided or blank scene.
+    pub fn create_with_template(
+        root: impl Into<PathBuf>,
+        language: engine_project::GameplayLanguage,
+        template: engine_project::ProjectTemplate,
+    ) -> Self {
         Self {
             root: root.into(),
             create: true,
+            language,
+            template,
         }
     }
 }
@@ -290,5 +315,27 @@ mod tests {
     fn a_request_records_what_it_is_for() {
         assert!(!ProjectRequest::open("/tmp/a").create);
         assert!(ProjectRequest::create("/tmp/b").create);
+        assert_eq!(
+            ProjectRequest::create("/tmp/b").language,
+            engine_project::GameplayLanguage::Lua
+        );
+        assert_eq!(
+            ProjectRequest::create_with_language("/tmp/c", engine_project::GameplayLanguage::Rust)
+                .language,
+            engine_project::GameplayLanguage::Rust
+        );
+        assert_eq!(
+            ProjectRequest::create("/tmp/b").template,
+            engine_project::ProjectTemplate::Blank
+        );
+        assert_eq!(
+            ProjectRequest::create_with_template(
+                "/tmp/d",
+                engine_project::GameplayLanguage::Lua,
+                engine_project::ProjectTemplate::Starter2D,
+            )
+            .template,
+            engine_project::ProjectTemplate::Starter2D
+        );
     }
 }

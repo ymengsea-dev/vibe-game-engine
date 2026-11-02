@@ -165,25 +165,9 @@ impl Inspectable for engine_renderer::Camera {
     }
 }
 
-/// Two `0.0..=1.0`-clamped drag values for a `[u, v]` atlas coordinate.
-fn uv_pair(ui: &mut egui::Ui, uv: &mut [f32; 2]) -> bool {
-    let mut changed = false;
-    for component in uv.iter_mut() {
-        if ui
-            .add(egui::DragValue::new(component).speed(0.01).range(0.0..=1.0))
-            .changed()
-        {
-            *component = component.clamp(0.0, 1.0);
-            changed = true;
-        }
-    }
-    changed
-}
-
 impl Inspectable for engine_ecs::components::Sprite {
-    /// `size` in world units, `uv` as the atlas sub-rect (both corners,
-    /// each `[u, v]` clamped to `0..=1`), and `color` as a linear RGBA
-    /// tint picker.
+    /// `size` in world units, `color` as a linear RGBA tint picker,
+    /// and an explicit draw layer. Atlas UVs are managed by the image packer.
     ///
     /// `Sprite` is the one renderer-adjacent component with a
     /// specialized editor for now: it is plain data. The mesh renderers
@@ -197,17 +181,15 @@ impl Inspectable for engine_ecs::components::Sprite {
             changed |= self.size.inspect_field(ui, 0.05);
         });
         ui.horizontal(|ui| {
-            ui.label("Atlas UV min");
-            changed |= uv_pair(ui, &mut self.uv.min);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Atlas UV max");
-            changed |= uv_pair(ui, &mut self.uv.max);
-        });
-        ui.horizontal(|ui| {
             ui.label("Tint");
             changed |= ui
                 .color_edit_button_rgba_unmultiplied(&mut self.color)
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Layer");
+            changed |= ui
+                .add(egui::DragValue::new(&mut self.z_order).speed(0.1))
                 .changed();
         });
         changed

@@ -129,7 +129,7 @@ impl Heightmap {
     ///
     /// [`RendererError::InvalidHeightmap`] if `resolution` is outside the
     /// supported single-patch range, `size` isn't positive and finite, or
-    /// `heights.len() != resolution * resolution`.
+    /// `heights.len() != resolution * resolution`, or any sample is non-finite.
     pub fn from_heights(
         resolution: u32,
         size: f32,
@@ -139,6 +139,11 @@ impl Heightmap {
         if heights.len() != (resolution as usize) * (resolution as usize) {
             return Err(RendererError::InvalidHeightmap {
                 reason: "heights length must equal resolution squared",
+            });
+        }
+        if heights.iter().any(|height| !height.is_finite()) {
+            return Err(RendererError::InvalidHeightmap {
+                reason: "heights must be finite",
             });
         }
         Ok(Self {
@@ -153,7 +158,8 @@ impl Heightmap {
     /// # Errors
     ///
     /// [`RendererError::InvalidHeightmap`] if `resolution` is outside the
-    /// supported single-patch range or `size` isn't positive and finite.
+    /// supported single-patch range, `size` isn't positive and finite, or
+    /// the generator returns a non-finite sample.
     pub fn from_fn(
         resolution: u32,
         size: f32,
@@ -166,11 +172,7 @@ impl Heightmap {
                 heights.push(height_fn(row, col));
             }
         }
-        Ok(Self {
-            resolution,
-            size,
-            heights,
-        })
+        Self::from_heights(resolution, size, heights)
     }
 
     fn validate(resolution: u32, size: f32) -> Result<(), RendererError> {
@@ -504,6 +506,18 @@ mod tests {
     }
 
     #[test]
+    fn from_heights_rejects_non_finite_samples() {
+        assert!(matches!(
+            Heightmap::from_heights(2, 2.0, vec![0.0, f32::NAN, 0.0, 0.0]),
+            Err(RendererError::InvalidHeightmap { .. })
+        ));
+        assert!(matches!(
+            Heightmap::from_fn(2, 2.0, |_, _| f32::INFINITY),
+            Err(RendererError::InvalidHeightmap { .. })
+        ));
+    }
+
+    #[test]
     fn from_fn_fills_row_major() {
         let hm = Heightmap::from_fn(3, 2.0, |row, col| (row * 10 + col) as f32).unwrap();
         assert_eq!(
@@ -740,7 +754,7 @@ mod tests {
         let hm = Heightmap::new(3, 2.0).unwrap();
         let (vertices, indices) = hm.mesh_data();
         let tp = |i: u32| Vec3::from(vertices[i as usize].position);
-        for tri in indices.chunks_exact(3) {
+        for tri in indices.as_chunks::<3>().0 {
             assert!((tp(tri[1]) - tp(tri[0])).cross(tp(tri[2]) - tp(tri[0])).y > 0.0);
         }
     }

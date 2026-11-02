@@ -7,11 +7,33 @@
 //! source, corrupted on disk).
 
 use glam::{Quat, Vec3};
+use std::path::{Component, Path};
 
 use crate::format::{
-    AssetRef, CameraData, ColliderData, ColliderShape, MeshRendererData, ProjectionData,
-    SceneEntity, SpriteData, TransformData,
+    AssetRef, CameraData, ColliderData, ColliderShape, FoliageData, MeshRendererData,
+    ProjectionData, RuleAction, RuleTrigger, SceneEntity, SpriteData, TilemapData, TransformData,
 };
+
+impl TilemapData {
+    /// Rejects malformed sheet settings before the editor or scene loader uses them.
+    pub fn validate(&self) -> Result<(), String> {
+        self.atlas.validate()?;
+        if self.columns == 0 || self.rows == 0 || self.columns > 4096 || self.rows > 4096 {
+            return Err("tilemap sheet must have 1–4096 columns and rows".into());
+        }
+        if self.brush_column >= self.columns || self.brush_row >= self.rows {
+            return Err("tilemap brush cell is outside the sheet grid".into());
+        }
+        if !self
+            .cell_size
+            .iter()
+            .all(|value| value.is_finite() && (0.01..=10_000.0).contains(value))
+        {
+            return Err("tilemap cell size must be between 0.01 and 10,000".into());
+        }
+        Ok(())
+    }
+}
 
 impl TransformData {
     /// Checks that every component is finite and that `rotation` is (to
@@ -111,6 +133,34 @@ impl MeshRendererData {
         self.material
             .validate()
             .map_err(|reason| format!("material: {reason}"))?;
+        if let Some(authored) = &self.material_override
+            && (!authored
+                .tint
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                || ![authored.metallic, authored.roughness]
+                    .into_iter()
+                    .flatten()
+                    .all(|value| value.is_finite() && (0.0..=1.0).contains(&value)))
+        {
+            return Err("material override factors must be finite and in [0, 1]".into());
+        }
+        Ok(())
+    }
+}
+
+impl FoliageData {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        self.mesh.validate()?;
+        self.material.validate()?;
+        if self.instances.len() > 20_000 {
+            return Err("foliage exceeds 20,000 instances".into());
+        }
+        for (index, transform) in self.instances.iter().enumerate() {
+            transform
+                .validate()
+                .map_err(|reason| format!("instance {index}: {reason}"))?;
+        }
         Ok(())
     }
 }
@@ -125,6 +175,14 @@ impl SpriteData {
         if self.region.is_empty() {
             return Err("region must not be empty".to_string());
         }
+        if self.region.starts_with("grid:")
+            && crate::sprite_atlas::GridRegion::parse(&self.region).is_none()
+        {
+            return Err(
+                "grid region must be grid:columns,rows:column,row with a cell inside the grid"
+                    .into(),
+            );
+        }
         let [width, height] = self.size;
         if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
             return Err(format!(
@@ -134,6 +192,23 @@ impl SpriteData {
         }
         if !self.color.iter().all(|c| c.is_finite()) {
             return Err(format!("color must be finite, got {:?}", self.color));
+        }
+        if let Some(animation) = self.animation {
+            let grid = crate::sprite_atlas::GridRegion::parse(&self.region)
+                .ok_or("animated sprites require a sprite-sheet cell")?;
+            let start = u64::from(grid.row) * u64::from(grid.columns) + u64::from(grid.column);
+            let available = u64::from(grid.columns) * u64::from(grid.rows) - start;
+            if animation.frames == 0
+                || animation.frames > 4096
+                || u64::from(animation.frames) > available
+            {
+                return Err(
+                    "animation frames must fit the remaining sheet cells (max 4096)".into(),
+                );
+            }
+            if !animation.fps.is_finite() || !(0.1..=120.0).contains(&animation.fps) {
+                return Err("animation fps must be between 0.1 and 120".into());
+            }
         }
         Ok(())
     }
@@ -186,6 +261,26 @@ impl SceneEntity {
     /// needs the owning [`crate::Scene`]'s full entity list to validate
     /// against (bounds, acyclicity); see [`crate::Scene::validate`].
     pub(crate) fn validate(&self) -> Result<(), String> {
+        if let Some(id) = &self.object_id {
+            uuid::Uuid::parse_str(id).map_err(|err| format!("object_id: {err}"))?;
+        }
+        if let Some(script) = &self.script {
+            let path = Path::new(script);
+            let normal = !script.is_empty()
+                && !path.is_absolute()
+                && path
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)));
+            let lua = path.starts_with("assets/scripts")
+                && path.extension().and_then(|ext| ext.to_str()) == Some("lua");
+            let rust = path.starts_with("src")
+                && path.extension().and_then(|ext| ext.to_str()) == Some("rs");
+            if !normal || !(lua || rust) {
+                return Err(format!(
+                    "script: invalid project-relative script path {script}"
+                ));
+            }
+        }
         if let Some(transform) = &self.transform {
             transform
                 .validate()
@@ -201,10 +296,20 @@ impl SceneEntity {
                 .validate()
                 .map_err(|reason| format!("mesh_renderer: {reason}"))?;
         }
+        if let Some(foliage) = &self.foliage {
+            foliage
+                .validate()
+                .map_err(|reason| format!("foliage: {reason}"))?;
+        }
         if let Some(sprite) = &self.sprite {
             sprite
                 .validate()
                 .map_err(|reason| format!("sprite: {reason}"))?;
+        }
+        if let Some(tilemap) = &self.tilemap {
+            tilemap
+                .validate()
+                .map_err(|reason| format!("tilemap: {reason}"))?;
         }
         if let Some(collider) = &self.collider {
             collider
@@ -215,6 +320,116 @@ impl SceneEntity {
             emitter
                 .validate()
                 .map_err(|reason| format!("audio_emitter: {reason}"))?;
+        }
+        if let Some(water) = self.water {
+            engine_physics::WaterSurface::try_from(water)
+                .map_err(|error| format!("water: {error}"))?;
+        }
+        if let Some(light) = self.point_light
+            && (!light
+                .color
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
+                || !light.intensity.is_finite()
+                || !(0.0..=1000.0).contains(&light.intensity)
+                || !light.range.is_finite()
+                || !(0.0..=10_000.0).contains(&light.range)
+                || light.range == 0.0)
+        {
+            return Err("point_light: color, intensity, or range is invalid".into());
+        }
+        if let Some(ui) = &self.ui {
+            ui.validate().map_err(|reason| format!("ui: {reason}"))?;
+        }
+        if self.rules.len() > 16 {
+            return Err("rules: an object may have at most 16 rules".into());
+        }
+        for (index, rule) in self.rules.iter().enumerate() {
+            rule.validate(self.ui.as_ref())
+                .map_err(|reason| format!("rule {index}: {reason}"))?;
+        }
+        Ok(())
+    }
+}
+
+impl crate::RuleData {
+    fn validate(&self, owner_ui: Option<&crate::UiElementData>) -> Result<(), String> {
+        match &self.trigger {
+            RuleTrigger::UiClicked
+                if !owner_ui.is_some_and(|ui| ui.kind == crate::UiKind::Button) =>
+            {
+                return Err("click trigger requires an owning UI Button".into());
+            }
+            RuleTrigger::Named(name) => validate_event_name(name)?,
+            _ => {}
+        }
+        if let Some(position) = self.graph_position
+            && !position
+                .iter()
+                .all(|value| value.is_finite() && value.abs() <= 1_000_000.0)
+        {
+            return Err("graph position must be finite and within ±1,000,000".into());
+        }
+        if let Some(condition) = &self.condition {
+            validate_variable(&condition.variable, condition.value)
+                .map_err(|reason| format!("condition: {reason}"))?;
+        }
+        let target = match &self.action {
+            RuleAction::SetUiText { target, text } => {
+                if text.len() > 1024 {
+                    return Err("UI text exceeds 1024 bytes".into());
+                }
+                target
+            }
+            RuleAction::PlayAudio { target } => target,
+            RuleAction::EmitEvent { name } => return validate_event_name(name),
+            RuleAction::SetVariable { name, value } => return validate_variable(name, *value),
+            RuleAction::AddToVariable { name, amount } => return validate_variable(name, *amount),
+        };
+        uuid::Uuid::parse_str(target)
+            .map_err(|_| "action target must be an object ID".to_string())?;
+        Ok(())
+    }
+}
+
+fn validate_event_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+        return Err("event name must be 1–64 printable bytes".into());
+    }
+    Ok(())
+}
+
+fn validate_variable(name: &str, value: f64) -> Result<(), String> {
+    if !crate::rules::valid_variable_name(name) {
+        return Err("variable name must be 1–64 printable bytes".into());
+    }
+    if !value.is_finite() {
+        return Err("variable value must be finite".into());
+    }
+    Ok(())
+}
+
+impl crate::UiElementData {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.text.len() > 1024 {
+            return Err("text exceeds 1024 bytes".into());
+        }
+        if !self.offset.iter().all(|value| value.is_finite()) {
+            return Err("offset must be finite".into());
+        }
+        if !self
+            .size
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0 && *value <= 10000.0)
+        {
+            return Err("size must be finite and in (0, 10000]".into());
+        }
+        if !self
+            .color
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        {
+            return Err("color must be in [0, 1]".into());
         }
         Ok(())
     }
@@ -230,6 +445,28 @@ impl crate::format::AudioEmitterData {
         }
         if !self.radius.is_finite() || self.radius < 0.0 {
             return Err(format!("radius is not a usable distance: {}", self.radius));
+        }
+        Ok(())
+    }
+}
+
+impl crate::format::EnvironmentData {
+    /// Checks the ambient sound count, references and gains.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.ambient_sounds.len() > Self::MAX_AMBIENT_SOUNDS {
+            return Err(format!(
+                "at most {} ambient sounds are allowed",
+                Self::MAX_AMBIENT_SOUNDS
+            ));
+        }
+        for (index, ambient) in self.ambient_sounds.iter().enumerate() {
+            ambient
+                .sound
+                .validate()
+                .map_err(|reason| format!("ambient sound {index}: {reason}"))?;
+            if !ambient.gain.is_finite() || !(0.0..=4.0).contains(&ambient.gain) {
+                return Err(format!("ambient sound {index}: gain must be in [0, 4]"));
+            }
         }
         Ok(())
     }
@@ -266,6 +503,84 @@ impl crate::format::NavGridData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn material_override_rejects_nonfinite_and_out_of_range_values() {
+        let mut mesh = valid_mesh_renderer();
+        mesh.material_override = Some(crate::MaterialOverrideData {
+            tint: [f32::NAN, 1.0, 1.0],
+            metallic: Some(0.5),
+            roughness: None,
+        });
+        assert!(mesh.validate().is_err());
+        mesh.material_override.as_mut().unwrap().tint = [1.0; 3];
+        mesh.material_override.as_mut().unwrap().metallic = Some(1.2);
+        assert!(mesh.validate().is_err());
+    }
+
+    #[test]
+    fn foliage_rejects_invalid_instances_and_excessive_count() {
+        let source = valid_mesh_renderer();
+        let mut foliage = crate::FoliageData {
+            mesh: source.mesh,
+            material: source.material,
+            instances: vec![crate::TransformData::from(
+                engine_utils::Transform::IDENTITY,
+            )],
+        };
+        assert!(foliage.validate().is_ok());
+        foliage.instances[0].translation[0] = f32::NAN;
+        assert!(foliage.validate().is_err());
+        foliage.instances =
+            vec![crate::TransformData::from(engine_utils::Transform::IDENTITY); 20_001];
+        assert!(foliage.validate().is_err());
+    }
+
+    #[test]
+    fn scene_rejects_escaping_or_wrong_language_script_paths() {
+        for path in [
+            "../outside.lua",
+            "/tmp/outside.lua",
+            "assets/scripts/main.rs",
+            "src/main.lua",
+        ] {
+            let entity = SceneEntity {
+                script: Some(path.to_owned()),
+                ..Default::default()
+            };
+            assert!(entity.validate().is_err(), "accepted {path}");
+        }
+        let entity = SceneEntity {
+            script: Some("assets/scripts/actor.lua".to_owned()),
+            ..Default::default()
+        };
+        assert!(entity.validate().is_ok());
+    }
+
+    #[test]
+    fn scene_rejects_invalid_object_id() {
+        let entity = SceneEntity {
+            object_id: Some("not-a-uuid".to_owned()),
+            ..Default::default()
+        };
+        assert!(entity.validate().is_err());
+    }
+
+    #[test]
+    fn scene_rejects_invalid_point_light_values() {
+        let mut entity = SceneEntity {
+            point_light: Some(crate::PointLightData::default()),
+            ..Default::default()
+        };
+        entity.point_light.as_mut().unwrap().intensity = f32::NAN;
+        assert!(entity.validate().is_err());
+        entity.point_light.as_mut().unwrap().intensity = 1.0;
+        entity.point_light.as_mut().unwrap().range = 0.0;
+        assert!(entity.validate().is_err());
+        entity.point_light.as_mut().unwrap().range = 5.0;
+        entity.point_light.as_mut().unwrap().color[0] = -1.0;
+        assert!(entity.validate().is_err());
+    }
 
     fn valid_transform() -> TransformData {
         TransformData {
@@ -451,6 +766,7 @@ mod tests {
         MeshRendererData {
             mesh: valid_asset_ref(),
             material: valid_asset_ref(),
+            material_override: None,
         }
     }
 
@@ -500,6 +816,7 @@ mod tests {
             size: [1.0, 1.0],
             color: [1.0, 1.0, 1.0, 1.0],
             z_order: 0.0,
+            animation: None,
         }
     }
 
@@ -520,6 +837,17 @@ mod tests {
         let mut sprite = valid_sprite();
         sprite.region = String::new();
         assert!(sprite.validate().is_err());
+    }
+
+    #[test]
+    fn sprite_rejects_out_of_grid_cell_and_keeps_legacy_region_names() {
+        let mut sprite = valid_sprite();
+        sprite.region = "grid:2,2:2,0".into();
+        assert!(sprite.validate().is_err());
+        sprite.region = "grid:0,2:0,0".into();
+        assert!(sprite.validate().is_err());
+        sprite.region = "coin_0".into();
+        assert!(sprite.validate().is_ok());
     }
 
     #[test]
@@ -568,5 +896,96 @@ mod tests {
             ..Default::default()
         };
         assert!(entity.validate().is_err());
+    }
+
+    #[test]
+    fn sprite_animation_rejects_invalid_range_and_speed() {
+        let mut sprite = valid_sprite();
+        sprite.region = "grid:2,2:1,1".into();
+        sprite.animation = Some(crate::SpriteAnimationData {
+            frames: 2,
+            fps: 8.0,
+            looping: true,
+        });
+        assert!(sprite.validate().is_err());
+        sprite.region = "grid:2,2:0,0".into();
+        sprite.animation.as_mut().unwrap().fps = f32::INFINITY;
+        assert!(sprite.validate().is_err());
+        sprite.animation.as_mut().unwrap().fps = 8.0;
+        assert!(sprite.validate().is_ok());
+        sprite.region = "full".into();
+        assert!(sprite.validate().is_err());
+    }
+
+    #[test]
+    fn entity_rejects_invalid_tilemap_settings() {
+        let mut tilemap = TilemapData::new(AssetRef {
+            id: uuid::Uuid::new_v4().to_string(),
+        });
+        tilemap.columns = 0;
+        assert!(
+            SceneEntity {
+                tilemap: Some(tilemap.clone()),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+
+        tilemap.columns = 4;
+        tilemap.brush_column = 4;
+        assert!(tilemap.validate().is_err());
+        tilemap.brush_column = 0;
+        tilemap.cell_size[0] = f32::NAN;
+        assert!(tilemap.validate().is_err());
+        tilemap.cell_size[0] = 0.0;
+        assert!(tilemap.validate().is_err());
+    }
+
+    #[test]
+    fn event_rule_rejects_bad_owner_target_and_payload() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut entity = SceneEntity {
+            rules: vec![crate::RuleData {
+                trigger: RuleTrigger::UiClicked,
+                action: RuleAction::SetUiText {
+                    target: id,
+                    text: "Ready".into(),
+                },
+                condition: None,
+                graph_position: None,
+            }],
+            ..Default::default()
+        };
+        assert!(entity.validate().is_err());
+        entity.ui = Some(crate::UiElementData::button());
+        assert!(entity.validate().is_ok());
+        entity.rules[0].trigger = RuleTrigger::Named("bad\nname".into());
+        assert!(entity.validate().is_err());
+        entity.rules[0].trigger = RuleTrigger::Named("ready".into());
+        entity.rules[0].action = RuleAction::PlayAudio {
+            target: "../escape".into(),
+        };
+        assert!(entity.validate().is_err());
+    }
+
+    #[test]
+    fn event_rule_rejects_an_invalid_emitted_event_name() {
+        let mut entity = SceneEntity {
+            rules: vec![crate::RuleData {
+                trigger: RuleTrigger::Named("start".into()),
+                action: RuleAction::EmitEvent {
+                    name: "bad\nname".into(),
+                },
+                condition: None,
+                graph_position: None,
+            }],
+            ..Default::default()
+        };
+        assert!(entity.validate().is_err());
+        entity.rules[0].action = RuleAction::EmitEvent {
+            name: "okay".into(),
+        };
+        assert!(entity.validate().is_ok());
     }
 }

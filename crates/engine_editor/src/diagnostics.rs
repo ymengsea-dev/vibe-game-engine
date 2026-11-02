@@ -34,9 +34,9 @@ impl Severity {
 
     fn color(self) -> egui::Color32 {
         match self {
-            Severity::Error => egui::Color32::from_rgb(220, 80, 80),
-            Severity::Warning => egui::Color32::from_rgb(220, 180, 80),
-            Severity::Info => egui::Color32::from_rgb(150, 180, 220),
+            Severity::Error => crate::theme::NIGHT.danger,
+            Severity::Warning => crate::theme::NIGHT.highlight,
+            Severity::Info => crate::theme::NIGHT.info,
         }
     }
 }

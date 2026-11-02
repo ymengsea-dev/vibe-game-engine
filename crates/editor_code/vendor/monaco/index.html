@@ -8,7 +8,7 @@
     :root { --explorer-width: 205px; --panel: #151d29; --raised: #1b2533; --hover: #233044;
       --border: #2b3b50; --border-soft: #253346; --text: #e4eaf3; --muted: #91a0b4; --accent: #83b5ff; }
     html, body { margin: 0; height: 100%; overflow: hidden; background: var(--panel);
-      font-family: 'Roboto', system-ui, sans-serif; font-weight: 400; color: var(--text); }
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, 'Roboto', sans-serif; font-weight: 400; color: var(--text); }
 
     #tabs { position: absolute; top: 0; left: var(--explorer-width); right: 0; height: 34px;
       display: flex; align-items: stretch; background: #111a27;
@@ -109,7 +109,7 @@
         ].join('\n'),
         language: 'rust', theme: 'vge-dark',
         automaticLayout: true, fontSize: 12, lineHeight: 20,
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontFamily: "Menlo, Monaco, 'Courier New', monospace",
         minimap: { enabled: false },
         readOnly: true, scrollBeyondLastLine: false
       });
@@ -408,11 +408,14 @@
             models[path] = { model: model, dirty: false };
             tabOrder.push(path);
             model.onDidChangeContent(function () {
+              if (models[path].replacing) return;
               if (!models[path].dirty) { models[path].dirty = true; renderTabs(); }
               post({ type: 'edited', path: path, text: model.getValue() });
             });
           } else {
+            models[path].replacing = true;
             models[path].model.setValue(contents);
+            models[path].replacing = false;
             models[path].dirty = false;
           }
           activate(path);
@@ -431,7 +434,7 @@
           // `list` items are already Monaco `IMarkerData` (1-based
           // positions + numeric severity), built by the LSP bridge.
           if (!models[path]) return;
-          monaco.editor.setModelMarkers(models[path].model, 'rust-analyzer', list || []);
+          monaco.editor.setModelMarkers(models[path].model, 'studio-lsp', list || []);
         },
         // Answer a pending language-provider request (see lspRequest).
         // `payload` is neutral JSON from the host; the provider closures
@@ -454,7 +457,7 @@
         }
       };
 
-      // --- Language features via the host / rust-analyzer -----------------
+      // --- Language features via the host's project language server ------
       // Monaco providers can't talk to the LSP directly; each one posts an
       // `lsp` message with a nonce and returns a Promise the host settles
       // through `studio.resolveLsp`. A timeout resolves to null so the UI
@@ -497,7 +500,8 @@
         return map[lspKind] != null ? map[lspKind] : K.Text;
       }
 
-      monaco.languages.registerCompletionItemProvider('rust', {
+      ['rust', 'lua'].forEach(function (language) {
+      monaco.languages.registerCompletionItemProvider(language, {
         triggerCharacters: ['.', ':'],
         provideCompletionItems: function (model, position) {
           return lspRequest('completion', model, position).then(function (payload) {
@@ -526,7 +530,7 @@
         }
       });
 
-      monaco.languages.registerHoverProvider('rust', {
+      monaco.languages.registerHoverProvider(language, {
         provideHover: function (model, position) {
           return lspRequest('hover', model, position).then(function (payload) {
             if (!payload || !payload.markdown) return null;
@@ -539,6 +543,7 @@
             return res;
           });
         }
+      });
       });
 
       monaco.languages.registerDefinitionProvider('rust', {

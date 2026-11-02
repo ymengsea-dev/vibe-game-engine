@@ -17,10 +17,12 @@ path = "src/main.rs"
 # allowed — that drops the `studio` feature, keeping the editor out of a
 # shipped runtime (NFR-004). Navigation (`engine_ai`) is unconditional:
 # it is gameplay, and a shipped game needs to pathfind.
-engine = { path = "../../crates/engine", default-features = false }
+engine = { path = "../../crates/engine", default-features = false, features = ["lua"] }
 thiserror.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+uuid.workspace = true
 
 [lints]
 workspace = true

@@ -31,18 +31,24 @@
 //! drawn in the scene pass, depth-configured to stay visible through
 //! geometry so a gizmo behind a wall is still grabbable.
 
-use engine_ecs::components::{Disabled, GlobalTransform, MeshRenderer};
+use engine_ecs::components::{
+    Disabled, GlobalTransform, InstancedMeshRenderer, MeshRenderer, Sprite, SpriteSource,
+};
 use engine_ecs::prelude::{Entity, World};
+use engine_ecs::render::SpriteTarget;
 use engine_renderer::{
     Camera, CameraBinding, DebugLinePipeline, DebugLineVertex, DirectionalLight, GpuContext,
     HdrTarget, InstancedPipeline, LightSet, LightsBinding, Pipeline, PostProcessStack,
     PostSettings, RenderAssets, RenderTarget, ShadowMap, ShadowPipeline, SkinnedPipeline,
-    SkyboxBinding, SkyboxPipeline, directional_light_view_projection, skybox_uniform,
+    SkyboxBinding, SkyboxPipeline, SpriteAtlasBinding, SpritePipeline, TextureAtlas, WaterBinding,
+    WaterDraw, WaterFrame, WaterGpuUniform, WaterPipeline, directional_light_view_projection,
+    skybox_uniform,
 };
-use glam::{Mat4, Vec3};
+use engine_utils::AssetHandle;
+use glam::{Mat4, Quat, Vec3};
+use std::collections::HashMap;
 
 use crate::error::EditorError;
-use crate::gizmo::{self, GizmoMode};
 use crate::shell::EditorShell;
 
 /// `egui_wgpu::Renderer::register_native_texture` requires exactly this
@@ -54,9 +60,32 @@ pub const VIEWPORT_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg
 /// to swamp real geometry.
 const PLACEHOLDER_HALF_EXTENT: f32 = 0.5;
 
-/// Colour of that wireframe box: a desaturated amber, readable as
-/// "something is here but its asset didn't load".
-const PLACEHOLDER_COLOR: [f32; 4] = [0.85, 0.65, 0.2, 1.0];
+type InstancedHandles = (
+    AssetHandle<engine_renderer::Mesh>,
+    AssetHandle<engine_renderer::MaterialBinding>,
+);
+
+fn instanced_handles(world: &mut World) -> HashMap<Entity, InstancedHandles> {
+    world
+        .query::<(Entity, &InstancedMeshRenderer)>()
+        .iter(world)
+        .map(|(entity, renderer)| (entity, (renderer.mesh, renderer.material)))
+        .collect()
+}
+
+fn removed_instanced_handles(
+    before: &HashMap<Entity, InstancedHandles>,
+    after: &HashMap<Entity, InstancedHandles>,
+) -> Vec<InstancedHandles> {
+    before
+        .iter()
+        .filter_map(|(entity, handles)| (after.get(entity) != Some(handles)).then_some(*handles))
+        .collect()
+}
+
+/// Colour of that wireframe box: warning red, because a model that should
+/// be here did not load.
+const PLACEHOLDER_COLOR: [f32; 4] = [0.95, 0.3, 0.28, 1.0];
 
 /// The 12 edges of a unit cube, as index pairs into
 /// [`box_corners`]' output.
@@ -101,16 +130,12 @@ fn push_wire_box(out: &mut Vec<DebugLineVertex>, centre: Vec3, half_extent: f32,
     }
 }
 
-/// Builds the frame's overlay line list: a wireframe box per entity with
-/// no resolvable mesh, plus the gizmo handles at `gizmo_origin`.
+/// Builds the frame's placeholder line list: a wireframe box per entity
+/// with no resolvable mesh. (The transform gizmo is painted by the shell
+/// over the viewport image, so it is always on top.)
 ///
 /// Pure over its inputs so it can be unit-tested without a GPU.
-fn overlay_lines(
-    placeholders: &[Vec3],
-    gizmo_origin: Option<Vec3>,
-    gizmo_mode: GizmoMode,
-    two_d: bool,
-) -> Vec<DebugLineVertex> {
+fn overlay_lines(placeholders: &[Vec3]) -> Vec<DebugLineVertex> {
     let mut lines = Vec::new();
     for &centre in placeholders {
         push_wire_box(
@@ -119,20 +144,6 @@ fn overlay_lines(
             PLACEHOLDER_HALF_EXTENT,
             PLACEHOLDER_COLOR,
         );
-    }
-    if let Some(origin) = gizmo_origin {
-        for &axis in gizmo::axes_for(gizmo_mode, two_d) {
-            let (start, end) = gizmo::axis_endpoints(origin, axis);
-            let color = axis.color();
-            lines.push(DebugLineVertex {
-                position: start.into(),
-                color,
-            });
-            lines.push(DebugLineVertex {
-                position: end.into(),
-                color,
-            });
-        }
     }
     lines
 }
@@ -158,6 +169,14 @@ pub struct Viewport {
     shadow_map: ShadowMap,
     skinned_pipeline: SkinnedPipeline,
     instanced_pipeline: InstancedPipeline,
+    sprite_pipeline: SpritePipeline,
+    sprite_quad: engine_renderer::Mesh,
+    sprite_atlas: Option<SpriteAtlasBinding>,
+    sprite_layout: Option<engine_renderer::AtlasLayout>,
+    sprite_ids: Vec<String>,
+    sprite_import_pass: u64,
+    water_pipeline: WaterPipeline,
+    water_bindings: HashMap<Entity, WaterBinding>,
     skybox_pipeline: SkyboxPipeline,
     skybox: SkyboxBinding,
     debug_line_pipeline: DebugLinePipeline,
@@ -172,6 +191,31 @@ pub struct Viewport {
     /// GPU meshes/materials the scene's entities resolved to. Owned here
     /// because the entities' `MeshRenderer` handles index into it.
     assets: RenderAssets,
+    /// Handles owned by live instanced groups at the last editor boundary.
+    tracked_instanced: HashMap<Entity, InstancedHandles>,
+}
+
+fn default_editor_lights() -> LightSet {
+    LightSet {
+        directional: vec![DirectionalLight {
+            direction: Vec3::new(-0.4, -1.0, -0.3).normalize(),
+            color: Vec3::ONE,
+            intensity: 3.0,
+        }],
+        point: Vec::new(),
+        ambient: engine_renderer::AmbientLight::DAYLIGHT,
+    }
+}
+
+fn editor_lights(world: &mut World) -> LightSet {
+    let mut lights = world
+        .get_resource::<engine_scene::SceneLighting>()
+        .map(|lighting| lighting.0.to_light_set())
+        .unwrap_or_else(default_editor_lights);
+    lights
+        .point
+        .extend(engine_scene::point_lights_from_world(world));
+    lights
 }
 
 impl Viewport {
@@ -197,23 +241,19 @@ impl Viewport {
         let skinned_pipeline = gpu.create_skinned_pbr_pipeline(&pipeline, "editor skinned pbr");
         let instanced_pipeline =
             gpu.create_instanced_pbr_pipeline(&pipeline, "editor instanced pbr");
+        let sprite_pipeline = gpu.create_sprite_pipeline("editor sprites", &pipeline);
+        let (sprite_vertices, sprite_indices) = engine_renderer::quad();
+        let sprite_quad =
+            gpu.create_mesh("editor sprite quad", &sprite_vertices, &sprite_indices)?;
+        let water_pipeline = gpu.create_water_pipeline(&pipeline, "editor water")?;
         let skybox_pipeline = gpu.create_skybox_pipeline("editor skybox");
         let debug_line_pipeline = gpu.create_debug_line_pipeline(&pipeline, "editor overlay lines");
 
-        let camera = Self::perspective_camera(width, height);
+        let camera =
+            crate::SceneCamera::default().to_camera(false, width as f32 / height.max(1) as f32);
         // One sun, angled down and slightly forward so authored geometry
         // reads as solid rather than flat-lit.
-        let lights = LightSet {
-            directional: vec![DirectionalLight {
-                direction: Vec3::new(-0.4, -1.0, -0.3).normalize(),
-                color: Vec3::ONE,
-                intensity: 3.0,
-            }],
-            point: Vec::new(),
-            // Same daylight ambient the runtime defaults to, so the
-            // Scene view and a shipped build agree on how things look.
-            ambient: engine_renderer::AmbientLight::DAYLIGHT,
-        };
+        let lights = default_editor_lights();
         let (sun_direction, sun_color) = lights
             .directional
             .first()
@@ -252,6 +292,14 @@ impl Viewport {
             shadow_map,
             skinned_pipeline,
             instanced_pipeline,
+            sprite_pipeline,
+            sprite_quad,
+            sprite_atlas: None,
+            sprite_layout: None,
+            sprite_ids: Vec::new(),
+            sprite_import_pass: 0,
+            water_pipeline,
+            water_bindings: HashMap::new(),
             skybox_pipeline,
             skybox,
             debug_line_pipeline,
@@ -262,42 +310,19 @@ impl Viewport {
             lights_binding,
             lights,
             assets: RenderAssets::new(),
+            tracked_instanced: HashMap::new(),
         })
     }
 
-    /// The perspective camera used in 3D authoring mode.
-    fn perspective_camera(width: u32, height: u32) -> Camera {
-        Camera::new(
-            Vec3::new(4.0, 3.0, 6.0),
-            Vec3::ZERO,
-            width as f32 / height.max(1) as f32,
-        )
-    }
-
-    /// The orthographic front view used in 2D authoring mode.
-    fn orthographic_camera(width: u32, height: u32) -> Camera {
-        Camera::new_orthographic(
-            Vec3::new(0.0, 0.0, 10.0),
-            Vec3::ZERO,
-            width as f32 / height.max(1) as f32,
-            10.0,
-        )
-    }
-
-    /// Switches between the 3D perspective camera and the 2D
-    /// orthographic front view, re-uploading only when the mode actually
-    /// changes.
-    pub fn set_dimension(&mut self, gpu: &GpuContext, two_d: bool) {
-        if self.two_d == two_d {
-            return;
-        }
+    /// Rebuilds the GPU camera from the editor's navigation state for the
+    /// current 2D/3D mode, uploading only when the view actually changed.
+    pub fn sync_camera(&mut self, gpu: &GpuContext, view: &crate::SceneCamera, two_d: bool) {
         self.two_d = two_d;
-        self.camera = if two_d {
-            Self::orthographic_camera(self.width, self.height)
-        } else {
-            Self::perspective_camera(self.width, self.height)
-        };
-        gpu.write_uniform_buffer(&self.camera_binding.buffer, &self.camera.to_uniform());
+        let camera = view.to_camera(two_d, self.width as f32 / self.height.max(1) as f32);
+        if camera.is_valid() && camera != self.camera {
+            self.camera = camera;
+            gpu.write_uniform_buffer(&self.camera_binding.buffer, &self.camera.to_uniform());
+        }
     }
 
     /// This viewport's pixel dimensions.
@@ -373,12 +398,29 @@ impl Viewport {
     /// wherever an id happened to collide.
     pub fn release_assets(&mut self) {
         self.assets = RenderAssets::new();
+        self.tracked_instanced.clear();
+        self.sprite_atlas = None;
+        self.sprite_layout = None;
+        self.sprite_ids.clear();
+        self.sprite_import_pass = 0;
     }
 
     /// How many meshes this viewport currently holds — the hook a test
     /// uses to prove a project swap actually released them.
     pub fn uploaded_mesh_count(&self) -> usize {
         self.assets.meshes.len()
+    }
+
+    /// Reconciles instanced GPU ownership after a hierarchy or scene edit.
+    /// Deleting a group removes its ECS component but cannot release the
+    /// viewport-owned GPU handles at the deletion call site.
+    pub fn sync_instanced_handles(&mut self, world: &mut World) {
+        let current = instanced_handles(world);
+        for (mesh, material) in removed_instanced_handles(&self.tracked_instanced, &current) {
+            self.assets.meshes.release(mesh);
+            self.assets.materials.release(material);
+        }
+        self.tracked_instanced = current;
     }
 
     /// Resolves any of `world`'s renderable references that are now
@@ -395,7 +437,71 @@ impl Viewport {
         importer: &crate::AssetImporter,
         gpu: &GpuContext,
     ) -> crate::ResolveReport {
-        crate::resolve_pending(world, importer, gpu, &self.pipeline, &mut self.assets)
+        let report = crate::resolve_pending(world, importer, gpu, &self.pipeline, &mut self.assets);
+        self.refresh_sprite_atlas(world, importer, gpu);
+        report
+    }
+
+    fn refresh_sprite_atlas(
+        &mut self,
+        world: &mut World,
+        importer: &crate::AssetImporter,
+        gpu: &GpuContext,
+    ) {
+        let mut ids: Vec<String> = world
+            .query::<(&SpriteSource, &Sprite)>()
+            .iter(world)
+            .map(|(source, _)| source.atlas.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if self.sprite_ids == ids && self.sprite_import_pass == importer.pass_id() {
+            engine_scene::apply_packed_sprite_uvs(world, self.sprite_layout.as_ref());
+            return;
+        }
+        self.sprite_ids = ids;
+        self.sprite_import_pass = importer.pass_id();
+        let images: Vec<_> = self
+            .sprite_ids
+            .iter()
+            .filter_map(|id| {
+                let asset_id = crate::assets::parse_asset_id(id)?;
+                match importer.get(asset_id)? {
+                    crate::ImportedAsset::Texture(image) => Some((id.as_str(), image.as_ref())),
+                    _ => None,
+                }
+            })
+            .collect();
+        match engine_scene::pack_sprite_textures(
+            &images,
+            gpu.device().limits().max_texture_dimension_2d,
+        ) {
+            Ok(Some(packed)) => {
+                engine_scene::apply_packed_sprite_uvs(world, Some(&packed.layout));
+                self.sprite_layout = Some(packed.layout.clone());
+                let texture = gpu.create_texture_from_rgba(
+                    "editor sprites",
+                    packed.width,
+                    packed.height,
+                    &packed.rgba,
+                );
+                self.sprite_atlas = Some(gpu.create_sprite_atlas_binding(
+                    &self.sprite_pipeline,
+                    &TextureAtlas::new(texture, packed.layout),
+                ));
+            }
+            Ok(None) => {
+                engine_scene::apply_packed_sprite_uvs(world, None);
+                self.sprite_atlas = None;
+                self.sprite_layout = None;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not build scene sprite atlas");
+                engine_scene::apply_packed_sprite_uvs(world, None);
+                self.sprite_atlas = None;
+                self.sprite_layout = None;
+            }
+        }
     }
 
     /// Drops live mesh renderers whose source ids changed so the next
@@ -449,12 +555,26 @@ impl Viewport {
         &mut self,
         gpu: &GpuContext,
         world: &mut World,
-        gizmo_mode: GizmoMode,
-        gizmo_origin: Option<Vec3>,
         overlays: crate::OverlayToggles,
+        selection: &[Entity],
     ) {
+        self.update_water(gpu, world);
+        self.lights = editor_lights(world);
+        let sun_direction = self
+            .lights
+            .directional
+            .first()
+            .map(|sun| sun.direction)
+            .unwrap_or(Vec3::NEG_Y);
+        gpu.update_shadow_map(
+            &mut self.shadow_map,
+            directional_light_view_projection(sun_direction, self.camera.target, 40.0),
+        );
         gpu.write_uniform_buffer(&self.camera_binding.buffer, &self.camera.to_uniform());
-        gpu.write_uniform_buffer(&self.lights_binding.buffer, &self.lights.to_uniform());
+        gpu.write_uniform_buffer(
+            &self.lights_binding.buffer,
+            &self.lights.to_uniform_for_view(self.camera.eye),
+        );
         let (sun_direction, sun_color) = self
             .lights
             .directional
@@ -472,14 +592,37 @@ impl Viewport {
         // the cost of turning an overlay on is its vertices and not a
         // draw call.
         self.debug_draw.clear();
-        for vertex in overlay_lines(&placeholders, gizmo_origin, gizmo_mode, self.two_d) {
+        for vertex in overlay_lines(&placeholders) {
             self.debug_draw.push_vertex(vertex);
         }
-        crate::overlays::build(world, &self.lights, overlays, &mut self.debug_draw);
+        let assets = &self.assets;
+        crate::overlays::build(
+            world,
+            &self.lights,
+            overlays,
+            selection,
+            |world, entity| {
+                let renderer = world.get::<engine_ecs::components::MeshRenderer>(entity)?;
+                assets
+                    .meshes
+                    .get(renderer.mesh)
+                    .map(|mesh| mesh.local_bounds)
+            },
+            &mut self.debug_draw,
+        );
         let lines = self.debug_draw.vertices();
         let debug_lines = (!lines.is_empty()).then_some((&self.debug_line_pipeline, lines));
 
         let frustum = self.camera.frustum();
+        let water_draws: Vec<_> = self
+            .water_bindings
+            .values()
+            .map(|binding| WaterDraw { binding })
+            .collect();
+        let water = (!water_draws.is_empty()).then_some(WaterFrame {
+            pipeline: &self.water_pipeline,
+            draws: &water_draws,
+        });
         if let Err(err) = engine_ecs::extract_and_render_to(
             Some(RenderTarget::new(&self.view)),
             world,
@@ -498,14 +641,14 @@ impl Viewport {
             &self.skinned_pipeline,
             &self.instanced_pipeline,
             debug_lines,
-            // No sprites: every sprite in a scene samples its own atlas
-            // texture, and the Scene view has no atlas binding to draw
-            // them with yet. 2D scenes show their meshes, not their
-            // sprites, until that is wired.
+            self.sprite_atlas.as_ref().map(|atlas| SpriteTarget {
+                pipeline: &self.sprite_pipeline,
+                quad: &self.sprite_quad,
+                atlas,
+            }),
             None,
             None,
-            None,
-            None,
+            water,
             // The editor draws its own chrome through egui; the runtime
             // UI pass is for shipped games.
             None,
@@ -513,15 +656,59 @@ impl Viewport {
             tracing::error!(error = %err, "editor viewport frame failed");
         }
     }
+
+    fn update_water(&mut self, gpu: &GpuContext, world: &mut World) {
+        let surfaces = water_surfaces(world);
+        self.water_bindings
+            .retain(|entity, _| surfaces.iter().any(|(live, _)| live == entity));
+        for (entity, surface) in surfaces {
+            let center = Vec3::new(surface.center.x, surface.base_height, surface.center.z);
+            let uniform = WaterGpuUniform::new(
+                center,
+                surface.half_extent,
+                surface.wave.direction,
+                surface.wave.amplitude,
+                surface.wave.length,
+                surface.wave.speed,
+                0.0,
+            );
+            let binding = self.water_bindings.entry(entity).or_insert_with(|| {
+                gpu.create_water_binding(&self.water_pipeline, &self.pipeline, &uniform)
+            });
+            gpu.write_water_binding(binding, &uniform, &[]);
+            let model = Mat4::from_scale_rotation_translation(
+                Vec3::new(surface.half_extent.x, 1.0, surface.half_extent.y),
+                Quat::IDENTITY,
+                center,
+            );
+            gpu.write_uniform_buffer(
+                &binding.model.buffer,
+                &engine_renderer::ModelUniform {
+                    model: model.to_cols_array_2d(),
+                },
+            );
+        }
+    }
 }
 
-/// World-space positions of every visible entity that has a transform but
-/// no [`MeshRenderer`] — lights, cameras, empties, and anything whose
-/// asset failed to resolve. These get a wireframe box so they stay
-/// visible and selectable.
+fn water_surfaces(world: &mut World) -> Vec<(Entity, engine_physics::WaterSurface)> {
+    world
+        .query::<(Entity, &engine_ecs::components::WaterVolume)>()
+        .iter(world)
+        .map(|(entity, volume)| (entity, volume.surface))
+        .collect()
+}
+
+/// World-space positions of every visible entity that names a model
+/// ([`MeshSource`]) but has no [`MeshRenderer`]: its asset is missing or
+/// failed to load. These get a red box so the problem is visible. Objects
+/// that never had a shape (empties, lights, cameras, sounds) get nothing
+/// here; cameras, lights and sounds are shown as icons instead.
 fn placeholder_positions(world: &mut World) -> Vec<Vec3> {
     let mut query = world.query_filtered::<&GlobalTransform, (
+        bevy_ecs::prelude::With<engine_ecs::components::MeshSource>,
         bevy_ecs::prelude::Without<MeshRenderer>,
+        bevy_ecs::prelude::Without<Sprite>,
         bevy_ecs::prelude::Without<Disabled>,
     )>();
     query
@@ -533,6 +720,102 @@ fn placeholder_positions(world: &mut World) -> Vec<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rendered_sprite_does_not_get_missing_mesh_placeholder() {
+        let mut world = World::new();
+        world.spawn((
+            GlobalTransform(engine_utils::Transform::from_translation(Vec3::ZERO)),
+            engine_ecs::components::Sprite::new(
+                glam::Vec2::ONE,
+                engine_renderer::UvRect {
+                    min: [0.0; 2],
+                    max: [1.0; 2],
+                },
+            ),
+        ));
+        assert!(placeholder_positions(&mut world).is_empty());
+    }
+
+    #[test]
+    fn only_unloaded_models_get_a_placeholder_box() {
+        let mut world = World::new();
+        let at = |x: f32| {
+            GlobalTransform(engine_utils::Transform::from_translation(Vec3::new(
+                x, 0.0, 0.0,
+            )))
+        };
+        world.spawn(at(1.0)); // An empty or a sound: no box.
+        world.spawn((
+            at(2.0),
+            engine_ecs::components::MeshSource {
+                mesh: uuid::Uuid::new_v4().to_string(),
+                material: uuid::Uuid::new_v4().to_string(),
+            },
+        ));
+        assert_eq!(
+            placeholder_positions(&mut world),
+            vec![Vec3::new(2.0, 0.0, 0.0)]
+        );
+    }
+
+    #[test]
+    fn scene_view_lights_include_authored_point_light() {
+        let mut world = World::new();
+        world.spawn((
+            engine_ecs::components::Transform::from(engine_utils::Transform::from_translation(
+                Vec3::new(2.0, 3.0, 4.0),
+            )),
+            engine_scene::ScenePointLight(engine_scene::PointLightData::default()),
+        ));
+        let lights = super::editor_lights(&mut world);
+        assert_eq!(lights.point.len(), 1);
+        assert_eq!(lights.point[0].position, Vec3::new(2.0, 3.0, 4.0));
+    }
+
+    #[test]
+    fn water_surface_collection_tracks_live_scene_entities() {
+        let mut world = World::new();
+        let entity = world
+            .spawn(engine_ecs::components::WaterVolume {
+                surface: engine_physics::WaterSurface::default(),
+            })
+            .id();
+        assert_eq!(water_surfaces(&mut world).len(), 1);
+        world.despawn(entity);
+        assert!(water_surfaces(&mut world).is_empty());
+    }
+
+    #[test]
+    fn deleted_instanced_group_is_identified_without_releasing_survivors() {
+        use engine_ecs::components::InstancedMeshRenderer;
+        use engine_utils::{AssetHandle, AssetId};
+
+        let mut world = World::new();
+        let first_mesh = AssetHandle::new(AssetId::new());
+        let first_material = AssetHandle::new(AssetId::new());
+        let second_mesh = AssetHandle::new(AssetId::new());
+        let second_material = AssetHandle::new(AssetId::new());
+        let deleted = world
+            .spawn(InstancedMeshRenderer {
+                mesh: first_mesh,
+                material: first_material,
+                instances: Vec::new(),
+            })
+            .id();
+        world.spawn(InstancedMeshRenderer {
+            mesh: second_mesh,
+            material: second_material,
+            instances: Vec::new(),
+        });
+        let before = super::instanced_handles(&mut world);
+        world.despawn(deleted);
+
+        assert_eq!(
+            super::removed_instanced_handles(&before, &super::instanced_handles(&mut world)),
+            vec![(first_mesh, first_material)]
+        );
+    }
 
     #[test]
     fn box_has_twelve_edges_as_twentyfour_vertices() {
@@ -551,33 +834,15 @@ mod tests {
 
     #[test]
     fn overlay_has_no_lines_with_nothing_to_draw() {
-        let lines = overlay_lines(&[], None, GizmoMode::Translate, false);
-        assert!(lines.is_empty(), "an empty overlay must skip the draw");
+        assert!(
+            overlay_lines(&[]).is_empty(),
+            "an empty overlay must skip the draw"
+        );
     }
 
     #[test]
     fn overlay_includes_a_box_per_placeholder() {
-        let lines = overlay_lines(
-            &[Vec3::ZERO, Vec3::X, Vec3::Y],
-            None,
-            GizmoMode::Translate,
-            false,
-        );
+        let lines = overlay_lines(&[Vec3::ZERO, Vec3::X, Vec3::Y]);
         assert_eq!(lines.len(), 3 * 24);
-    }
-
-    #[test]
-    fn overlay_appends_gizmo_handles_after_placeholders() {
-        let with_gizmo =
-            overlay_lines(&[Vec3::ZERO], Some(Vec3::ZERO), GizmoMode::Translate, false);
-        let axes = gizmo::axes_for(GizmoMode::Translate, false).len();
-        assert_eq!(with_gizmo.len(), 24 + axes * 2);
-    }
-
-    #[test]
-    fn two_d_mode_draws_fewer_gizmo_axes_than_three_d() {
-        let three_d = overlay_lines(&[], Some(Vec3::ZERO), GizmoMode::Translate, false);
-        let two_d = overlay_lines(&[], Some(Vec3::ZERO), GizmoMode::Translate, true);
-        assert!(two_d.len() < three_d.len());
     }
 }

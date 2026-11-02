@@ -71,6 +71,10 @@ pub struct AudioEmitter {
     /// Play as soon as the emitter is first seen. Set `false` to trigger
     /// it later with [`AudioEmitter::play`].
     pub autoplay: bool,
+    /// Linear playback gain (`1.0` is unchanged).
+    pub gain: f32,
+    /// Distance at which spatial playback fades to silence, in world units.
+    pub radius: f32,
     /// Index into the caller's own bus list, if this should play flat on
     /// a bus instead of spatially. See the module docs.
     pub bus: Option<usize>,
@@ -90,6 +94,8 @@ impl AudioEmitter {
         Self {
             sound,
             autoplay: true,
+            gain: 1.0,
+            radius: 100.0,
             bus: None,
             pending: false,
             started: false,
@@ -163,7 +169,10 @@ pub fn update_audio(world: &mut World, audio: &mut AudioContext, buses: &mut [Bu
             if !needs_track {
                 continue;
             }
-            match audio.add_spatial_track(handle, position) {
+            let radius = world
+                .get::<AudioEmitter>(entity)
+                .map_or(100.0, |emitter| emitter.radius);
+            match audio.add_spatial_track_with_radius(handle, position, radius) {
                 Ok(track) => new_tracks.push((entity, track)),
                 Err(err) => {
                     tracing::warn!(error = %err, "could not create a spatial audio track")
@@ -192,7 +201,7 @@ pub fn update_audio(world: &mut World, audio: &mut AudioContext, buses: &mut [Bu
         emitter.pending = false;
         emitter.started = true;
 
-        let sound = emitter.sound.clone();
+        let sound = emitter.sound.clone().with_gain(emitter.gain);
         let result = match emitter.bus {
             Some(index) => match buses.get_mut(index) {
                 Some(bus) => sound.play_on_bus(bus).map(|_| ()),

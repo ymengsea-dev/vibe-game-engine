@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn cube_faces_wind_counter_clockwise_from_outside() {
         let (vertices, indices) = cube();
-        for tri in indices.chunks_exact(3) {
+        for tri in indices.as_chunks::<3>().0 {
             let p = |i: u32| glam::Vec3::from(vertices[i as usize].position);
             let geometric = (p(tri[1]) - p(tri[0])).cross(p(tri[2]) - p(tri[0]));
             let stored = glam::Vec3::from(vertices[tri[0] as usize].normal);

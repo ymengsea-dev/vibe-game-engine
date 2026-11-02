@@ -37,7 +37,7 @@ use engine_utils::AssetHandle;
 
 use crate::Scene;
 use crate::error::SceneError;
-use crate::format::AssetRef;
+use crate::format::{AssetRef, MaterialOverrideData};
 use crate::resolve::SceneResolver;
 
 /// Where an [`AssetLibrary`]'s bytes come from.
@@ -65,6 +65,26 @@ pub struct AssetLibrary {
     store: AssetStore,
     /// Asset id to store-relative path.
     by_id: HashMap<String, String>,
+}
+
+fn checked_loose_asset_path(root: &Path, relative: &Path) -> Result<Option<PathBuf>, SceneError> {
+    let path = root.join(relative);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|err| SceneError::Io(format!("{}: {err}", root.display())))?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|err| SceneError::Io(format!("{}: {err}", path.display())))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(SceneError::Io(format!(
+            "project asset escapes its directory: {}",
+            relative.display()
+        )));
+    }
+    Ok(Some(canonical_path))
 }
 
 impl AssetLibrary {
@@ -100,7 +120,13 @@ impl AssetLibrary {
                 .map_err(|err| SceneError::Io(format!("{}: {err}", dir.display())))?;
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
                     stack.push(path);
                     continue;
                 }
@@ -182,7 +208,9 @@ impl AssetLibrary {
     pub fn path_for(&self, id: &str) -> Option<PathBuf> {
         let relative = self.by_id.get(id)?;
         match &self.store {
-            AssetStore::Directory(root) => Some(root.join(relative)),
+            AssetStore::Directory(root) => checked_loose_asset_path(root, Path::new(relative))
+                .ok()
+                .flatten(),
             AssetStore::Bundle(_) => None,
         }
     }
@@ -207,12 +235,21 @@ impl AssetLibrary {
     ///
     /// [`SceneError::Io`] if the path exists but cannot be read.
     pub fn read_path(&self, relative: &str) -> Result<Option<Vec<u8>>, SceneError> {
+        let relative_path = Path::new(relative);
+        if relative_path.as_os_str().is_empty()
+            || !relative_path
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(SceneError::Io(format!(
+                "invalid project asset path: {relative}"
+            )));
+        }
         match &self.store {
             AssetStore::Directory(root) => {
-                let path = root.join(relative);
-                if !path.is_file() {
+                let Some(path) = checked_loose_asset_path(root, relative_path)? else {
                     return Ok(None);
-                }
+                };
                 std::fs::read(&path)
                     .map(Some)
                     .map_err(|err| SceneError::Io(format!("{}: {err}", path.display())))
@@ -243,12 +280,12 @@ impl AssetLibrary {
             return Ok(None);
         };
         match &self.store {
-            AssetStore::Directory(root) => {
-                let path = root.join(relative);
-                std::fs::read(&path)
-                    .map(Some)
-                    .map_err(|err| SceneError::Io(format!("{}: {err}", path.display())))
-            }
+            AssetStore::Directory(_) => self
+                .read_path(relative)?
+                .ok_or_else(|| {
+                    SceneError::Io(format!("{relative} is indexed but missing from assets"))
+                })
+                .map(Some),
             AssetStore::Bundle(bundle) => bundle.get(relative).map(<[u8]>::to_vec).map_or_else(
                 || {
                     Err(SceneError::Io(format!(
@@ -405,7 +442,16 @@ impl SceneResolver for RuntimeResolver<'_> {
     fn resolve_mesh(
         &mut self,
         mesh: &AssetRef,
+        material: &AssetRef,
+    ) -> Result<Option<MeshRenderer>, SceneError> {
+        self.resolve_mesh_with_material(mesh, material, None)
+    }
+
+    fn resolve_mesh_with_material(
+        &mut self,
+        mesh: &AssetRef,
         _material: &AssetRef,
+        material_override: Option<&MaterialOverrideData>,
     ) -> Result<Option<MeshRenderer>, SceneError> {
         let uuid = mesh.parse_id().map_err(SceneError::Resolve)?;
         let id = AssetId::from_uuid(uuid);
@@ -413,7 +459,8 @@ impl SceneResolver for RuntimeResolver<'_> {
         // Already uploaded for an earlier entity. The ref-count check
         // guards a stale entry: if everything using this mesh was
         // despawned, the store freed it and the handle points at nothing.
-        if let Some(&(mesh_handle, material_handle)) = self.uploaded.get(&id)
+        if material_override.is_none()
+            && let Some(&(mesh_handle, material_handle)) = self.uploaded.get(&id)
             && self.assets.meshes.ref_count(mesh_handle).is_some()
             && self.assets.materials.ref_count(material_handle).is_some()
         {
@@ -447,6 +494,7 @@ impl SceneResolver for RuntimeResolver<'_> {
             .and_then(|index| gltf.images.get(index))
             .map(|image| (image.width, image.height, image.rgba8.as_slice()));
         let material = imported_material.map_or(Material::DEFAULT, material_from_imported);
+        let material = material_override.map_or(material, |value| value.apply(material));
 
         let renderer = MeshRenderer::from_geometry(
             self.gpu,
@@ -459,7 +507,9 @@ impl SceneResolver for RuntimeResolver<'_> {
         )
         .map_err(|err| SceneError::Resolve(err.to_string()))?;
 
-        self.uploaded.insert(id, (renderer.mesh, renderer.material));
+        if material_override.is_none() {
+            self.uploaded.insert(id, (renderer.mesh, renderer.material));
+        }
         Ok(Some(renderer))
     }
 
@@ -900,6 +950,77 @@ mod tests {
                 .is_none()
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_path_rejects_parent_traversal() {
+        let root = temp_project("read-path-traversal");
+        let outside = root.with_extension("outside");
+        std::fs::write(&outside, b"private").expect("outside file");
+        let library = AssetLibrary::index(&root).expect("index");
+        assert!(
+            library
+                .read_path("../vge-asset-library-read-path-traversal.outside")
+                .is_err()
+        );
+        let _ = std::fs::remove_file(outside);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_path_rejects_a_symlink_outside_the_asset_directory() {
+        let root = temp_project("read-path-symlink");
+        let outside = root.with_extension("outside");
+        std::fs::write(&outside, b"private").expect("outside file");
+        std::os::unix::fs::symlink(&outside, root.join("models/escape.prefab")).expect("symlink");
+        let library = AssetLibrary::index(&root).expect("index");
+        assert!(library.read_path("models/escape.prefab").is_err());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_does_not_follow_symlinked_assets_or_directories() {
+        let root = temp_project("index-symlinks");
+        let outside = root.with_extension("outside");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        std::fs::write(outside.join("private.gltf"), b"private").expect("outside file");
+        std::os::unix::fs::symlink(
+            outside.join("private.gltf"),
+            root.join("models/linked.gltf"),
+        )
+        .expect("file symlink");
+        std::fs::write(
+            root.join("models/linked.gltf.meta"),
+            "(id: \"5e62f4ac-2b5d-41c7-a3e7-d68816f6f7cd\", source_hash: 0)",
+        )
+        .expect("metadata");
+        std::os::unix::fs::symlink(&outside, root.join("models/external"))
+            .expect("directory symlink");
+        let library = AssetLibrary::index(&root).expect("index");
+        assert!(library.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn indexed_asset_replaced_by_external_symlink_cannot_be_read() {
+        let root = temp_project("replaced-symlink");
+        let outside = root.with_extension("outside");
+        let id = "5e62f4ac-2b5d-41c7-a3e7-d68816f6f7cd";
+        let asset = root.join("models/linked.gltf");
+        write_asset(&root.join("models"), "linked.gltf", id);
+        let library = AssetLibrary::index(&root).expect("index");
+        std::fs::write(&outside, b"private").expect("outside file");
+        std::fs::remove_file(&asset).expect("remove indexed file");
+        std::os::unix::fs::symlink(&outside, &asset).expect("replace with symlink");
+        assert!(library.read(id).is_err());
+        assert!(library.path_for(id).is_none());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_file(outside);
     }
 
     #[test]

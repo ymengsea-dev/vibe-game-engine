@@ -31,6 +31,18 @@ pub struct StaticSound {
 }
 
 impl StaticSound {
+    /// Applies linear gain to a play request (`1.0` is unchanged, `0.0` is silent).
+    /// Values beyond the editor's 4× range are capped before reaching the mixer.
+    pub fn with_gain(mut self, gain: f32) -> Self {
+        let level = if !gain.is_finite() || gain <= 0.0 {
+            kira::Decibels::SILENCE
+        } else {
+            kira::Decibels(20.0 * gain.min(4.0).log10())
+        };
+        self.data = self.data.volume(level);
+        self
+    }
+
     /// Decodes `bytes` into a [`StaticSound`].
     ///
     /// `looping: true` repeats the whole sound from the start indefinitely
@@ -162,6 +174,22 @@ mod tests {
     fn from_bytes_decodes_a_valid_wav() {
         let wav = silent_wav(44_100, 1000);
         assert!(StaticSound::from_bytes(wav, false).is_ok());
+    }
+
+    #[test]
+    fn authored_linear_gain_changes_playback_volume() {
+        let sound = StaticSound::from_bytes(silent_wav(44_100, 1000), false)
+            .expect("valid fixture")
+            .with_gain(0.5);
+        let kira::Value::Fixed(level) = sound.data.settings.volume else {
+            panic!("gain must produce a fixed playback level");
+        };
+        assert!((level.0 - -6.0206).abs() < 0.001);
+        let muted = sound.with_gain(0.0);
+        assert_eq!(
+            muted.data.settings.volume,
+            kira::Value::Fixed(kira::Decibels::SILENCE)
+        );
     }
 
     // `StaticSound`/`StreamingSound` aren't `Debug` (they hold decoded

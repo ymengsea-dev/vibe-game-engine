@@ -111,7 +111,11 @@ pub enum PendingAction {
     /// Open an existing project at this directory.
     OpenProject(PathBuf),
     /// Create a project in this directory, then open it.
-    NewProject(PathBuf),
+    NewProject(
+        PathBuf,
+        engine_project::GameplayLanguage,
+        engine_project::ProjectTemplate,
+    ),
 }
 
 impl PendingAction {
@@ -131,7 +135,7 @@ impl PendingAction {
             PendingAction::NewScene => "starting a new scene",
             PendingAction::RevertScene => "reverting the scene",
             PendingAction::OpenProject(_) => "opening another project",
-            PendingAction::NewProject(_) => "creating a new project",
+            PendingAction::NewProject(_, _, _) => "creating a new project",
         }
     }
 }

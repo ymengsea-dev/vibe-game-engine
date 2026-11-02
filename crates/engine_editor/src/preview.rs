@@ -395,7 +395,7 @@ fn paint_waveform(ui: &mut egui::Ui, bins: &[(f32, f32)]) {
     let mid_y = rect.center().y;
     let half_h = rect.height() / 2.0;
     let column_width = rect.width() / bins.len() as f32;
-    let color = egui::Color32::from_rgb(120, 170, 220);
+    let color = crate::theme::NIGHT.accent;
     for (index, (low, high)) in bins.iter().enumerate() {
         let x = rect.left() + index as f32 * column_width + column_width / 2.0;
         let y_low = mid_y - low.clamp(-1.0, 1.0) * half_h;

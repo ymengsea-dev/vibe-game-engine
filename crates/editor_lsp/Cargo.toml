@@ -1,6 +1,6 @@
 [package]
 name = "editor_lsp"
-description = "rust-analyzer LSP bridge for RustyEngine Studio: spawns the server, syncs open documents, and surfaces diagnostics."
+description = "Rust and Lua language-server bridge for RustyEngine Studio."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

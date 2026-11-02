@@ -22,7 +22,6 @@
 # private dev notes
 NOTES.md
 
-# Agent planning artifacts
-/docs/superpowers/
-.superpowers
+# Agent planning artifacts (specs and plans), kept local
+.superpowers/
 island-save.ron

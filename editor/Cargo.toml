@@ -9,10 +9,12 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-engine.workspace = true
+engine = { workspace = true, features = ["lua"] }
 editor_code.workspace = true
 editor_lsp.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+toml_edit.workspace = true
 # Turn on the integrated terminal for the editor build only. `engine`
 # pulls `engine_editor` without this feature, so runtime builds
 # (game -> engine) stay free of the PTY stack (NFR-004).
@@ -23,6 +25,12 @@ rfd.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 muda.workspace = true
 core-graphics.workspace = true
+
+# The Rust starter Studio writes into new projects. Built as an example so
+# `cargo build/clippy --all-targets` catches API drift in the template.
+[[example]]
+name = "rust_starter"
+path = "assets/rust_starter.rs"
 
 [lints]
 workspace = true

@@ -36,6 +36,7 @@ mod dirty;
 #[cfg(feature = "dock-shell")]
 pub mod dock;
 mod error;
+pub mod game_view;
 pub mod gizmo;
 pub mod hierarchy;
 mod history;
@@ -53,15 +54,24 @@ mod preview;
 pub mod profiler;
 mod project_swap;
 mod resolve;
+pub mod scene_camera;
+pub mod scene_icons;
+pub mod scene_pick;
 mod search;
 mod session;
+mod settings_window;
 mod shell;
 mod state;
+pub mod storage;
 #[cfg(feature = "terminal")]
 mod terminal;
 pub mod terrain_tools;
 mod theme;
+mod tilemap;
+#[cfg(test)]
+mod ui_snapshot;
 mod viewport;
+mod widgets;
 
 pub use asset_import::{
     IMPORTABLE_EXTENSIONS, ImportOutcome as AssetImportOutcome, import_files, is_importable,
@@ -73,7 +83,7 @@ pub use assets::{
     scan_with_folders as scan_assets_with_folders,
 };
 pub use chrome::{
-    BottomTab, EditorDimension, InspectorTab, PanelVisibility, TransformSpace, Workspace,
+    BottomTab, EditorDimension, InspectorTab, PanelVisibility, TransformSpace, ViewTool, Workspace,
 };
 pub use console::{ConsoleFilter, ConsoleLayer, ConsoleLine, ConsoleLog, LevelFilter};
 pub use diagnostics::{Diagnostic, Diagnostics, Severity};
@@ -98,11 +108,13 @@ pub use search::{
 
 pub use egui_wgpu::ScreenDescriptor;
 pub use error::EditorError;
-pub use gizmo::{Axis, GizmoMode};
-pub use history::History;
+pub use game_view::{GameFrameTexture, GameTexture, GameView};
+pub use gizmo::{Axis, GizmoHandle};
+pub use history::{History, HistoryChange, HistoryError};
 pub use inspect::{InspectField, Inspectable};
-pub use play::{EditorMode, PlayState};
+pub use play::{EditorMode, GameControl, PlayKind, PlayState};
 pub use profiler::{FrameProfiler, FrameSample};
+pub use scene_camera::{SceneCamera, SceneCameras};
 pub use session::{EditorSession, SESSION_FILE, SESSION_VERSION};
 pub use shell::EditorShell;
 pub use state::{AUTOSAVE_FILE, DEFAULT_SCENE_PATH, EditorState, recovery_candidate};
