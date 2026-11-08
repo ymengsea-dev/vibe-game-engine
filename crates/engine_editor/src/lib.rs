@@ -45,6 +45,7 @@ mod import;
 pub mod inspect;
 pub mod inspector;
 mod menu;
+pub(crate) mod object_clipboard;
 mod output;
 pub mod overlays;
 pub mod perf_budget;
@@ -86,7 +87,7 @@ pub use chrome::{
     BottomTab, EditorDimension, InspectorTab, PanelVisibility, TransformSpace, ViewTool, Workspace,
 };
 pub use console::{ConsoleFilter, ConsoleLayer, ConsoleLine, ConsoleLog, LevelFilter};
-pub use diagnostics::{Diagnostic, Diagnostics, Severity};
+pub use diagnostics::{ASSET_DROP_CODE, Diagnostic, Diagnostics, Severity};
 pub use dirty::{DirtyState, PendingAction};
 pub use import::{
     AssetImporter, ImportOutcome, ImportRecord, ImportStats, ImportedAsset, ReloadReport,
@@ -108,7 +109,7 @@ pub use search::{
 
 pub use egui_wgpu::ScreenDescriptor;
 pub use error::EditorError;
-pub use game_view::{GameFrameTexture, GameTexture, GameView};
+pub use game_view::{GameFrameTexture, GameTexture, GameView, StudioCursorLock};
 pub use gizmo::{Axis, GizmoHandle};
 pub use history::{History, HistoryChange, HistoryError};
 pub use inspect::{InspectField, Inspectable};

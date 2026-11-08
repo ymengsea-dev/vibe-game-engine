@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::window::WindowId;
+use winit::window::{CursorGrabMode, WindowId};
 
 use crate::config::WindowConfig;
 use crate::error::PlatformError;
@@ -96,6 +96,13 @@ pub trait PlatformHandler {
         false
     }
 
+    /// Polled once per event-loop iteration. `Some(true)` asks the runner to
+    /// lock and hide the cursor, `Some(false)` to release and show it, and
+    /// `None` means no change. Default: never changes the cursor.
+    fn cursor_lock(&self) -> Option<bool> {
+        None
+    }
+
     /// Selects whether the event loop waits, schedules a timer, or draws
     /// another frame after the current turn.
     fn redraw_policy(&self) -> RedrawPolicy {
@@ -131,6 +138,9 @@ struct Runner<H: PlatformHandler> {
     window: Option<Arc<Window>>,
     wake: WakeHandle,
     handler: H,
+    /// Whether the window currently has focus (raw motion is only
+    /// delivered while it does).
+    focused: bool,
     /// Set when `resumed` fails to create the window. `resumed` has no way
     /// to return a `Result` to the caller, so it exits the loop and stashes
     /// the error here for `run_windowed` to surface afterward.
@@ -162,6 +172,13 @@ impl<H: PlatformHandler> ApplicationHandler<UserEvent> for Runner<H> {
                 let window = Arc::new(window);
                 self.handler.set_wake_handle(self.wake.clone());
                 self.handler.on_window_ready(Arc::clone(&window));
+                // winit only reports focus *changes*, so seed the real
+                // starting state rather than assuming focus.
+                self.focused = window.has_focus();
+                self.handler
+                    .on_event(crate::event::PlatformEvent::FocusChanged {
+                        focused: self.focused,
+                    });
                 window.request_redraw();
                 self.window = Some(window);
             }
@@ -181,6 +198,9 @@ impl<H: PlatformHandler> ApplicationHandler<UserEvent> for Runner<H> {
             }
         }
 
+        if let WindowEvent::Focused(focused) = event {
+            self.focused = focused;
+        }
         let Some(mapped) = map_window_event(&event) else {
             return;
         };
@@ -195,6 +215,19 @@ impl<H: PlatformHandler> ApplicationHandler<UserEvent> for Runner<H> {
             return;
         }
         self.handler.on_event(mapped);
+    }
+
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta } = event
+            && self.focused
+            && self.window.is_some()
+        {
+            self.handler
+                .on_event(crate::event::PlatformEvent::MouseMotion {
+                    delta_x: delta.0 as f32,
+                    delta_y: delta.1 as f32,
+                });
+        }
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -215,6 +248,11 @@ impl<H: PlatformHandler> ApplicationHandler<UserEvent> for Runner<H> {
             event_loop.exit();
             return;
         }
+        if let Some(locked) = self.handler.cursor_lock()
+            && let Some(window) = &self.window
+        {
+            apply_cursor_lock(window, locked);
+        }
         let policy = self.handler.redraw_policy();
         if deadline_needs_redraw(Instant::now(), policy)
             && let Some(window) = &self.window
@@ -233,6 +271,25 @@ impl<H: PlatformHandler> ApplicationHandler<UserEvent> for Runner<H> {
                 }
             }
         }
+    }
+}
+
+/// Locks (or releases) the cursor, hiding it while locked. Prefers a true
+/// lock and falls back to confining it to the window.
+pub fn apply_cursor_lock(window: &Window, locked: bool) {
+    if locked {
+        let grabbed = window.set_cursor_grab(CursorGrabMode::Locked).is_ok()
+            || window.set_cursor_grab(CursorGrabMode::Confined).is_ok();
+        if grabbed {
+            window.set_cursor_visible(false);
+        } else {
+            tracing::warn!("could not lock the cursor; the platform refused both grab modes");
+        }
+    } else {
+        if let Err(err) = window.set_cursor_grab(CursorGrabMode::None) {
+            tracing::warn!(error = %err, "could not release the cursor");
+        }
+        window.set_cursor_visible(true);
     }
 }
 
@@ -282,6 +339,7 @@ pub fn run_windowed(
         window: None,
         wake,
         handler,
+        focused: true,
         pending_error: None,
     };
 

@@ -113,6 +113,37 @@ pub struct WorldSnapshot {
 }
 
 impl WorldSnapshot {
+    /// Folds legacy `eye`/`target`/`up` cameras into their transforms, the
+    /// same way a scene does on load. Saves written before a camera's
+    /// transform became its pose carry the view only in those vectors.
+    fn adopt_legacy_camera_poses(&mut self) {
+        if !self
+            .entities
+            .iter()
+            .any(|e| e.camera.is_some_and(|c| !c.pose_from_transform))
+        {
+            return;
+        }
+        let mut holder = crate::Scene {
+            entities: self
+                .entities
+                .iter()
+                .map(|e| crate::SceneEntity {
+                    parent: e.parent,
+                    transform: e.transform,
+                    camera: e.camera,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        crate::adopt_legacy_camera_poses(&mut holder);
+        for (saved, adopted) in self.entities.iter_mut().zip(holder.entities) {
+            saved.transform = adopted.transform;
+            saved.camera = adopted.camera;
+        }
+    }
+
     /// Validates values and hierarchy links before they become live ECS
     /// components. Save files are untrusted input just like scene files.
     fn validate(&self) -> Result<(), SceneError> {
@@ -217,6 +248,9 @@ impl WorldSnapshot {
                     .get::<crate::SceneFoliage>(entity)
                     .map(|source| source.0.clone());
                 saved.sprite = sprite;
+                saved.camera = saved
+                    .camera
+                    .map(|camera| crate::saved_camera_pose(world, entity, camera));
                 // A parent that was itself skipped leaves this entity a
                 // root, rather than dangling at an index that means
                 // something else.
@@ -287,6 +321,9 @@ impl SavedEntity {
             sibling_order: None,
             transform: self.transform,
             camera: self.camera,
+            // Saves do not keep object ids, which is what a follow target is,
+            // so the scene's own follow setup stays the source of truth.
+            camera_follow: None,
             mesh_renderer: self.mesh_renderer.clone(),
             foliage: self.foliage.clone(),
             sprite: self.sprite.clone(),
@@ -392,8 +429,9 @@ impl<T: DeserializeOwned> SaveGame<T> {
     /// or hierarchy links.
     pub fn from_ron_str(text: &str) -> Result<Self, SceneError> {
         check_version(text)?;
-        let save: Self =
+        let mut save: Self =
             ron::from_str(text).map_err(|err| SceneError::Deserialize(err.to_string()))?;
+        save.world.adopt_legacy_camera_poses();
         save.world.validate()?;
         Ok(save)
     }
@@ -462,6 +500,33 @@ mod tests {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("vge-save-{name}-{}-{n}.ron", std::process::id()))
+    }
+
+    #[test]
+    fn saved_moved_camera_reloads_with_the_same_world_view() {
+        let mut world = World::new();
+        let rotation = glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        world.spawn((
+            Name::new("Cam"),
+            engine_ecs::components::Transform(
+                MathTransform::from_translation(Vec3::new(1.0, 2.0, 3.0)).with_rotation(rotation),
+            ),
+            Camera(engine_renderer::Camera::new(Vec3::ZERO, Vec3::NEG_Z, 1.5)),
+            engine_ecs::components::ActiveCamera,
+        ));
+        let snapshot = WorldSnapshot::capture(&mut world);
+        let camera = snapshot.entities[0].camera.unwrap();
+        assert!(camera.pose_from_transform && camera.active);
+        let mut restored = World::new();
+        snapshot.restore(&mut restored, &mut NullResolver);
+        let mut query = restored.query::<(
+            &engine_ecs::components::Transform,
+            &engine_ecs::components::ActiveCamera,
+        )>();
+        let (transform, _) = query.single(&restored).unwrap();
+        let (eye, look, _) = crate::camera_world_pose(transform.0.to_matrix());
+        assert!((eye - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-4);
+        assert!((look - Vec3::new(0.0, 2.0, 3.0)).length() < 1e-4);
     }
 
     #[test]
@@ -658,6 +723,37 @@ mod tests {
     fn corrupt_save_is_an_error_not_a_panic() {
         let result: Result<SaveGame<()>, _> = SaveGame::from_ron_str("this is not RON {{{");
         assert!(matches!(result, Err(SceneError::Deserialize(_))));
+    }
+
+    #[test]
+    fn old_save_with_a_legacy_camera_adopts_its_view_into_the_transform() {
+        let camera = crate::CameraData {
+            eye: [1.0, 2.0, 3.0],
+            target: [1.0, 2.0, 2.0],
+            up: [0.0, 1.0, 0.0],
+            aspect_ratio: 1.5,
+            projection: crate::ProjectionData::Perspective { fov_y_radians: 1.0 },
+            near: 0.1,
+            far: 100.0,
+            pose_from_transform: false,
+            active: false,
+        };
+        let save = SaveGame {
+            version: CURRENT_SAVE_VERSION,
+            world: WorldSnapshot {
+                entities: vec![SavedEntity {
+                    camera: Some(camera),
+                    ..Default::default()
+                }],
+            },
+            game: (),
+        };
+        let text = save.to_ron_string().unwrap();
+        let loaded = SaveGame::<()>::from_ron_str(&text).unwrap();
+        let entity = &loaded.world.entities[0];
+        assert!(entity.camera.unwrap().pose_from_transform);
+        let translation = entity.transform.unwrap().translation;
+        assert_eq!(translation, [1.0, 2.0, 3.0]);
     }
 
     #[test]

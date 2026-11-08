@@ -118,14 +118,14 @@ pub mod prelude {
     };
     pub use engine_scene::{
         AmbientSoundData, AssetLibrary, AssetRef, AudioEmitterData, BUNDLE_FILE, BodyKind,
-        CURRENT_SCENE_VERSION, CameraData, ColliderData, ColliderShape, EXPORT_SCENE_FILE,
-        EnvironmentData, ExportContent, InstantiateReport, LoadedSkinnedMesh, MeshRendererData,
-        NavGridData, NullResolver, Prefab, ProjectionData, RuleAction, RuleCompare, RuleCondition,
-        RuleData, RuleEvent, RuleTrigger, RuleVariables, RuntimeResolver, SaveGame, SavedEntity,
-        Scene, SceneAudioEmitter, SceneCollider, SceneEntity, SceneError, SceneNavGrid,
-        SceneResolver, SceneSpriteAnimation, SpriteAnimationData, SpriteData, TransformData,
-        WorldSnapshot, capture_renderables, executable_dir, load_mesh_geometry, load_skinned_mesh,
-        open_export,
+        CURRENT_SCENE_VERSION, CameraData, ColliderData, ColliderShape, ContactRuleKind,
+        EXPORT_SCENE_FILE, EnvironmentData, ExportContent, GameState, GameStateName,
+        InstantiateReport, LoadedSkinnedMesh, MeshRendererData, NavGridData, NullResolver, Prefab,
+        ProjectionData, RuleAction, RuleCompare, RuleCondition, RuleData, RuleEvent, RuleOutcome,
+        RuleTrigger, RuleVariables, RuntimeResolver, SaveGame, SavedEntity, Scene,
+        SceneAudioEmitter, SceneCollider, SceneEntity, SceneError, SceneNavGrid, SceneResolver,
+        SceneSpriteAnimation, SpriteAnimationData, SpriteData, TransformData, WorldSnapshot,
+        capture_renderables, executable_dir, load_mesh_geometry, load_skinned_mesh, open_export,
     };
     pub use engine_scripting::GameCommand;
     #[cfg(feature = "lua")]

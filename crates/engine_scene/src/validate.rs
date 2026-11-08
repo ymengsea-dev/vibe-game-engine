@@ -62,6 +62,111 @@ impl TransformData {
     }
 }
 
+impl crate::CameraFollowData {
+    /// Checks every setting is finite and in range. An empty target is allowed: it
+    /// means none has been picked yet.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        use crate::CameraFollowMode;
+        Self::validate_mode(self.mode)?;
+        if let Some(switch) = &self.view_switch {
+            if switch.key.is_empty() || switch.key.len() > 32 {
+                return Err(format!("view switch key is not a key: {:?}", switch.key));
+            }
+            Self::validate_mode(switch.other)?;
+            let person = |mode| {
+                matches!(
+                    mode,
+                    CameraFollowMode::ThirdPerson { .. } | CameraFollowMode::FirstPerson { .. }
+                )
+            };
+            let same_view =
+                std::mem::discriminant(&self.mode) == std::mem::discriminant(&switch.other);
+            if !person(self.mode) || !person(switch.other) || same_view {
+                return Err(
+                    "a view switch needs one first-person and one third-person view".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_mode(mode: crate::CameraFollowMode) -> Result<(), String> {
+        use crate::CameraFollowMode;
+        let smoothing_ok = |smoothing: f32| smoothing.is_finite() && smoothing >= 0.0;
+        let check_pitch = |min: f32, max: f32| {
+            let in_range = |degrees: f32| degrees.is_finite() && (-89.0..=89.0).contains(&degrees);
+            if in_range(min) && in_range(max) && min < max {
+                Ok(())
+            } else {
+                Err(format!(
+                    "pitch limits must be within -89..89 degrees with min < max, \
+                     got {min}..{max}"
+                ))
+            }
+        };
+        match mode {
+            CameraFollowMode::ThirdPerson {
+                distance,
+                height,
+                smoothing,
+                pitch_min_degrees,
+                pitch_max_degrees,
+                ..
+            } => {
+                if !(distance.is_finite() && distance > 0.0) {
+                    return Err(format!("distance must be finite and > 0, got {distance}"));
+                }
+                if !height.is_finite() {
+                    return Err(format!("height is not finite: {height}"));
+                }
+                if !smoothing_ok(smoothing) {
+                    return Err(format!(
+                        "smoothing must be finite and >= 0, got {smoothing}"
+                    ));
+                }
+                check_pitch(pitch_min_degrees, pitch_max_degrees)?;
+            }
+            CameraFollowMode::FirstPerson {
+                height,
+                pitch_min_degrees,
+                pitch_max_degrees,
+                ..
+            } => {
+                if !height.is_finite() {
+                    return Err(format!("height is not finite: {height}"));
+                }
+                check_pitch(pitch_min_degrees, pitch_max_degrees)?;
+            }
+            CameraFollowMode::Side2D {
+                dead_zone,
+                bounds,
+                smoothing,
+            } => {
+                if !dead_zone.iter().all(|v| v.is_finite() && *v >= 0.0) {
+                    return Err(format!(
+                        "dead_zone must be finite and >= 0, got {dead_zone:?}"
+                    ));
+                }
+                if !smoothing_ok(smoothing) {
+                    return Err(format!(
+                        "smoothing must be finite and >= 0, got {smoothing}"
+                    ));
+                }
+                if let Some([min_x, min_y, max_x, max_y]) = bounds
+                    && !([min_x, min_y, max_x, max_y].iter().all(|v| v.is_finite())
+                        && min_x <= max_x
+                        && min_y <= max_y)
+                {
+                    return Err(format!(
+                        "bounds must be finite with min <= max, got {bounds:?}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl CameraData {
     /// Checks that every vector is finite and that the projection
     /// parameters describe a valid, non-degenerate frustum.
@@ -229,6 +334,27 @@ impl ColliderData {
                 Err(format!("{name} must be finite and > 0, got {value}"))
             }
         };
+        if let Some(mass) = self.mass {
+            positive("mass", mass)?;
+        }
+        if !(self.friction.is_finite() && self.friction >= 0.0) {
+            return Err(format!(
+                "friction must be finite and >= 0, got {}",
+                self.friction
+            ));
+        }
+        if !(self.bounciness.is_finite() && (0.0..=1.0).contains(&self.bounciness)) {
+            return Err(format!(
+                "bounciness must be between 0 and 1, got {}",
+                self.bounciness
+            ));
+        }
+        if !self.gravity_scale.is_finite() {
+            return Err(format!(
+                "gravity scale must be finite, got {}",
+                self.gravity_scale
+            ));
+        }
         match &self.shape {
             ColliderShape::Ball { radius } => positive("radius", *radius),
             ColliderShape::Cuboid { half_extents } => {
@@ -290,6 +416,11 @@ impl SceneEntity {
             camera
                 .validate()
                 .map_err(|reason| format!("camera: {reason}"))?;
+        }
+        if let Some(follow) = &self.camera_follow {
+            follow
+                .validate()
+                .map_err(|reason| format!("camera_follow: {reason}"))?;
         }
         if let Some(mesh_renderer) = &self.mesh_renderer {
             mesh_renderer
@@ -361,7 +492,32 @@ impl crate::RuleData {
                 return Err("click trigger requires an owning UI Button".into());
             }
             RuleTrigger::Named(name) => validate_event_name(name)?,
+            RuleTrigger::KeyPressed { key } => {
+                if key.is_empty() || key.len() > 32 || key.chars().any(char::is_control) {
+                    return Err("key name must be 1–32 printable bytes".into());
+                }
+            }
+            RuleTrigger::Timer { seconds, .. } => {
+                if !seconds.is_finite() || !(0.05..=3600.0).contains(seconds) {
+                    return Err("timer seconds must be in 0.05–3600".into());
+                }
+            }
+            RuleTrigger::VariableChanged { name } => {
+                if !crate::rules::valid_variable_name(name) {
+                    return Err("variable name must be 1–64 printable bytes".into());
+                }
+            }
+            RuleTrigger::CollisionEnter { with: Some(id) }
+            | RuleTrigger::CollisionExit { with: Some(id) }
+            | RuleTrigger::TriggerEnter { with: Some(id) }
+            | RuleTrigger::TriggerExit { with: Some(id) } => validate_object_id(id)?,
             _ => {}
+        }
+        if self.conditions.len() > crate::MAX_RULE_CONDITIONS {
+            return Err(format!(
+                "a rule may have at most {} conditions",
+                crate::MAX_RULE_CONDITIONS
+            ));
         }
         if let Some(position) = self.graph_position
             && !position
@@ -370,7 +526,7 @@ impl crate::RuleData {
         {
             return Err("graph position must be finite and within ±1,000,000".into());
         }
-        if let Some(condition) = &self.condition {
+        for condition in &self.conditions {
             validate_variable(&condition.variable, condition.value)
                 .map_err(|reason| format!("condition: {reason}"))?;
         }
@@ -385,11 +541,78 @@ impl crate::RuleData {
             RuleAction::EmitEvent { name } => return validate_event_name(name),
             RuleAction::SetVariable { name, value } => return validate_variable(name, *value),
             RuleAction::AddToVariable { name, amount } => return validate_variable(name, *amount),
+            RuleAction::SetVisible { target, .. }
+            | RuleAction::SetEnabled { target, .. }
+            | RuleAction::Destroy { target } => {
+                if target.is_empty() {
+                    return Err("action needs a target object".into());
+                }
+                target
+            }
+            RuleAction::ChangeScene { path } => {
+                return if valid_scene_path(path) {
+                    Ok(())
+                } else {
+                    Err("scene path must be a project-relative scenes/*.ron path".into())
+                };
+            }
+            RuleAction::SpawnPrefab { path, at } => {
+                if !valid_prefab_path(path) {
+                    return Err(
+                        "prefab path must be under assets/prefabs and end in .prefab".into(),
+                    );
+                }
+                return match at {
+                    crate::SpawnAt::Object(id) => validate_object_id(id),
+                    crate::SpawnAt::Position(position) => {
+                        if position.iter().all(|value| value.is_finite()) {
+                            Ok(())
+                        } else {
+                            Err("spawn position must be finite".into())
+                        }
+                    }
+                };
+            }
+            RuleAction::SetGameState { .. } => return Ok(()),
         };
         uuid::Uuid::parse_str(target)
             .map_err(|_| "action target must be an object ID".to_string())?;
         Ok(())
     }
+}
+
+fn validate_object_id(id: &str) -> Result<(), String> {
+    uuid::Uuid::parse_str(id)
+        .map(|_| ())
+        .map_err(|_| "object reference must be an object ID".to_string())
+}
+
+/// Whether `path` is a project-relative `scenes/**/*.ron` path: no absolute
+/// path, `..`, backslash or `//`.
+pub fn valid_scene_path(path: &str) -> bool {
+    let relative = Path::new(path);
+    !relative.is_absolute()
+        && !path.contains('\\')
+        && !path.contains("//")
+        && relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+        && relative.starts_with("scenes")
+        && relative.extension().and_then(|ext| ext.to_str()) == Some("ron")
+}
+
+/// Whether `path` is a project-relative `assets/prefabs/**/*.prefab` path: no
+/// absolute path, `..`, backslash or `//`.
+pub fn valid_prefab_path(path: &str) -> bool {
+    let relative = Path::new(path);
+    !relative.is_absolute()
+        && !path.contains('\\')
+        && !path.contains("//")
+        && relative
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+        && relative.starts_with("assets/prefabs")
+        && relative.extension().and_then(|ext| ext.to_str()) == Some("prefab")
 }
 
 fn validate_event_name(name: &str) -> Result<(), String> {
@@ -505,6 +728,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn collider_settings_are_range_checked() {
+        let base = ColliderData::new(
+            ColliderShape::Ball { radius: 1.0 },
+            crate::BodyKind::Dynamic,
+        );
+        assert!(base.validate().is_ok());
+        type Change = fn(&mut ColliderData);
+        let cases: [(&str, Change); 5] = [
+            ("mass", |c| c.mass = Some(0.0)),
+            ("mass", |c| c.mass = Some(f32::NAN)),
+            ("friction", |c| c.friction = -0.1),
+            ("bounciness", |c| c.bounciness = 1.5),
+            ("gravity scale", |c| c.gravity_scale = f32::INFINITY),
+        ];
+        for (field, change) in cases {
+            let mut bad = base.clone();
+            change(&mut bad);
+            let message = bad.validate().unwrap_err();
+            assert!(message.contains(field), "{message:?} should name {field}");
+        }
+    }
+
+    #[test]
     fn material_override_rejects_nonfinite_and_out_of_range_values() {
         let mut mesh = valid_mesh_renderer();
         mesh.material_override = Some(crate::MaterialOverrideData {
@@ -601,6 +847,8 @@ mod tests {
             },
             near: 0.1,
             far: 100.0,
+            pose_from_transform: false,
+            active: false,
         }
     }
 
@@ -952,7 +1200,8 @@ mod tests {
                     target: id,
                     text: "Ready".into(),
                 },
-                condition: None,
+                conditions: Vec::new(),
+                match_mode: crate::RuleMatch::All,
                 graph_position: None,
             }],
             ..Default::default()
@@ -977,7 +1226,8 @@ mod tests {
                 action: RuleAction::EmitEvent {
                     name: "bad\nname".into(),
                 },
-                condition: None,
+                conditions: Vec::new(),
+                match_mode: crate::RuleMatch::All,
                 graph_position: None,
             }],
             ..Default::default()

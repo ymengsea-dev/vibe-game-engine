@@ -29,6 +29,8 @@ pub(crate) trait Embedded {
     fn set_paused(&mut self, paused: bool);
     /// Makes the next redraw advance exactly `seconds`.
     fn prepare_step(&mut self, seconds: f32);
+    /// A change in whether the game wants the cursor locked, once per change.
+    fn cursor_lock(&self) -> Option<bool>;
     /// Last chance to save, as when a window closes.
     fn finish(&mut self);
 }
@@ -52,6 +54,10 @@ impl<G: Game> Embedded for GameRunner<G> {
 
     fn prepare_step(&mut self, seconds: f32) {
         GameRunner::prepare_step(self, seconds);
+    }
+
+    fn cursor_lock(&self) -> Option<bool> {
+        PlatformHandler::cursor_lock(self)
     }
 
     fn finish(&mut self) {
@@ -138,6 +144,11 @@ pub(crate) fn drive(
             }
             game.deliver(PlatformEvent::RedrawRequested);
         }
+        if let Some(locked) = game.cursor_lock()
+            && let Err(err) = link.send(&ToStudio::CursorLock { locked })
+        {
+            break Err(err);
+        }
         if let Some(frame) = game.take_frame() {
             sequence += 1;
             let message = ToStudio::Frame(Frame {
@@ -179,6 +190,7 @@ mod tests {
         steps: Vec<f32>,
         finished: u32,
         exit_after_redraws: Option<usize>,
+        lock_changes: std::cell::RefCell<VecDeque<bool>>,
     }
 
     impl FakeGame {
@@ -216,6 +228,9 @@ mod tests {
         }
         fn finish(&mut self) {
             self.finished += 1;
+        }
+        fn cursor_lock(&self) -> Option<bool> {
+            self.lock_changes.borrow_mut().pop_front()
         }
     }
 
@@ -361,5 +376,19 @@ mod tests {
         drive(&mut game, &mut link, Duration::ZERO).expect("drive");
         assert_eq!(game.redraws(), 2);
         assert_eq!(game.finished, 1);
+    }
+
+    #[test]
+    fn driver_sends_cursor_lock_when_the_game_asks() {
+        let mut game = FakeGame::default();
+        game.lock_changes.borrow_mut().push_back(true);
+        let mut link = ScriptedLink::new(vec![vec![], vec![], vec![]]);
+        drive(&mut game, &mut link, Duration::ZERO).expect("drive");
+        let locks: Vec<_> = link
+            .sent
+            .iter()
+            .filter(|message| matches!(message, ToStudio::CursorLock { .. }))
+            .collect();
+        assert_eq!(locks, [&ToStudio::CursorLock { locked: true }]);
     }
 }

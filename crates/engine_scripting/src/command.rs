@@ -1,5 +1,9 @@
 //! Engine-owned gameplay commands shared by Lua and Rust games.
 
+/// The game state names, in the order `engine_scene::GameStateName::ALL` lists
+/// them (`engine` tests that the two agree).
+pub const GAME_STATES: [&str; 4] = ["menu", "playing", "paused", "game_over"];
+
 /// A validated gameplay request for the engine to apply.
 ///
 /// Lua scripts produce these through `engine.*` calls; Rust games construct
@@ -78,5 +82,108 @@ pub enum GameCommand {
         object_id: String,
         /// Parent-relative displacement.
         delta: [f32; 3],
+    },
+    /// Set a scene object's local rotation.
+    SetRotation {
+        /// Stable scene object ID.
+        object_id: String,
+        /// Finite unit quaternion (xyzw).
+        rotation: [f32; 4],
+    },
+    /// Rotate a scene object by a delta in its local space (`current * delta`).
+    Rotate {
+        /// Stable scene object ID.
+        object_id: String,
+        /// Finite unit quaternion (xyzw).
+        delta: [f32; 4],
+    },
+    /// Ask the host to lock (and hide) or release the mouse cursor.
+    SetMouseLocked {
+        /// Whether the game wants the cursor locked.
+        locked: bool,
+    },
+    /// Set a scene object's local scale.
+    SetScale {
+        /// Stable scene object ID.
+        object_id: String,
+        /// Finite, non-zero scale on every axis.
+        scale: [f32; 3],
+    },
+    /// Set a dynamic body's linear velocity (world units per second).
+    SetVelocity {
+        /// Stable scene object ID.
+        object_id: String,
+        /// Finite velocity.
+        velocity: [f32; 3],
+    },
+    /// Push a dynamic body with a force for `duration` seconds
+    /// (an impulse of `force * duration`).
+    AddForce {
+        /// Stable scene object ID.
+        object_id: String,
+        /// Finite force.
+        force: [f32; 3],
+        /// Finite seconds, at least zero, the force acts for.
+        duration: f32,
+    },
+    /// Give a dynamic body an instant change of momentum.
+    AddImpulse {
+        /// Stable scene object ID.
+        object_id: String,
+        /// Finite impulse.
+        impulse: [f32; 3],
+    },
+    /// Move a kinematic character body by `delta`, sliding along obstacles.
+    MoveCharacter {
+        /// Stable scene object ID.
+        object_id: String,
+        /// Finite desired translation for this step.
+        delta: [f32; 3],
+    },
+    /// Make a scene camera object the one the game views through.
+    SetCamera {
+        /// Stable scene object ID of a camera.
+        object_id: String,
+    },
+    /// Point a follow camera at another object (resets its follow state).
+    SetFollowTarget {
+        /// Stable scene object ID of the follow camera.
+        camera_id: String,
+        /// Stable scene object ID of the object to follow.
+        target_id: String,
+    },
+    /// Remove a scene object and everything parented under it.
+    Destroy {
+        /// Stable scene object ID.
+        object_id: String,
+    },
+    /// Show or hide a scene object and its descendants (hidden objects are not
+    /// drawn but keep simulating).
+    SetVisible {
+        /// Stable scene object ID.
+        object_id: String,
+        /// Whether the object should be drawn.
+        visible: bool,
+    },
+    /// Enable or disable a scene object and its descendants (disabled objects
+    /// are not drawn and their physics is switched off).
+    SetEnabled {
+        /// Stable scene object ID.
+        object_id: String,
+        /// Whether the object should take part in the game.
+        enabled: bool,
+    },
+    /// Shake the presented view; a new shake replaces the current one.
+    CameraShake {
+        /// Largest offset in world units; finite and at least zero.
+        strength: f32,
+        /// Duration in seconds, `0..=10`.
+        seconds: f32,
+    },
+    /// Switch the game state (one of [`GAME_STATES`]); `paused` freezes the
+    /// simulation.
+    SetGameState {
+        /// A name from [`GAME_STATES`].
+        state: String,
     },
 }

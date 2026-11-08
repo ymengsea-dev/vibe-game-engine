@@ -648,6 +648,7 @@ impl EditorState {
         self.asset_browser.preview_open = session.preview_open;
         self.overlays = session.overlays;
         self.hierarchy.open = session.hierarchy_open;
+        self.hierarchy.hidden = session.hierarchy_hidden;
         self.asset_browser.open_folders = session.asset_folders_open;
         match &session.scene_view {
             Some(view) => {
@@ -707,6 +708,7 @@ impl EditorState {
             configuration_index: self.configuration_index,
             overlays: self.overlays,
             hierarchy_open: self.hierarchy.open.clone(),
+            hierarchy_hidden: self.hierarchy.hidden.clone(),
             asset_folders_open: self.asset_browser.open_folders.clone(),
             scene_view: Some(self.scene_cameras.saved(self.dimension.is_2d())),
         }
@@ -1107,6 +1109,68 @@ impl EditorState {
         Ok(entity)
     }
 
+    /// Adds the file `path` (relative to the assets root) to the scene, as a
+    /// drag from Project Assets does, and selects the new object. It goes at
+    /// `position`, keeping a prefab's rotation and scale, or at `parent` as
+    /// its child. A prefab that cannot be loaded is reported in Problems.
+    pub fn drop_asset(
+        &mut self,
+        path: &Path,
+        position: Option<Vec3>,
+        parent: Option<Entity>,
+    ) -> Option<Entity> {
+        let rows = self.diagnostics.snapshot();
+        if rows
+            .iter()
+            .any(|row| row.code.as_deref() == Some(crate::diagnostics::ASSET_DROP_CODE))
+        {
+            self.diagnostics.set(
+                rows.into_iter()
+                    .filter(|row| row.code.as_deref() != Some(crate::diagnostics::ASSET_DROP_CODE))
+                    .collect(),
+            );
+        }
+        let is_prefab = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("prefab"));
+        let entity = if is_prefab {
+            match self.spawn_prefab(path) {
+                Ok(entity) => entity,
+                Err(err) => {
+                    tracing::warn!(error = %err, path = %path.display(), "could not instantiate prefab");
+                    self.diagnostics.push(Diagnostic {
+                        severity: crate::diagnostics::Severity::Error,
+                        code: Some(crate::diagnostics::ASSET_DROP_CODE.to_owned()),
+                        message: format!("Could not add {} to the scene: {err}", path.display()),
+                        file: Some(Path::new("assets").join(path)),
+                        line: None,
+                    });
+                    return None;
+                }
+            }
+        } else {
+            self.spawn_asset_entity(path)
+        };
+        let parent = parent.filter(|&parent| self.world.get_entity(parent).is_ok());
+        if let Some(translation) = position.or(parent.map(|_| Vec3::ZERO)) {
+            let mut transform = self
+                .world
+                .get::<TransformComponent>(entity)
+                .map(|transform| transform.0)
+                .unwrap_or_default();
+            transform.translation = translation;
+            self.world
+                .entity_mut(entity)
+                .insert(TransformComponent::from(transform));
+        }
+        if let Some(parent) = parent {
+            hierarchy::adopt_new_object(&mut self.world, entity, parent);
+        }
+        self.select_only(entity);
+        self.mark_dirty();
+        Some(entity)
+    }
+
     /// Re-points every [`AssetSource`] in the world at the current path
     /// for its stable id (via [`EditorState::asset_index`]), and
     /// backfills a missing id from the path. Called right after loading a
@@ -1362,16 +1426,50 @@ impl EditorState {
         true
     }
 
-    /// Deep-copies every selected entity; the last copy becomes the new
-    /// primary selection. No-op on an empty selection.
-    pub fn duplicate_selection(&mut self) {
-        let mut last = None;
-        for source in self.selection() {
-            last = Some(hierarchy::duplicate_entity(&mut self.world, source));
+    /// Deep-copies every selected entity next to its original and selects
+    /// the copies, the last one primary. Returns whether anything was copied.
+    pub fn duplicate_selection(&mut self) -> bool {
+        let selection = self.selection();
+        hierarchy::duplicate_and_select(
+            &mut self.world,
+            &mut self.selected_entity,
+            &mut self.secondary_selection,
+            &selection,
+        )
+    }
+
+    /// Keeps the selected objects for [`Self::paste_objects`].
+    pub fn copy_selection(&mut self) {
+        let selection = self.selection();
+        if let Some(clipboard) = crate::object_clipboard::copy_objects(&mut self.world, &selection)
+        {
+            self.hierarchy.clipboard = Some(clipboard);
         }
-        if let Some(new) = last {
-            self.select_only(new);
-        }
+    }
+
+    /// Forgets the copied objects: their asset ids belong to one project.
+    pub fn clear_object_clipboard(&mut self) {
+        self.hierarchy.clipboard = None;
+    }
+
+    /// Whether [`Self::paste_objects`] has anything to paste.
+    pub fn can_paste_objects(&self) -> bool {
+        self.hierarchy.clipboard.is_some()
+    }
+
+    /// Pastes the copied objects next to the primary selection, or at the
+    /// scene root with nothing selected, and selects them. Returns whether
+    /// anything was pasted.
+    pub fn paste_objects(&mut self) -> bool {
+        let Some(clipboard) = self.hierarchy.clipboard.clone() else {
+            return false;
+        };
+        hierarchy::paste_and_select(
+            &mut self.world,
+            &mut self.selected_entity,
+            &mut self.secondary_selection,
+            &clipboard,
+        )
     }
 
     /// The Scene View tool in effect: Hand while Space is held, else the
@@ -1670,10 +1768,10 @@ mod tests {
         assert!(state.world.get::<SceneCollider>(tile).is_some());
         assert_eq!(state.world.get::<Children>(parent).unwrap().len(), 1);
 
-        let custom = SceneCollider(engine_scene::ColliderData {
-            shape: engine_scene::ColliderShape::Ball { radius: 0.4 },
-            body: engine_scene::BodyKind::Dynamic,
-        });
+        let custom = SceneCollider(engine_scene::ColliderData::new(
+            engine_scene::ColliderShape::Ball { radius: 0.4 },
+            engine_scene::BodyKind::Dynamic,
+        ));
         state.world.entity_mut(tile).insert(custom.clone());
         state
             .world
@@ -2573,6 +2671,120 @@ mod tests {
         assert!(state.world.get_entity(keep).is_ok());
     }
 
+    /// Writes `prefabs/Rock.prefab`, with a rotation and scale, and returns
+    /// its path relative to the assets root.
+    fn write_rock_prefab(state: &EditorState) -> PathBuf {
+        let transform = engine_utils::Transform {
+            rotation: glam::Quat::from_rotation_y(1.0),
+            scale: Vec3::splat(2.0),
+            ..Default::default()
+        };
+        let prefab = engine_scene::Prefab::new(engine_scene::SceneEntity {
+            name: Some("Rock".to_owned()),
+            transform: Some(transform.into()),
+            ..Default::default()
+        });
+        let assets = state.project.assets_dir();
+        std::fs::create_dir_all(assets.join("prefabs")).unwrap();
+        prefab
+            .save_to_file(&assets.join("prefabs/Rock.prefab"))
+            .unwrap();
+        PathBuf::from("prefabs/Rock.prefab")
+    }
+
+    #[test]
+    fn a_dropped_file_lands_at_the_point_and_is_selected() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let at = Vec3::new(1.0, 2.0, 3.0);
+
+        let entity = state
+            .drop_asset(Path::new("props/barrel.gltf"), Some(at), None)
+            .unwrap();
+
+        assert_eq!(
+            state
+                .world
+                .get::<TransformComponent>(entity)
+                .unwrap()
+                .0
+                .translation,
+            at
+        );
+        assert_eq!(state.selected_entity, Some(entity));
+    }
+
+    #[test]
+    fn a_dropped_prefab_keeps_its_rotation_and_scale() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let path = write_rock_prefab(&state);
+        let at = Vec3::new(4.0, 0.0, 4.0);
+
+        let entity = state.drop_asset(&path, Some(at), None).unwrap();
+
+        let transform = state.world.get::<TransformComponent>(entity).unwrap().0;
+        assert_eq!(transform.translation, at);
+        assert_eq!(transform.scale, Vec3::splat(2.0));
+        assert!(
+            transform
+                .rotation
+                .abs_diff_eq(glam::Quat::from_rotation_y(1.0), 1e-5)
+        );
+    }
+
+    #[test]
+    fn a_file_dropped_on_a_row_becomes_its_child_at_its_position() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let parent = hierarchy::spawn_entity(&mut state.world, "Parent", Vec3::new(5.0, 0.0, 0.0));
+        let path = write_rock_prefab(&state);
+
+        let entity = state.drop_asset(&path, None, Some(parent)).unwrap();
+
+        assert_eq!(hierarchy::children_of(&state.world, parent), vec![entity]);
+        assert!(
+            hierarchy::world_transform(&state.world, entity)
+                .translation
+                .abs_diff_eq(Vec3::new(5.0, 0.0, 0.0), 1e-5)
+        );
+    }
+
+    #[test]
+    fn a_broken_prefab_is_reported_once_in_problems_and_adds_nothing() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let drop_rows = |state: &EditorState| {
+            state
+                .diagnostics
+                .snapshot()
+                .into_iter()
+                .filter(|row| row.code.as_deref() == Some(crate::diagnostics::ASSET_DROP_CODE))
+                .collect::<Vec<_>>()
+        };
+
+        assert!(
+            state
+                .drop_asset(Path::new("missing.prefab"), None, None)
+                .is_none()
+        );
+        assert_eq!(drop_rows(&state).len(), 1);
+        assert_eq!(
+            drop_rows(&state)[0].file.as_deref(),
+            Some(Path::new("assets/missing.prefab"))
+        );
+        assert_eq!(state.world.query::<&Name>().iter(&state.world).count(), 0);
+
+        assert!(
+            state
+                .drop_asset(Path::new("other.prefab"), None, None)
+                .is_none()
+        );
+        let rows = drop_rows(&state);
+        assert_eq!(rows.len(), 1, "only the latest failure shows");
+        assert!(rows[0].message.contains("other.prefab"));
+    }
+
     #[test]
     fn duplicate_selection_copies_each_and_reprimaries() {
         let project = temp_project();
@@ -2587,9 +2799,10 @@ mod tests {
         // Two originals + two copies.
         let mut query = state.world.query::<&Name>();
         assert_eq!(query.iter(&state.world).count(), 4);
-        // Selection collapsed to the last copy.
-        assert_eq!(state.selection_len(), 1);
-        assert!(state.secondary_selection.is_empty());
+        // Both copies are selected, the last one primary.
+        assert_eq!(state.selection_len(), 2);
+        assert!(!state.selection().contains(&a));
+        assert!(!state.selection().contains(&b));
     }
 
     #[test]

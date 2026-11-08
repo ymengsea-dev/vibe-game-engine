@@ -30,6 +30,8 @@ pub(crate) enum SessionEvent {
     Paused,
     /// The game confirmed a resume.
     Resumed,
+    /// The game wants the mouse locked (`true`) or released (`false`).
+    CursorLock(bool),
     /// The connection closed (the game quit, crashed or was stopped).
     Closed,
     /// The preview cannot continue; the message says why, for the user.
@@ -255,6 +257,7 @@ fn read_game(
             }
             Ok(ToStudio::Paused) => Some(SessionEvent::Paused),
             Ok(ToStudio::Resumed) => Some(SessionEvent::Resumed),
+            Ok(ToStudio::CursorLock { locked }) => Some(SessionEvent::CursorLock(locked)),
             Ok(ToStudio::Hello { .. }) => None,
             Err(protocol::ProtocolError::Io(_)) => Some(SessionEvent::Closed),
             Err(err) => Some(SessionEvent::Failed(format!(

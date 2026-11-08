@@ -160,6 +160,26 @@ fn validate_output_location(input: &Path, output: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuses a binary holding the builder's home folder path, which Cargo
+/// compiles in for dependencies unless the build remaps it.
+fn refuse_home_path(binary: &Path, home: &str) -> Result<(), String> {
+    if home.is_empty() {
+        return Ok(());
+    }
+    let bytes =
+        fs::read(binary).map_err(|err| format!("cannot read {}: {err}", binary.display()))?;
+    if bytes
+        .windows(home.len())
+        .any(|part| part == home.as_bytes())
+    {
+        return Err(format!(
+            "{} contains the home folder path {home}. Rebuild with: RUSTFLAGS=\"--remap-path-prefix=$HOME=/build\" cargo build -p editor -p player --release",
+            binary.display()
+        ));
+    }
+    Ok(())
+}
+
 fn stage_distribution(
     binaries: &Path,
     monaco: &Path,
@@ -171,6 +191,11 @@ fn stage_distribution(
     let player = binaries.join(format!("player{suffix}"));
     regular_file(&editor)?;
     regular_file(&player)?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    refuse_home_path(&editor, &home)?;
+    refuse_home_path(&player, &home)?;
     regular_file(&monaco.join("index.html"))?;
     regular_file(&luals.join("main.lua"))?;
     regular_file(&luals.join("LICENSE"))?;
@@ -349,6 +374,18 @@ mod tests {
     }
 
     #[test]
+    fn a_binary_with_the_home_path_is_refused() {
+        let binary =
+            std::env::temp_dir().join(format!("vge-studio-home-path-{}", std::process::id()));
+        fs::write(&binary, b"panic at /Users/someone/.cargo/registry/x.rs").expect("binary");
+        let error = super::refuse_home_path(&binary, "/Users/someone").expect_err("refused");
+        assert!(error.contains("--remap-path-prefix"), "{error}");
+        super::refuse_home_path(&binary, "/Users/other").expect("other home");
+        super::refuse_home_path(&binary, "").expect("no home known");
+        fs::remove_file(&binary).expect("cleanup");
+    }
+
+    #[test]
     fn packaged_studio_contains_player_and_monaco_beside_the_editor() {
         let root = std::env::temp_dir().join(format!(
             "vge-studio-package-{}-{}",
@@ -388,8 +425,36 @@ mod tests {
         fs::write(monaco.join("index.html"), b"Monaco").expect("index");
         fs::create_dir_all(monaco.join("vs/editor")).expect("nested Monaco");
         fs::write(monaco.join("vs/editor/editor.main.js"), b"editor").expect("script");
+        // A build folder can hold other workspace binaries and game files.
+        fs::write(
+            binaries.join(format!("island{}", std::env::consts::EXE_SUFFIX)),
+            b"game",
+        )
+        .expect("game binary");
+        fs::create_dir_all(binaries.join("games/island")).expect("game folder");
+        fs::write(binaries.join("games/island/project.ron"), b"()").expect("game project");
 
         stage_distribution(&binaries, &monaco, &luals, &output).expect("package Studio");
+
+        fn staged_paths(dir: &Path, found: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).expect("staged folder") {
+                let path = entry.expect("entry").path();
+                found.push(path.to_string_lossy().into_owned());
+                if path.is_dir() {
+                    staged_paths(&path, found);
+                }
+            }
+        }
+        let mut staged = Vec::new();
+        staged_paths(&output, &mut staged);
+        let prefix = output.to_string_lossy().into_owned();
+        assert!(
+            !staged.iter().any(|path| {
+                let path = &path[prefix.len()..];
+                path.contains("games") || path.contains("island")
+            }),
+            "a game was packaged: {staged:?}"
+        );
 
         let app = if cfg!(target_os = "macos") {
             output.join("RustyEngine Studio.app/Contents")

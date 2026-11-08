@@ -11,10 +11,10 @@
 //! View gizmo also calls [`transform_of`]/[`set_transform`] directly.
 
 use engine_ecs::components::{
-    AssetSource, Camera, Disabled, Lock, MeshSource, Name, Script, Sprite, SpriteSource, Static,
-    Transform, WaterVolume,
+    ActiveCamera, AssetSource, Camera, CameraFollow, Disabled, Lock, MeshSource, Name, Script,
+    Sprite, SpriteSource, Static, Transform, WaterVolume,
 };
-use engine_ecs::prelude::{Component, Entity, World};
+use engine_ecs::prelude::{Component, Entity, With, World};
 use engine_utils::Transform as MathTransform;
 use glam::{Vec2, Vec3};
 
@@ -22,8 +22,8 @@ use engine_scene::{
     AssetRef, AudioEmitterData, BodyKind, ColliderShape, GridRegion, MaterialOverrideData,
     PointLightData, RuleAction, RuleCompare, RuleCondition, RuleData, RuleTrigger,
     SceneAudioEmitter, SceneCollider, SceneMaterialOverride, SceneObjectId, ScenePointLight,
-    SceneRules, SceneSpriteAnimation, SceneTilemap, SceneUi, SpriteAnimationData, UiAnchor,
-    UiElementData, UiKind, WaterData,
+    SceneRules, SceneSpriteAnimation, SceneTilemap, SceneUi, SpawnAt, SpriteAnimationData,
+    UiAnchor, UiElementData, UiKind, WaterData,
 };
 
 use crate::assets::{AssetIndex, AssetKind};
@@ -152,6 +152,16 @@ fn copy_component<T: Component + Clone>(world: &mut World, from: Entity, to: Ent
 
 /// Generic "does `entity` have `T`" — monomorphises to one fn pointer per
 /// component type.
+/// A new camera: eye at the origin looking down -Z, so the object's Transform
+/// alone decides the view.
+pub(crate) fn default_camera() -> Camera {
+    Camera::from(engine_renderer::Camera::new(
+        Vec3::ZERO,
+        Vec3::NEG_Z,
+        16.0 / 9.0,
+    ))
+}
+
 fn has<T: Component>(world: &World, entity: Entity) -> bool {
     world.get::<T>(entity).is_some()
 }
@@ -327,26 +337,56 @@ enum RuleActionKind {
     Audio,
     Event,
     Variable,
+    ChangeScene,
+    Visible,
+    Enabled,
+    Spawn,
+    Destroy,
+    State,
+}
+
+impl RuleActionKind {
+    /// Whether the action needs a named object to point at.
+    fn needs_object(self) -> bool {
+        matches!(self, Self::Visible | Self::Enabled | Self::Destroy)
+    }
 }
 
 fn rule_target_matches(world: &World, entity: Entity, kind: RuleActionKind) -> bool {
+    // Object pickers list disabled objects too, so a disabled door can be
+    // enabled again; UI text and audio targets stay limited to active ones.
     world.get::<Name>(entity).is_some()
-        && world.get::<Disabled>(entity).is_none()
         && match kind {
-            RuleActionKind::Text => world.get::<SceneUi>(entity).is_some(),
-            RuleActionKind::Audio => world.get::<SceneAudioEmitter>(entity).is_some(),
-            RuleActionKind::Event | RuleActionKind::Variable => false,
+            RuleActionKind::Text => {
+                world.get::<Disabled>(entity).is_none() && world.get::<SceneUi>(entity).is_some()
+            }
+            RuleActionKind::Audio => {
+                world.get::<Disabled>(entity).is_none()
+                    && world.get::<SceneAudioEmitter>(entity).is_some()
+            }
+            RuleActionKind::Visible
+            | RuleActionKind::Enabled
+            | RuleActionKind::Destroy
+            | RuleActionKind::Spawn => true,
+            RuleActionKind::Event
+            | RuleActionKind::Variable
+            | RuleActionKind::ChangeScene
+            | RuleActionKind::State => false,
         }
 }
 
-fn ensure_rule_object_ids(world: &mut World, owner: Entity) {
+/// Gives the owner, and every UI or audio object a rule can name, a stable
+/// ID. With `all_named`, every named object gets one, so object pickers
+/// can point at it.
+fn ensure_rule_object_ids(world: &mut World, owner: Entity, all_named: bool) {
     let missing: Vec<_> = world
         .iter_entities()
         .filter(|entity| {
             entity.get::<SceneObjectId>().is_none()
                 && (entity.id() == owner
                     || (entity.get::<Name>().is_some()
-                        && (entity.get::<SceneUi>().is_some()
+                        && (all_named
+                            || entity.get::<SceneUi>().is_some()
                             || entity.get::<SceneAudioEmitter>().is_some())))
         })
         .map(|entity| entity.id())
@@ -356,6 +396,100 @@ fn ensure_rule_object_ids(world: &mut World, owner: Entity) {
             .entity_mut(entity)
             .insert(SceneObjectId(uuid::Uuid::new_v4().to_string()));
     }
+}
+
+/// Whether any rule points at an object by ID, so object IDs must exist.
+fn rules_name_objects(rules: &[RuleData]) -> bool {
+    rules.iter().any(|rule| {
+        matches!(
+            rule.trigger,
+            RuleTrigger::CollisionEnter { with: Some(_) }
+                | RuleTrigger::CollisionExit { with: Some(_) }
+                | RuleTrigger::TriggerEnter { with: Some(_) }
+                | RuleTrigger::TriggerExit { with: Some(_) }
+        ) || matches!(
+            rule.action,
+            RuleAction::SetVisible { .. }
+                | RuleAction::SetEnabled { .. }
+                | RuleAction::Destroy { .. }
+                | RuleAction::SpawnPrefab {
+                    at: SpawnAt::Object(_),
+                    ..
+                }
+        )
+    })
+}
+
+/// The "When" choices, in picker order.
+const TRIGGER_CHOICES: [&str; 11] = [
+    "This button is clicked",
+    "Scene starts",
+    "Key pressed",
+    "Touches an object",
+    "Stops touching",
+    "Enters a trigger",
+    "Leaves a trigger",
+    "Timer",
+    "Variable changes",
+    "Game state changes",
+    "Named event",
+];
+
+/// The picker label for `trigger`.
+fn trigger_choice_label(trigger: &RuleTrigger) -> &'static str {
+    match trigger {
+        RuleTrigger::UiClicked => TRIGGER_CHOICES[0],
+        RuleTrigger::SceneStart => TRIGGER_CHOICES[1],
+        RuleTrigger::KeyPressed { .. } => TRIGGER_CHOICES[2],
+        RuleTrigger::CollisionEnter { .. } => TRIGGER_CHOICES[3],
+        RuleTrigger::CollisionExit { .. } => TRIGGER_CHOICES[4],
+        RuleTrigger::TriggerEnter { .. } => TRIGGER_CHOICES[5],
+        RuleTrigger::TriggerExit { .. } => TRIGGER_CHOICES[6],
+        RuleTrigger::Timer { .. } => TRIGGER_CHOICES[7],
+        RuleTrigger::VariableChanged { .. } => TRIGGER_CHOICES[8],
+        RuleTrigger::StateChanged { .. } => TRIGGER_CHOICES[9],
+        RuleTrigger::Named(_) => TRIGGER_CHOICES[10],
+    }
+}
+
+/// A new trigger of the kind a picker label names, with starting fields.
+fn trigger_for_choice(label: &str) -> Option<RuleTrigger> {
+    Some(match label {
+        "This button is clicked" => RuleTrigger::UiClicked,
+        "Scene starts" => RuleTrigger::SceneStart,
+        "Key pressed" => RuleTrigger::KeyPressed {
+            key: "Space".into(),
+        },
+        "Touches an object" => RuleTrigger::CollisionEnter { with: None },
+        "Stops touching" => RuleTrigger::CollisionExit { with: None },
+        "Enters a trigger" => RuleTrigger::TriggerEnter { with: None },
+        "Leaves a trigger" => RuleTrigger::TriggerExit { with: None },
+        "Timer" => RuleTrigger::Timer {
+            seconds: 1.0,
+            repeat: false,
+        },
+        "Variable changes" => RuleTrigger::VariableChanged {
+            name: "score".into(),
+        },
+        "Game state changes" => RuleTrigger::StateChanged {
+            state: engine_scene::GameStateName::Paused,
+        },
+        "Named event" => RuleTrigger::Named("game_start".into()),
+        _ => return None,
+    })
+}
+
+/// Adds a starting condition. False at the limit.
+fn add_condition(rule: &mut RuleData) -> bool {
+    if rule.conditions.len() >= engine_scene::MAX_RULE_CONDITIONS {
+        return false;
+    }
+    rule.conditions.push(RuleCondition {
+        variable: "score".into(),
+        compare: RuleCompare::GreaterOrEqual,
+        value: 1.0,
+    });
+    true
 }
 
 fn add_visual_rule(
@@ -383,7 +517,14 @@ fn add_visual_rule(
     if matches!(trigger, RuleTrigger::UiClicked) && !owner_is_button {
         return false;
     }
-    ensure_rule_object_ids(world, owner);
+    if kind.needs_object()
+        && !world
+            .iter_entities()
+            .any(|entity| rule_target_matches(world, entity.id(), kind))
+    {
+        return false;
+    }
+    ensure_rule_object_ids(world, owner, kind.needs_object());
     let target = world
         .iter_entities()
         .find(|entity| rule_target_matches(world, entity.id(), kind))
@@ -408,11 +549,40 @@ fn add_visual_rule(
             name: "score".into(),
             amount: 1.0,
         },
+        RuleActionKind::ChangeScene => RuleAction::ChangeScene {
+            path: "scenes/level2.ron".into(),
+        },
+        RuleActionKind::Visible => {
+            let Some(target) = target else { return false };
+            RuleAction::SetVisible {
+                target,
+                visible: false,
+            }
+        }
+        RuleActionKind::Enabled => {
+            let Some(target) = target else { return false };
+            RuleAction::SetEnabled {
+                target,
+                enabled: false,
+            }
+        }
+        RuleActionKind::Spawn => RuleAction::SpawnPrefab {
+            path: "assets/prefabs/coin.prefab".into(),
+            at: SpawnAt::Position([0.0; 3]),
+        },
+        RuleActionKind::Destroy => {
+            let Some(target) = target else { return false };
+            RuleAction::Destroy { target }
+        }
+        RuleActionKind::State => RuleAction::SetGameState {
+            state: engine_scene::GameStateName::GameOver,
+        },
     };
     rules.push(RuleData {
         trigger,
         action,
-        condition: None,
+        conditions: Vec::new(),
+        match_mode: engine_scene::RuleMatch::All,
         graph_position: None,
     });
     world.entity_mut(owner).insert(SceneRules(rules));
@@ -458,50 +628,159 @@ fn rule_target_picker(
         });
 }
 
+/// Picks one of `options`, or "Any object" for `None`.
+fn optional_target_picker(
+    ui: &mut egui::Ui,
+    salt: (Entity, usize),
+    target: &mut Option<String>,
+    options: &[(String, String)],
+) {
+    let selected = match target {
+        None => "Any object",
+        Some(id) => options
+            .iter()
+            .find(|(candidate, _)| candidate == id)
+            .map_or("Missing target", |(_, name)| name.as_str()),
+    };
+    choice(("visual_rule_with", salt), ui)
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(target, None, "Any object");
+            for (id, name) in options {
+                ui.selectable_value(target, Some(id.clone()), name);
+            }
+        });
+}
+
+/// A two-way choice such as Show / Hide; returns whether `value` changed.
+fn on_off_choice(ui: &mut egui::Ui, salt: (Entity, usize), value: &mut bool, on: &str, off: &str) {
+    choice(("visual_rule_switch", salt), ui)
+        .selected_text(if *value { on } else { off })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(value, true, on);
+            ui.selectable_value(value, false, off);
+        });
+}
+
+fn state_choice(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    state: &mut engine_scene::GameStateName,
+) {
+    choice(id, ui)
+        .selected_text(state.label())
+        .show_ui(ui, |ui| {
+            for candidate in engine_scene::GameStateName::ALL {
+                ui.selectable_value(state, candidate, candidate.label());
+            }
+        });
+}
+
+fn trigger_fields(
+    ui: &mut egui::Ui,
+    salt: (Entity, usize),
+    trigger: &mut RuleTrigger,
+    object_targets: &[(String, String)],
+) {
+    match trigger {
+        RuleTrigger::Named(name) => {
+            property_row(ui, "Event", |ui| {
+                crate::widgets::text_field(ui, name, "Event name");
+            });
+        }
+        RuleTrigger::KeyPressed { key } => {
+            property_row(ui, "Key", |ui| {
+                choice(("visual_rule_key", salt), ui)
+                    .selected_text(key.as_str())
+                    .show_ui(ui, |ui| {
+                        for candidate in engine_scripting::ScriptKey::ALL {
+                            let name = candidate.name();
+                            ui.selectable_value(key, name.to_owned(), name);
+                        }
+                    });
+            });
+        }
+        RuleTrigger::CollisionEnter { with }
+        | RuleTrigger::CollisionExit { with }
+        | RuleTrigger::TriggerEnter { with }
+        | RuleTrigger::TriggerExit { with } => {
+            property_row(ui, "With", |ui| {
+                optional_target_picker(ui, salt, with, object_targets);
+            });
+        }
+        RuleTrigger::Timer { seconds, repeat } => {
+            property_row(ui, "Seconds", |ui| {
+                number(
+                    ui,
+                    egui::DragValue::new(seconds)
+                        .speed(0.05)
+                        .range(0.05..=3600.0),
+                );
+            });
+            property_row(ui, "Repeat", |ui| {
+                crate::widgets::checkbox(ui, &crate::theme::NIGHT, repeat, "")
+                    .on_hover_text("Start again after each time it fires");
+            });
+        }
+        RuleTrigger::VariableChanged { name } => {
+            property_row(ui, "Variable", |ui| {
+                crate::widgets::text_field(ui, name, "Variable name");
+            });
+        }
+        RuleTrigger::StateChanged { state } => {
+            property_row(ui, "State", |ui| {
+                state_choice(ui, ("visual_rule_state_trigger", salt), state);
+            });
+        }
+        RuleTrigger::UiClicked | RuleTrigger::SceneStart => {}
+    }
+}
+
+/// The named objects a rule's pickers can list: `(stable ID, name)`.
+#[derive(Clone, Copy)]
+struct RuleTargets<'a> {
+    text: &'a [(String, String)],
+    audio: &'a [(String, String)],
+    objects: &'a [(String, String)],
+}
+
 fn rule_fields(
     ui: &mut egui::Ui,
     entity: Entity,
     index: usize,
     rule: &mut RuleData,
     owner_is_button: bool,
-    text_targets: &[(String, String)],
-    audio_targets: &[(String, String)],
+    targets: &RuleTargets<'_>,
 ) {
+    let RuleTargets {
+        text: text_targets,
+        audio: audio_targets,
+        objects: object_targets,
+    } = *targets;
     property_row(ui, "When", |ui| {
         choice(("visual_rule_trigger", entity, index), ui)
-            .selected_text(match &rule.trigger {
-                RuleTrigger::UiClicked => "This button is clicked",
-                RuleTrigger::Named(_) => "Named event",
-            })
+            .selected_text(trigger_choice_label(&rule.trigger))
             .show_ui(ui, |ui| {
-                if owner_is_button
-                    && ui
-                        .selectable_label(
-                            matches!(rule.trigger, RuleTrigger::UiClicked),
-                            "This button is clicked",
-                        )
-                        .clicked()
-                {
-                    rule.trigger = RuleTrigger::UiClicked;
-                }
-                if ui
-                    .selectable_label(matches!(rule.trigger, RuleTrigger::Named(_)), "Named event")
-                    .clicked()
-                    && !matches!(rule.trigger, RuleTrigger::Named(_))
-                {
-                    rule.trigger = RuleTrigger::Named("game_start".into());
+                for label in TRIGGER_CHOICES {
+                    if label == TRIGGER_CHOICES[0] && !owner_is_button {
+                        continue;
+                    }
+                    let current = trigger_choice_label(&rule.trigger) == label;
+                    if ui.selectable_label(current, label).clicked()
+                        && !current
+                        && let Some(trigger) = trigger_for_choice(label)
+                    {
+                        rule.trigger = trigger;
+                    }
                 }
             });
     });
-    if let RuleTrigger::Named(name) = &mut rule.trigger {
-        property_row(ui, "Event", |ui| {
-            crate::widgets::text_field(ui, name, "Event name");
-        });
-    }
+    trigger_fields(ui, (entity, index), &mut rule.trigger, object_targets);
+    let salt = (entity, index);
     match &mut rule.action {
         RuleAction::SetUiText { target, text } => {
             property_row(ui, "Set text on", |ui| {
-                rule_target_picker(ui, (entity, index), target, text_targets);
+                rule_target_picker(ui, salt, target, text_targets);
             });
             property_row(ui, "Text", |ui| {
                 crate::widgets::text_field(ui, text, "");
@@ -510,7 +789,7 @@ fn rule_fields(
         }
         RuleAction::PlayAudio { target } => {
             property_row(ui, "Play sound on", |ui| {
-                rule_target_picker(ui, (entity, index), target, audio_targets);
+                rule_target_picker(ui, salt, target, audio_targets);
             });
         }
         RuleAction::EmitEvent { name } => {
@@ -520,11 +799,85 @@ fn rule_fields(
         }
         RuleAction::SetVariable { .. } | RuleAction::AddToVariable { .. } => {
             property_row(ui, "Do", |ui| {
-                variable_action_fields(ui, (entity, index), &mut rule.action);
+                variable_action_fields(ui, salt, &mut rule.action);
+            });
+        }
+        RuleAction::ChangeScene { path } => {
+            property_row(ui, "Go to scene", |ui| {
+                crate::widgets::text_field(ui, path, "scenes/level2.ron");
+            });
+        }
+        RuleAction::SetVisible { target, visible } => {
+            property_row(ui, "Object", |ui| {
+                rule_target_picker(ui, salt, target, object_targets);
+            });
+            property_row(ui, "Do", |ui| {
+                on_off_choice(ui, salt, visible, "Show", "Hide");
+            });
+        }
+        RuleAction::SetEnabled { target, enabled } => {
+            property_row(ui, "Object", |ui| {
+                rule_target_picker(ui, salt, target, object_targets);
+            });
+            property_row(ui, "Do", |ui| {
+                on_off_choice(ui, salt, enabled, "Enable", "Disable");
+            });
+        }
+        RuleAction::SpawnPrefab { path, at } => {
+            property_row(ui, "Spawn", |ui| {
+                crate::widgets::text_field(ui, path, "assets/prefabs/coin.prefab");
+            });
+            property_row(ui, "At", |ui| {
+                let mut at_object = matches!(at, SpawnAt::Object(_));
+                let was_object = at_object;
+                on_off_choice(ui, salt, &mut at_object, "An object", "A position");
+                if at_object != was_object {
+                    *at = if at_object {
+                        SpawnAt::Object(
+                            object_targets
+                                .first()
+                                .map(|(id, _)| id.clone())
+                                .unwrap_or_default(),
+                        )
+                    } else {
+                        SpawnAt::Position([0.0; 3])
+                    };
+                }
+            });
+            match at {
+                SpawnAt::Object(target) => {
+                    property_row(ui, "Object", |ui| {
+                        rule_target_picker(ui, salt, target, object_targets);
+                    });
+                }
+                SpawnAt::Position(position) => {
+                    property_row(ui, "Position", |ui| {
+                        for (axis, component) in
+                            ["X", "Y", "Z"].into_iter().zip(position.iter_mut())
+                        {
+                            number(
+                                ui,
+                                egui::DragValue::new(component)
+                                    .speed(0.1)
+                                    .prefix(format!("{axis} ")),
+                            );
+                        }
+                    });
+                }
+            }
+        }
+        RuleAction::Destroy { target } => {
+            property_row(ui, "Destroy", |ui| {
+                rule_target_picker(ui, salt, target, object_targets);
+            });
+        }
+        RuleAction::SetGameState { state } => {
+            property_row(ui, "Set state", |ui| {
+                state_choice(ui, ("visual_rule_state_action", salt), state);
             });
         }
     }
-    rule_condition_fields(ui, (entity, index), &mut rule.condition);
+    rule_condition_fields(ui, salt, rule);
 }
 
 fn variable_action_fields(ui: &mut egui::Ui, salt: (Entity, usize), action: &mut RuleAction) {
@@ -565,45 +918,72 @@ fn variable_action_fields(ui: &mut egui::Ui, salt: (Entity, usize), action: &mut
     number(ui, egui::DragValue::new(value).speed(0.1));
 }
 
-fn rule_condition_fields(
-    ui: &mut egui::Ui,
-    salt: (Entity, usize),
-    condition: &mut Option<RuleCondition>,
-) {
+fn rule_condition_fields(ui: &mut egui::Ui, salt: (Entity, usize), rule: &mut RuleData) {
+    let palette = crate::theme::NIGHT;
     property_row(ui, "Only if", |ui| {
-        let mut enabled = condition.is_some();
-        if crate::widgets::checkbox(ui, &crate::theme::NIGHT, &mut enabled, "")
+        let full = rule.conditions.len() >= engine_scene::MAX_RULE_CONDITIONS;
+        if ui
+            .add_enabled(
+                !full,
+                egui::Button::new("Add condition").fill(palette.hover),
+            )
             .on_hover_text("Run this rule only when a variable matches")
-            .changed()
+            .on_disabled_hover_text("A rule can have up to 8 conditions")
+            .clicked()
         {
-            *condition = enabled.then(|| RuleCondition {
-                variable: "score".into(),
-                compare: RuleCompare::GreaterOrEqual,
-                value: 1.0,
-            });
+            add_condition(rule);
         }
-        let Some(condition) = condition else {
-            return;
-        };
-        let height = ui.spacing().interact_size.y;
-        let field = crate::widgets::field(ui, &mut condition.variable, 12.0, height)
-            .hint_text("Variable")
-            .desired_width(90.0);
-        ui.add(field);
-        egui::ComboBox::from_id_salt(("visual_rule_compare", salt))
-            .width(52.0)
-            .icon(crate::widgets::combo_chevron)
-            .selected_text(condition.compare.symbol())
-            .show_ui(ui, |ui| {
-                for compare in RuleCompare::ALL {
-                    ui.selectable_value(&mut condition.compare, compare, compare.symbol());
-                }
-            });
-        number(ui, egui::DragValue::new(&mut condition.value).speed(0.1));
     });
+    let mut remove = None;
+    for (position, condition) in rule.conditions.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            let height = ui.spacing().interact_size.y;
+            let field = crate::widgets::field(ui, &mut condition.variable, 12.0, height)
+                .hint_text("Variable")
+                .desired_width(80.0);
+            ui.add(field);
+            egui::ComboBox::from_id_salt(("visual_rule_compare", salt, position))
+                .width(48.0)
+                .icon(crate::widgets::combo_chevron)
+                .selected_text(condition.compare.symbol())
+                .show_ui(ui, |ui| {
+                    for compare in RuleCompare::ALL {
+                        ui.selectable_value(&mut condition.compare, compare, compare.symbol());
+                    }
+                });
+            number(ui, egui::DragValue::new(&mut condition.value).speed(0.1));
+            if ui
+                .button(egui::RichText::new("Remove").color(palette.danger))
+                .clicked()
+            {
+                remove = Some(position);
+            }
+        });
+    }
+    if let Some(position) = remove {
+        rule.conditions.remove(position);
+    }
+    if rule.conditions.len() >= 2 {
+        property_row(ui, "Match", |ui| {
+            let mut any = rule.match_mode == engine_scene::RuleMatch::Any;
+            on_off_choice(ui, salt, &mut any, "Any of these", "All of these");
+            rule.match_mode = if any {
+                engine_scene::RuleMatch::Any
+            } else {
+                engine_scene::RuleMatch::All
+            };
+        });
+    }
 }
 
-fn fit_sprite_collider(world: &mut World, entity: Entity) -> bool {
+/// Replaces `entity`'s collider shape with `shape_for(width, height)` of its
+/// sprite. The body and every other setting stay as authored; an entity
+/// without a collider gets a Fixed one. False when nothing changed.
+fn fit_sprite_shape(
+    world: &mut World,
+    entity: Entity,
+    shape_for: impl FnOnce(f32, f32) -> ColliderShape,
+) -> bool {
     let size = world
         .get::<Sprite>(entity)
         .map(|sprite| sprite.size.to_array())
@@ -614,26 +994,471 @@ fn fit_sprite_collider(world: &mut World, entity: Entity) -> bool {
     if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
         return false;
     }
-    let body = world
-        .get::<SceneCollider>(entity)
-        .map_or(BodyKind::Fixed, |collider| collider.0.body);
-    let data = engine_scene::ColliderData {
-        shape: ColliderShape::Cuboid {
-            half_extents: [width * 0.5, height * 0.5, 0.05],
-        },
-        body,
+    let shape = shape_for(width, height);
+    let existing = world.get::<SceneCollider>(entity).map(|c| c.0.clone());
+    let data = match existing {
+        Some(mut data) => {
+            if data.shape == shape {
+                return false;
+            }
+            data.shape = shape;
+            data
+        }
+        None => engine_scene::ColliderData::new(shape, BodyKind::Fixed),
     };
-    if world
-        .get::<SceneCollider>(entity)
-        .is_some_and(|collider| collider.0 == data)
-    {
-        return false;
-    }
     let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
         return false;
     };
     entity_mut.insert(SceneCollider(data));
     true
+}
+
+fn fit_sprite_collider(world: &mut World, entity: Entity) -> bool {
+    fit_sprite_shape(world, entity, |width, height| ColliderShape::Cuboid {
+        half_extents: [width * 0.5, height * 0.5, 0.05],
+    })
+}
+
+fn fit_sprite_circle(world: &mut World, entity: Entity) -> bool {
+    fit_sprite_shape(world, entity, |width, height| ColliderShape::Ball {
+        radius: width.max(height) * 0.5,
+    })
+}
+
+/// The smallest near-plane distance the Inspector allows.
+const MIN_NEAR: f32 = 0.001;
+
+/// Sets the near plane (at least [`MIN_NEAR`]) and pushes far out when it
+/// would no longer be beyond near.
+fn set_camera_near(camera: &mut engine_renderer::Camera, near: f32) {
+    camera.near = if near.is_finite() {
+        near.max(MIN_NEAR)
+    } else {
+        MIN_NEAR
+    };
+    if camera.far <= camera.near {
+        camera.far = camera.near + 1.0;
+    }
+}
+
+/// Sets the far plane, keeping it beyond near.
+fn set_camera_far(camera: &mut engine_renderer::Camera, far: f32) {
+    camera.far = if far.is_finite() {
+        far.max(camera.near + MIN_NEAR)
+    } else {
+        camera.near + 1.0
+    };
+}
+
+/// Makes `entity` the active camera (removing the marker from every other
+/// entity), or clears it from `entity` alone.
+fn set_active_camera(world: &mut World, entity: Entity, active: bool) {
+    if !active {
+        if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+            entity_mut.remove::<ActiveCamera>();
+        }
+        return;
+    }
+    let others: Vec<Entity> = world
+        .query_filtered::<Entity, With<ActiveCamera>>()
+        .iter(world)
+        .filter(|&other| other != entity)
+        .collect();
+    for other in others {
+        if let Ok(mut other_mut) = world.get_entity_mut(other) {
+            other_mut.remove::<ActiveCamera>();
+        }
+    }
+    if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+        entity_mut.insert(ActiveCamera);
+    }
+}
+
+/// Objects a camera can follow: named, with a transform, not the camera.
+fn follow_targets(world: &World, camera: Entity) -> Vec<(String, String)> {
+    world
+        .iter_entities()
+        .filter(|entity| entity.id() != camera && entity.contains::<Transform>())
+        .filter_map(|entity| {
+            let id = entity.get::<SceneObjectId>()?.0.clone();
+            let name = entity.get::<Name>()?.0.clone();
+            Some((id, name))
+        })
+        .collect()
+}
+
+/// One min/max degree pair that keeps `min < max`.
+/// The choice of what input turns a follow camera.
+fn follow_input_row(
+    ui: &mut egui::Ui,
+    entity: Entity,
+    label: &str,
+    input: &mut engine_ecs::components::OrbitInput,
+) -> bool {
+    use engine_ecs::components::OrbitInput;
+    let name = |input: OrbitInput| match input {
+        OrbitInput::None => "None",
+        OrbitInput::Mouse => "Mouse",
+        OrbitInput::RightStick => "Right stick",
+        OrbitInput::Both => "Mouse and right stick",
+    };
+    let mut changed = false;
+    property_row(ui, label, |ui| {
+        choice(("camera_follow_input", entity), ui)
+            .selected_text(name(*input))
+            .show_ui(ui, |ui| {
+                for option in [
+                    OrbitInput::None,
+                    OrbitInput::Mouse,
+                    OrbitInput::RightStick,
+                    OrbitInput::Both,
+                ] {
+                    changed |= ui.selectable_value(input, option, name(option)).changed();
+                }
+            });
+    });
+    changed
+}
+
+fn pitch_limit_rows(ui: &mut egui::Ui, min: &mut f32, max: &mut f32) -> bool {
+    let mut changed = false;
+    property_row(ui, "Pitch limits", |ui| {
+        let low = number(
+            ui,
+            egui::DragValue::new(min)
+                .prefix("Min ")
+                .suffix("°")
+                .speed(0.5)
+                .range(-89.0..=88.0),
+        )
+        .changed();
+        let high = number(
+            ui,
+            egui::DragValue::new(max)
+                .prefix("Max ")
+                .suffix("°")
+                .speed(0.5)
+                .range(-88.0..=89.0),
+        )
+        .changed();
+        if low && *min >= *max {
+            *max = *min + 1.0;
+        }
+        if high && *max <= *min {
+            *min = *max - 1.0;
+        }
+        changed = low || high;
+    });
+    changed
+}
+
+/// The Camera Follow section: who to follow, and how.
+fn camera_follow_rows(world: &mut World, entity: Entity, ui: &mut egui::Ui) -> bool {
+    use engine_ecs::components::FollowMode;
+    let Some((mut target, mut mode, mut switch)) = world
+        .get::<CameraFollow>(entity)
+        .map(|follow| (follow.target.clone(), follow.mode, follow.switch.clone()))
+    else {
+        return false;
+    };
+    let options = follow_targets(world, entity);
+    let mut changed = false;
+
+    property_row(ui, "Target", |ui| {
+        let selected = if target.is_empty() {
+            "Choose an object"
+        } else {
+            options
+                .iter()
+                .find(|(id, _)| *id == target)
+                .map_or("Missing target", |(_, name)| name.as_str())
+        };
+        choice(("camera_follow_target", entity), ui)
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for (id, name) in &options {
+                    changed |= ui.selectable_value(&mut target, id.clone(), name).changed();
+                }
+            });
+    });
+
+    property_row(ui, "Mode", |ui| {
+        let options = [
+            (FollowMode::THIRD_PERSON, "Third person"),
+            (FollowMode::FIRST_PERSON, "First person"),
+            (FollowMode::SIDE_2D, "2D side"),
+        ];
+        let is_current =
+            |option: &FollowMode| std::mem::discriminant(option) == std::mem::discriminant(&mode);
+        let current = options
+            .iter()
+            .find(|(option, _)| is_current(option))
+            .map_or("", |(_, name)| name);
+        let mut picked = None;
+        choice(("camera_follow_mode", entity), ui)
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                for (option, name) in options {
+                    let chosen = is_current(&option);
+                    if ui.selectable_label(chosen, name).clicked() && !chosen {
+                        picked = Some(option);
+                    }
+                }
+            });
+        if let Some(option) = picked {
+            let same_view = |a: &FollowMode, b: &FollowMode| {
+                std::mem::discriminant(a) == std::mem::discriminant(b)
+            };
+            match &mut switch {
+                // The other view keeps its own settings.
+                Some(switch) if same_view(&switch.other, &option) => {
+                    std::mem::swap(&mut mode, &mut switch.other);
+                }
+                _ => mode = option,
+            }
+            if matches!(mode, FollowMode::Side2D { .. }) {
+                switch = None;
+            }
+            changed = true;
+        }
+    });
+
+    match &mut mode {
+        FollowMode::ThirdPerson {
+            distance,
+            height,
+            smoothing,
+            orbit,
+            pitch_min_degrees,
+            pitch_max_degrees,
+        } => {
+            for (label, value, range) in [
+                ("Distance", distance, 0.1..=1000.0),
+                ("Height", height, -1000.0..=1000.0),
+                ("Smoothing", smoothing, 0.0..=100.0),
+            ] {
+                property_row(ui, label, |ui| {
+                    changed |=
+                        number(ui, egui::DragValue::new(value).speed(0.1).range(range)).changed();
+                });
+            }
+            changed |= follow_input_row(ui, entity, "Orbit with", orbit);
+            changed |= pitch_limit_rows(ui, pitch_min_degrees, pitch_max_degrees);
+        }
+        FollowMode::FirstPerson {
+            height,
+            look,
+            pitch_min_degrees,
+            pitch_max_degrees,
+        } => {
+            property_row(ui, "Height", |ui| {
+                changed |= number(
+                    ui,
+                    egui::DragValue::new(height)
+                        .speed(0.1)
+                        .range(-1000.0..=1000.0),
+                )
+                .changed();
+            });
+            changed |= follow_input_row(ui, entity, "Look with", look);
+            changed |= pitch_limit_rows(ui, pitch_min_degrees, pitch_max_degrees);
+        }
+        FollowMode::Side2D {
+            dead_zone,
+            bounds,
+            smoothing,
+        } => {
+            property_row(ui, "Dead zone", |ui| {
+                for (axis, value) in ["X ", "Y "].into_iter().zip(dead_zone.iter_mut()) {
+                    changed |= number(
+                        ui,
+                        egui::DragValue::new(value)
+                            .prefix(axis)
+                            .speed(0.1)
+                            .range(0.0..=1000.0),
+                    )
+                    .changed();
+                }
+            });
+            let mut limited = bounds.is_some();
+            if crate::widgets::checkbox(ui, &crate::theme::NIGHT, &mut limited, "Limit to area")
+                .on_hover_text("Keep the camera inside a rectangle")
+                .changed()
+            {
+                *bounds = limited.then_some([-10.0, -10.0, 10.0, 10.0]);
+                changed = true;
+            }
+            if let Some(area) = bounds {
+                for (label, first) in [("Min", 0), ("Max", 2)] {
+                    property_row(ui, label, |ui| {
+                        for (axis, offset) in ["X ", "Y "].into_iter().zip(0..2) {
+                            changed |= number(
+                                ui,
+                                egui::DragValue::new(&mut area[first + offset])
+                                    .prefix(axis)
+                                    .speed(0.1),
+                            )
+                            .changed();
+                        }
+                    });
+                }
+                // Keep min <= max whichever side was dragged.
+                if area[0] > area[2] {
+                    area.swap(0, 2);
+                }
+                if area[1] > area[3] {
+                    area.swap(1, 3);
+                }
+            }
+            property_row(ui, "Smoothing", |ui| {
+                changed |= number(
+                    ui,
+                    egui::DragValue::new(smoothing)
+                        .speed(0.1)
+                        .range(0.0..=100.0),
+                )
+                .changed();
+            });
+        }
+    }
+
+    if !matches!(mode, FollowMode::Side2D { .. }) {
+        let mut enabled = switch.is_some();
+        if crate::widgets::checkbox(
+            ui,
+            &crate::theme::NIGHT,
+            &mut enabled,
+            "Switch view with a key",
+        )
+        .on_hover_text("Flip between first and third person while playing")
+        .changed()
+        {
+            switch = enabled.then(|| engine_ecs::components::ViewSwitch {
+                key: "V".to_owned(),
+                other: if matches!(mode, FollowMode::FirstPerson { .. }) {
+                    FollowMode::THIRD_PERSON
+                } else {
+                    FollowMode::FIRST_PERSON
+                },
+            });
+            changed = true;
+        }
+        if let Some(switch) = &mut switch {
+            property_row(ui, "Key", |ui| {
+                choice(("camera_follow_switch_key", entity), ui)
+                    .selected_text(switch.key.as_str())
+                    .show_ui(ui, |ui| {
+                        for candidate in engine_scripting::ScriptKey::ALL {
+                            let name = candidate.name();
+                            changed |= ui
+                                .selectable_value(&mut switch.key, name.to_owned(), name)
+                                .changed();
+                        }
+                    });
+            });
+        }
+    }
+
+    if changed && let Some(mut follow) = world.get_mut::<CameraFollow>(entity) {
+        follow.target = target;
+        follow.mode = mode;
+        follow.switch = switch;
+    }
+    changed
+}
+
+/// Whether the Add-Component menu lists `component` for `entity`.
+fn offered_in_add_menu(world: &World, entity: Entity, component: &ComponentUi) -> bool {
+    if component.name == "Sprite" || (component.present)(world, entity) {
+        return false;
+    }
+    // A follow moves a camera, so it is only offered on one.
+    component.name != "Camera Follow" || world.get::<Camera>(entity).is_some()
+}
+
+/// The Camera section's property rows. `aspect_ratio` is left out (the
+/// viewport owns it) and so are eye/target/up (the Transform aims the camera).
+fn camera_rows(ui: &mut egui::Ui, entity: Entity, camera: &mut engine_renderer::Camera) -> bool {
+    use engine_renderer::Projection;
+    let mut changed = false;
+    let perspective = matches!(camera.projection, Projection::Perspective { .. });
+    property_row(ui, "Projection", |ui| {
+        choice(("camera_projection", entity), ui)
+            .selected_text(if perspective {
+                "Perspective"
+            } else {
+                "Orthographic"
+            })
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(perspective, "Perspective").clicked() && !perspective {
+                    camera.projection = Projection::Perspective {
+                        fov_y_radians: 45.0_f32.to_radians(),
+                    };
+                    changed = true;
+                }
+                if ui.selectable_label(!perspective, "Orthographic").clicked() && perspective {
+                    camera.projection = Projection::Orthographic { height: 10.0 };
+                    changed = true;
+                }
+            });
+    });
+    match &mut camera.projection {
+        Projection::Perspective { fov_y_radians } => {
+            let mut degrees = fov_y_radians.to_degrees();
+            property_row(ui, "Field of view", |ui| {
+                if number(
+                    ui,
+                    egui::DragValue::new(&mut degrees)
+                        .speed(0.5)
+                        .range(10.0..=120.0)
+                        .suffix("°"),
+                )
+                .changed()
+                {
+                    *fov_y_radians = degrees.clamp(10.0, 120.0).to_radians();
+                    changed = true;
+                }
+            });
+        }
+        Projection::Orthographic { height } => {
+            property_row(ui, "Size", |ui| {
+                changed |= number(
+                    ui,
+                    egui::DragValue::new(height).speed(0.1).range(0.1..=1000.0),
+                )
+                .changed();
+            });
+        }
+    }
+    let mut near = camera.near;
+    property_row(ui, "Near", |ui| {
+        if number(
+            ui,
+            egui::DragValue::new(&mut near)
+                .speed(0.01)
+                .range(MIN_NEAR..=100_000.0),
+        )
+        .changed()
+        {
+            set_camera_near(camera, near);
+            changed = true;
+        }
+    });
+    let mut far = camera.far;
+    property_row(ui, "Far", |ui| {
+        if number(
+            ui,
+            egui::DragValue::new(&mut far)
+                .speed(1.0)
+                .range(MIN_NEAR..=1_000_000.0),
+        )
+        .changed()
+        {
+            set_camera_far(camera, far);
+            changed = true;
+        }
+    });
+    changed
 }
 
 /// The component types the Inspector knows. Adding a type here is all it
@@ -668,29 +1493,52 @@ const REGISTRY: &[ComponentUi] = &[
         type_name: "Camera",
         present: has::<Camera>,
         insert_default: |world, entity| {
+            // Eye at the origin looking down -Z: the object's Transform alone
+            // decides the view, so nothing is lost when the scene is saved.
             if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
-                entity_mut.insert(Camera::from(engine_renderer::Camera::new(
-                    Vec3::new(0.0, 2.0, 6.0),
-                    Vec3::ZERO,
-                    16.0 / 9.0,
-                )));
+                entity_mut.insert(default_camera());
             }
         },
-        remove: strip::<Camera>,
+        remove: |world, entity| {
+            // A follow only makes sense on a camera.
+            strip::<CameraFollow>(world, entity);
+            strip::<Camera>(world, entity);
+        },
         inspect: |world, entity, ui, _assets| {
             let Some(mut value) = world.get::<Camera>(entity).map(|camera| camera.0) else {
                 return false;
             };
-            if value.inspect(ui) {
-                if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
-                    entity_mut.insert(Camera::from(value));
-                }
-                true
-            } else {
-                false
+            let mut changed = camera_rows(ui, entity, &mut value);
+            if changed && let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(Camera::from(value));
             }
+            let mut active = world.get::<ActiveCamera>(entity).is_some();
+            if crate::widgets::checkbox(ui, &crate::theme::NIGHT, &mut active, "Active camera")
+                .on_hover_text("The game looks through this camera")
+                .changed()
+            {
+                set_active_camera(world, entity, active);
+                changed = true;
+            }
+            changed
         },
         copy_to: copy_component::<Camera>,
+    },
+    ComponentUi {
+        name: "Camera Follow",
+        type_name: "CameraFollow",
+        present: has::<CameraFollow>,
+        insert_default: |world, entity| {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(CameraFollow::new(
+                    String::new(),
+                    engine_ecs::components::FollowMode::THIRD_PERSON,
+                ));
+            }
+        },
+        remove: strip::<CameraFollow>,
+        inspect: |world, entity, ui, _assets| camera_follow_rows(world, entity, ui),
+        copy_to: copy_component::<CameraFollow>,
     },
     ComponentUi {
         name: "Point Light",
@@ -910,12 +1758,12 @@ const REGISTRY: &[ComponentUi] = &[
         present: has::<SceneCollider>,
         insert_default: |world, entity| {
             if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
-                entity_mut.insert(SceneCollider(engine_scene::ColliderData {
-                    shape: ColliderShape::Cuboid {
+                entity_mut.insert(SceneCollider(engine_scene::ColliderData::new(
+                    ColliderShape::Cuboid {
                         half_extents: [0.5, 0.5, 0.5],
                     },
-                    body: BodyKind::Fixed,
-                }));
+                    BodyKind::Fixed,
+                )));
             }
         },
         remove: strip::<SceneCollider>,
@@ -999,12 +1847,81 @@ const REGISTRY: &[ComponentUi] = &[
                     }
                 }
             }
-            let fit_sprite = has_sprite && ui.button("Fit box to sprite").clicked();
+            let body = value.0.body;
+            let trigger = value.0.trigger;
+            let dynamic = body == BodyKind::Dynamic;
+            property_row(ui, "Trigger", |ui| {
+                changed |=
+                    crate::widgets::checkbox(ui, &crate::theme::NIGHT, &mut value.0.trigger, "")
+                        .changed();
+            });
+            if dynamic && !trigger {
+                property_row(ui, "Mass", |ui| {
+                    let mut auto = value.0.mass.is_none();
+                    if crate::widgets::checkbox(ui, &crate::theme::NIGHT, &mut auto, "Auto")
+                        .changed()
+                    {
+                        value.0.mass = if auto { None } else { Some(1.0) };
+                        changed = true;
+                    }
+                    if let Some(mass) = &mut value.0.mass {
+                        changed |= number(
+                            ui,
+                            egui::DragValue::new(mass)
+                                .speed(0.05)
+                                .range(0.001..=100000.0),
+                        )
+                        .changed();
+                    }
+                });
+            }
+            if !trigger {
+                let unit = |ui: &mut egui::Ui, label: &str, value: &mut f32, max: f32| {
+                    property_row(ui, label, |ui| {
+                        number(ui, egui::DragValue::new(value).speed(0.01).range(0.0..=max))
+                            .changed()
+                    })
+                };
+                changed |= unit(ui, "Friction", &mut value.0.friction, 10.0);
+                changed |= unit(ui, "Bounciness", &mut value.0.bounciness, 1.0);
+            }
+            if dynamic && !trigger {
+                property_row(ui, "Gravity", |ui| {
+                    changed |= number(
+                        ui,
+                        egui::DragValue::new(&mut value.0.gravity_scale)
+                            .speed(0.05)
+                            .range(-10.0..=10.0),
+                    )
+                    .changed();
+                });
+            }
+            if dynamic {
+                property_row(ui, "Keep upright", |ui| {
+                    changed |= crate::widgets::checkbox(
+                        ui,
+                        &crate::theme::NIGHT,
+                        &mut value.0.lock_rotation,
+                        "",
+                    )
+                    .changed();
+                });
+            }
+            let (mut fit_box, mut fit_circle) = (false, false);
+            if has_sprite {
+                ui.horizontal_wrapped(|ui| {
+                    fit_box = ui.button("Fit box to sprite").clicked();
+                    fit_circle = ui.button("Fit circle to sprite").clicked();
+                });
+            }
             if changed && let Ok(mut entity_mut) = world.get_entity_mut(entity) {
                 entity_mut.insert(value);
             }
-            if fit_sprite {
+            if fit_box {
                 changed |= fit_sprite_collider(world, entity);
+            }
+            if fit_circle {
+                changed |= fit_sprite_circle(world, entity);
             }
             changed
         },
@@ -1186,10 +2103,15 @@ const REGISTRY: &[ComponentUi] = &[
                     changed = true;
                 }
             }
-            if world.get::<SceneCollider>(entity).is_none()
-                && ui.button("Add box collision").clicked()
-            {
-                changed |= fit_sprite_collider(world, entity);
+            if world.get::<SceneCollider>(entity).is_none() {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Add box collision").clicked() {
+                        changed |= fit_sprite_collider(world, entity);
+                    }
+                    if ui.button("Add circle collision").clicked() {
+                        changed |= fit_sprite_circle(world, entity);
+                    }
+                });
             }
             if let Some(path) = dropped {
                 changed |= set_sprite_image(world, entity, assets, &path);
@@ -1638,7 +2560,8 @@ pub fn show(
         .get::<SceneRules>(entity)
         .map_or_else(Vec::new, |value| value.0.clone());
     if !rules.is_empty() {
-        ensure_rule_object_ids(world, entity);
+        let all_named = rules_name_objects(&rules);
+        ensure_rule_object_ids(world, entity, all_named);
     }
     let before = rules.clone();
     let owner_is_button = world
@@ -1646,17 +2569,24 @@ pub fn show(
         .is_some_and(|value| value.0.kind == UiKind::Button);
     let text_targets = rule_targets(world, RuleActionKind::Text);
     let audio_targets = rule_targets(world, RuleActionKind::Audio);
+    let object_targets = rule_targets(world, RuleActionKind::Destroy);
     let has_text_target = world
         .iter_entities()
         .any(|candidate| rule_target_matches(world, candidate.id(), RuleActionKind::Text));
     let has_audio_target = world
         .iter_entities()
         .any(|candidate| rule_target_matches(world, candidate.id(), RuleActionKind::Audio));
+    let has_object_target = world
+        .iter_entities()
+        .any(|candidate| rule_target_matches(world, candidate.id(), RuleActionKind::Destroy));
     let can_add_rule = rules.len() < 16 && visual_rule_count(world) < 1024;
     let mut add_rule = None;
     let mut remove_rule = None;
     section(ui, "Visual Rules", None::<fn(&mut egui::Ui)>, |ui| {
-        note(ui, "React to this button or to a named gameplay event.");
+        note(
+            ui,
+            "React to a button, a key, a timer, a game event, and more.",
+        );
         ui.horizontal_wrapped(|ui| {
             let add = egui::Button::new(egui::RichText::new("Add rule").color(if can_add_rule {
                 palette.accent
@@ -1672,6 +2602,20 @@ pub fn show(
                         ("Play a sound", RuleActionKind::Audio, has_audio_target),
                         ("Emit an event", RuleActionKind::Event, true),
                         ("Change a variable", RuleActionKind::Variable, true),
+                        ("Change scene", RuleActionKind::ChangeScene, true),
+                        (
+                            "Show or hide object",
+                            RuleActionKind::Visible,
+                            has_object_target,
+                        ),
+                        (
+                            "Enable or disable object",
+                            RuleActionKind::Enabled,
+                            has_object_target,
+                        ),
+                        ("Spawn prefab", RuleActionKind::Spawn, true),
+                        ("Destroy object", RuleActionKind::Destroy, has_object_target),
+                        ("Set game state", RuleActionKind::State, true),
                     ] {
                         if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                             add_rule = Some((kind, None));
@@ -1720,8 +2664,11 @@ pub fn show(
                         index,
                         rule,
                         owner_is_button,
-                        &text_targets,
-                        &audio_targets,
+                        &RuleTargets {
+                            text: &text_targets,
+                            audio: &audio_targets,
+                            objects: &object_targets,
+                        },
                     );
                 });
         }
@@ -1733,6 +2680,7 @@ pub fn show(
         graph::Controls {
             text_targets: &text_targets,
             audio_targets: &audio_targets,
+            object_targets: &object_targets,
             owner_is_button,
             can_add_rule,
             add_rule: &mut add_rule,
@@ -2041,7 +2989,7 @@ fn add_component_menu(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
         crate::theme::style_context_menu(ui);
         let mut any = false;
         for component in REGISTRY {
-            if component.name == "Sprite" || (component.present)(world, entity) {
+            if !offered_in_add_menu(world, entity, component) {
                 continue;
             }
             any = true;
@@ -2071,7 +3019,8 @@ mod tests {
                     target: target.clone(),
                     text: "Ready".into(),
                 },
-                condition: None,
+                conditions: Vec::new(),
+                match_mode: engine_scene::RuleMatch::All,
                 graph_position: None,
             },
             RuleData {
@@ -2080,7 +3029,8 @@ mod tests {
                     target,
                     text: "Score".into(),
                 },
-                condition: None,
+                conditions: Vec::new(),
+                match_mode: engine_scene::RuleMatch::All,
                 graph_position: None,
             },
         ];
@@ -2156,14 +3106,14 @@ mod tests {
             text: "Ready".into(),
         };
         assert!(matches!(
-            &world.get::<SceneRules>(button).unwrap().0[0],
-            RuleData {
-                trigger: RuleTrigger::UiClicked,
-                action: RuleAction::SetUiText { target, .. },
-                condition: None,
-                graph_position: None,
-            } if target == &label_id
-        ));
+                   &world.get::<SceneRules>(button).unwrap().0[0],
+                   RuleData {
+                       trigger: RuleTrigger::UiClicked,
+                       action: RuleAction::SetUiText { target, .. },
+                       graph_position: None,
+        ..
+                   } if target == &label_id
+               ));
 
         let saved = engine_scene::Scene::from_world(&mut world)
             .to_ron_string()
@@ -2201,7 +3151,8 @@ mod tests {
                 target,
                 text: "Ready".into(),
             },
-            condition: None,
+            conditions: Vec::new(),
+            match_mode: engine_scene::RuleMatch::All,
             graph_position: None,
         };
         for _ in 0..64 {
@@ -2252,14 +3203,133 @@ mod tests {
         ));
         let rules = &world.get::<SceneRules>(owner).expect("authored rules").0;
         assert!(matches!(
-            &rules[0],
-            RuleData {
-                trigger: RuleTrigger::Named(trigger),
-                action: RuleAction::EmitEvent { name },
-                condition: None,
-                graph_position: None,
-            } if trigger == "game_start" && name == "next_event"
+                   &rules[0],
+                   RuleData {
+                       trigger: RuleTrigger::Named(trigger),
+                       action: RuleAction::EmitEvent { name },
+                       graph_position: None,
+        ..
+                   } if trigger == "game_start" && name == "next_event"
+               ));
+    }
+
+    #[test]
+    fn new_trigger_choice_sets_default_fields() {
+        assert_eq!(
+            trigger_for_choice("Timer"),
+            Some(RuleTrigger::Timer {
+                seconds: 1.0,
+                repeat: false
+            })
+        );
+        assert_eq!(
+            trigger_for_choice("Key pressed"),
+            Some(RuleTrigger::KeyPressed {
+                key: "Space".into()
+            })
+        );
+        assert_eq!(
+            trigger_for_choice("Touches an object"),
+            Some(RuleTrigger::CollisionEnter { with: None })
+        );
+        assert_eq!(
+            trigger_for_choice("Game state changes"),
+            Some(RuleTrigger::StateChanged {
+                state: engine_scene::GameStateName::Paused
+            })
+        );
+        assert_eq!(trigger_for_choice("Nonsense"), None);
+        for label in TRIGGER_CHOICES {
+            let trigger = trigger_for_choice(label).expect("every choice has a default");
+            assert_eq!(trigger_choice_label(&trigger), label);
+        }
+    }
+
+    #[test]
+    fn add_rule_offers_new_action_kinds() {
+        for kind in [
+            RuleActionKind::ChangeScene,
+            RuleActionKind::Spawn,
+            RuleActionKind::State,
+        ] {
+            let mut world = World::new();
+            let owner = world.spawn(Name::new("Rules")).id();
+            assert!(add_visual_rule(&mut world, owner, kind, None));
+            let rules = &world.get::<SceneRules>(owner).expect("rules").0;
+            assert!(
+                matches!(
+                    (&rules[0].action, kind),
+                    (RuleAction::ChangeScene { path }, RuleActionKind::ChangeScene)
+                        if path == "scenes/level2.ron"
+                ) || matches!(
+                    (&rules[0].action, kind),
+                    (RuleAction::SpawnPrefab { .. }, RuleActionKind::Spawn)
+                ) || matches!(
+                    (&rules[0].action, kind),
+                    (RuleAction::SetGameState { .. }, RuleActionKind::State)
+                )
+            );
+        }
+        let mut lonely = World::new();
+        let owner = lonely.spawn_empty().id();
+        for kind in [
+            RuleActionKind::Visible,
+            RuleActionKind::Enabled,
+            RuleActionKind::Destroy,
+        ] {
+            assert!(!add_visual_rule(&mut lonely, owner, kind, None));
+        }
+        assert!(lonely.get::<SceneRules>(owner).is_none());
+        let mut world = World::new();
+        let owner = world.spawn_empty().id();
+        let door = world.spawn(Name::new("Door")).id();
+        for kind in [
+            RuleActionKind::Visible,
+            RuleActionKind::Enabled,
+            RuleActionKind::Destroy,
+        ] {
+            assert!(add_visual_rule(&mut world, owner, kind, None));
+        }
+        let door_id = world.get::<SceneObjectId>(door).expect("id").0.clone();
+        let rules = &world.get::<SceneRules>(owner).expect("rules").0;
+        assert!(matches!(&rules[0].action,
+            RuleAction::SetVisible { target, visible: false } if *target == door_id));
+        assert!(matches!(&rules[1].action,
+            RuleAction::SetEnabled { target, enabled: false } if *target == door_id));
+        assert!(matches!(&rules[2].action,
+            RuleAction::Destroy { target } if *target == door_id));
+    }
+
+    #[test]
+    fn a_disabled_object_can_be_picked_for_enable() {
+        let mut world = World::new();
+        let owner = world.spawn_empty().id();
+        let door = world.spawn((Name::new("Door"), Disabled)).id();
+        assert!(add_visual_rule(
+            &mut world,
+            owner,
+            RuleActionKind::Enabled,
+            None
         ));
+        let door_id = world.get::<SceneObjectId>(door).expect("id").0.clone();
+        assert!(matches!(
+            &world.get::<SceneRules>(owner).expect("rules").0[0].action,
+            RuleAction::SetEnabled { target, .. } if *target == door_id
+        ));
+        assert!(rule_targets(&world, RuleActionKind::Destroy).contains(&(door_id, "Door".into())));
+    }
+
+    #[test]
+    fn condition_list_adds_up_to_eight() {
+        let mut rule = RuleData::new(
+            RuleTrigger::SceneStart,
+            RuleAction::EmitEvent { name: "x".into() },
+        );
+        for _ in 0..engine_scene::MAX_RULE_CONDITIONS {
+            assert!(add_condition(&mut rule));
+        }
+        assert!(!add_condition(&mut rule));
+        assert_eq!(rule.conditions.len(), 8);
     }
 
     #[test]
@@ -2362,6 +3432,361 @@ mod tests {
         assert_eq!(saved.entities[0].collider.as_ref(), Some(&collider));
     }
 
+    fn spawn_sprite_collider(size: [f32; 2], data: engine_scene::ColliderData) -> (World, Entity) {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                SpriteSource {
+                    atlas: uuid::Uuid::nil().to_string(),
+                    region: "full".into(),
+                    size,
+                    color: [1.0; 4],
+                    z_order: 0.0,
+                },
+                SceneCollider(data),
+            ))
+            .id();
+        (world, entity)
+    }
+
+    #[test]
+    fn fitting_a_sprite_keeps_body_settings() {
+        let mut data =
+            engine_scene::ColliderData::new(ColliderShape::Ball { radius: 1.0 }, BodyKind::Dynamic);
+        data.friction = 0.9;
+        data.trigger = true;
+        data.mass = Some(3.0);
+        data.bounciness = 0.4;
+        data.gravity_scale = 0.5;
+        data.lock_rotation = true;
+        let (mut world, entity) = spawn_sprite_collider([4.0, 2.0], data.clone());
+        assert!(fit_sprite_collider(&mut world, entity));
+        let fitted = &world.get::<SceneCollider>(entity).unwrap().0;
+        assert_eq!(
+            fitted.shape,
+            ColliderShape::Cuboid {
+                half_extents: [2.0, 1.0, 0.05]
+            }
+        );
+        let expected = engine_scene::ColliderData {
+            shape: fitted.shape.clone(),
+            ..data
+        };
+        assert_eq!(fitted, &expected);
+    }
+
+    #[test]
+    fn fit_sprite_circle_uses_the_larger_side() {
+        let mut data = engine_scene::ColliderData::new(
+            ColliderShape::Cuboid {
+                half_extents: [1.0; 3],
+            },
+            BodyKind::Dynamic,
+        );
+        data.friction = 0.9;
+        data.trigger = true;
+        data.mass = Some(3.0);
+        let (mut world, entity) = spawn_sprite_collider([2.0, 1.0], data.clone());
+        assert!(fit_sprite_circle(&mut world, entity));
+        let fitted = &world.get::<SceneCollider>(entity).unwrap().0;
+        assert_eq!(fitted.shape, ColliderShape::Ball { radius: 1.0 });
+        assert_eq!(fitted.body, BodyKind::Dynamic);
+        assert_eq!(fitted.friction, 0.9);
+        assert!(fitted.trigger);
+        assert_eq!(fitted.mass, Some(3.0));
+        assert!(!fit_sprite_circle(&mut world, entity));
+        world.get_mut::<SpriteSource>(entity).unwrap().size = [f32::NAN, 1.0];
+        assert!(!fit_sprite_circle(&mut world, entity));
+    }
+
+    #[test]
+    fn fit_sprite_circle_adds_a_fixed_circle_when_there_is_no_collider() {
+        let mut world = World::new();
+        let entity = world
+            .spawn(SpriteSource {
+                atlas: uuid::Uuid::nil().to_string(),
+                region: "full".into(),
+                size: [1.0, 3.0],
+                color: [1.0; 4],
+                z_order: 0.0,
+            })
+            .id();
+        assert!(fit_sprite_circle(&mut world, entity));
+        let data = &world.get::<SceneCollider>(entity).unwrap().0;
+        assert_eq!(data.shape, ColliderShape::Ball { radius: 1.5 });
+        assert_eq!(data.body, BodyKind::Fixed);
+    }
+
+    /// The labels the Collider section draws for `data`.
+    fn collider_labels(data: engine_scene::ColliderData) -> Vec<String> {
+        let mut world = World::new();
+        let entity = world.spawn(SceneCollider(data)).id();
+        let section = REGISTRY
+            .iter()
+            .find(|component| component.name == "Collider")
+            .expect("Collider registry entry");
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let assets = AssetIndex::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            (section.inspect)(&mut world, entity, ui, &assets);
+        });
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The labels the Camera section draws for `camera`.
+    fn camera_labels(camera: engine_renderer::Camera) -> Vec<String> {
+        let mut world = World::new();
+        let entity = world.spawn(Camera::from(camera)).id();
+        let section = REGISTRY
+            .iter()
+            .find(|component| component.name == "Camera")
+            .expect("Camera registry entry");
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let assets = AssetIndex::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            (section.inspect)(&mut world, entity, ui, &assets);
+        });
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn camera_rows_follow_projection() {
+        let has = |labels: &[String], name: &str| labels.iter().any(|label| label == name);
+        let perspective = camera_labels(engine_renderer::Camera::new(Vec3::ZERO, Vec3::NEG_Z, 1.0));
+        assert!(has(&perspective, "Field of view") && !has(&perspective, "Size"));
+        let ortho = camera_labels(engine_renderer::Camera::new_orthographic(
+            Vec3::ZERO,
+            Vec3::NEG_Z,
+            1.0,
+            10.0,
+        ));
+        assert!(has(&ortho, "Size") && !has(&ortho, "Field of view"));
+        for labels in [&perspective, &ortho] {
+            assert!(has(labels, "Projection"));
+            assert!(has(labels, "Near") && has(labels, "Far") && has(labels, "Active camera"));
+            for gone in ["Eye", "Target", "Up"] {
+                assert!(!has(labels, gone), "{gone} row must not be shown");
+            }
+        }
+    }
+
+    #[test]
+    fn ticking_active_camera_clears_others() {
+        use engine_ecs::components::ActiveCamera;
+        let mut world = World::new();
+        let cam = || Camera::from(engine_renderer::Camera::new(Vec3::ZERO, Vec3::NEG_Z, 1.0));
+        let first = world.spawn((cam(), ActiveCamera)).id();
+        let second = world.spawn(cam()).id();
+        set_active_camera(&mut world, second, true);
+        assert!(world.get::<ActiveCamera>(first).is_none());
+        assert!(world.get::<ActiveCamera>(second).is_some());
+        set_active_camera(&mut world, second, false);
+        assert!(world.get::<ActiveCamera>(second).is_none());
+    }
+
+    #[test]
+    fn unticking_active_camera_only_clears_this_one() {
+        use engine_ecs::components::ActiveCamera;
+        let mut world = World::new();
+        let cam = || Camera::from(engine_renderer::Camera::new(Vec3::ZERO, Vec3::NEG_Z, 1.0));
+        let first = world.spawn((cam(), ActiveCamera)).id();
+        let second = world.spawn((cam(), ActiveCamera)).id();
+        set_active_camera(&mut world, first, false);
+        assert!(world.get::<ActiveCamera>(first).is_none());
+        assert!(
+            world.get::<ActiveCamera>(second).is_some(),
+            "the other camera keeps its marker"
+        );
+    }
+
+    #[test]
+    fn camera_follow_section_only_for_cameras() {
+        let mut world = World::new();
+        let plain = world.spawn(Transform::from(MathTransform::IDENTITY)).id();
+        let camera = world
+            .spawn(Camera::from(engine_renderer::Camera::new(
+                Vec3::ZERO,
+                Vec3::NEG_Z,
+                1.0,
+            )))
+            .id();
+        let follow = REGISTRY
+            .iter()
+            .find(|component| component.name == "Camera Follow")
+            .expect("Camera Follow registry entry");
+        assert!(!offered_in_add_menu(&world, plain, follow));
+        assert!(offered_in_add_menu(&world, camera, follow));
+        (follow.insert_default)(&mut world, camera);
+        assert!(
+            !offered_in_add_menu(&world, camera, follow),
+            "already added"
+        );
+        // Removing the camera takes its follow with it.
+        let camera_ui = REGISTRY
+            .iter()
+            .find(|component| component.name == "Camera")
+            .expect("Camera registry entry");
+        (camera_ui.remove)(&mut world, camera);
+        assert!(!(follow.present)(&world, camera));
+    }
+
+    /// The labels the Camera Follow section draws for `follow`.
+    fn follow_labels(follow: engine_ecs::components::CameraFollow) -> Vec<String> {
+        let mut world = World::new();
+        let entity = world.spawn(follow).id();
+        let section = REGISTRY
+            .iter()
+            .find(|component| component.name == "Camera Follow")
+            .expect("Camera Follow registry entry");
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let assets = AssetIndex::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            (section.inspect)(&mut world, entity, ui, &assets);
+        });
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) => Some(text.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn camera_follow_rows_follow_the_mode() {
+        use engine_ecs::components::{CameraFollow, FollowMode};
+        let has = |labels: &[String], name: &str| labels.iter().any(|label| label == name);
+        let third = follow_labels(CameraFollow::new("", FollowMode::THIRD_PERSON));
+        for row in [
+            "Target",
+            "Mode",
+            "Distance",
+            "Height",
+            "Smoothing",
+            "Orbit with",
+        ] {
+            assert!(has(&third, row), "missing {row}");
+        }
+        assert!(has(&third, "Pitch limits") && !has(&third, "Dead zone"));
+        let side = follow_labels(CameraFollow::new("", FollowMode::SIDE_2D));
+        for row in ["Target", "Mode", "Dead zone", "Smoothing", "Limit to area"] {
+            assert!(has(&side, row), "missing {row}");
+        }
+        assert!(!has(&side, "Distance") && !has(&side, "Orbit with"));
+    }
+
+    #[test]
+    fn far_stays_beyond_near() {
+        let mut camera = engine_renderer::Camera::new(Vec3::ZERO, Vec3::NEG_Z, 1.0);
+        camera.far = 10.0;
+        set_camera_near(&mut camera, 50.0);
+        assert!(camera.far > camera.near && camera.near > 0.0);
+        set_camera_far(&mut camera, 1.0);
+        assert!(camera.far > camera.near);
+        set_camera_near(&mut camera, -3.0);
+        assert!(camera.near > 0.0);
+    }
+
+    #[test]
+    fn added_camera_view_survives_save_and_reload() {
+        let mut world = World::new();
+        let eye = Vec3::new(0.0, 2.0, 6.0);
+        let mut transform = MathTransform::from_translation(eye);
+        transform.rotation =
+            engine_scene::look_rotation(Vec3::ZERO - eye, Vec3::Y).expect("look rotation");
+        let entity = world
+            .spawn((Name::new("Cam"), Transform::from(transform)))
+            .id();
+        let section = REGISTRY
+            .iter()
+            .find(|component| component.name == "Camera")
+            .expect("Camera registry entry");
+        (section.insert_default)(&mut world, entity);
+
+        let matrix = transform.to_matrix();
+        let (want_eye, want_target, _) = engine_scene::camera_world_pose(matrix);
+        let scene = engine_scene::Scene::from_world(&mut world);
+        let saved = scene.entities[0].camera.expect("saved camera");
+        assert!(Vec3::from_array(saved.eye).distance(want_eye) < 1e-4);
+        assert!(Vec3::from_array(saved.target).distance(want_target) < 1e-4);
+        let forward = Vec3::from_array(saved.target) - Vec3::from_array(saved.eye);
+        assert!(
+            forward.distance((Vec3::ZERO - eye).normalize()) < 1e-3,
+            "looks at the origin"
+        );
+
+        let mut reloaded = World::new();
+        scene.instantiate(&mut reloaded);
+        let mut query = reloaded.query::<(&Transform, &Camera)>();
+        let (t, _) = query.single(&reloaded).expect("one camera");
+        let (eye2, target2, _) = engine_scene::camera_world_pose(t.0.to_matrix());
+        assert!(eye2.distance(want_eye) < 1e-4 && target2.distance(want_target) < 1e-4);
+    }
+
+    fn collider(body: BodyKind, trigger: bool) -> engine_scene::ColliderData {
+        let mut data = engine_scene::ColliderData::new(ColliderShape::Ball { radius: 0.5 }, body);
+        data.trigger = trigger;
+        data
+    }
+
+    #[test]
+    fn collider_rows_follow_body_kind() {
+        let has = |labels: &[String], name: &str| labels.iter().any(|label| label == name);
+
+        let fixed = collider_labels(collider(BodyKind::Fixed, false));
+        assert!(has(&fixed, "Trigger"));
+        assert!(has(&fixed, "Friction") && has(&fixed, "Bounciness"));
+        assert!(!has(&fixed, "Mass") && !has(&fixed, "Gravity"));
+        assert!(!has(&fixed, "Keep upright"));
+
+        let dynamic = collider_labels(collider(BodyKind::Dynamic, false));
+        assert!(has(&dynamic, "Mass") && has(&dynamic, "Gravity"));
+        assert!(has(&dynamic, "Friction") && has(&dynamic, "Keep upright"));
+
+        let kinematic = collider_labels(collider(BodyKind::Kinematic, false));
+        // Rapier ignores locked rotation on script-moved Kinematic bodies.
+        assert!(!has(&kinematic, "Keep upright"));
+        assert!(!has(&kinematic, "Mass") && !has(&kinematic, "Gravity"));
+
+        let trigger = collider_labels(collider(BodyKind::Dynamic, true));
+        assert!(has(&trigger, "Trigger") && !has(&trigger, "Gravity"));
+        assert!(!has(&trigger, "Mass"));
+        assert!(!has(&trigger, "Friction") && !has(&trigger, "Bounciness"));
+    }
+
+    #[test]
+    fn mass_row_offers_auto_and_a_value_when_not_auto() {
+        let auto = collider_labels(collider(BodyKind::Dynamic, false));
+        assert!(auto.iter().any(|label| label == "Auto"));
+        let mut data = collider(BodyKind::Dynamic, false);
+        data.mass = Some(2.5);
+        let manual = collider_labels(data);
+        assert!(manual.iter().any(|label| label == "Auto"));
+        assert!(manual.iter().any(|label| label.contains("2.5")));
+        assert!(!auto.iter().any(|label| label.contains("2.5")));
+    }
+
     #[test]
     fn sprite_collision_refit_preserves_body_and_rejects_invalid_size() {
         let mut world = World::new();
@@ -2374,10 +3799,10 @@ mod tests {
                     color: [1.0; 4],
                     z_order: 0.0,
                 },
-                SceneCollider(engine_scene::ColliderData {
-                    shape: ColliderShape::Ball { radius: 1.0 },
-                    body: BodyKind::Dynamic,
-                }),
+                SceneCollider(engine_scene::ColliderData::new(
+                    ColliderShape::Ball { radius: 1.0 },
+                    BodyKind::Dynamic,
+                )),
             ))
             .id();
 

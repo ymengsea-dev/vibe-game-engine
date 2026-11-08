@@ -2,15 +2,22 @@
 //! behind the `lua` feature.
 
 mod command;
+mod input;
 #[cfg(feature = "lua")]
 mod lua;
+mod queries;
 
-pub use command::GameCommand;
+pub use command::{GAME_STATES, GameCommand};
+pub use input::{
+    ButtonState, InputSnapshot, ScriptGamepadAxis, ScriptGamepadButton, ScriptKey,
+    ScriptMouseButton,
+};
+pub use queries::{ScriptQueries, ScriptRayHit};
 
 #[cfg(feature = "lua")]
 pub use lua::{
     LUA_DIAGNOSTIC_PREFIX, LuaRuntime, LuaScriptDiagnostic, LuaSyntaxDiagnostic, ScriptError,
-    ScriptKey, check_lua_syntax,
+    SnapshotObject, check_lua_syntax,
 };
 
 #[cfg(all(test, feature = "lua"))]
@@ -706,6 +713,87 @@ mod tests {
     }
 
     #[test]
+    fn old_position_calls_still_work() {
+        let mut runtime = LuaRuntime::new().expect("runtime");
+        runtime.set_scene_snapshot([("actor".into(), None, Some([1.0, 2.0, 3.0]))]);
+        runtime
+            .load_script(
+                "assets/scripts/main.lua",
+                "return { start = function() engine.set_position('actor', 4, 5, 6); local p = engine.get_position('actor'); engine.log(p.x .. ',' .. p.y .. ',' .. p.z) end }",
+            )
+            .expect("script");
+        assert_eq!(
+            runtime.start().expect("start"),
+            vec![
+                GameCommand::SetPosition {
+                    object_id: "actor".into(),
+                    position: [4.0, 5.0, 6.0],
+                },
+                GameCommand::Log("4.0,5.0,6.0".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn position_calls_accept_vec3_and_return_vec3() {
+        let mut runtime = LuaRuntime::new().expect("runtime");
+        runtime.set_scene_snapshot([("actor".into(), None, Some([1.0, 2.0, 3.0]))]);
+        runtime
+            .load_script(
+                "assets/scripts/main.lua",
+                "return { start = function() engine.translate('actor', vec3(1, 0, 0)); local p = engine.get_position('actor'); engine.log(tostring(p + vec3(0, 1, 0))) end }",
+            )
+            .expect("script");
+        assert_eq!(
+            runtime.start().expect("start"),
+            vec![
+                GameCommand::Translate {
+                    object_id: "actor".into(),
+                    delta: [1.0, 0.0, 0.0],
+                },
+                GameCommand::Log("vec3(2, 3, 3)".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn spawn_calls_accept_vec3_positions() {
+        let mut runtime = LuaRuntime::new().expect("runtime");
+        runtime
+            .load_script(
+                "assets/scripts/main.lua",
+                "return { start = function() engine.spawn_empty('Marker', vec3(1, 2, 3)) end }",
+            )
+            .expect("script");
+        let commands = runtime.start().expect("start");
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [GameCommand::SpawnEmpty { position, .. }] if *position == [1.0, 2.0, 3.0]
+            ),
+            "{commands:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_objects_expose_rotation_and_scale_with_pending_writes() {
+        let mut runtime = LuaRuntime::new().expect("runtime");
+        runtime.set_scene_objects([SnapshotObject {
+            id: "actor".into(),
+            name: None,
+            position: Some([1.0, 2.0, 3.0]),
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [2.0, 2.0, 2.0],
+            velocity: None,
+            visible: true,
+            enabled: true,
+        }]);
+        assert_eq!(runtime.scene_scale("actor"), Some([2.0, 2.0, 2.0]));
+        assert_eq!(runtime.scene_rotation("actor"), Some([0.0, 0.0, 0.0, 1.0]));
+        assert_eq!(runtime.scene_scale("missing"), None);
+    }
+
+    #[test]
     fn lua_spawn_empty_returns_an_id_visible_to_later_commands() {
         let mut runtime = LuaRuntime::new().expect("runtime");
         runtime
@@ -936,6 +1024,140 @@ mod tests {
                 .start_object("missing")
                 .expect("no match")
                 .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "lua")]
+mod input_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn runtime(body: &str) -> LuaRuntime {
+        let mut runtime = LuaRuntime::new().expect("runtime");
+        runtime
+            .load_script(
+                "assets/scripts/main.lua",
+                &format!("return {{ update = function() {body} end }}"),
+            )
+            .expect("script");
+        runtime
+    }
+
+    fn down() -> ButtonState {
+        ButtonState {
+            down: true,
+            pressed: true,
+            released: false,
+        }
+    }
+
+    #[test]
+    fn every_script_key_round_trips_by_name() {
+        for key in ScriptKey::ALL {
+            assert_eq!(ScriptKey::from_name(key.name()), Some(*key));
+        }
+        assert_eq!(ScriptKey::ALL.len(), 13 + 22 + 10 + 6);
+    }
+
+    #[test]
+    fn mouse_and_gamepad_state_reach_lua() {
+        let mut snapshot = InputSnapshot {
+            mouse_position: Some((10.0, 20.0)),
+            mouse_delta: (3.0, -4.0),
+            wheel: (0.0, 1.0),
+            ..InputSnapshot::default()
+        };
+        snapshot
+            .mouse_buttons
+            .insert(ScriptMouseButton::Left, down());
+        snapshot
+            .gamepad_buttons
+            .insert(ScriptGamepadButton::South, down());
+        snapshot.gamepad_axes.insert(ScriptGamepadAxis::LeftX, 0.5);
+        let mut rt = runtime(
+            "local x, y = engine.mouse_position() \
+             local dx, dy = engine.mouse_delta() local wy, wx = engine.mouse_wheel() \
+             engine.log(table.concat({tostring(engine.mouse_pressed('left')), x, y, dx, dy, wy, \
+             tostring(engine.gamepad_down('south')), engine.gamepad_axis('left_x')}, ' '))",
+        );
+        rt.set_input(snapshot);
+        let commands = rt.update(0.1).expect("update");
+        assert_eq!(
+            commands,
+            vec![GameCommand::Log(
+                "true 10.0 20.0 3.0 -4.0 1.0 true 0.5".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn mouse_position_is_nil_when_unknown() {
+        let mut rt = runtime("engine.log(tostring(engine.mouse_position()))");
+        assert_eq!(
+            rt.update(0.1).expect("update"),
+            vec![GameCommand::Log("nil".into())]
+        );
+    }
+
+    #[test]
+    fn input_axis_combines_keys_and_stick_and_clamps() {
+        let script =
+            "engine.log(engine.input_axis('horizontal') .. ' ' .. engine.input_axis('vertical'))";
+        let with = |keys: &[ScriptKey], axes: &[(ScriptGamepadAxis, f32)]| {
+            let mut rt = runtime(script);
+            rt.set_input(InputSnapshot {
+                keys: keys
+                    .iter()
+                    .map(|key| (*key, down()))
+                    .collect::<HashMap<_, _>>(),
+                gamepad_axes: axes.iter().copied().collect(),
+                ..InputSnapshot::default()
+            });
+            rt.update(0.1).expect("update")
+        };
+        let log = |text: &str| vec![GameCommand::Log(text.into())];
+        assert_eq!(
+            with(&[ScriptKey::D], &[(ScriptGamepadAxis::LeftX, 0.5)]),
+            log("1.0 0.0")
+        );
+        assert_eq!(
+            with(&[ScriptKey::A], &[(ScriptGamepadAxis::LeftX, 0.25)]),
+            log("-0.75 0.0")
+        );
+        assert_eq!(with(&[], &[]), log("0.0 0.0"));
+        assert_eq!(
+            with(&[ScriptKey::W], &[(ScriptGamepadAxis::LeftY, -0.5)]),
+            log("0.0 0.5")
+        );
+    }
+
+    #[test]
+    fn unknown_input_names_are_lua_errors_listing_choices() {
+        let message = runtime("engine.key_down('Foo')")
+            .update(0.1)
+            .expect_err("unknown key")
+            .to_string();
+        assert!(message.contains("unknown key 'Foo'"), "{message}");
+        assert!(message.contains("Digit1"), "{message}");
+        let message = runtime("engine.mouse_down('side')")
+            .update(0.1)
+            .expect_err("unknown button")
+            .to_string();
+        assert!(message.contains("left, right, middle"), "{message}");
+    }
+
+    #[test]
+    fn set_mouse_locked_queues_command_and_reads_back() {
+        let mut rt =
+            runtime("engine.set_mouse_locked(true) engine.log(tostring(engine.is_mouse_locked()))");
+        assert_eq!(
+            rt.update(0.1).expect("update"),
+            vec![
+                GameCommand::SetMouseLocked { locked: true },
+                GameCommand::Log("true".into())
+            ]
         );
     }
 }

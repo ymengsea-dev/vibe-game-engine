@@ -18,6 +18,8 @@ use crate::world::PhysicsWorld;
 /// slope climbing up to 45°, snap-to-ground enabled, autostep disabled).
 pub use rapier3d::control::KinematicCharacterController as CharacterController;
 
+pub use rapier3d::control::{CharacterAutostep, CharacterLength};
+
 /// The result of applying [`move_character`]'s movement for one frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CharacterMovement {
@@ -88,11 +90,15 @@ pub fn move_character(
             .bodies
             .get(body)
             .ok_or(PhysicsError::UnknownCharacterHandle)?;
-        let current_pose = *body_ref.position();
+        // `next_position` equals `position` after a step and includes any move
+        // already scheduled this frame, so repeated calls accumulate.
+        let current_pose = *body_ref.next_position();
 
-        let queries = physics
-            .rapier
-            .query_pipeline_with_filter(QueryFilter::default().exclude_collider(collider));
+        let queries = physics.rapier.query_pipeline_with_filter(
+            QueryFilter::default()
+                .exclude_sensors()
+                .exclude_collider(collider),
+        );
 
         controller.move_shape(
             dt,
@@ -107,7 +113,9 @@ pub fn move_character(
     let Some(body_mut) = physics.rapier.bodies.get_mut(body) else {
         return Err(PhysicsError::UnknownCharacterHandle);
     };
-    body_mut.set_next_kinematic_translation(body_mut.translation() + effective.translation);
+    body_mut.set_next_kinematic_translation(
+        body_mut.next_position().translation + effective.translation,
+    );
 
     Ok(CharacterMovement {
         translation: effective.translation,

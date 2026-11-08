@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever a message changes incompatibly; [`ToStudio::Hello`]
 /// carries it so a game built against an older engine is refused with a
 /// readable message instead of misbehaving.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Header kind of a JSON control message.
 pub const KIND_CONTROL: u8 = 1;
@@ -66,11 +66,21 @@ pub enum InputEvent {
         /// Y position.
         y: f64,
     },
+    /// The cursor left the game view.
+    CursorLeft,
     /// The wheel or trackpad scrolled.
     Wheel {
         /// Horizontal delta.
         delta_x: f32,
         /// Vertical delta.
+        delta_y: f32,
+    },
+    /// Raw mouse movement (not a position), for mouse look; sent while the
+    /// pointer is locked or over the game view.
+    MouseMotion {
+        /// Horizontal movement.
+        delta_x: f32,
+        /// Vertical movement.
         delta_y: f32,
     },
     /// The game view gained or lost keyboard focus.
@@ -98,7 +108,11 @@ impl InputEvent {
                 Self::MouseButton { button, pressed }
             }
             PlatformEvent::CursorMoved { x, y } => Self::CursorMoved { x, y },
+            PlatformEvent::CursorLeft => Self::CursorLeft,
             PlatformEvent::MouseWheel { delta_x, delta_y } => Self::Wheel { delta_x, delta_y },
+            PlatformEvent::MouseMotion { delta_x, delta_y } => {
+                Self::MouseMotion { delta_x, delta_y }
+            }
             PlatformEvent::FocusChanged { focused } => Self::Focus { focused },
             PlatformEvent::Resized { .. }
             | PlatformEvent::RedrawRequested
@@ -123,7 +137,11 @@ impl InputEvent {
                 PlatformEvent::MouseButtonInput { button, pressed }
             }
             Self::CursorMoved { x, y } => PlatformEvent::CursorMoved { x, y },
+            Self::CursorLeft => PlatformEvent::CursorLeft,
             Self::Wheel { delta_x, delta_y } => PlatformEvent::MouseWheel { delta_x, delta_y },
+            Self::MouseMotion { delta_x, delta_y } => {
+                PlatformEvent::MouseMotion { delta_x, delta_y }
+            }
             Self::Focus { focused } => PlatformEvent::FocusChanged { focused },
         }
     }
@@ -165,6 +183,12 @@ pub enum ToStudio {
     Paused,
     /// The game acknowledged [`ToGame::Resume`].
     Resumed,
+    /// The game wants the mouse locked (`true`) or released (`false`); sent
+    /// once per change so Studio can grab or free its own cursor.
+    CursorLock {
+        /// Whether the game now wants the cursor locked.
+        locked: bool,
+    },
     /// A rendered frame. Sent as [`KIND_FRAME`], never as JSON.
     #[serde(skip)]
     Frame(Frame),
@@ -386,6 +410,7 @@ mod tests {
                 pressed: false,
             }),
             ToGame::Input(InputEvent::CursorMoved { x: 10.5, y: 20.0 }),
+            ToGame::Input(InputEvent::CursorLeft),
             ToGame::Input(InputEvent::Wheel {
                 delta_x: 0.0,
                 delta_y: -1.0,
@@ -516,5 +541,28 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn mouse_motion_and_cursor_lock_round_trip() {
+        let motion = InputEvent::MouseMotion {
+            delta_x: 1.5,
+            delta_y: -2.0,
+        };
+        let platform = motion.into_platform();
+        assert_eq!(
+            platform,
+            PlatformEvent::MouseMotion {
+                delta_x: 1.5,
+                delta_y: -2.0
+            }
+        );
+        assert_eq!(InputEvent::from_platform(&platform), Some(motion));
+        assert_eq!(
+            round_trip_to_game(ToGame::Input(motion)),
+            ToGame::Input(motion)
+        );
+        let lock = ToStudio::CursorLock { locked: true };
+        assert_eq!(round_trip_to_studio(lock.clone()), lock);
     }
 }

@@ -9,6 +9,7 @@ use crate::theme;
 pub(super) struct Controls<'a> {
     pub text_targets: &'a [(String, String)],
     pub audio_targets: &'a [(String, String)],
+    pub object_targets: &'a [(String, String)],
     pub owner_is_button: bool,
     pub can_add_rule: bool,
     pub add_rule: &'a mut Option<(RuleActionKind, Option<RuleTrigger>)>,
@@ -53,6 +54,7 @@ fn action_label(
     rule: &RuleData,
     text_targets: &[(String, String)],
     audio_targets: &[(String, String)],
+    object_targets: &[(String, String)],
 ) -> String {
     let label = match &rule.action {
         RuleAction::SetUiText { target, .. } => {
@@ -68,16 +70,44 @@ fn action_label(
         RuleAction::AddToVariable { name, amount } => {
             format!("Change variable\n{name} + {}", format_variable(*amount))
         }
-    };
-    match &rule.condition {
-        Some(condition) => format!(
-            "{label}\nif {} {} {}",
-            condition.variable,
-            condition.compare.symbol(),
-            format_variable(condition.value)
+        RuleAction::ChangeScene { path } => format!("Change scene\n{path}"),
+        RuleAction::SetVisible { target, visible } => format!(
+            "{}\n{}",
+            if *visible { "Show" } else { "Hide" },
+            target_name(target, object_targets)
         ),
-        None => label,
+        RuleAction::SetEnabled { target, enabled } => format!(
+            "{}\n{}",
+            if *enabled { "Enable" } else { "Disable" },
+            target_name(target, object_targets)
+        ),
+        RuleAction::SpawnPrefab { path, .. } => format!("Spawn\n{path}"),
+        RuleAction::Destroy { target } => {
+            format!("Destroy\n{}", target_name(target, object_targets))
+        }
+        RuleAction::SetGameState { state } => format!("Set state\n{}", state.label()),
+    };
+    if rule.conditions.is_empty() {
+        return label;
     }
+    let joiner = match rule.match_mode {
+        engine_scene::RuleMatch::All => " and ",
+        engine_scene::RuleMatch::Any => " or ",
+    };
+    let conditions = rule
+        .conditions
+        .iter()
+        .map(|condition| {
+            format!(
+                "{} {} {}",
+                condition.variable,
+                condition.compare.symbol(),
+                format_variable(condition.value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(joiner);
+    format!("{label}\nif {conditions}")
 }
 
 fn target_name<'a>(target: &str, candidates: &'a [(String, String)]) -> &'a str {
@@ -152,10 +182,36 @@ pub(super) fn reset_layout(rules: &mut [RuleData]) {
     }
 }
 
-fn event_label(trigger: &RuleTrigger) -> String {
+fn event_label(trigger: &RuleTrigger, object_targets: &[(String, String)]) -> String {
+    let with = |with: &Option<String>| {
+        with.as_deref()
+            .map_or("any object", |id| target_name(id, object_targets))
+            .to_owned()
+    };
     match trigger {
         RuleTrigger::UiClicked => "When\nbutton clicked".to_owned(),
         RuleTrigger::Named(name) => format!("When event\n{name}"),
+        RuleTrigger::SceneStart => "When\nscene starts".to_owned(),
+        RuleTrigger::KeyPressed { key } => format!("When key\n{key}"),
+        RuleTrigger::CollisionEnter { with: other } => {
+            format!("When touching\n{}", with(other))
+        }
+        RuleTrigger::CollisionExit { with: other } => {
+            format!("When stops touching\n{}", with(other))
+        }
+        RuleTrigger::TriggerEnter { with: other } => {
+            format!("When entering trigger\n{}", with(other))
+        }
+        RuleTrigger::TriggerExit { with: other } => {
+            format!("When leaving trigger\n{}", with(other))
+        }
+        RuleTrigger::Timer { seconds, repeat } => format!(
+            "When timer\n{} s{}",
+            format_variable(f64::from(*seconds)),
+            if *repeat { ", repeats" } else { "" }
+        ),
+        RuleTrigger::VariableChanged { name } => format!("When variable\n{name} changes"),
+        RuleTrigger::StateChanged { state } => format!("When state\n{}", state.label()),
     }
 }
 
@@ -240,6 +296,7 @@ pub(super) fn show(
     let Controls {
         text_targets,
         audio_targets,
+        object_targets,
         owner_is_button,
         can_add_rule,
         add_rule,
@@ -392,7 +449,7 @@ pub(super) fn show(
             }
             for (index, trigger) in events.iter().enumerate() {
                 let selected = selected_event.as_ref() == Some(trigger);
-                let label = event_label(trigger);
+                let label = event_label(trigger, object_targets);
                 let look = NodeLook {
                     label: &label,
                     selected,
@@ -415,7 +472,7 @@ pub(super) fn show(
                 }
             }
             for (index, rule) in rules.iter().enumerate() {
-                let label = action_label(rule, text_targets, audio_targets);
+                let label = action_label(rule, text_targets, audio_targets, object_targets);
                 let look = NodeLook {
                     label: &label,
                     selected: selected_action == Some(index),
@@ -458,8 +515,11 @@ pub(super) fn show(
                     index,
                     rule,
                     owner_is_button,
-                    text_targets,
-                    audio_targets,
+                    &super::RuleTargets {
+                        text: text_targets,
+                        audio: audio_targets,
+                        objects: object_targets,
+                    },
                 );
             }
         });
@@ -504,13 +564,16 @@ mod tests {
                 amount: 1.0,
             },
         );
-        assert_eq!(action_label(&add, &[], &[]), "Change variable\ncoins + 1");
+        assert_eq!(
+            action_label(&add, &[], &[], &[]),
+            "Change variable\ncoins + 1"
+        );
         let win = RuleData {
-            condition: Some(engine_scene::RuleCondition {
+            conditions: vec![engine_scene::RuleCondition {
                 variable: "coins".into(),
                 compare: engine_scene::RuleCompare::GreaterOrEqual,
                 value: 3.0,
-            }),
+            }],
             ..RuleData::new(
                 RuleTrigger::Named("coin".into()),
                 RuleAction::SetVariable {
@@ -520,9 +583,126 @@ mod tests {
             )
         };
         assert_eq!(
-            action_label(&win, &[], &[]),
+            action_label(&win, &[], &[], &[]),
             "Set variable\nlevel = 2\nif coins ≥ 3"
         );
+    }
+
+    #[test]
+    fn graph_labels_for_new_triggers_and_actions() {
+        use engine_scene::{GameStateName, SpawnAt};
+        let objects = vec![
+            ("coin".to_owned(), "Coin".to_owned()),
+            ("door".to_owned(), "Door".to_owned()),
+            ("enemy".to_owned(), "Enemy".to_owned()),
+        ];
+        assert_eq!(
+            event_label(
+                &RuleTrigger::KeyPressed {
+                    key: "Space".into()
+                },
+                &objects
+            ),
+            "When key\nSpace"
+        );
+        assert_eq!(
+            event_label(
+                &RuleTrigger::Timer {
+                    seconds: 2.0,
+                    repeat: true
+                },
+                &objects
+            ),
+            "When timer\n2 s, repeats"
+        );
+        assert_eq!(
+            event_label(
+                &RuleTrigger::CollisionEnter {
+                    with: Some("coin".into())
+                },
+                &objects
+            ),
+            "When touching\nCoin"
+        );
+        assert_eq!(
+            event_label(&RuleTrigger::CollisionEnter { with: None }, &objects),
+            "When touching\nany object"
+        );
+        assert_eq!(
+            event_label(
+                &RuleTrigger::StateChanged {
+                    state: GameStateName::Paused
+                },
+                &objects
+            ),
+            "When state\nPaused"
+        );
+        let label = |action| {
+            action_label(
+                &RuleData::new(RuleTrigger::SceneStart, action),
+                &[],
+                &[],
+                &objects,
+            )
+        };
+        assert_eq!(
+            label(RuleAction::SetVisible {
+                target: "door".into(),
+                visible: false
+            }),
+            "Hide\nDoor"
+        );
+        assert_eq!(
+            label(RuleAction::SetEnabled {
+                target: "enemy".into(),
+                enabled: false
+            }),
+            "Disable\nEnemy"
+        );
+        assert_eq!(
+            label(RuleAction::Destroy {
+                target: "coin".into()
+            }),
+            "Destroy\nCoin"
+        );
+        assert_eq!(
+            label(RuleAction::SpawnPrefab {
+                path: "prefabs/coin.ron".into(),
+                at: SpawnAt::Position([0.0; 3])
+            }),
+            "Spawn\nprefabs/coin.ron"
+        );
+        assert_eq!(
+            label(RuleAction::ChangeScene {
+                path: "scenes/level2.ron".into()
+            }),
+            "Change scene\nscenes/level2.ron"
+        );
+        assert_eq!(
+            label(RuleAction::SetGameState {
+                state: GameStateName::GameOver
+            }),
+            "Set state\nGame over"
+        );
+        let mut rule = RuleData::new(
+            RuleTrigger::SceneStart,
+            RuleAction::Destroy {
+                target: "coin".into(),
+            },
+        );
+        let condition = |variable: &str| engine_scene::RuleCondition {
+            variable: variable.into(),
+            compare: engine_scene::RuleCompare::Greater,
+            value: 1.0,
+        };
+        rule.conditions = vec![condition("a"), condition("b")];
+        rule.match_mode = engine_scene::RuleMatch::Any;
+        assert_eq!(
+            action_label(&rule, &[], &[], &objects),
+            "Destroy\nCoin\nif a > 1 or b > 1"
+        );
+        rule.match_mode = engine_scene::RuleMatch::All;
+        assert!(action_label(&rule, &[], &[], &objects).ends_with("if a > 1 and b > 1"));
     }
 
     fn named(event: &str, emits: &str) -> RuleData {
@@ -605,6 +785,7 @@ mod tests {
                         Controls {
                             text_targets: &[],
                             audio_targets: &[],
+                            object_targets: &[],
                             owner_is_button: false,
                             can_add_rule: true,
                             add_rule: &mut add,
@@ -678,6 +859,7 @@ mod tests {
                         Controls {
                             text_targets: &[],
                             audio_targets: &[],
+                            object_targets: &[],
                             owner_is_button: false,
                             can_add_rule: true,
                             add_rule: &mut add,
@@ -723,7 +905,8 @@ mod tests {
             action: RuleAction::EmitEvent {
                 name: "next_event".into(),
             },
-            condition: None,
+            conditions: Vec::new(),
+            match_mode: engine_scene::RuleMatch::All,
             graph_position: None,
         }];
         let mut draw = |time, events, label: &str| {
@@ -748,6 +931,7 @@ mod tests {
                         Controls {
                             text_targets: &[],
                             audio_targets: &[],
+                            object_targets: &[],
                             owner_is_button: false,
                             can_add_rule: true,
                             add_rule: &mut add,

@@ -84,6 +84,7 @@ mod tests {
             ambient_sounds: (0..=EnvironmentData::MAX_AMBIENT_SOUNDS)
                 .map(|_| ambient(1.0))
                 .collect(),
+            start_state: None,
         };
         assert!(scene.validate().is_err());
     }

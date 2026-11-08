@@ -25,6 +25,7 @@ pub struct InputState {
     released_buttons: HashSet<MouseButton>,
     cursor_position: Option<(f64, f64)>,
     scroll_delta: (f32, f32),
+    mouse_delta: (f32, f32),
 
     held_gamepad: HashSet<GamepadButton>,
     pressed_gamepad: HashSet<GamepadButton>,
@@ -166,9 +167,16 @@ impl InputState {
             PlatformEvent::CursorMoved { x, y } => {
                 self.cursor_position = Some((x, y));
             }
+            PlatformEvent::CursorLeft => {
+                self.cursor_position = None;
+            }
             PlatformEvent::MouseWheel { delta_x, delta_y } => {
                 self.scroll_delta.0 += delta_x;
                 self.scroll_delta.1 += delta_y;
+            }
+            PlatformEvent::MouseMotion { delta_x, delta_y } => {
+                self.mouse_delta.0 += delta_x;
+                self.mouse_delta.1 += delta_y;
             }
             PlatformEvent::FocusChanged { focused: false } => {
                 self.released_keys.extend(self.held_keys.drain());
@@ -197,6 +205,7 @@ impl InputState {
         self.pressed_gamepad.clear();
         self.released_gamepad.clear();
         self.scroll_delta = (0.0, 0.0);
+        self.mouse_delta = (0.0, 0.0);
     }
 
     /// `true` while `key` is held down.
@@ -234,6 +243,11 @@ impl InputState {
     /// cursor hasn't moved over the window yet this session.
     pub fn cursor_position(&self) -> Option<(f64, f64)> {
         self.cursor_position
+    }
+
+    /// Raw mouse motion accumulated since the last [`InputState::end_frame`].
+    pub fn mouse_delta(&self) -> (f32, f32) {
+        self.mouse_delta
     }
 
     /// Accumulated scroll delta since the last [`InputState::end_frame`].
@@ -349,12 +363,36 @@ mod tests {
     }
 
     #[test]
+    fn cursor_left_clears_the_position() {
+        let mut input = InputState::new();
+        input.apply_event(&PlatformEvent::CursorMoved { x: 1.0, y: 2.0 });
+        input.apply_event(&PlatformEvent::CursorLeft);
+        assert_eq!(input.cursor_position(), None);
+    }
+
+    #[test]
     fn cursor_position_tracks_latest() {
         let mut input = InputState::new();
         assert_eq!(input.cursor_position(), None);
         input.apply_event(&PlatformEvent::CursorMoved { x: 1.0, y: 2.0 });
         input.apply_event(&PlatformEvent::CursorMoved { x: 3.0, y: 4.0 });
         assert_eq!(input.cursor_position(), Some((3.0, 4.0)));
+    }
+
+    #[test]
+    fn mouse_motion_accumulates_until_end_frame() {
+        let mut input = InputState::new();
+        input.apply_event(&PlatformEvent::MouseMotion {
+            delta_x: 1.0,
+            delta_y: 2.0,
+        });
+        input.apply_event(&PlatformEvent::MouseMotion {
+            delta_x: 3.0,
+            delta_y: 4.0,
+        });
+        assert_eq!(input.mouse_delta(), (4.0, 6.0));
+        input.end_frame();
+        assert_eq!(input.mouse_delta(), (0.0, 0.0));
     }
 
     #[test]

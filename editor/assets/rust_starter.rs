@@ -21,11 +21,32 @@ impl MyGame {
     /// - Switch level next frame: `self.gameplay.request_scene_change("scenes/level2.ron");`
     fn on_update(&mut self, _ctx: &mut GameContext<'_>, _dt: f32) {}
 
+    /// Your gameplay: the game state changed (`Menu`, `Playing`, `Paused` or
+    /// `GameOver`). Switch with `GameCommand::SetGameState { state: "paused".into() }`;
+    /// `Paused` freezes fixed updates, physics and animation while `on_update`
+    /// and the UI keep running.
+    fn on_state_changed(
+        &mut self,
+        _ctx: &mut GameContext<'_>,
+        _old: GameStateName,
+        _new: GameStateName,
+    ) {
+    }
+
     /// Your gameplay: an authored UI button was clicked (its visual rules already ran).
     fn on_ui_click(&mut self, _ctx: &mut GameContext<'_>, _button_id: &str) {}
 
     /// Your gameplay: two objects with colliders started or stopped touching.
     fn on_collision(&mut self, _ctx: &mut GameContext<'_>, _contact: &CollisionEvent) {}
+}
+
+impl MyGame {
+    /// Rust games have no scripts to attach to rule-spawned prefabs or to drop
+    /// for destroyed objects. Take both lists each frame so they do not grow.
+    fn drain_rule_queues(&mut self) {
+        let _ = self.gameplay.take_rule_spawns();
+        let _ = self.gameplay.take_destroyed();
+    }
 }
 
 impl Game for MyGame {
@@ -34,7 +55,10 @@ impl Game for MyGame {
     }
 
     fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
-        self.gameplay.setup(ctx)
+        self.gameplay.setup(ctx)?;
+        // Fire the scene's "Scene starts" rules once it is ready.
+        self.gameplay.start_rules(ctx);
+        Ok(())
     }
 
     fn update(&mut self, ctx: &mut GameContext<'_>, dt: f32) {
@@ -42,8 +66,18 @@ impl Game for MyGame {
         for button_id in self.gameplay.dispatch_ui_clicks(ctx) {
             self.on_ui_click(ctx, &button_id);
         }
+        // Key, timer, variable and state rules.
+        self.gameplay.update_rules(ctx, dt);
+        if let Some((old, new)) = self.gameplay.take_state_change() {
+            self.on_state_changed(ctx, old, new);
+        }
         self.on_update(ctx, dt);
-        if ctx.input().is_key_pressed(KeyCode::Escape) {
+        self.drain_rule_queues();
+        // Show the active camera object's view (move or rotate that object to move the view).
+        self.gameplay.present_camera(ctx, dt);
+        // In Scene View Play, Esc is Studio's (it frees a locked mouse);
+        // Stop or Cmd-P ends Play. Only the Run window quits on Esc.
+        if !ctx.is_embedded() && ctx.input().is_key_pressed(KeyCode::Escape) {
             ctx.request_exit();
         }
     }
@@ -52,6 +86,7 @@ impl Game for MyGame {
         for contact in self.gameplay.sample_collisions(ctx) {
             self.on_collision(ctx, &contact);
         }
+        self.drain_rule_queues();
     }
 }
 

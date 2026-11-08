@@ -654,6 +654,8 @@ impl Viewport {
             // The editor draws its own chrome through egui; the runtime
             // UI pass is for shipped games.
             None,
+            // Scene View keeps drawing Disabled objects (ruling D5).
+            true,
         ) {
             tracing::error!(error = %err, "editor viewport frame failed");
         }
@@ -695,7 +697,10 @@ impl Viewport {
 
 fn water_surfaces(world: &mut World) -> Vec<(Entity, engine_physics::WaterSurface)> {
     world
-        .query::<(Entity, &engine_ecs::components::WaterVolume)>()
+        .query_filtered::<
+            (Entity, &engine_ecs::components::WaterVolume),
+            bevy_ecs::prelude::Without<engine_ecs::components::Hidden>,
+        >()
         .iter(world)
         .map(|(entity, volume)| (entity, volume.surface))
         .collect()
@@ -712,6 +717,7 @@ fn placeholder_positions(world: &mut World) -> Vec<Vec3> {
         bevy_ecs::prelude::Without<MeshRenderer>,
         bevy_ecs::prelude::Without<Sprite>,
         bevy_ecs::prelude::Without<Disabled>,
+        bevy_ecs::prelude::Without<engine_ecs::components::Hidden>,
     )>();
     query
         .iter(world)

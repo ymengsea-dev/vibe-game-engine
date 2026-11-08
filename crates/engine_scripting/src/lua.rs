@@ -1,13 +1,26 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path};
 use std::rc::Rc;
 
 use mlua::chunk::ChunkMode;
-use mlua::{Function, HookTriggers, Lua, LuaOptions, RegistryKey, StdLib, Table, VmState};
+use mlua::{
+    FromLua, Function, HookTriggers, Lua, LuaOptions, MultiValue, RegistryKey, StdLib, Table,
+    Value, VmState,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::GameCommand;
+use crate::input::ScriptKey;
+use crate::input::{ButtonState, InputSnapshot};
+
+mod camera_api;
+mod input_api;
+mod object_api;
+mod physics_api;
+mod state_api;
+mod transform_api;
+mod vec3;
 
 const MAX_MEMORY: usize = 64 * 1024 * 1024;
 const MAX_COMMANDS: usize = 1_024;
@@ -16,6 +29,8 @@ const HOOK_INTERVAL: u32 = 1_000;
 const MAX_INSTRUCTIONS: u32 = 1_000_000;
 const MAX_SAVE_BYTES: usize = 64 * 1024;
 const MAX_SAVE_ENTRIES: usize = 128;
+/// Fixed step used for `engine.add_force` until the host sets one.
+const DEFAULT_FIXED_STEP: f32 = 1.0 / 60.0;
 
 /// Framing for one JSON diagnostic line sent by the player to Studio.
 pub const LUA_DIAGNOSTIC_PREFIX: &str = "VGE_LUA_DIAGNOSTIC:";
@@ -71,94 +86,6 @@ pub fn check_lua_syntax(path: &str, source: &str) -> Result<(), LuaSyntaxDiagnos
         })
 }
 
-/// Input keys exposed to Lua by their exact names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ScriptKey {
-    /// A key.
-    A,
-    /// D key.
-    D,
-    /// S key.
-    S,
-    /// W key.
-    W,
-    /// Space bar.
-    Space,
-    /// Escape key.
-    Escape,
-    /// Enter key.
-    Enter,
-    /// Left arrow.
-    ArrowLeft,
-    /// Right arrow.
-    ArrowRight,
-    /// Up arrow.
-    ArrowUp,
-    /// Down arrow.
-    ArrowDown,
-    /// Left Shift.
-    ShiftLeft,
-    /// Right Shift.
-    ShiftRight,
-}
-
-impl ScriptKey {
-    /// Every key currently available to Lua.
-    pub const ALL: [Self; 13] = [
-        Self::A,
-        Self::D,
-        Self::S,
-        Self::W,
-        Self::Space,
-        Self::Escape,
-        Self::Enter,
-        Self::ArrowLeft,
-        Self::ArrowRight,
-        Self::ArrowUp,
-        Self::ArrowDown,
-        Self::ShiftLeft,
-        Self::ShiftRight,
-    ];
-
-    /// Name accepted by `engine.key_down` and `engine.key_pressed`.
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::A => "A",
-            Self::D => "D",
-            Self::S => "S",
-            Self::W => "W",
-            Self::Space => "Space",
-            Self::Escape => "Escape",
-            Self::Enter => "Enter",
-            Self::ArrowLeft => "ArrowLeft",
-            Self::ArrowRight => "ArrowRight",
-            Self::ArrowUp => "ArrowUp",
-            Self::ArrowDown => "ArrowDown",
-            Self::ShiftLeft => "ShiftLeft",
-            Self::ShiftRight => "ShiftRight",
-        }
-    }
-
-    fn from_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "A" => Self::A,
-            "D" => Self::D,
-            "S" => Self::S,
-            "W" => Self::W,
-            "Space" => Self::Space,
-            "Escape" => Self::Escape,
-            "Enter" => Self::Enter,
-            "ArrowLeft" => Self::ArrowLeft,
-            "ArrowRight" => Self::ArrowRight,
-            "ArrowUp" => Self::ArrowUp,
-            "ArrowDown" => Self::ArrowDown,
-            "ShiftLeft" => Self::ShiftLeft,
-            "ShiftRight" => Self::ShiftRight,
-            _ => return None,
-        })
-    }
-}
-
 /// A Lua project script failed validation, loading, or execution.
 #[derive(Debug, thiserror::Error)]
 pub enum ScriptError {
@@ -180,6 +107,9 @@ pub enum ScriptError {
     /// Saved Lua gameplay values were malformed or exceeded the limit.
     #[error("invalid Lua save data: {0}")]
     SaveData(String),
+    /// The scoped `engine.raycast` / `engine.is_grounded` functions could not be installed or removed.
+    #[error("could not set up physics queries for a Lua callback: {0}")]
+    Queries(#[source] mlua::Error),
 }
 
 impl ScriptError {
@@ -216,23 +146,111 @@ struct LoadedScript {
     path: String,
     table: RegistryKey,
     object_id: Option<String>,
+    /// A `start` was requested while the object was disabled; it runs the
+    /// first time the object is seen enabled, before any other callback.
+    awaiting_start: bool,
 }
 
 #[derive(Default)]
 struct SceneSnapshot {
     positions: HashMap<String, [f32; 3]>,
+    rotations: HashMap<String, [f32; 4]>,
+    scales: HashMap<String, [f32; 3]>,
+    velocities: HashMap<String, [f32; 3]>,
     names: HashMap<String, String>,
     variables: BTreeMap<String, f64>,
+    /// Every object by ID with its `Hidden` state inverted.
+    visible: HashMap<String, bool>,
+    /// Every object by ID with its `Disabled` state inverted.
+    enabled: HashMap<String, bool>,
+    pending_visible: HashMap<String, bool>,
+    pending_enabled: HashMap<String, bool>,
+    /// Objects this callback destroyed.
+    pending_destroyed: HashSet<String>,
     pending_positions: HashMap<String, [f32; 3]>,
+    pending_rotations: HashMap<String, [f32; 4]>,
+    pending_scales: HashMap<String, [f32; 3]>,
+    pending_velocities: HashMap<String, [f32; 3]>,
     pending_names: HashMap<String, String>,
     pending_variables: BTreeMap<String, f64>,
+    /// The camera object the game views through.
+    active_camera: Option<String>,
+    /// This callback's own `set_camera`.
+    pending_camera: Option<String>,
+    /// The game state name when the callback began (`playing` if never set).
+    game_state: Option<String>,
+    /// This callback's own `set_state`.
+    pending_state: Option<String>,
 }
 
 impl SceneSnapshot {
     fn clear_pending(&mut self) {
         self.pending_positions.clear();
+        self.pending_rotations.clear();
+        self.pending_scales.clear();
+        self.pending_velocities.clear();
         self.pending_names.clear();
         self.pending_variables.clear();
+        self.pending_visible.clear();
+        self.pending_enabled.clear();
+        self.pending_destroyed.clear();
+        self.pending_camera = None;
+        self.pending_state = None;
+    }
+
+    /// The game state, this callback's own `set_state` first.
+    fn state(&self) -> String {
+        self.pending_state
+            .clone()
+            .or_else(|| self.game_state.clone())
+            .unwrap_or_else(|| "playing".to_owned())
+    }
+
+    /// Whether the id is in the dispatch-start snapshot or spawned this callback.
+    fn knows(&self, object_id: &str) -> bool {
+        self.visible.contains_key(object_id)
+            || self.enabled.contains_key(object_id)
+            || self.pending_positions.contains_key(object_id)
+    }
+
+    fn destroyed(&self, object_id: &str) -> bool {
+        self.pending_destroyed.contains(object_id)
+    }
+
+    /// Visibility, this callback's own writes first; unknown or destroyed is `false`.
+    fn is_visible(&self, object_id: &str) -> bool {
+        !self.destroyed(object_id)
+            && self.knows(object_id)
+            && self
+                .pending_visible
+                .get(object_id)
+                .or_else(|| self.visible.get(object_id))
+                .copied()
+                .unwrap_or(false)
+    }
+
+    /// Enabled state, this callback's own writes first; unknown or destroyed is `false`.
+    fn is_enabled(&self, object_id: &str) -> bool {
+        !self.destroyed(object_id)
+            && self.knows(object_id)
+            && self
+                .pending_enabled
+                .get(object_id)
+                .or_else(|| self.enabled.get(object_id))
+                .copied()
+                .unwrap_or(false)
+    }
+
+    /// True when the dispatch-start snapshot marks the object disabled.
+    fn disabled_at_dispatch_start(&self, object_id: &str) -> bool {
+        self.enabled.get(object_id) == Some(&false)
+    }
+
+    /// The active camera, this callback's own `set_camera` first.
+    fn camera(&self) -> Option<String> {
+        self.pending_camera
+            .clone()
+            .or_else(|| self.active_camera.clone())
     }
 
     fn variable(&self, name: &str) -> f64 {
@@ -244,24 +262,104 @@ impl SceneSnapshot {
     }
 
     fn position(&self, object_id: &str) -> Option<[f32; 3]> {
+        if self.destroyed(object_id) {
+            return None;
+        }
         self.pending_positions
             .get(object_id)
             .or_else(|| self.positions.get(object_id))
             .copied()
     }
 
+    fn rotation(&self, object_id: &str) -> Option<glam::Quat> {
+        if self.destroyed(object_id) {
+            return None;
+        }
+        self.pending_rotations
+            .get(object_id)
+            .or_else(|| self.rotations.get(object_id))
+            .map(|r| glam::Quat::from_array(*r))
+    }
+
+    /// Velocity of a dynamic body, pending writes first.
+    fn velocity(&self, object_id: &str) -> Option<[f32; 3]> {
+        if self.destroyed(object_id) {
+            return None;
+        }
+        self.pending_velocities
+            .get(object_id)
+            .or_else(|| self.velocities.get(object_id))
+            .copied()
+    }
+
+    fn scale(&self, object_id: &str) -> Option<glam::Vec3> {
+        if self.destroyed(object_id) {
+            return None;
+        }
+        self.pending_scales
+            .get(object_id)
+            .or_else(|| self.scales.get(object_id))
+            .map(|s| glam::Vec3::from_array(*s))
+    }
+
+    /// Records a freshly spawned object's transform (identity rotation, unit scale).
+    fn insert_pending_spawn(&mut self, object_id: &str, position: [f32; 3]) {
+        self.pending_positions
+            .insert(object_id.to_owned(), position);
+        self.pending_rotations
+            .insert(object_id.to_owned(), glam::Quat::IDENTITY.to_array());
+        self.pending_scales
+            .insert(object_id.to_owned(), glam::Vec3::ONE.to_array());
+    }
+
     fn named_id(&self, name: &str) -> Option<String> {
         self.names
             .get(name)
             .or_else(|| self.pending_names.get(name))
+            .filter(|id| !self.destroyed(id))
             .cloned()
     }
 }
 
+/// One scene object as Lua sees it. Rotation is a quaternion in xyzw order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotObject {
+    /// Stable scene object ID.
+    pub id: String,
+    /// Display name, if the object has one.
+    pub name: Option<String>,
+    /// Local translation; `None` for objects without a transform.
+    pub position: Option<[f32; 3]>,
+    /// Local rotation quaternion (xyzw).
+    pub rotation: [f32; 4],
+    /// Local scale.
+    pub scale: [f32; 3],
+    /// Linear velocity; `Some` only for dynamic physics bodies.
+    pub velocity: Option<[f32; 3]>,
+    /// False when the object has the `Hidden` marker.
+    pub visible: bool,
+    /// False when the object has the `Disabled` marker.
+    pub enabled: bool,
+}
+
+/// Consumes the leading string argument of a variadic call.
+fn string_arg(lua: &Lua, args: &mut MultiValue, what: &str) -> mlua::Result<String> {
+    match args.pop_front() {
+        Some(value @ (Value::String(_) | Value::Integer(_) | Value::Number(_))) => {
+            String::from_lua(value, lua)
+        }
+        _ => Err(mlua::Error::RuntimeError(format!(
+            "{what} must be a string"
+        ))),
+    }
+}
+
+#[derive(Clone, Copy)]
 enum CallbackArgs<'a> {
     None,
     Delta(f32),
     Event(&'a str, &'a str),
+    StateChange(&'a str, &'a str),
     Collision(&'a str, &'a str, &'a str),
 }
 
@@ -271,12 +369,17 @@ pub struct LuaRuntime {
     scripts: Vec<LoadedScript>,
     commands: Rc<RefCell<Vec<GameCommand>>>,
     active_object: Rc<RefCell<Option<String>>>,
-    key_states: Rc<RefCell<HashMap<ScriptKey, (bool, bool)>>>,
+    input: Rc<RefCell<InputSnapshot>>,
     scene: Rc<RefCell<SceneSnapshot>>,
     active_callback: Rc<Cell<bool>>,
     instructions: Rc<Cell<u32>>,
     save_values: Rc<RefCell<BTreeMap<String, serde_json::Value>>>,
     save_writes: Rc<Cell<usize>>,
+    query_stubs: physics_api::QueryStubs,
+    /// Seconds an `engine.add_force` call pushes for: the running callback's
+    /// `dt` in `update`/`fixed_update`, the fixed step elsewhere.
+    force_seconds: Rc<Cell<f32>>,
+    fixed_step: f32,
 }
 
 fn valid_save_value(value: &serde_json::Value) -> bool {
@@ -294,6 +397,7 @@ impl LuaRuntime {
         let lua = Lua::new_with(libs, LuaOptions::default()).map_err(ScriptError::Initialize)?;
         lua.set_memory_limit(MAX_MEMORY)
             .map_err(ScriptError::Initialize)?;
+        vec3::install(&lua).map_err(ScriptError::Initialize)?;
         let globals = lua.globals();
         for name in ["dofile", "loadfile", "load", "require", "collectgarbage"] {
             globals
@@ -623,23 +727,19 @@ impl LuaRuntime {
         engine
             .set(
                 "spawn_empty",
-                lua.create_function(move |_, (name, x, y, z): (String, f32, f32, f32)| {
+                lua.create_function(move |lua, mut args: MultiValue| {
                     if !spawn_active.get() {
                         return Err(mlua::Error::RuntimeError(
                             "engine commands may only run in callbacks".to_owned(),
                         ));
                     }
+                    let name = string_arg(lua, &mut args, "object name")?;
                     if name.trim().is_empty() || name.len() > 256 {
                         return Err(mlua::Error::RuntimeError(
                             "object name must be nonempty and at most 256 bytes".to_owned(),
                         ));
                     }
-                    let position = [x, y, z];
-                    if !position.iter().all(|value| value.is_finite()) {
-                        return Err(mlua::Error::RuntimeError(
-                            "position must be finite".to_owned(),
-                        ));
-                    }
+                    let position = vec3::vector_arg(&mut args, "position")?.to_array();
                     let mut pending = spawn_commands.borrow_mut();
                     if pending.len() >= MAX_COMMANDS {
                         return Err(mlua::Error::RuntimeError(
@@ -657,9 +757,7 @@ impl LuaRuntime {
                         .pending_names
                         .entry(name)
                         .or_insert_with(|| object_id.clone());
-                    snapshot
-                        .pending_positions
-                        .insert(object_id.clone(), position);
+                    snapshot.insert_pending_spawn(&object_id, position);
                     Ok(object_id)
                 })
                 .map_err(ScriptError::Initialize)?,
@@ -671,24 +769,20 @@ impl LuaRuntime {
         engine
             .set(
                 "spawn_prefab",
-                lua.create_function(move |_, (path, x, y, z): (String, f32, f32, f32)| {
+                lua.create_function(move |lua, mut args: MultiValue| {
                     if !prefab_active.get() {
                         return Err(mlua::Error::RuntimeError(
                             "engine commands may only run in callbacks".to_owned(),
                         ));
                     }
+                    let path = string_arg(lua, &mut args, "prefab path")?;
                     if !valid_prefab_path(Path::new(&path)) {
                         return Err(mlua::Error::RuntimeError(
                             "prefab path must be under assets/prefabs and end in .prefab"
                                 .to_owned(),
                         ));
                     }
-                    let position = [x, y, z];
-                    if !position.iter().all(|value| value.is_finite()) {
-                        return Err(mlua::Error::RuntimeError(
-                            "position must be finite".to_owned(),
-                        ));
-                    }
+                    let position = vec3::vector_arg(&mut args, "position")?.to_array();
                     let mut pending = prefab_commands.borrow_mut();
                     if pending.len() >= MAX_COMMANDS {
                         return Err(mlua::Error::RuntimeError(
@@ -703,8 +797,7 @@ impl LuaRuntime {
                     });
                     prefab_scene
                         .borrow_mut()
-                        .pending_positions
-                        .insert(object_id.clone(), position);
+                        .insert_pending_spawn(&object_id, position);
                     Ok(object_id)
                 })
                 .map_err(ScriptError::Initialize)?,
@@ -717,22 +810,19 @@ impl LuaRuntime {
             engine
                 .set(
                     name,
-                    lua.create_function(move |_, (object_id, x, y, z): (String, f32, f32, f32)| {
+                    lua.create_function(move |lua, mut args: MultiValue| {
                         if !transform_active.get() {
                             return Err(mlua::Error::RuntimeError(
                                 "engine commands may only run in callbacks".to_owned(),
                             ));
                         }
+                        let object_id = string_arg(lua, &mut args, "object ID")?;
                         if object_id.is_empty() || object_id.len() > 64 {
                             return Err(mlua::Error::RuntimeError(
                                 "object ID must be nonempty and at most 64 bytes".to_owned(),
                             ));
                         }
-                        if ![x, y, z].iter().all(|value| value.is_finite()) {
-                            return Err(mlua::Error::RuntimeError(
-                                "position must be finite".to_owned(),
-                            ));
-                        }
+                        let [x, y, z] = vec3::vector_arg(&mut args, "position")?.to_array();
                         let mut pending = transform_commands.borrow_mut();
                         if pending.len() >= MAX_COMMANDS {
                             return Err(mlua::Error::RuntimeError(
@@ -767,33 +857,26 @@ impl LuaRuntime {
                 )
                 .map_err(ScriptError::Initialize)?;
         }
-        let key_states = Rc::new(RefCell::new(HashMap::<ScriptKey, (bool, bool)>::new()));
-        let held_states = Rc::clone(&key_states);
-        engine
-            .set(
-                "key_down",
-                lua.create_function(move |_, name: String| {
-                    let key = ScriptKey::from_name(&name)
-                        .ok_or_else(|| mlua::Error::RuntimeError(format!("unknown key: {name}")))?;
-                    Ok(held_states.borrow().get(&key).is_some_and(|state| state.0))
-                })
-                .map_err(ScriptError::Initialize)?,
-            )
+        transform_api::register(&lua, &engine, &commands, &scene, &active_callback)
             .map_err(ScriptError::Initialize)?;
-        let pressed_states = Rc::clone(&key_states);
-        engine
-            .set(
-                "key_pressed",
-                lua.create_function(move |_, name: String| {
-                    let key = ScriptKey::from_name(&name)
-                        .ok_or_else(|| mlua::Error::RuntimeError(format!("unknown key: {name}")))?;
-                    Ok(pressed_states
-                        .borrow()
-                        .get(&key)
-                        .is_some_and(|state| state.1))
-                })
-                .map_err(ScriptError::Initialize)?,
-            )
+        let input = Rc::new(RefCell::new(InputSnapshot::default()));
+        let force_seconds = Rc::new(Cell::new(DEFAULT_FIXED_STEP));
+        let query_stubs = physics_api::register(
+            &lua,
+            &engine,
+            &commands,
+            &scene,
+            &active_callback,
+            &force_seconds,
+        )
+        .map_err(ScriptError::Initialize)?;
+        camera_api::register(&lua, &engine, &commands, &scene, &active_callback)
+            .map_err(ScriptError::Initialize)?;
+        state_api::register(&lua, &engine, &commands, &scene, &active_callback)
+            .map_err(ScriptError::Initialize)?;
+        object_api::register(&lua, &engine, &commands, &scene, &active_callback)
+            .map_err(ScriptError::Initialize)?;
+        input_api::register(&lua, &engine, &commands, &input, &active_callback)
             .map_err(ScriptError::Initialize)?;
         let named_scene = Rc::clone(&scene);
         engine
@@ -813,7 +896,7 @@ impl LuaRuntime {
                     positioned_scene
                         .borrow()
                         .position(&object_id)
-                        .map(|[x, y, z]| lua.create_table_from([("x", x), ("y", y), ("z", z)]))
+                        .map(|[x, y, z]| vec3::to_lua(lua, glam::Vec3::new(x, y, z)))
                         .transpose()
                 })
                 .map_err(ScriptError::Initialize)?,
@@ -921,13 +1004,40 @@ impl LuaRuntime {
             scripts: Vec::new(),
             commands,
             active_object,
-            key_states,
+            input,
             scene,
             active_callback,
             instructions,
             save_values,
             save_writes,
+            query_stubs,
+            force_seconds,
+            fixed_step: DEFAULT_FIXED_STEP,
         })
+    }
+
+    /// Runs `f` with `engine.raycast` and `engine.is_grounded` answering from
+    /// `queries`. Outside this call they return nil and false. A script that
+    /// stores either function and calls it later gets a Lua error.
+    ///
+    /// Fails only if the scoped functions cannot be installed or removed.
+    pub fn with_queries<R>(
+        &mut self,
+        queries: &dyn crate::ScriptQueries,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> Result<R, ScriptError> {
+        let lua = self.lua.clone();
+        physics_api::with_queries(&lua, &self.query_stubs.clone(), queries, || f(self))
+            .map_err(ScriptError::Queries)
+    }
+
+    /// Sets the fixed physics step (seconds). `engine.add_force` pushes for
+    /// this long in callbacks other than `update` and `fixed_update`.
+    /// Non-finite or non-positive values are ignored.
+    pub fn set_fixed_step(&mut self, seconds: f32) {
+        if seconds.is_finite() && seconds > 0.0 {
+            self.fixed_step = seconds;
+        }
     }
 
     /// Serializes bounded game values for the engine's atomic save file.
@@ -961,7 +1071,19 @@ impl LuaRuntime {
 
     /// Sets this frame's input state for a supported Lua key.
     pub fn set_key_state(&mut self, key: ScriptKey, down: bool, pressed: bool) {
-        self.key_states.borrow_mut().insert(key, (down, pressed));
+        self.input.borrow_mut().keys.insert(
+            key,
+            ButtonState {
+                down,
+                pressed,
+                released: false,
+            },
+        );
+    }
+
+    /// Replaces the whole Lua-visible input snapshot for the next callbacks.
+    pub fn set_input(&mut self, snapshot: InputSnapshot) {
+        *self.input.borrow_mut() = snapshot;
     }
 
     /// Replaces the Lua-visible scene snapshot before a gameplay callback.
@@ -970,18 +1092,92 @@ impl LuaRuntime {
         &mut self,
         objects: impl IntoIterator<Item = (String, Option<String>, Option<[f32; 3]>)>,
     ) {
+        self.set_scene_objects(
+            objects
+                .into_iter()
+                .map(|(id, name, position)| SnapshotObject {
+                    id,
+                    name,
+                    position,
+                    rotation: glam::Quat::IDENTITY.to_array(),
+                    scale: glam::Vec3::ONE.to_array(),
+                    velocity: None,
+                    visible: true,
+                    enabled: true,
+                }),
+        );
+    }
+
+    /// Replaces the Lua-visible scene snapshot, including rotation and scale.
+    /// Only objects with a finite position get transform entries.
+    pub fn set_scene_objects(&mut self, objects: impl IntoIterator<Item = SnapshotObject>) {
         let mut scene = self.scene.borrow_mut();
         scene.positions.clear();
+        scene.rotations.clear();
+        scene.scales.clear();
+        scene.velocities.clear();
         scene.names.clear();
+        scene.visible.clear();
+        scene.enabled.clear();
         scene.clear_pending();
-        for (id, name, position) in objects {
-            if let Some(name) = name {
+        for object in objects {
+            let id = object.id;
+            scene.visible.insert(id.clone(), object.visible);
+            scene.enabled.insert(id.clone(), object.enabled);
+            if let Some(name) = object.name {
                 scene.names.entry(name).or_insert_with(|| id.clone());
             }
-            if let Some(position) = position.filter(|p| p.iter().all(|value| value.is_finite())) {
+            let finite = |values: &[f32]| values.iter().all(|value| value.is_finite());
+            if let Some(position) = object.position.filter(|p| finite(p)) {
+                // A non-finite or zero-length rotation falls back to identity.
+                let rotation = glam::Quat::from_array(object.rotation);
+                let rotation = if finite(&object.rotation) && rotation.length_squared() > 0.0 {
+                    rotation.normalize().to_array()
+                } else {
+                    glam::Quat::IDENTITY.to_array()
+                };
+                let scale = if finite(&object.scale) {
+                    object.scale
+                } else {
+                    glam::Vec3::ONE.to_array()
+                };
+                if let Some(velocity) = object.velocity.filter(|v| finite(v)) {
+                    scene.velocities.insert(id.clone(), velocity);
+                }
+                scene.rotations.insert(id.clone(), rotation);
+                scene.scales.insert(id.clone(), scale);
                 scene.positions.insert(id, position);
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scene_rotation(&self, object_id: &str) -> Option<[f32; 4]> {
+        self.scene
+            .borrow()
+            .rotation(object_id)
+            .map(|q| q.to_array())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scene_scale(&self, object_id: &str) -> Option<[f32; 3]> {
+        self.scene.borrow().scale(object_id).map(|v| v.to_array())
+    }
+
+    /// Sets the camera object `engine.get_camera` reports. Call before a
+    /// callback.
+    pub fn set_active_camera(&mut self, object_id: Option<String>) {
+        let mut scene = self.scene.borrow_mut();
+        scene.active_camera = object_id;
+        scene.pending_camera = None;
+    }
+
+    /// Sets the game state `engine.get_state` reports (one of `GAME_STATES`).
+    /// Call before a callback.
+    pub fn set_game_state(&mut self, name: &str) {
+        let mut scene = self.scene.borrow_mut();
+        scene.game_state = Some(name.to_owned());
+        scene.pending_state = None;
     }
 
     /// Replaces the gameplay variables Lua reads with `engine.get_var`.
@@ -1037,11 +1233,27 @@ impl LuaRuntime {
             path: path.to_owned(),
             table: key,
             object_id,
+            awaiting_start: false,
         });
         Ok(())
     }
 
-    /// Invokes each script's `start` callback in load order.
+    /// Drops the scripts attached to the given (destroyed) objects, so they
+    /// get no more callbacks and stop using the instruction budget.
+    pub fn forget_objects(&mut self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        self.scripts.retain(|script| {
+            script
+                .object_id
+                .as_ref()
+                .is_none_or(|id| !ids.iter().any(|gone| gone == id))
+        });
+    }
+
+    /// Invokes each script's `start` callback in load order. A script on a
+    /// disabled object starts later, the first time it is seen enabled.
     pub fn start(&mut self) -> Result<Vec<GameCommand>, ScriptError> {
         self.call("start", CallbackArgs::None)
     }
@@ -1067,6 +1279,16 @@ impl LuaRuntime {
         self.call("on_event", CallbackArgs::Event(kind, value))
     }
 
+    /// Delivers a game state change to every script as
+    /// `on_state_changed(old, new)`.
+    pub fn on_state_changed(
+        &mut self,
+        old: &str,
+        new: &str,
+    ) -> Result<Vec<GameCommand>, ScriptError> {
+        self.call("on_state_changed", CallbackArgs::StateChange(old, new))
+    }
+
     /// Delivers one contact transition to the global script and the two involved objects.
     pub fn on_collision(
         &mut self,
@@ -1085,6 +1307,45 @@ impl LuaRuntime {
         self.call_scripts(name, args, None)
     }
 
+    /// Calls one script's callback `name` if it defines it.
+    fn invoke(
+        &self,
+        script: &LoadedScript,
+        name: &str,
+        args: CallbackArgs<'_>,
+        collision_ids: Option<(&str, &str)>,
+    ) -> Result<(), ScriptError> {
+        let lua_error = |source| ScriptError::Lua {
+            path: script.path.clone(),
+            source,
+        };
+        let table: Table = self.lua.registry_value(&script.table).map_err(lua_error)?;
+        let function: Option<Function> = table.get(name).map_err(lua_error)?;
+        let Some(function) = function else {
+            return Ok(());
+        };
+        *self.active_object.borrow_mut() = script.object_id.clone();
+        self.active_callback.set(true);
+        self.force_seconds.set(match args {
+            CallbackArgs::Delta(dt) if dt.is_finite() && dt >= 0.0 => dt,
+            CallbackArgs::Delta(_) => 0.0,
+            _ => self.fixed_step,
+        });
+        let result = match args {
+            CallbackArgs::None => function.call::<()>(()),
+            CallbackArgs::Delta(dt) => function.call::<()>(dt),
+            CallbackArgs::Event(kind, value) => function.call::<()>((kind, value)),
+            CallbackArgs::StateChange(old, new) => function.call::<()>((old, new)),
+            CallbackArgs::Collision(kind, _, _) => match collision_ids {
+                Some((first, second)) => function.call::<()>((kind, first, second)),
+                None => Ok(()),
+            },
+        };
+        self.active_callback.set(false);
+        *self.active_object.borrow_mut() = None;
+        result.map_err(lua_error)
+    }
+
     /// Runs one callback across scripts — all of them, or only those attached
     /// to `only_object` — as one atomic dispatch with a shared budget.
     fn call_scripts(
@@ -1098,58 +1359,49 @@ impl LuaRuntime {
         self.save_writes.set(0);
         self.instructions.set(0);
         let original_save = self.save_values.borrow().clone();
-        for script in &self.scripts {
-            if only_object.is_some() && script.object_id.as_deref() != only_object {
+        for index in 0..self.scripts.len() {
+            if only_object.is_some() && self.scripts[index].object_id.as_deref() != only_object {
                 continue;
             }
+            // Scripts on objects disabled when the dispatch began get no
+            // callbacks; their `start` waits until the object is enabled.
+            let disabled = self.scripts[index]
+                .object_id
+                .as_deref()
+                .is_some_and(|id| self.scene.borrow().disabled_at_dispatch_start(id));
+            if disabled {
+                if name == "start" {
+                    self.scripts[index].awaiting_start = true;
+                }
+                continue;
+            }
+            let script = &self.scripts[index];
             let collision_ids = if let CallbackArgs::Collision(_, first, second) = args {
                 match script.object_id.as_deref() {
                     None => Some((first, second)),
                     Some(id) if id == first => Some((first, second)),
                     Some(id) if id == second => Some((second, first)),
-                    Some(_) => None,
+                    Some(_) => continue,
                 }
             } else {
                 None
             };
-            if matches!(args, CallbackArgs::Collision(..)) && collision_ids.is_none() {
-                continue;
+            let late_start = name != "start" && script.awaiting_start;
+            if name == "start" || late_start {
+                self.scripts[index].awaiting_start = false;
             }
-            let table: Table =
-                self.lua
-                    .registry_value(&script.table)
-                    .map_err(|source| ScriptError::Lua {
-                        path: script.path.clone(),
-                        source,
-                    })?;
-            let function: Option<Function> =
-                table.get(name).map_err(|source| ScriptError::Lua {
-                    path: script.path.clone(),
-                    source,
-                })?;
-            if let Some(function) = function {
-                *self.active_object.borrow_mut() = script.object_id.clone();
-                self.active_callback.set(true);
-                let result = match args {
-                    CallbackArgs::None => function.call::<()>(()),
-                    CallbackArgs::Delta(dt) => function.call::<()>(dt),
-                    CallbackArgs::Event(kind, value) => function.call::<()>((kind, value)),
-                    CallbackArgs::Collision(kind, _, _) => match collision_ids {
-                        Some((first, second)) => function.call::<()>((kind, first, second)),
-                        None => Ok(()),
-                    },
-                };
-                self.active_callback.set(false);
-                *self.active_object.borrow_mut() = None;
-                if let Err(source) = result {
-                    self.commands.borrow_mut().clear();
-                    self.scene.borrow_mut().clear_pending();
-                    *self.save_values.borrow_mut() = original_save;
-                    return Err(ScriptError::Lua {
-                        path: script.path.clone(),
-                        source,
-                    });
-                }
+            let script = &self.scripts[index];
+            let result = if late_start {
+                self.invoke(script, "start", CallbackArgs::None, None)
+                    .and_then(|()| self.invoke(script, name, args, collision_ids))
+            } else {
+                self.invoke(script, name, args, collision_ids)
+            };
+            if let Err(error) = result {
+                self.commands.borrow_mut().clear();
+                self.scene.borrow_mut().clear_pending();
+                *self.save_values.borrow_mut() = original_save;
+                return Err(error);
             }
         }
         let mut scene = self.scene.borrow_mut();

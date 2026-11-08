@@ -6,12 +6,12 @@ use engine_scene::{BodyKind, ColliderData, ColliderShape, GridRegion, SceneTilem
 use glam::{Mat4, Vec2, Vec4};
 
 pub(crate) fn brush_collider(size: [f32; 2]) -> ColliderData {
-    ColliderData {
-        shape: ColliderShape::Cuboid {
+    ColliderData::new(
+        ColliderShape::Cuboid {
             half_extents: [size[0] * 0.5, size[1] * 0.5, 0.05],
         },
-        body: BodyKind::Fixed,
-    }
+        BodyKind::Fixed,
+    )
 }
 
 /// Intersects the viewport pointer ray with a tilemap parent's local XY plane.
@@ -220,12 +220,12 @@ mod tests {
                         max: [1.0; 2],
                     },
                 ),
-                SceneCollider(ColliderData {
-                    shape: ColliderShape::Cuboid {
+                SceneCollider(ColliderData::new(
+                    ColliderShape::Cuboid {
                         half_extents: [0.5, 0.5, 0.05],
                     },
-                    body: BodyKind::Fixed,
-                }),
+                    BodyKind::Fixed,
+                )),
             ))
             .id();
         let mut next = world.get::<SceneTilemap>(parent).unwrap().0.clone();

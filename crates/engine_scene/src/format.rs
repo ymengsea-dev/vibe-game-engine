@@ -115,6 +115,226 @@ pub struct CameraData {
     pub near: f32,
     /// Far clip plane distance.
     pub far: f32,
+    /// `true` once the entity's `Transform` is the camera's pose.
+    /// `false` (the default, for scenes written before this field existed)
+    /// means `eye`/`target`/`up` are authoritative and are adopted into the
+    /// transform on load. `eye`/`target`/`up` are still written on save,
+    /// derived from the transform, so older SDKs open the same view.
+    #[serde(default)]
+    pub pose_from_transform: bool,
+    /// Whether this is the scene's active camera.
+    #[serde(default)]
+    pub active: bool,
+}
+
+/// What input orbits a third-person follow camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum OrbitInput {
+    /// The camera never orbits.
+    None,
+    /// Mouse movement orbits.
+    #[default]
+    Mouse,
+    /// The right thumbstick orbits.
+    RightStick,
+    /// Mouse and right thumbstick both orbit.
+    Both,
+}
+
+/// How a follow camera tracks its target.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum CameraFollowMode {
+    /// Behind and above the target, orbiting around it.
+    ThirdPerson {
+        /// Distance from the look point to the camera.
+        distance: f32,
+        /// How far above the target's origin the camera looks.
+        height: f32,
+        /// Follow rate per second; higher is snappier.
+        smoothing: f32,
+        /// What input orbits the camera.
+        orbit: OrbitInput,
+        /// Lowest the camera may tilt, in degrees.
+        pitch_min_degrees: f32,
+        /// Highest the camera may tilt, in degrees.
+        pitch_max_degrees: f32,
+    },
+    /// At the target's head, turned by mouse or stick.
+    FirstPerson {
+        /// How far above the target's origin the eye sits.
+        height: f32,
+        /// What input turns the camera.
+        look: OrbitInput,
+        /// Lowest the camera may tilt, in degrees.
+        pitch_min_degrees: f32,
+        /// Highest the camera may tilt, in degrees.
+        pitch_max_degrees: f32,
+    },
+    /// Sideways 2D follow: x/y only, inside a dead zone, within bounds.
+    Side2D {
+        /// Half-size of the area the target can move in before the camera
+        /// follows.
+        dead_zone: [f32; 2],
+        /// `min_x, min_y, max_x, max_y` the camera position stays within.
+        bounds: Option<[f32; 4]>,
+        /// Follow rate per second; higher is snappier.
+        smoothing: f32,
+    },
+}
+
+/// On-disk camera follow: which object the camera tracks, and how.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraFollowData {
+    /// Stable object id of the target.
+    pub target: String,
+    /// How to follow it.
+    pub mode: CameraFollowMode,
+    /// A key that switches between first and third person in the game.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_switch: Option<CameraViewSwitch>,
+}
+
+/// On-disk key for switching a follow camera's view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraViewSwitch {
+    /// The key's script-visible name, such as `"V"`.
+    pub key: String,
+    /// The view the key switches to, with its own settings.
+    pub other: CameraFollowMode,
+}
+
+impl From<engine_ecs::components::OrbitInput> for OrbitInput {
+    fn from(value: engine_ecs::components::OrbitInput) -> Self {
+        use engine_ecs::components::OrbitInput as Live;
+        match value {
+            Live::None => Self::None,
+            Live::Mouse => Self::Mouse,
+            Live::RightStick => Self::RightStick,
+            Live::Both => Self::Both,
+        }
+    }
+}
+
+impl From<OrbitInput> for engine_ecs::components::OrbitInput {
+    fn from(value: OrbitInput) -> Self {
+        match value {
+            OrbitInput::None => Self::None,
+            OrbitInput::Mouse => Self::Mouse,
+            OrbitInput::RightStick => Self::RightStick,
+            OrbitInput::Both => Self::Both,
+        }
+    }
+}
+
+impl From<engine_ecs::components::FollowMode> for CameraFollowMode {
+    fn from(value: engine_ecs::components::FollowMode) -> Self {
+        use engine_ecs::components::FollowMode as Live;
+        match value {
+            Live::ThirdPerson {
+                distance,
+                height,
+                smoothing,
+                orbit,
+                pitch_min_degrees,
+                pitch_max_degrees,
+            } => Self::ThirdPerson {
+                distance,
+                height,
+                smoothing,
+                orbit: orbit.into(),
+                pitch_min_degrees,
+                pitch_max_degrees,
+            },
+            Live::FirstPerson {
+                height,
+                look,
+                pitch_min_degrees,
+                pitch_max_degrees,
+            } => Self::FirstPerson {
+                height,
+                look: look.into(),
+                pitch_min_degrees,
+                pitch_max_degrees,
+            },
+            Live::Side2D {
+                dead_zone,
+                bounds,
+                smoothing,
+            } => Self::Side2D {
+                dead_zone,
+                bounds,
+                smoothing,
+            },
+        }
+    }
+}
+
+impl From<CameraFollowMode> for engine_ecs::components::FollowMode {
+    fn from(value: CameraFollowMode) -> Self {
+        match value {
+            CameraFollowMode::ThirdPerson {
+                distance,
+                height,
+                smoothing,
+                orbit,
+                pitch_min_degrees,
+                pitch_max_degrees,
+            } => Self::ThirdPerson {
+                distance,
+                height,
+                smoothing,
+                orbit: orbit.into(),
+                pitch_min_degrees,
+                pitch_max_degrees,
+            },
+            CameraFollowMode::FirstPerson {
+                height,
+                look,
+                pitch_min_degrees,
+                pitch_max_degrees,
+            } => Self::FirstPerson {
+                height,
+                look: look.into(),
+                pitch_min_degrees,
+                pitch_max_degrees,
+            },
+            CameraFollowMode::Side2D {
+                dead_zone,
+                bounds,
+                smoothing,
+            } => Self::Side2D {
+                dead_zone,
+                bounds,
+                smoothing,
+            },
+        }
+    }
+}
+
+impl From<&engine_ecs::components::CameraFollow> for CameraFollowData {
+    fn from(live: &engine_ecs::components::CameraFollow) -> Self {
+        Self {
+            target: live.target.clone(),
+            mode: live.mode.into(),
+            view_switch: live.switch.as_ref().map(|switch| CameraViewSwitch {
+                key: switch.key.clone(),
+                other: switch.other.into(),
+            }),
+        }
+    }
+}
+
+impl From<CameraFollowData> for engine_ecs::components::CameraFollow {
+    fn from(data: CameraFollowData) -> Self {
+        let mut follow = Self::new(data.target, data.mode.into());
+        follow.switch = data
+            .view_switch
+            .map(|switch| engine_ecs::components::ViewSwitch {
+                key: switch.key,
+                other: switch.other.into(),
+            });
+        follow
+    }
 }
 
 impl From<engine_renderer::Camera> for CameraData {
@@ -127,6 +347,8 @@ impl From<engine_renderer::Camera> for CameraData {
             projection: camera.projection.into(),
             near: camera.near,
             far: camera.far,
+            pose_from_transform: false,
+            active: false,
         }
     }
 }
@@ -404,21 +626,94 @@ pub struct UiElementData {
 #[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq)]
 pub struct SceneUi(pub UiElementData);
 
+/// Most conditions one rule may carry.
+pub const MAX_RULE_CONDITIONS: usize = 8;
+
 /// An authored condition that can drive a scene action in either game language.
+///
+/// Saved through [`RuleDataOnDisk`]: a rule with exactly one condition and
+/// [`RuleMatch::All`] keeps the older single-`condition` form so older SDKs
+/// still read it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RuleDataOnDisk", into = "RuleDataOnDisk")]
 pub struct RuleData {
     /// Event that runs this rule.
     pub trigger: RuleTrigger,
     /// Engine-owned action to apply when the event arrives.
     pub action: RuleAction,
-    /// Optional check on a gameplay variable; the action runs only when it holds.
-    /// Absent in older scenes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub condition: Option<RuleCondition>,
+    /// Checks on gameplay variables; the action runs only when they hold
+    /// (see `match_mode`). At most [`MAX_RULE_CONDITIONS`].
+    pub conditions: Vec<RuleCondition>,
+    /// Whether every condition or any one condition must hold.
+    pub match_mode: RuleMatch,
     /// Where the Gameplay Graph draws this rule's action node, in graph units.
     /// Editor layout only; `None` uses the automatic column layout.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_position: Option<[f32; 2]>,
+}
+
+/// How a rule combines several conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum RuleMatch {
+    /// Every condition must hold.
+    #[default]
+    All,
+    /// At least one condition must hold.
+    Any,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RuleDataOnDisk {
+    trigger: RuleTrigger,
+    action: RuleAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    condition: Option<RuleCondition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    conditions: Vec<RuleCondition>,
+    #[serde(default, skip_serializing_if = "is_match_all")]
+    match_mode: RuleMatch,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    graph_position: Option<[f32; 2]>,
+}
+
+fn is_match_all(mode: &RuleMatch) -> bool {
+    *mode == RuleMatch::All
+}
+
+impl From<RuleDataOnDisk> for RuleData {
+    fn from(disk: RuleDataOnDisk) -> Self {
+        let mut conditions: Vec<RuleCondition> = disk.condition.into_iter().collect();
+        conditions.extend(disk.conditions);
+        Self {
+            trigger: disk.trigger,
+            action: disk.action,
+            conditions,
+            match_mode: disk.match_mode,
+            graph_position: disk.graph_position,
+        }
+    }
+}
+
+impl From<RuleData> for RuleDataOnDisk {
+    fn from(rule: RuleData) -> Self {
+        let legacy = rule.conditions.len() == 1 && rule.match_mode == RuleMatch::All;
+        let (condition, conditions, match_mode) = if legacy {
+            (
+                rule.conditions.into_iter().next(),
+                Vec::new(),
+                RuleMatch::All,
+            )
+        } else {
+            (None, rule.conditions, rule.match_mode)
+        };
+        Self {
+            trigger: rule.trigger,
+            action: rule.action,
+            condition,
+            conditions,
+            match_mode,
+            graph_position: rule.graph_position,
+        }
+    }
 }
 
 impl RuleData {
@@ -427,8 +722,26 @@ impl RuleData {
         Self {
             trigger,
             action,
-            condition: None,
+            conditions: Vec::new(),
+            match_mode: RuleMatch::All,
             graph_position: None,
+        }
+    }
+
+    /// Whether the rule's conditions allow its action to run now. An empty
+    /// list always holds.
+    pub fn conditions_hold(&self, variables: &crate::RuleVariables) -> bool {
+        let holds = |condition: &RuleCondition| {
+            condition
+                .compare
+                .holds(variables.get(&condition.variable), condition.value)
+        };
+        if self.conditions.is_empty() {
+            return true;
+        }
+        match self.match_mode {
+            RuleMatch::All => self.conditions.iter().all(holds),
+            RuleMatch::Any => self.conditions.iter().any(holds),
         }
     }
 }
@@ -504,6 +817,59 @@ pub enum RuleTrigger {
     UiClicked,
     /// A Lua or Rust game emitted this name.
     Named(String),
+    /// Once per scene load, after that scene's scripts' `start`.
+    SceneStart,
+    /// The named key went down this frame.
+    KeyPressed {
+        /// Key name, as used by the input API.
+        key: String,
+    },
+    /// This object began touching another solid object.
+    CollisionEnter {
+        /// Stable ID of the other object; `None` matches any.
+        with: Option<String>,
+    },
+    /// This object stopped touching another solid object.
+    CollisionExit {
+        /// Stable ID of the other object; `None` matches any.
+        with: Option<String>,
+    },
+    /// This object overlapped a trigger volume or another object began overlapping its trigger.
+    TriggerEnter {
+        /// Stable ID of the other object; `None` matches any.
+        with: Option<String>,
+    },
+    /// An overlap with a trigger volume ended.
+    TriggerExit {
+        /// Stable ID of the other object; `None` matches any.
+        with: Option<String>,
+    },
+    /// A countdown finished.
+    Timer {
+        /// Seconds until it fires, in `0.05..=3600`.
+        seconds: f32,
+        /// Whether it starts again after firing.
+        repeat: bool,
+    },
+    /// A gameplay variable changed value.
+    VariableChanged {
+        /// Variable name.
+        name: String,
+    },
+    /// The game state changed to this state.
+    StateChanged {
+        /// The state entered.
+        state: crate::GameStateName,
+    },
+}
+
+/// Where a spawned prefab appears.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SpawnAt {
+    /// At the position of the object with this stable ID.
+    Object(String),
+    /// At a fixed world position.
+    Position([f32; 3]),
 }
 
 /// Actions available to visual rules without exposing engine internals.
@@ -539,6 +905,42 @@ pub enum RuleAction {
         name: String,
         /// Finite amount to add.
         amount: f64,
+    },
+    /// Load another scene.
+    ChangeScene {
+        /// Project-relative `scenes/*.ron` path.
+        path: String,
+    },
+    /// Show or hide an object.
+    SetVisible {
+        /// Stable ID of the object.
+        target: String,
+        /// Whether it is drawn.
+        visible: bool,
+    },
+    /// Enable or disable an object.
+    SetEnabled {
+        /// Stable ID of the object.
+        target: String,
+        /// Whether it is active.
+        enabled: bool,
+    },
+    /// Create an object from a prefab.
+    SpawnPrefab {
+        /// Project-relative `assets/prefabs/*.prefab` path.
+        path: String,
+        /// Where it appears.
+        at: SpawnAt,
+    },
+    /// Remove an object from the scene.
+    Destroy {
+        /// Stable ID of the object.
+        target: String,
+    },
+    /// Switch the game state.
+    SetGameState {
+        /// The state to enter.
+        state: crate::GameStateName,
     },
 }
 
@@ -615,6 +1017,49 @@ pub struct ColliderData {
     /// How the body moves.
     #[serde(default)]
     pub body: BodyKind,
+    /// A trigger detects overlaps but never blocks anything.
+    #[serde(default)]
+    pub trigger: bool,
+    /// Mass in kilograms, or `None` for Auto (from the shape's volume).
+    /// Only Dynamic bodies use it.
+    #[serde(default)]
+    pub mass: Option<f32>,
+    /// Surface grip, `0` is ice.
+    #[serde(default = "default_friction")]
+    pub friction: f32,
+    /// How much of its speed a hit gives back, `0` to `1`.
+    #[serde(default)]
+    pub bounciness: f32,
+    /// Multiplier on gravity. Only Dynamic bodies use it.
+    #[serde(default = "default_gravity_scale")]
+    pub gravity_scale: f32,
+    /// Keep the body upright; collisions cannot turn it.
+    #[serde(default)]
+    pub lock_rotation: bool,
+}
+
+impl ColliderData {
+    /// A collider with every setting at its default.
+    pub fn new(shape: ColliderShape, body: BodyKind) -> Self {
+        Self {
+            shape,
+            body,
+            trigger: false,
+            mass: None,
+            friction: default_friction(),
+            bounciness: 0.0,
+            gravity_scale: default_gravity_scale(),
+            lock_rotation: false,
+        }
+    }
+}
+
+fn default_friction() -> f32 {
+    0.5
+}
+
+fn default_gravity_scale() -> f32 {
+    1.0
 }
 
 /// A scene entity's collider, carried on the live entity so the editor
@@ -817,6 +1262,9 @@ pub struct EnvironmentData {
     /// Sounds that loop for the whole scene at the same volume everywhere.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ambient_sounds: Vec<AmbientSoundData>,
+    /// State the game starts in; `None` means the default, playing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_state: Option<crate::GameStateName>,
 }
 
 impl EnvironmentData {
@@ -825,7 +1273,7 @@ impl EnvironmentData {
 
     /// Whether nothing is set, so the scene file can omit the section.
     pub fn is_empty(&self) -> bool {
-        self.ambient_sounds.is_empty()
+        self.ambient_sounds.is_empty() && self.start_state.is_none()
     }
 }
 
@@ -968,6 +1416,9 @@ pub struct SceneEntity {
     /// This entity's camera, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<CameraData>,
+    /// Makes this camera follow another object, if set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_follow: Option<CameraFollowData>,
     /// This entity's mesh/material, as asset references, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_renderer: Option<MeshRendererData>,
@@ -1112,13 +1563,152 @@ impl Scene {
     pub fn from_ron_str(text: &str) -> Result<Self, SceneError> {
         let scene: Self =
             ron::from_str(text).map_err(|err| SceneError::Deserialize(err.to_string()))?;
-        crate::migration::migrate(scene)
+        let mut scene = crate::migration::migrate(scene)?;
+        crate::camera_pose::adopt_legacy_camera_poses(&mut scene);
+        Ok(scene)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn follow_scene(mode: CameraFollowMode) -> Scene {
+        let camera = CameraData::from(engine_renderer::Camera::new(
+            glam::Vec3::ZERO,
+            glam::Vec3::NEG_Z,
+            1.5,
+        ));
+        Scene {
+            entities: vec![SceneEntity {
+                camera: Some(camera),
+                camera_follow: Some(CameraFollowData {
+                    target: "player-id".into(),
+                    mode,
+                    view_switch: None,
+                }),
+                ..Default::default()
+            }],
+            ..Scene::default()
+        }
+    }
+
+    #[test]
+    fn camera_follow_round_trips_and_validates() {
+        for mode in [
+            engine_ecs::components::FollowMode::THIRD_PERSON.into(),
+            engine_ecs::components::FollowMode::FIRST_PERSON.into(),
+            CameraFollowMode::Side2D {
+                dead_zone: [1.0, 0.5],
+                bounds: Some([-5.0, 0.0, 20.0, 8.0]),
+                smoothing: 4.0,
+            },
+        ] {
+            let scene = follow_scene(mode);
+            assert!(scene.validate().is_ok());
+            let text = scene.to_ron_string().unwrap();
+            let back = Scene::from_ron_str(&text).unwrap();
+            assert_eq!(
+                back.entities[0].camera_follow,
+                scene.entities[0].camera_follow
+            );
+        }
+        // Old scenes have no follow.
+        let old = Scene::from_ron_str("(entities: [(camera: None)])").unwrap();
+        assert!(old.entities[0].camera_follow.is_none());
+    }
+
+    #[test]
+    fn camera_follow_survives_world_capture() {
+        let scene = follow_scene(engine_ecs::components::FollowMode::SIDE_2D.into());
+        let mut world = bevy_ecs::prelude::World::new();
+        let mut named = scene.clone();
+        named.entities[0].name = Some("Cam".into());
+        named.instantiate(&mut world);
+        let captured = Scene::from_world(&mut world);
+        assert_eq!(
+            captured.entities[0].camera_follow,
+            scene.entities[0].camera_follow
+        );
+    }
+
+    #[test]
+    fn camera_follow_rejects_bad_values() {
+        let bad = |mode: CameraFollowMode| follow_scene(mode).validate().is_err();
+        let first = |height, min, max| CameraFollowMode::FirstPerson {
+            height,
+            look: OrbitInput::Mouse,
+            pitch_min_degrees: min,
+            pitch_max_degrees: max,
+        };
+        assert!(!bad(first(1.6, -85.0, 85.0)));
+        assert!(bad(first(f32::NAN, -85.0, 85.0)));
+        assert!(bad(first(1.6, -95.0, 85.0)));
+        assert!(bad(first(1.6, 10.0, -10.0)));
+        let third = |distance, smoothing, min, max| CameraFollowMode::ThirdPerson {
+            distance,
+            height: 1.0,
+            smoothing,
+            orbit: OrbitInput::Mouse,
+            pitch_min_degrees: min,
+            pitch_max_degrees: max,
+        };
+        assert!(!bad(third(6.0, 10.0, -60.0, 70.0)));
+        assert!(bad(third(0.0, 10.0, -60.0, 70.0)));
+        assert!(bad(third(f32::NAN, 10.0, -60.0, 70.0)));
+        assert!(bad(third(6.0, -1.0, -60.0, 70.0)));
+        assert!(bad(third(6.0, 10.0, 70.0, -60.0)));
+        assert!(bad(third(6.0, 10.0, -60.0, 90.0)));
+        let side = |dead_zone, bounds, smoothing| CameraFollowMode::Side2D {
+            dead_zone,
+            bounds,
+            smoothing,
+        };
+        assert!(!bad(side([0.0, 0.0], Some([0.0, 0.0, 0.0, 0.0]), 0.0)));
+        assert!(bad(side([-1.0, 0.0], None, 1.0)));
+        assert!(bad(side([f32::INFINITY, 0.0], None, 1.0)));
+        assert!(bad(side([1.0, 1.0], Some([5.0, 0.0, 1.0, 1.0]), 1.0)));
+        assert!(bad(side([1.0, 1.0], Some([0.0, 0.0, f32::NAN, 1.0]), 1.0)));
+        assert!(bad(side([1.0, 1.0], None, f32::NAN)));
+    }
+
+    #[test]
+    fn old_collider_data_loads_with_defaults() {
+        let old: ColliderData =
+            ron::from_str("(shape: Cuboid(half_extents: (0.5,0.5,0.5)), body: Dynamic)").unwrap();
+        assert!(!old.trigger);
+        assert_eq!(old.mass, None);
+        assert_eq!(old.friction, 0.5);
+        assert_eq!(old.bounciness, 0.0);
+        assert_eq!(old.gravity_scale, 1.0);
+        assert!(!old.lock_rotation);
+        assert_eq!(
+            old,
+            ColliderData::new(
+                ColliderShape::Cuboid {
+                    half_extents: [0.5; 3]
+                },
+                BodyKind::Dynamic
+            )
+        );
+    }
+
+    #[test]
+    fn collider_settings_round_trip() {
+        let data = ColliderData {
+            shape: ColliderShape::Ball { radius: 2.0 },
+            body: BodyKind::Kinematic,
+            trigger: true,
+            mass: Some(4.5),
+            friction: 0.9,
+            bounciness: 0.3,
+            gravity_scale: -0.5,
+            lock_rotation: true,
+        };
+        let text = ron::to_string(&data).unwrap();
+        let back: ColliderData = ron::from_str(&text).unwrap();
+        assert_eq!(back, data);
+    }
 
     #[test]
     fn tilemap_solid_brush_survives_scene_format_round_trip() {
@@ -1209,11 +1799,17 @@ mod tests {
                 },
                 SceneEntity {
                     parent: Some(0),
-                    camera: Some(CameraData::from(engine_renderer::Camera::new(
-                        Vec3::new(0.0, 1.0, 5.0),
-                        Vec3::ZERO,
-                        16.0 / 9.0,
-                    ))),
+                    transform: Some(TransformData::from(
+                        engine_utils::Transform::from_translation(Vec3::new(0.0, 1.0, 5.0)),
+                    )),
+                    camera: Some(CameraData {
+                        pose_from_transform: true,
+                        ..CameraData::from(engine_renderer::Camera::new(
+                            Vec3::new(0.0, 1.0, 5.0),
+                            Vec3::ZERO,
+                            16.0 / 9.0,
+                        ))
+                    }),
                     mesh_renderer: Some(MeshRendererData {
                         mesh: AssetRef {
                             id: uuid::Uuid::nil().to_string(),

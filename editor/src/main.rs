@@ -37,7 +37,7 @@ use engine::ecs::components as ecs_components;
 use engine::ecs::components::Name;
 use engine::ecs::prelude::{ChildOf, World};
 use engine::editor::{
-    Diagnostic, EditorMode, GameControl, GameFrameTexture, MAX_TEXT_HITS,
+    ASSET_DROP_CODE, Diagnostic, EditorMode, GameControl, GameFrameTexture, MAX_TEXT_HITS,
     Severity as ProblemSeverity, SymbolHit,
 };
 use engine::embed::protocol::{InputEvent, ToGame};
@@ -744,14 +744,16 @@ fn handle_terrain_request(state: &mut EditorState) {
     state
         .world
         .entity_mut(entity)
-        .insert(engine::scene::SceneCollider(engine::scene::ColliderData {
-            shape: engine::scene::ColliderShape::TriMesh {
-                mesh: engine::scene::AssetRef {
-                    id: mesh_id.to_string(),
+        .insert(engine::scene::SceneCollider(
+            engine::scene::ColliderData::new(
+                engine::scene::ColliderShape::TriMesh {
+                    mesh: engine::scene::AssetRef {
+                        id: mesh_id.to_string(),
+                    },
                 },
-            },
-            body: engine::scene::BodyKind::Fixed,
-        }));
+                engine::scene::BodyKind::Fixed,
+            ),
+        ));
     state.select_only(entity);
     state.selected_asset = Some(relative.to_path_buf());
     state.mark_dirty();
@@ -868,6 +870,14 @@ fn import_destination(state: &EditorState) -> Option<PathBuf> {
     } else {
         tracing::warn!(target = %target.display(), "import target no longer exists; using the assets root");
         Some(assets_dir)
+    }
+}
+
+/// Grabs (`Some(true)`) or frees (`Some(false)`) Studio's cursor for a
+/// locked game, the way a windowed game does. Esc always frees it.
+fn apply_cursor_grab(window: Option<&Window>, change: Option<bool>) {
+    if let (Some(window), Some(locked)) = (window, change) {
+        engine::platform::apply_cursor_lock(window, locked);
     }
 }
 
@@ -1888,6 +1898,14 @@ fn refresh_code_problem_rows(
     code_problems: &HashMap<PathBuf, Vec<Diagnostic>>,
 ) {
     let mut all: Vec<Diagnostic> = code_problems.values().flatten().cloned().collect();
+    // Not a code problem: it stays until the next drop.
+    all.extend(
+        state
+            .diagnostics
+            .snapshot()
+            .into_iter()
+            .filter(|row| row.code.as_deref() == Some(ASSET_DROP_CODE)),
+    );
     all.sort_by(|a, b| a.severity.cmp(&b.severity).then(a.message.cmp(&b.message)));
     state.diagnostics.set(all);
 }
@@ -2009,9 +2027,15 @@ struct EditorHandler {
     preview_texture: Option<GameFrameTexture>,
     /// Player input for the previewed game, gathered from window events.
     preview_input: Vec<ToGame>,
+    /// Whether Studio's cursor is grabbed for the playing game.
+    preview_lock: engine::editor::StudioCursorLock,
+    /// The game-view focus last sent to the game.
+    preview_focus_sent: Option<bool>,
     /// Whether the cursor was over the game frame at its last move, so
     /// clicks and scrolls outside it stay with Studio.
     preview_cursor_inside: bool,
+    /// Whether the Studio window itself has OS focus.
+    window_focused: bool,
     /// Whether ⌘ or Ctrl is held: the Play shortcuts stay with Studio even
     /// while the game has the keyboard.
     command_held: bool,
@@ -2041,6 +2065,7 @@ impl EditorHandler {
                 PlayEvent::Finished => {
                     tracing::info!("project game exited");
                     self.state.play.stop(&mut self.state.world);
+                    self.state.clear_object_clipboard();
                     self.state.clear_selection();
                 }
                 PlayEvent::Failed(message) => {
@@ -2197,13 +2222,35 @@ impl EditorHandler {
                 }
                 SessionEvent::Paused => self.state.play.set_paused(true),
                 SessionEvent::Resumed => self.state.play.set_paused(false),
+                SessionEvent::CursorLock(locked) => {
+                    let change = self.preview_lock.on_game_request(
+                        locked,
+                        self.state.game_view.focused && self.window_focused,
+                    );
+                    apply_cursor_grab(self.window.as_deref(), change);
+                }
                 // The process exit (reported by `PlayProcess`) says how.
                 SessionEvent::Closed => {}
                 SessionEvent::Failed(message) => failure = Some(message),
             }
         }
+        // Only a focused game view keeps the cursor; clicking back in
+        // re-applies the game's wish.
+        let focused = self.state.game_view.focused;
+        let change = if focused {
+            (self.preview_focus_sent == Some(false))
+                .then(|| self.preview_lock.on_click_in_view())
+                .flatten()
+        } else {
+            self.preview_lock.on_stop_or_blur()
+        };
+        apply_cursor_grab(self.window.as_deref(), change);
         if session.is_connected() && failure.is_none() {
             let mut outgoing = Vec::new();
+            if self.preview_focus_sent != Some(focused) {
+                self.preview_focus_sent = Some(focused);
+                outgoing.push(ToGame::Input(InputEvent::Focus { focused }));
+            }
             if let Some((width, height)) = self.state.game_view.size_request.take() {
                 outgoing.push(ToGame::Resize { width, height });
             }
@@ -2244,6 +2291,9 @@ impl EditorHandler {
     /// Forgets the preview's per-session state (the texture is reused).
     fn end_preview(&mut self) {
         self.preview = None;
+        let change = self.preview_lock.reset();
+        apply_cursor_grab(self.window.as_deref(), change);
+        self.preview_focus_sent = None;
         self.preview_input.clear();
         self.preview_cursor_inside = false;
         self.state.game_view.reset();
@@ -2263,9 +2313,19 @@ impl EditorHandler {
             return true;
         };
         match input {
-            InputEvent::Key { key, .. } => {
+            InputEvent::Key {
+                key,
+                pressed,
+                repeat,
+                ..
+            } => {
                 if self.command_held && key == KeyCode::KeyP {
                     return true;
+                }
+                // Esc always frees the cursor, and still reaches the game.
+                if key == KeyCode::Escape && pressed && !repeat {
+                    let change = self.preview_lock.on_escape();
+                    apply_cursor_grab(Some(window), change);
                 }
                 self.preview_input.push(ToGame::Input(input));
                 false
@@ -2275,20 +2335,42 @@ impl EditorHandler {
                     self.state
                         .game_view
                         .frame_position_from_window(x, y, window.scale_factor());
-                self.preview_cursor_inside = inside.is_some();
+                let was_inside =
+                    std::mem::replace(&mut self.preview_cursor_inside, inside.is_some());
                 if let Some((x, y)) = inside {
                     self.preview_input
                         .push(ToGame::Input(InputEvent::CursorMoved { x, y }));
+                } else if was_inside {
+                    self.preview_input
+                        .push(ToGame::Input(InputEvent::CursorLeft));
                 }
                 true
             }
-            InputEvent::MouseButton { .. } | InputEvent::Wheel { .. } => {
+            // The pointer left Studio's window altogether.
+            InputEvent::CursorLeft => {
+                if std::mem::take(&mut self.preview_cursor_inside) {
+                    self.preview_input.push(ToGame::Input(input));
+                }
+                true
+            }
+            InputEvent::MouseButton { pressed, .. } => {
+                if self.preview_cursor_inside {
+                    let (change, reaches_game) = self.preview_lock.on_mouse_button(pressed);
+                    apply_cursor_grab(Some(window), change);
+                    if reaches_game {
+                        self.preview_input.push(ToGame::Input(input));
+                    }
+                }
+                true
+            }
+            InputEvent::Wheel { .. } => {
                 if self.preview_cursor_inside {
                     self.preview_input.push(ToGame::Input(input));
                 }
                 true
             }
-            InputEvent::Focus { .. } => true,
+            // Raw motion arrives through `on_event`, not window events.
+            InputEvent::MouseMotion { .. } | InputEvent::Focus { .. } => true,
         }
     }
 
@@ -2501,6 +2583,22 @@ impl PlatformHandler for EditorHandler {
     }
 
     fn on_raw_window_event(&mut self, window: &Window, event: &WindowEvent) {
+        if let WindowEvent::Focused(focused) = event {
+            self.window_focused = *focused;
+        }
+        if let WindowEvent::Focused(focused) = event
+            && self.state.play.is_previewing()
+        {
+            // Cmd-Tab away frees the cursor; coming back re-applies the
+            // game's wish if its view still has focus.
+            let change = if *focused && self.state.game_view.focused {
+                self.preview_lock.on_regain_focus()
+            } else {
+                self.preview_cursor_inside = false;
+                self.preview_lock.on_stop_or_blur()
+            };
+            apply_cursor_grab(Some(window), change);
+        }
         if let WindowEvent::ModifiersChanged(modifiers) = event {
             let held = modifiers.state();
             self.command_held = held.super_key() || held.control_key();
@@ -2599,8 +2697,22 @@ impl PlatformHandler for EditorHandler {
             PlatformEvent::KeyboardInput { .. }
             | PlatformEvent::MouseButtonInput { .. }
             | PlatformEvent::CursorMoved { .. }
+            | PlatformEvent::CursorLeft
             | PlatformEvent::MouseWheel { .. }
             | PlatformEvent::FocusChanged { .. } => {}
+            PlatformEvent::MouseMotion { delta_x, delta_y } => {
+                // While the lock is held the cursor cannot move, so its
+                // position says nothing; forward regardless.
+                if self.state.play.is_previewing()
+                    && self.state.game_view.focused
+                    && self
+                        .preview_lock
+                        .forwards_motion(self.preview_cursor_inside)
+                {
+                    self.preview_input
+                        .push(ToGame::Input(InputEvent::MouseMotion { delta_x, delta_y }));
+                }
+            }
         }
     }
 }
@@ -3336,7 +3448,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             preview: None,
             preview_texture: None,
             preview_input: Vec::new(),
+            preview_lock: engine::editor::StudioCursorLock::default(),
+            preview_focus_sent: None,
             preview_cursor_inside: false,
+            window_focused: true,
             command_held: false,
             gpu: None,
             shell: None,
@@ -3370,6 +3485,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refreshing_code_problems_keeps_a_failed_drop() {
+        let root = std::env::temp_dir().join(format!("vge-drop-row-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = Project::create(&root, "Drop row").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        assert!(
+            state
+                .drop_asset(Path::new("missing.prefab"), None, None)
+                .is_none()
+        );
+
+        refresh_code_problem_rows(&state, &HashMap::new());
+
+        assert_eq!(state.diagnostics.len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn create_terrain_request_adds_a_saved_collidable_scene_object() {
@@ -4639,5 +4772,15 @@ mod tests {
         assert_eq!(entry["edits"][0]["startLineNumber"], 1);
         assert_eq!(entry["edits"][0]["startColumn"], 4);
         assert_eq!(entry["edits"][0]["text"], "renamed");
+    }
+
+    #[test]
+    fn embedded_sdk_holds_only_the_engine_never_a_game() {
+        for &(relative, _) in SDK_FILES {
+            assert!(
+                matches!(relative, "Cargo.toml" | "Cargo.lock") || relative.starts_with("crates/"),
+                "not part of the SDK: {relative}"
+            );
+        }
     }
 }

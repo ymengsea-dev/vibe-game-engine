@@ -28,8 +28,8 @@
 //! `EDITOR_CODE_MONACO_DIR` env var, then `monaco/` beside the
 //! running executable, then `../Resources/monaco` (macOS `.app`
 //! bundle), then the Cargo profile's `monaco/` next to a local `.app`,
-//! then the crate's `vendor/monaco` (the `cargo run` dev
-//! path). `cargo build -p editor` runs a build script that stages
+//! then, in debug builds, the crate's `vendor/monaco` (the `cargo run`
+//! dev path). `cargo build -p editor` runs a build script that stages
 //! `vendor/monaco/` into `target/<profile>/monaco`, so a shipped
 //! `editor` binary plus that folder runs with no source tree.
 //!
@@ -47,7 +47,9 @@ use wry::raw_window_handle::HasWindowHandle;
 use wry::{Rect, WebView, WebViewBuilder, WebViewId};
 
 /// The crate's own `vendor/monaco` — the `cargo run` dev location and
-/// the last-resort fallback.
+/// the last-resort fallback. Debug builds only: it is the path of the
+/// machine that built Studio, which must not ship in a release.
+#[cfg(debug_assertions)]
 const DEV_MONACO_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/monaco");
 
 /// The vendored-Monaco directory, resolved once at first use. See the
@@ -59,10 +61,10 @@ fn monaco_dir() -> &'static Path {
 
 /// Picks the vendored-Monaco directory: `EDITOR_CODE_MONACO_DIR`, then
 /// `monaco/` next to the executable, then a macOS `.app`
-/// `../Resources/monaco`, then the Cargo profile's `monaco/`, then the
-/// crate's `vendor/monaco`. Returns the
-/// first that contains an `index.html`; if none do, returns the dev
-/// path anyway so [`CodeError::Asset`] fires with a sensible location.
+/// `../Resources/monaco`, then the Cargo profile's `monaco/`, then (debug
+/// builds only) the crate's `vendor/monaco`. Returns the
+/// first that contains an `index.html`; if none do, returns the last
+/// candidate anyway so [`CodeError::Asset`] fires with a sensible location.
 fn resolve_monaco_dir() -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -79,6 +81,7 @@ fn resolve_monaco_dir() -> PathBuf {
         // A local Cargo .app lives beside the staged `monaco/` directory.
         candidates.push(exe_dir.join("../../../monaco"));
     }
+    #[cfg(debug_assertions)]
     candidates.push(PathBuf::from(DEV_MONACO_DIR));
 
     for candidate in &candidates {
@@ -86,7 +89,7 @@ fn resolve_monaco_dir() -> PathBuf {
             return candidate.clone();
         }
     }
-    PathBuf::from(DEV_MONACO_DIR)
+    candidates.pop().unwrap_or_else(|| PathBuf::from("monaco"))
 }
 
 /// Errors from setting up the code editor.
@@ -892,6 +895,7 @@ mod tests {
         );
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn resolve_monaco_dir_falls_through_to_the_dev_path() {
         // No env var set in the test process, and no `monaco/` next to

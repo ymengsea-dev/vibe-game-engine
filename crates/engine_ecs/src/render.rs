@@ -3,6 +3,7 @@
 //! whatever the game code manually kept a reference to".
 
 use bevy_ecs::entity::Entity;
+use bevy_ecs::query::Has;
 use bevy_ecs::world::World;
 use engine_renderer::{
     Aabb, CameraBinding, DebugLinePipeline, DebugLineVertex, Drawable, Frustum, GpuContext,
@@ -15,8 +16,8 @@ use engine_renderer::{
 use glam::Mat4;
 
 use crate::components::{
-    GlobalTransform, InstancedMeshRenderer, MeshRenderer, SkinnedMeshRenderer, Sprite,
-    VegetationRenderer,
+    Disabled, GlobalTransform, Hidden, InstancedMeshRenderer, MeshRenderer, SkinnedMeshRenderer,
+    Sprite, VegetationRenderer,
 };
 use crate::propagate::propagate_transforms;
 
@@ -141,6 +142,10 @@ fn visible_instances(
 /// small per-frame buffer upload). A configurable threshold is future
 /// work.
 const MIN_AUTO_BATCH_SIZE: usize = 2;
+
+/// Entities gameplay has hidden are never drawn. [`Disabled`] ones are drawn
+/// only when the caller asks (Studio's Scene View shows them; games do not).
+type DrawFilter = bevy_ecs::query::Without<Hidden>;
 
 /// How [`extract_and_render`] should split a frame's visible meshes:
 /// `individuals` are drawn one `Drawable` each; each entry of `batches` is
@@ -354,6 +359,7 @@ pub fn extract_and_render(
     vegetation: Option<(&VegetationPipeline, &WindBinding)>,
     water: Option<engine_renderer::WaterFrame<'_>>,
     ui: Option<(&engine_renderer::UiPipeline, &[engine_renderer::UiQuad])>,
+    draw_disabled: bool,
 ) -> Result<RenderStats, RendererError> {
     extract_and_render_to(
         None,
@@ -378,6 +384,7 @@ pub fn extract_and_render(
         vegetation,
         water,
         ui,
+        draw_disabled,
     )
 }
 
@@ -389,6 +396,10 @@ pub fn extract_and_render(
 /// into an off-screen texture it then shows inside an egui panel, using
 /// the same extraction and the same passes a shipped game uses, so what
 /// the editor displays is what the game will draw.
+///
+/// `draw_disabled` chooses whether entities marked [`Disabled`] are drawn:
+/// Studio's Scene View passes `true` (it shows them), a running game passes
+/// `false`. [`Hidden`] entities are never drawn.
 ///
 /// A `target`'s format must match the one `post` was built for; see
 /// [`engine_renderer::GpuContext::create_post_process_stack_for_format`].
@@ -423,6 +434,7 @@ pub fn extract_and_render_to(
     vegetation: Option<(&VegetationPipeline, &WindBinding)>,
     water: Option<engine_renderer::WaterFrame<'_>>,
     ui: Option<(&engine_renderer::UiPipeline, &[engine_renderer::UiQuad])>,
+    draw_disabled: bool,
 ) -> Result<RenderStats, RendererError> {
     propagate_transforms(world);
 
@@ -430,15 +442,19 @@ pub fn extract_and_render_to(
     // collection below borrows the world shared for the rest of the
     // call. The batch it returns owns its instances, so nothing here
     // keeps that mutable borrow alive.
-    let sprite_batch = sprites.map(|_| extract_sprites(world, frustum));
+    let sprite_batch = sprites.map(|_| extract_sprites(world, frustum, draw_disabled));
 
     // All query states built up front: `world.query` needs `&mut World`,
     // but the collected drawables below borrow `&World` shared, so a
     // later `world.query` would conflict.
-    let mut mesh_query = world.query::<(&GlobalTransform, &MeshRenderer)>();
-    let mut skinned_query = world.query::<(&GlobalTransform, &SkinnedMeshRenderer)>();
-    let mut instanced_query = world.query::<&InstancedMeshRenderer>();
-    let mut vegetation_query = world.query::<&VegetationRenderer>();
+    let mut mesh_query =
+        world.query_filtered::<(&GlobalTransform, &MeshRenderer, Has<Disabled>), DrawFilter>();
+    let mut skinned_query = world
+        .query_filtered::<(&GlobalTransform, &SkinnedMeshRenderer, Has<Disabled>), DrawFilter>();
+    let mut instanced_query =
+        world.query_filtered::<(&InstancedMeshRenderer, Has<Disabled>), DrawFilter>();
+    let mut vegetation_query =
+        world.query_filtered::<(&VegetationRenderer, Has<Disabled>), DrawFilter>();
 
     // `visible` is the subset inside `frustum` that the scene pass draws — either individually or,
     // where several share a mesh+material, folded into one instanced draw
@@ -448,7 +464,10 @@ pub fn extract_and_render_to(
     // `(view depth, drawable)` so the sort key survives the borrow.
     let mut transparent: Vec<(f32, Drawable<'_>)> = Vec::new();
     let mut visible: Vec<VisibleMesh<'_>> = Vec::new();
-    for (transform, mesh_renderer) in mesh_query.iter(&*world) {
+    for (transform, mesh_renderer, disabled) in mesh_query.iter(&*world) {
+        if disabled && !draw_disabled {
+            continue;
+        }
         let Some(mesh) = assets.meshes.get(mesh_renderer.mesh) else {
             tracing::warn!(
                 mesh = ?mesh_renderer.mesh,
@@ -524,7 +543,10 @@ pub fn extract_and_render_to(
     // before this call. Not frustum-culled (bind-pose bounds can't bound
     // an arbitrary pose) and not shadow casters (no skinned shadow shader).
     let mut skinned_drawables = Vec::new();
-    for (transform, skinned) in skinned_query.iter(&*world) {
+    for (transform, skinned, disabled) in skinned_query.iter(&*world) {
+        if disabled && !draw_disabled {
+            continue;
+        }
         let Some(mesh) = assets.skinned_meshes.get(skinned.mesh) else {
             tracing::warn!(
                 mesh = ?skinned.mesh,
@@ -610,7 +632,10 @@ pub fn extract_and_render_to(
 
     let mut instances_total = 0u32;
     let mut pending_instanced: Vec<PendingInstanced<'_>> = Vec::new();
-    for instanced in instanced_query.iter(&*world) {
+    for (instanced, disabled) in instanced_query.iter(&*world) {
+        if disabled && !draw_disabled {
+            continue;
+        }
         let Some(mesh) = assets.meshes.get(instanced.mesh) else {
             tracing::warn!(
                 mesh = ?instanced.mesh,
@@ -744,7 +769,10 @@ pub fn extract_and_render_to(
     let mut vegetation_total = 0u32;
     let mut pending_vegetation: Vec<PendingInstanced<'_>> = Vec::new();
     if vegetation.is_some() {
-        for plants in vegetation_query.iter(&*world) {
+        for (plants, disabled) in vegetation_query.iter(&*world) {
+            if disabled && !draw_disabled {
+                continue;
+            }
             let Some(mesh) = assets.meshes.get(plants.mesh) else {
                 tracing::warn!(
                     mesh = ?plants.mesh,
@@ -914,12 +942,16 @@ pub fn extract_and_render_to(
 /// rotation about `Z` (the only kind a 2D game produces; anything tilting
 /// out of the XY plane isn't representable by a flat sprite's single
 /// rotation angle anyway).
-pub fn extract_sprites(world: &mut World, frustum: &Frustum) -> SpriteBatch {
+pub fn extract_sprites(world: &mut World, frustum: &Frustum, draw_disabled: bool) -> SpriteBatch {
     // `(z_order, view depth, entity id, instance)` — the sort keys
     // carried alongside so the comparison touches no component data.
     let mut sorted: Vec<(f32, f32, u64, SpriteInstance)> = Vec::new();
-    let mut query = world.query::<(Entity, &GlobalTransform, &Sprite)>();
-    for (entity, transform, sprite) in query.iter(&*world) {
+    let mut query =
+        world.query_filtered::<(Entity, &GlobalTransform, &Sprite, Has<Disabled>), DrawFilter>();
+    for (entity, transform, sprite, disabled) in query.iter(&*world) {
+        if disabled && !draw_disabled {
+            continue;
+        }
         let rotation = transform.0.rotation.to_scaled_axis().z;
         sorted.push((
             sprite.z_order,
@@ -1099,11 +1131,58 @@ mod tests {
     }
 
     #[test]
+    fn hidden_and_disabled_meshes_are_not_drawn() {
+        // A `MeshRenderer` needs GPU handles, so the shared `DrawFilter` is
+        // exercised on plain entities: it drops `Hidden`; `Disabled` is
+        // dropped per `draw_disabled` in each collection loop (sprites cover
+        // that branch end to end below).
+        let mut world = World::new();
+        let shown = world.spawn(GlobalTransform::default()).id();
+        let disabled = world.spawn((GlobalTransform::default(), Disabled)).id();
+        world.spawn((GlobalTransform::default(), Hidden));
+        world.spawn((GlobalTransform::default(), Hidden, Disabled));
+        let mut drawn: Vec<(Entity, bool)> = world
+            .query_filtered::<(Entity, Has<Disabled>), (bevy_ecs::query::With<GlobalTransform>, DrawFilter)>()
+            .iter(&world)
+            .collect();
+        drawn.sort_by_key(|(entity, _)| entity.index());
+        assert_eq!(drawn, vec![(shown, false), (disabled, true)]);
+    }
+
+    #[test]
+    fn draw_disabled_keeps_disabled_sprites_but_never_hidden_ones() {
+        let mut world = world_with_sprites(&[(0.0, 0.0), (0.0, 1.0), (0.0, 2.0)]);
+        let sprites: Vec<Entity> = world
+            .query_filtered::<Entity, bevy_ecs::query::With<Sprite>>()
+            .iter(&world)
+            .collect();
+        world.entity_mut(sprites[1]).insert(Disabled);
+        world.entity_mut(sprites[2]).insert(Hidden);
+        let studio = extract_sprites(&mut world, &view_frustum(), true);
+        assert_eq!(studio.len(), 2, "Studio draws Disabled, not Hidden");
+        let game = extract_sprites(&mut world, &view_frustum(), false);
+        assert_eq!(game.len(), 1);
+    }
+
+    #[test]
+    fn hidden_and_disabled_sprites_are_not_drawn() {
+        let mut world = world_with_sprites(&[(0.0, 0.0), (0.0, 1.0), (0.0, 2.0)]);
+        let sprites: Vec<Entity> = world
+            .query_filtered::<Entity, bevy_ecs::query::With<Sprite>>()
+            .iter(&world)
+            .collect();
+        world.entity_mut(sprites[1]).insert(Disabled);
+        world.entity_mut(sprites[2]).insert(Hidden);
+        let batch = extract_sprites(&mut world, &view_frustum(), false);
+        assert_eq!(batch.len(), 1, "a Hidden and a Disabled sprite are skipped");
+    }
+
+    #[test]
     fn sprite_batch_sorts_back_to_front() {
         // Camera at z = 5 looking at the origin, so a smaller z is
         // farther away and must be drawn first.
         let mut world = world_with_sprites(&[(0.0, 2.0), (0.0, -4.0), (0.0, 0.0)]);
-        let batch = extract_sprites(&mut world, &view_frustum());
+        let batch = extract_sprites(&mut world, &view_frustum(), false);
 
         let order: Vec<f32> = batch
             .instances()
@@ -1122,7 +1201,7 @@ mod tests {
         // The nearer sprite (z = 4) is on the lower layer, so it draws
         // first even though depth alone would put it last.
         let mut world = world_with_sprites(&[(1.0, -4.0), (0.0, 4.0)]);
-        let batch = extract_sprites(&mut world, &view_frustum());
+        let batch = extract_sprites(&mut world, &view_frustum(), false);
 
         let order: Vec<f32> = batch
             .instances()
@@ -1143,8 +1222,8 @@ mod tests {
         let mut world = world_with_sprites(&[(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]);
         let frustum = view_frustum();
 
-        let first = extract_sprites(&mut world, &frustum);
-        let second = extract_sprites(&mut world, &frustum);
+        let first = extract_sprites(&mut world, &frustum, false);
+        let second = extract_sprites(&mut world, &frustum, false);
         assert_eq!(
             first.instances(),
             second.instances(),
@@ -1159,7 +1238,7 @@ mod tests {
         // `extract_and_render_to` tests before building a `SpriteFrame` —
         // no instance buffer, no pipeline switch, no draw.
         let mut world = World::new();
-        let batch = extract_sprites(&mut world, &view_frustum());
+        let batch = extract_sprites(&mut world, &view_frustum(), false);
         assert!(batch.is_empty());
         assert_eq!(batch.len(), 0);
     }
@@ -1167,7 +1246,7 @@ mod tests {
     #[test]
     fn a_nan_z_order_does_not_panic_the_sort() {
         let mut world = world_with_sprites(&[(f32::NAN, 0.0), (0.0, 1.0), (1.0, -1.0)]);
-        let batch = extract_sprites(&mut world, &view_frustum());
+        let batch = extract_sprites(&mut world, &view_frustum(), false);
         assert_eq!(batch.len(), 3, "every sprite must survive a NaN layer");
     }
 

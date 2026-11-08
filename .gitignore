@@ -16,6 +16,12 @@
 **/.studio/*
 !**/.studio/assets/
 
+# Games made with Studio stay local; only the Island regression project is
+# part of the repo. The local games' tests need those folders.
+/games/*
+!/games/island/
+/apps/player/tests/demos.rs
+
 # Environment
 .env
 

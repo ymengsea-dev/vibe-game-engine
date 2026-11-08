@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod build;
 mod starter;
+
 pub mod storage;
 
 /// On-disk format version for `project.ron`. Bump on any breaking
@@ -78,9 +79,9 @@ engine = {}
 ---@field on_event? fun(kind: string, value: string) Keyboard events use key_pressed/key_released.
 ---@field on_collision? fun(kind: string, self_id: string, other_id: string) Contact enter/exit after a physics step; global script receives the sorted pair.
 "#;
-/// Current annotations. Never edit in place without bumping
-/// [`STUDIO_API_VERSION`] and freezing the previous text; see `refresh_lua_annotations`.
-const STUDIO_API_LUA: &str = r#"---@meta
+/// Annotations as shipped at version 2. Frozen: projects holding exactly this
+/// text are upgraded with a backup.
+const STUDIO_API_LUA_V2: &str = r#"---@meta
 ---Studio's Lua gameplay API. This file is for editor help; the player never executes it.
 ---@class StudioPosition
 ---@field x number Parent-relative X coordinate.
@@ -118,7 +119,791 @@ engine = {}
 ---@field on_event? fun(kind: string, value: string) Keyboard events use key_pressed/key_released.
 ---@field on_collision? fun(kind: string, self_id: string, other_id: string) Contact enter/exit after a physics step; global script receives the sorted pair.
 "#;
-const STUDIO_API_VERSION: u32 = 2;
+/// Frozen v3 annotations (shipped before physics). Never edit.
+const STUDIO_API_LUA_V3: &str = r#"---@meta
+---Studio's Lua gameplay API. This file is for editor help; the player never executes it.
+---@class vec3
+---@field x number
+---@field y number
+---@field z number
+---@operator add(vec3): vec3
+---@operator sub(vec3): vec3
+---@operator mul(number|vec3): vec3
+---@operator div(number): vec3
+---@operator unm: vec3
+local vec3_methods = {}
+---Length of the vector.
+---@return number
+function vec3_methods:length() end
+---Squared length; cheaper than length.
+---@return number
+function vec3_methods:length_squared() end
+---Same direction with length 1; a zero vector stays zero.
+---@return vec3
+function vec3_methods:normalized() end
+---@param other vec3
+---@return number
+function vec3_methods:dot(other) end
+---@param other vec3
+---@return vec3
+function vec3_methods:cross(other) end
+---@param other vec3
+---@return number
+function vec3_methods:distance(other) end
+---Blend towards `other`; t = 0 is this vector, t = 1 is `other`.
+---@param other vec3
+---@param t number
+---@return vec3
+function vec3_methods:lerp(other, t) end
+
+---@class StudioVec3Library
+---@overload fun(x?: number, y?: number, z?: number): vec3
+---@field zero vec3 (0, 0, 0)
+---@field one vec3 (1, 1, 1)
+---@field up vec3 (0, 1, 0)
+---@field down vec3 (0, -1, 0)
+---@field right vec3 (1, 0, 0)
+---@field left vec3 (-1, 0, 0)
+---@field forward vec3 (0, 0, -1)
+---@field back vec3 (0, 0, 1)
+---@type StudioVec3Library
+vec3 = {}
+
+---@alias StudioKey
+---| 'A'
+---| 'D'
+---| 'S'
+---| 'W'
+---| 'Space'
+---| 'Escape'
+---| 'Enter'
+---| 'ArrowLeft'
+---| 'ArrowRight'
+---| 'ArrowUp'
+---| 'ArrowDown'
+---| 'ShiftLeft'
+---| 'ShiftRight'
+---| 'B'
+---| 'C'
+---| 'E'
+---| 'F'
+---| 'G'
+---| 'H'
+---| 'I'
+---| 'J'
+---| 'K'
+---| 'L'
+---| 'M'
+---| 'N'
+---| 'O'
+---| 'P'
+---| 'Q'
+---| 'R'
+---| 'T'
+---| 'U'
+---| 'V'
+---| 'X'
+---| 'Y'
+---| 'Z'
+---| 'Digit0'
+---| 'Digit1'
+---| 'Digit2'
+---| 'Digit3'
+---| 'Digit4'
+---| 'Digit5'
+---| 'Digit6'
+---| 'Digit7'
+---| 'Digit8'
+---| 'Digit9'
+---| 'Tab'
+---| 'Backspace'
+---| 'ControlLeft'
+---| 'ControlRight'
+---| 'AltLeft'
+---| 'AltRight'
+---@alias StudioMouseButton
+---| 'left'
+---| 'right'
+---| 'middle'
+---@alias StudioGamepadButton
+---| 'south'
+---| 'east'
+---| 'west'
+---| 'north'
+---| 'start'
+---| 'select'
+---| 'left_shoulder'
+---| 'right_shoulder'
+---| 'left_stick'
+---| 'right_stick'
+---| 'dpad_up'
+---| 'dpad_down'
+---| 'dpad_left'
+---| 'dpad_right'
+---@alias StudioGamepadAxis
+---| 'left_x'
+---| 'left_y'
+---| 'right_x'
+---| 'right_y'
+---| 'left_trigger'
+---| 'right_trigger'
+
+---@class StudioEngine
+---@field log fun(message: string)
+---@field object_id fun(): string? Current attached scene object; nil in the global script.
+---@field set_position (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, position: vec3)) Set a parent-relative position.
+---@field translate (fun(object_id: string, dx: number, dy: number, dz: number))|(fun(object_id: string, delta: vec3)) Move by a parent-relative delta.
+---@field find_object fun(name: string): string? Find the first scene object with this name.
+---@field get_position fun(object_id: string): vec3? Read a parent-relative position; nil if missing.
+---@field spawn_empty (fun(name: string, x: number, y: number, z: number): string)|(fun(name: string, position: vec3): string) Create a named runtime object without a mesh and return its UUID.
+---@field spawn_prefab (fun(path: string, x: number, y: number, z: number): string)|(fun(path: string, position: vec3): string) Spawn a packaged assets/prefabs/*.prefab object and return its UUID.
+---@field key_down fun(key: StudioKey): boolean Whether a key is held.
+---@field key_pressed fun(key: StudioKey): boolean Whether a key went down this frame.
+---@field key_released fun(key: StudioKey): boolean Whether a key went up this frame.
+---@field mouse_down fun(button: StudioMouseButton): boolean Whether a mouse button is held.
+---@field mouse_pressed fun(button: StudioMouseButton): boolean Whether a mouse button went down this frame.
+---@field mouse_released fun(button: StudioMouseButton): boolean Whether a mouse button went up this frame.
+---@field mouse_position fun(): number?, number? Cursor position in game-frame pixels; nil when the cursor is outside the game.
+---@field mouse_delta fun(): number, number Mouse movement this frame as dx, dy (keeps changing while the mouse is locked).
+---@field mouse_wheel fun(): number, number Wheel scroll this frame as vertical, horizontal.
+---@field gamepad_down fun(button: StudioGamepadButton): boolean Whether a gamepad button is held.
+---@field gamepad_pressed fun(button: StudioGamepadButton): boolean Whether a gamepad button went down this frame.
+---@field gamepad_axis fun(axis: StudioGamepadAxis): number Gamepad axis value; sticks are -1 to 1 with a 0.15 dead zone, triggers 0 to 1.
+---@field input_axis fun(name: "horizontal"|"vertical"): number Keyboard (WASD or arrows) plus left stick, from -1 to 1.
+---@field set_mouse_locked fun(locked: boolean) Hide and lock the cursor so mouse_delta gives endless motion. Esc releases it in Scene View Play.
+---@field is_mouse_locked fun(): boolean Whether the game currently wants the mouse locked.
+---@field set_rotation (fun(object_id: string, degrees: vec3))|(fun(object_id: string, pitch: number, yaw: number, roll: number)) Set rotation as Euler degrees (x = pitch, y = yaw, z = roll; yaw is applied first).
+---@field rotate (fun(object_id: string, degrees: vec3))|(fun(object_id: string, pitch: number, yaw: number, roll: number)) Turn by Euler degrees in the object's own space, on top of the current rotation.
+---@field get_rotation fun(object_id: string): vec3? Rotation as Euler degrees; nil if missing.
+---@field set_scale fun(object_id: string, scale: vec3|number) Set scale; a single number scales evenly. Components must be non-zero. Scaling an object does not resize its collider yet.
+---@field get_scale fun(object_id: string): vec3? Read the scale; nil if missing.
+---@field look_at fun(object_id: string, target: vec3, up?: vec3) Face a point in the object's parent space (world space for unparented objects); forward is -Z. Does nothing for a degenerate target.
+---@field forward fun(object_id: string): vec3? The direction the object faces (-Z rotated by the object).
+---@field right fun(object_id: string): vec3? The object's right direction (+X rotated by the object).
+---@field up fun(object_id: string): vec3? The object's up direction (+Y rotated by the object).
+---@field play_audio fun(object_id: string) Trigger an authored audio emitter on a scene object (up to 32 times per callback dispatch).
+---@field set_animation_playing fun(object_id: string, playing: boolean) Pause or resume an authored sprite-sheet animation.
+---@field ui_set_text fun(object_id: string, text: string) Change an authored label or button caption (at most 1024 bytes).
+---@field emit_event fun(name: string) Send a named event to authored visual rules (1–64 printable bytes).
+---@field change_scene fun(path: string) Load a packaged scenes/*.ron scene after this frame; the new scene runs start before its first update.
+---@field save_get fun(key: string): string|number|boolean|nil Read a restored gameplay value.
+---@field save_set fun(key: string, value: string|number|boolean|nil) Set a gameplay value; nil removes it.
+---@field save fun() Request an atomic save at the end of the frame.
+---@field get_var fun(name: string): number Read a gameplay variable shared with visual rules; unset variables are 0.
+---@field set_var fun(name: string, value: number) Set a gameplay variable shared with visual rules (finite number; name 1–64 printable bytes).
+---@type StudioEngine
+engine = {}
+
+---@class StudioScript
+---@field start? fun()
+---@field update? fun(dt: number)
+---@field fixed_update? fun(dt: number)
+---@field on_event? fun(kind: string, value: string) Keyboard events use key_pressed/key_released.
+---@field on_collision? fun(kind: string, self_id: string, other_id: string) Contact enter/exit after a physics step; global script receives the sorted pair.
+"#;
+/// Frozen v4 annotations (Step B). Never edit.
+const STUDIO_API_LUA_V4: &str = r#"---@meta
+---Studio's Lua gameplay API. This file is for editor help; the player never executes it.
+---@class vec3
+---@field x number
+---@field y number
+---@field z number
+---@operator add(vec3): vec3
+---@operator sub(vec3): vec3
+---@operator mul(number|vec3): vec3
+---@operator div(number): vec3
+---@operator unm: vec3
+local vec3_methods = {}
+---Length of the vector.
+---@return number
+function vec3_methods:length() end
+---Squared length; cheaper than length.
+---@return number
+function vec3_methods:length_squared() end
+---Same direction with length 1; a zero vector stays zero.
+---@return vec3
+function vec3_methods:normalized() end
+---@param other vec3
+---@return number
+function vec3_methods:dot(other) end
+---@param other vec3
+---@return vec3
+function vec3_methods:cross(other) end
+---@param other vec3
+---@return number
+function vec3_methods:distance(other) end
+---Blend towards `other`; t = 0 is this vector, t = 1 is `other`.
+---@param other vec3
+---@param t number
+---@return vec3
+function vec3_methods:lerp(other, t) end
+
+---@class StudioVec3Library
+---@overload fun(x?: number, y?: number, z?: number): vec3
+---@field zero vec3 (0, 0, 0)
+---@field one vec3 (1, 1, 1)
+---@field up vec3 (0, 1, 0)
+---@field down vec3 (0, -1, 0)
+---@field right vec3 (1, 0, 0)
+---@field left vec3 (-1, 0, 0)
+---@field forward vec3 (0, 0, -1)
+---@field back vec3 (0, 0, 1)
+---@type StudioVec3Library
+vec3 = {}
+
+---@alias StudioKey
+---| 'A'
+---| 'D'
+---| 'S'
+---| 'W'
+---| 'Space'
+---| 'Escape'
+---| 'Enter'
+---| 'ArrowLeft'
+---| 'ArrowRight'
+---| 'ArrowUp'
+---| 'ArrowDown'
+---| 'ShiftLeft'
+---| 'ShiftRight'
+---| 'B'
+---| 'C'
+---| 'E'
+---| 'F'
+---| 'G'
+---| 'H'
+---| 'I'
+---| 'J'
+---| 'K'
+---| 'L'
+---| 'M'
+---| 'N'
+---| 'O'
+---| 'P'
+---| 'Q'
+---| 'R'
+---| 'T'
+---| 'U'
+---| 'V'
+---| 'X'
+---| 'Y'
+---| 'Z'
+---| 'Digit0'
+---| 'Digit1'
+---| 'Digit2'
+---| 'Digit3'
+---| 'Digit4'
+---| 'Digit5'
+---| 'Digit6'
+---| 'Digit7'
+---| 'Digit8'
+---| 'Digit9'
+---| 'Tab'
+---| 'Backspace'
+---| 'ControlLeft'
+---| 'ControlRight'
+---| 'AltLeft'
+---| 'AltRight'
+---@alias StudioMouseButton
+---| 'left'
+---| 'right'
+---| 'middle'
+---@alias StudioGamepadButton
+---| 'south'
+---| 'east'
+---| 'west'
+---| 'north'
+---| 'start'
+---| 'select'
+---| 'left_shoulder'
+---| 'right_shoulder'
+---| 'left_stick'
+---| 'right_stick'
+---| 'dpad_up'
+---| 'dpad_down'
+---| 'dpad_left'
+---| 'dpad_right'
+---@alias StudioGamepadAxis
+---| 'left_x'
+---| 'left_y'
+---| 'right_x'
+---| 'right_y'
+---| 'left_trigger'
+---| 'right_trigger'
+
+---@class StudioRayHit
+---@field object string? ID of the object hit; nil if it has no ID.
+---@field point vec3 World position of the hit.
+---@field normal vec3 Surface direction at the hit.
+---@field distance number Distance from the ray start.
+
+---@class StudioEngine
+---@field log fun(message: string)
+---@field object_id fun(): string? Current attached scene object; nil in the global script.
+---@field set_position (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, position: vec3)) Set a parent-relative position.
+---@field translate (fun(object_id: string, dx: number, dy: number, dz: number))|(fun(object_id: string, delta: vec3)) Move by a parent-relative delta.
+---@field find_object fun(name: string): string? Find the first scene object with this name.
+---@field get_position fun(object_id: string): vec3? Read a parent-relative position; nil if missing.
+---@field spawn_empty (fun(name: string, x: number, y: number, z: number): string)|(fun(name: string, position: vec3): string) Create a named runtime object without a mesh and return its UUID.
+---@field spawn_prefab (fun(path: string, x: number, y: number, z: number): string)|(fun(path: string, position: vec3): string) Spawn a packaged assets/prefabs/*.prefab object and return its UUID.
+---@field key_down fun(key: StudioKey): boolean Whether a key is held.
+---@field key_pressed fun(key: StudioKey): boolean Whether a key went down this frame.
+---@field key_released fun(key: StudioKey): boolean Whether a key went up this frame.
+---@field mouse_down fun(button: StudioMouseButton): boolean Whether a mouse button is held.
+---@field mouse_pressed fun(button: StudioMouseButton): boolean Whether a mouse button went down this frame.
+---@field mouse_released fun(button: StudioMouseButton): boolean Whether a mouse button went up this frame.
+---@field mouse_position fun(): number?, number? Cursor position in game-frame pixels; nil when the cursor is outside the game.
+---@field mouse_delta fun(): number, number Mouse movement this frame as dx, dy (keeps changing while the mouse is locked).
+---@field mouse_wheel fun(): number, number Wheel scroll this frame as vertical, horizontal.
+---@field gamepad_down fun(button: StudioGamepadButton): boolean Whether a gamepad button is held.
+---@field gamepad_pressed fun(button: StudioGamepadButton): boolean Whether a gamepad button went down this frame.
+---@field gamepad_axis fun(axis: StudioGamepadAxis): number Gamepad axis value; sticks are -1 to 1 with a 0.15 dead zone, triggers 0 to 1.
+---@field input_axis fun(name: "horizontal"|"vertical"): number Keyboard (WASD or arrows) plus left stick, from -1 to 1.
+---@field set_mouse_locked fun(locked: boolean) Hide and lock the cursor so mouse_delta gives endless motion. Esc releases it in Scene View Play.
+---@field is_mouse_locked fun(): boolean Whether the game currently wants the mouse locked.
+---@field set_rotation (fun(object_id: string, degrees: vec3))|(fun(object_id: string, pitch: number, yaw: number, roll: number)) Set rotation as Euler degrees (x = pitch, y = yaw, z = roll; yaw is applied first).
+---@field rotate (fun(object_id: string, degrees: vec3))|(fun(object_id: string, pitch: number, yaw: number, roll: number)) Turn by Euler degrees in the object's own space, on top of the current rotation.
+---@field get_rotation fun(object_id: string): vec3? Rotation as Euler degrees; nil if missing.
+---@field set_scale fun(object_id: string, scale: vec3|number) Set scale; a single number scales evenly. Components must be non-zero. Scaling an object does not resize its collider yet.
+---@field get_scale fun(object_id: string): vec3? Read the scale; nil if missing.
+---@field look_at fun(object_id: string, target: vec3, up?: vec3) Face a point in the object's parent space (world space for unparented objects); forward is -Z. Does nothing for a degenerate target.
+---@field forward fun(object_id: string): vec3? The direction the object faces (-Z rotated by the object).
+---@field right fun(object_id: string): vec3? The object's right direction (+X rotated by the object).
+---@field up fun(object_id: string): vec3? The object's up direction (+Y rotated by the object).
+---@field play_audio fun(object_id: string) Trigger an authored audio emitter on a scene object (up to 32 times per callback dispatch).
+---@field set_animation_playing fun(object_id: string, playing: boolean) Pause or resume an authored sprite-sheet animation.
+---@field ui_set_text fun(object_id: string, text: string) Change an authored label or button caption (at most 1024 bytes).
+---@field emit_event fun(name: string) Send a named event to authored visual rules (1–64 printable bytes).
+---@field change_scene fun(path: string) Load a packaged scenes/*.ron scene after this frame; the new scene runs start before its first update.
+---@field save_get fun(key: string): string|number|boolean|nil Read a restored gameplay value.
+---@field save_set fun(key: string, value: string|number|boolean|nil) Set a gameplay value; nil removes it.
+---@field save fun() Request an atomic save at the end of the frame.
+---@field get_var fun(name: string): number Read a gameplay variable shared with visual rules; unset variables are 0.
+---@field set_var fun(name: string, value: number) Set a gameplay variable shared with visual rules (finite number; name 1–64 printable bytes).
+---@field get_velocity fun(object_id: string): vec3 Linear velocity of a Dynamic body; zero for other bodies. Does not reflect add_force/add_impulse until the next frame.
+---@field set_velocity (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, velocity: vec3)) Set a Dynamic body's velocity.
+---@field add_force (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, force: vec3)) Push a Dynamic body for the length of the current frame, so calling it every frame gives a steady push at any frame rate.
+---@field add_impulse (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, impulse: vec3)) Give a Dynamic body an instant push (a jump or a hit).
+---@field move_character (fun(object_id: string, dx: number, dy: number, dz: number))|(fun(object_id: string, delta: vec3)) Move a Kinematic body by this much, sliding along walls. Gravity is the script's job.
+---@field raycast (fun(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number, ignore_id?: string): StudioRayHit?)|(fun(origin: vec3, direction: vec3, max: number, ignore_id?: string): StudioRayHit?) Nearest hit along a ray (direction is normalized, max is capped at 10000, triggers are ignored). Pass ignore_id (an object ID) to let the ray pass through that object, such as the one casting it. Only works during callbacks; nil otherwise.
+---@field is_grounded fun(object_id: string): boolean Whether the body stands on something. Only works during callbacks; false otherwise.
+---@type StudioEngine
+engine = {}
+
+---@class StudioScript
+---@field start? fun()
+---@field update? fun(dt: number)
+---@field fixed_update? fun(dt: number)
+---@field on_event? fun(kind: string, value: string) Keyboard events use key_pressed/key_released.
+---@field on_collision? fun(kind: "enter"|"exit"|"trigger_enter"|"trigger_exit", self_id: string, other_id: string) kind is "enter" | "exit" | "trigger_enter" | "trigger_exit", sent after a physics step; the trigger kinds fire when something enters or leaves a trigger collider. A global script receives the sorted pair.
+"#;
+/// Frozen v5 annotations (Step C). Never edit.
+const STUDIO_API_LUA_V5: &str = r#"---@meta
+---Studio's Lua gameplay API. This file is for editor help; the player never executes it.
+---@class vec3
+---@field x number
+---@field y number
+---@field z number
+---@operator add(vec3): vec3
+---@operator sub(vec3): vec3
+---@operator mul(number|vec3): vec3
+---@operator div(number): vec3
+---@operator unm: vec3
+local vec3_methods = {}
+---Length of the vector.
+---@return number
+function vec3_methods:length() end
+---Squared length; cheaper than length.
+---@return number
+function vec3_methods:length_squared() end
+---Same direction with length 1; a zero vector stays zero.
+---@return vec3
+function vec3_methods:normalized() end
+---@param other vec3
+---@return number
+function vec3_methods:dot(other) end
+---@param other vec3
+---@return vec3
+function vec3_methods:cross(other) end
+---@param other vec3
+---@return number
+function vec3_methods:distance(other) end
+---Blend towards `other`; t = 0 is this vector, t = 1 is `other`.
+---@param other vec3
+---@param t number
+---@return vec3
+function vec3_methods:lerp(other, t) end
+
+---@class StudioVec3Library
+---@overload fun(x?: number, y?: number, z?: number): vec3
+---@field zero vec3 (0, 0, 0)
+---@field one vec3 (1, 1, 1)
+---@field up vec3 (0, 1, 0)
+---@field down vec3 (0, -1, 0)
+---@field right vec3 (1, 0, 0)
+---@field left vec3 (-1, 0, 0)
+---@field forward vec3 (0, 0, -1)
+---@field back vec3 (0, 0, 1)
+---@type StudioVec3Library
+vec3 = {}
+
+---@alias StudioKey
+---| 'A'
+---| 'D'
+---| 'S'
+---| 'W'
+---| 'Space'
+---| 'Escape'
+---| 'Enter'
+---| 'ArrowLeft'
+---| 'ArrowRight'
+---| 'ArrowUp'
+---| 'ArrowDown'
+---| 'ShiftLeft'
+---| 'ShiftRight'
+---| 'B'
+---| 'C'
+---| 'E'
+---| 'F'
+---| 'G'
+---| 'H'
+---| 'I'
+---| 'J'
+---| 'K'
+---| 'L'
+---| 'M'
+---| 'N'
+---| 'O'
+---| 'P'
+---| 'Q'
+---| 'R'
+---| 'T'
+---| 'U'
+---| 'V'
+---| 'X'
+---| 'Y'
+---| 'Z'
+---| 'Digit0'
+---| 'Digit1'
+---| 'Digit2'
+---| 'Digit3'
+---| 'Digit4'
+---| 'Digit5'
+---| 'Digit6'
+---| 'Digit7'
+---| 'Digit8'
+---| 'Digit9'
+---| 'Tab'
+---| 'Backspace'
+---| 'ControlLeft'
+---| 'ControlRight'
+---| 'AltLeft'
+---| 'AltRight'
+---@alias StudioMouseButton
+---| 'left'
+---| 'right'
+---| 'middle'
+---@alias StudioGamepadButton
+---| 'south'
+---| 'east'
+---| 'west'
+---| 'north'
+---| 'start'
+---| 'select'
+---| 'left_shoulder'
+---| 'right_shoulder'
+---| 'left_stick'
+---| 'right_stick'
+---| 'dpad_up'
+---| 'dpad_down'
+---| 'dpad_left'
+---| 'dpad_right'
+---@alias StudioGamepadAxis
+---| 'left_x'
+---| 'left_y'
+---| 'right_x'
+---| 'right_y'
+---| 'left_trigger'
+---| 'right_trigger'
+
+---@class StudioRayHit
+---@field object string? ID of the object hit; nil if it has no ID.
+---@field point vec3 World position of the hit.
+---@field normal vec3 Surface direction at the hit.
+---@field distance number Distance from the ray start.
+
+---@class StudioEngine
+---@field log fun(message: string)
+---@field object_id fun(): string? Current attached scene object; nil in the global script.
+---@field set_position (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, position: vec3)) Set a parent-relative position.
+---@field translate (fun(object_id: string, dx: number, dy: number, dz: number))|(fun(object_id: string, delta: vec3)) Move by a parent-relative delta.
+---@field find_object fun(name: string): string? Find the first scene object with this name.
+---@field get_position fun(object_id: string): vec3? Read a parent-relative position; nil if missing.
+---@field spawn_empty (fun(name: string, x: number, y: number, z: number): string)|(fun(name: string, position: vec3): string) Create a named runtime object without a mesh and return its UUID.
+---@field spawn_prefab (fun(path: string, x: number, y: number, z: number): string)|(fun(path: string, position: vec3): string) Spawn a packaged assets/prefabs/*.prefab object and return its UUID.
+---@field key_down fun(key: StudioKey): boolean Whether a key is held.
+---@field key_pressed fun(key: StudioKey): boolean Whether a key went down this frame.
+---@field key_released fun(key: StudioKey): boolean Whether a key went up this frame.
+---@field mouse_down fun(button: StudioMouseButton): boolean Whether a mouse button is held.
+---@field mouse_pressed fun(button: StudioMouseButton): boolean Whether a mouse button went down this frame.
+---@field mouse_released fun(button: StudioMouseButton): boolean Whether a mouse button went up this frame.
+---@field mouse_position fun(): number?, number? Cursor position in game-frame pixels; nil when the cursor is outside the game.
+---@field mouse_delta fun(): number, number Mouse movement this frame as dx, dy (keeps changing while the mouse is locked).
+---@field mouse_wheel fun(): number, number Wheel scroll this frame as vertical, horizontal.
+---@field gamepad_down fun(button: StudioGamepadButton): boolean Whether a gamepad button is held.
+---@field gamepad_pressed fun(button: StudioGamepadButton): boolean Whether a gamepad button went down this frame.
+---@field gamepad_axis fun(axis: StudioGamepadAxis): number Gamepad axis value; sticks are -1 to 1 with a 0.15 dead zone, triggers 0 to 1.
+---@field input_axis fun(name: "horizontal"|"vertical"): number Keyboard (WASD or arrows) plus left stick, from -1 to 1.
+---@field set_mouse_locked fun(locked: boolean) Hide and lock the cursor so mouse_delta gives endless motion. Esc releases it in Scene View Play.
+---@field is_mouse_locked fun(): boolean Whether the game currently wants the mouse locked.
+---@field set_rotation (fun(object_id: string, degrees: vec3))|(fun(object_id: string, pitch: number, yaw: number, roll: number)) Set rotation as Euler degrees (x = pitch, y = yaw, z = roll; yaw is applied first).
+---@field rotate (fun(object_id: string, degrees: vec3))|(fun(object_id: string, pitch: number, yaw: number, roll: number)) Turn by Euler degrees in the object's own space, on top of the current rotation.
+---@field get_rotation fun(object_id: string): vec3? Rotation as Euler degrees; nil if missing.
+---@field set_scale fun(object_id: string, scale: vec3|number) Set scale; a single number scales evenly. Components must be non-zero. Scaling an object does not resize its collider yet.
+---@field get_scale fun(object_id: string): vec3? Read the scale; nil if missing.
+---@field look_at fun(object_id: string, target: vec3, up?: vec3) Face a point in the object's parent space (world space for unparented objects); forward is -Z. Does nothing for a degenerate target.
+---@field forward fun(object_id: string): vec3? The direction the object faces (-Z rotated by the object).
+---@field right fun(object_id: string): vec3? The object's right direction (+X rotated by the object).
+---@field up fun(object_id: string): vec3? The object's up direction (+Y rotated by the object).
+---@field play_audio fun(object_id: string) Trigger an authored audio emitter on a scene object (up to 32 times per callback dispatch).
+---@field set_animation_playing fun(object_id: string, playing: boolean) Pause or resume an authored sprite-sheet animation.
+---@field ui_set_text fun(object_id: string, text: string) Change an authored label or button caption (at most 1024 bytes).
+---@field emit_event fun(name: string) Send a named event to authored visual rules (1–64 printable bytes).
+---@field change_scene fun(path: string) Load a packaged scenes/*.ron scene after this frame; the new scene runs start before its first update.
+---@field save_get fun(key: string): string|number|boolean|nil Read a restored gameplay value.
+---@field save_set fun(key: string, value: string|number|boolean|nil) Set a gameplay value; nil removes it.
+---@field save fun() Request an atomic save at the end of the frame.
+---@field get_var fun(name: string): number Read a gameplay variable shared with visual rules; unset variables are 0.
+---@field set_var fun(name: string, value: number) Set a gameplay variable shared with visual rules (finite number; name 1–64 printable bytes).
+---@field get_velocity fun(object_id: string): vec3 Linear velocity of a Dynamic body; zero for other bodies. Does not reflect add_force/add_impulse until the next frame.
+---@field set_velocity (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, velocity: vec3)) Set a Dynamic body's velocity.
+---@field add_force (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, force: vec3)) Push a Dynamic body for the length of the current frame, so calling it every frame gives a steady push at any frame rate.
+---@field add_impulse (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, impulse: vec3)) Give a Dynamic body an instant push (a jump or a hit).
+---@field move_character (fun(object_id: string, dx: number, dy: number, dz: number))|(fun(object_id: string, delta: vec3)) Move a Kinematic body by this much, sliding along walls. Gravity is the script's job.
+---@field raycast (fun(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number, ignore_id?: string): StudioRayHit?)|(fun(origin: vec3, direction: vec3, max: number, ignore_id?: string): StudioRayHit?) Nearest hit along a ray (direction is normalized, max is capped at 10000, triggers are ignored). Pass ignore_id (an object ID) to let the ray pass through that object, such as the one casting it. Only works during callbacks; nil otherwise.
+---@field is_grounded fun(object_id: string): boolean Whether the body stands on something. Only works during callbacks; false otherwise.
+---@field set_camera fun(object_id: string) Make this camera object the active camera. Ignored (with a warning) if the object has no Camera. Takes effect after the callback. Only works during callbacks.
+---@field get_camera fun(): string? The active camera object ID, or nil when there is none.
+---@field set_follow_target fun(camera_id: string, target_id: string) Point a camera's Camera Follow at another object. Ignored (with a warning) unless the camera already has Camera Follow. Only works during callbacks.
+---@field camera_shake fun(strength: number, seconds: number) Shake the screen. strength is a finite number, at least 0; seconds is 0 to 10. Only works during callbacks.
+---@type StudioEngine
+engine = {}
+
+---@class StudioScript
+---@field start? fun()
+---@field update? fun(dt: number)
+---@field fixed_update? fun(dt: number)
+---@field on_event? fun(kind: string, value: string) Keyboard events use key_pressed/key_released.
+---@field on_collision? fun(kind: "enter"|"exit"|"trigger_enter"|"trigger_exit", self_id: string, other_id: string) kind is "enter" | "exit" | "trigger_enter" | "trigger_exit", sent after a physics step; the trigger kinds fire when something enters or leaves a trigger collider. A global script receives the sorted pair.
+"#;
+/// Current annotations. Never edit in place without bumping
+/// [`STUDIO_API_VERSION`] and freezing the previous text; see `refresh_lua_annotations`.
+const STUDIO_API_LUA: &str = r#"---@meta
+---Studio's Lua gameplay API. This file is for editor help; the player never executes it.
+---@class vec3
+---@field x number
+---@field y number
+---@field z number
+---@operator add(vec3): vec3
+---@operator sub(vec3): vec3
+---@operator mul(number|vec3): vec3
+---@operator div(number): vec3
+---@operator unm: vec3
+local vec3_methods = {}
+---Length of the vector.
+---@return number
+function vec3_methods:length() end
+---Squared length; cheaper than length.
+---@return number
+function vec3_methods:length_squared() end
+---Same direction with length 1; a zero vector stays zero.
+---@return vec3
+function vec3_methods:normalized() end
+---@param other vec3
+---@return number
+function vec3_methods:dot(other) end
+---@param other vec3
+---@return vec3
+function vec3_methods:cross(other) end
+---@param other vec3
+---@return number
+function vec3_methods:distance(other) end
+---Blend towards `other`; t = 0 is this vector, t = 1 is `other`.
+---@param other vec3
+---@param t number
+---@return vec3
+function vec3_methods:lerp(other, t) end
+
+---@class StudioVec3Library
+---@overload fun(x?: number, y?: number, z?: number): vec3
+---@field zero vec3 (0, 0, 0)
+---@field one vec3 (1, 1, 1)
+---@field up vec3 (0, 1, 0)
+---@field down vec3 (0, -1, 0)
+---@field right vec3 (1, 0, 0)
+---@field left vec3 (-1, 0, 0)
+---@field forward vec3 (0, 0, -1)
+---@field back vec3 (0, 0, 1)
+---@type StudioVec3Library
+vec3 = {}
+
+---@alias StudioKey
+---| 'A'
+---| 'D'
+---| 'S'
+---| 'W'
+---| 'Space'
+---| 'Escape'
+---| 'Enter'
+---| 'ArrowLeft'
+---| 'ArrowRight'
+---| 'ArrowUp'
+---| 'ArrowDown'
+---| 'ShiftLeft'
+---| 'ShiftRight'
+---| 'B'
+---| 'C'
+---| 'E'
+---| 'F'
+---| 'G'
+---| 'H'
+---| 'I'
+---| 'J'
+---| 'K'
+---| 'L'
+---| 'M'
+---| 'N'
+---| 'O'
+---| 'P'
+---| 'Q'
+---| 'R'
+---| 'T'
+---| 'U'
+---| 'V'
+---| 'X'
+---| 'Y'
+---| 'Z'
+---| 'Digit0'
+---| 'Digit1'
+---| 'Digit2'
+---| 'Digit3'
+---| 'Digit4'
+---| 'Digit5'
+---| 'Digit6'
+---| 'Digit7'
+---| 'Digit8'
+---| 'Digit9'
+---| 'Tab'
+---| 'Backspace'
+---| 'ControlLeft'
+---| 'ControlRight'
+---| 'AltLeft'
+---| 'AltRight'
+---@alias StudioMouseButton
+---| 'left'
+---| 'right'
+---| 'middle'
+---@alias StudioGamepadButton
+---| 'south'
+---| 'east'
+---| 'west'
+---| 'north'
+---| 'start'
+---| 'select'
+---| 'left_shoulder'
+---| 'right_shoulder'
+---| 'left_stick'
+---| 'right_stick'
+---| 'dpad_up'
+---| 'dpad_down'
+---| 'dpad_left'
+---| 'dpad_right'
+---@alias StudioGamepadAxis
+---| 'left_x'
+---| 'left_y'
+---| 'right_x'
+---| 'right_y'
+---| 'left_trigger'
+---| 'right_trigger'
+
+---@class StudioRayHit
+---@field object string? ID of the object hit; nil if it has no ID.
+---@field point vec3 World position of the hit.
+---@field normal vec3 Surface direction at the hit.
+---@field distance number Distance from the ray start.
+
+---@class StudioEngine
+---@field log fun(message: string)
+---@field object_id fun(): string? Current attached scene object; nil in the global script.
+---@field set_position (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, position: vec3)) Set a parent-relative position.
+---@field translate (fun(object_id: string, dx: number, dy: number, dz: number))|(fun(object_id: string, delta: vec3)) Move by a parent-relative delta.
+---@field find_object fun(name: string): string? Find the first scene object with this name.
+---@field get_position fun(object_id: string): vec3? Read a parent-relative position; nil if missing.
+---@field spawn_empty (fun(name: string, x: number, y: number, z: number): string)|(fun(name: string, position: vec3): string) Create a named runtime object without a mesh and return its UUID.
+---@field spawn_prefab (fun(path: string, x: number, y: number, z: number): string)|(fun(path: string, position: vec3): string) Spawn a packaged assets/prefabs/*.prefab object and return its UUID.
+---@field key_down fun(key: StudioKey): boolean Whether a key is held.
+---@field key_pressed fun(key: StudioKey): boolean Whether a key went down this frame.
+---@field key_released fun(key: StudioKey): boolean Whether a key went up this frame.
+---@field mouse_down fun(button: StudioMouseButton): boolean Whether a mouse button is held.
+---@field mouse_pressed fun(button: StudioMouseButton): boolean Whether a mouse button went down this frame.
+---@field mouse_released fun(button: StudioMouseButton): boolean Whether a mouse button went up this frame.
+---@field mouse_position fun(): number?, number? Cursor position in game-frame pixels; nil when the cursor is outside the game.
+---@field mouse_delta fun(): number, number Mouse movement this frame as dx, dy (keeps changing while the mouse is locked).
+---@field mouse_wheel fun(): number, number Wheel scroll this frame as vertical, horizontal.
+---@field gamepad_down fun(button: StudioGamepadButton): boolean Whether a gamepad button is held.
+---@field gamepad_pressed fun(button: StudioGamepadButton): boolean Whether a gamepad button went down this frame.
+---@field gamepad_axis fun(axis: StudioGamepadAxis): number Gamepad axis value; sticks are -1 to 1 with a 0.15 dead zone, triggers 0 to 1.
+---@field input_axis fun(name: "horizontal"|"vertical"): number Keyboard (WASD or arrows) plus left stick, from -1 to 1.
+---@field set_mouse_locked fun(locked: boolean) Hide and lock the cursor so mouse_delta gives endless motion. Esc releases it in Scene View Play.
+---@field is_mouse_locked fun(): boolean Whether the game currently wants the mouse locked.
+---@field set_rotation (fun(object_id: string, degrees: vec3))|(fun(object_id: string, pitch: number, yaw: number, roll: number)) Set rotation as Euler degrees (x = pitch, y = yaw, z = roll; yaw is applied first).
+---@field rotate (fun(object_id: string, degrees: vec3))|(fun(object_id: string, pitch: number, yaw: number, roll: number)) Turn by Euler degrees in the object's own space, on top of the current rotation.
+---@field get_rotation fun(object_id: string): vec3? Rotation as Euler degrees; nil if missing.
+---@field set_scale fun(object_id: string, scale: vec3|number) Set scale; a single number scales evenly. Components must be non-zero. Scaling an object does not resize its collider yet.
+---@field get_scale fun(object_id: string): vec3? Read the scale; nil if missing.
+---@field look_at fun(object_id: string, target: vec3, up?: vec3) Face a point in the object's parent space (world space for unparented objects); forward is -Z. Does nothing for a degenerate target.
+---@field forward fun(object_id: string): vec3? The direction the object faces (-Z rotated by the object).
+---@field right fun(object_id: string): vec3? The object's right direction (+X rotated by the object).
+---@field up fun(object_id: string): vec3? The object's up direction (+Y rotated by the object).
+---@field play_audio fun(object_id: string) Trigger an authored audio emitter on a scene object (up to 32 times per callback dispatch).
+---@field set_animation_playing fun(object_id: string, playing: boolean) Pause or resume an authored sprite-sheet animation.
+---@field ui_set_text fun(object_id: string, text: string) Change an authored label or button caption (at most 1024 bytes).
+---@field emit_event fun(name: string) Send a named event to authored visual rules (1–64 printable bytes).
+---@field change_scene fun(path: string) Load a packaged scenes/*.ron scene after this frame; the new scene runs start before its first update.
+---@field save_get fun(key: string): string|number|boolean|nil Read a restored gameplay value.
+---@field save_set fun(key: string, value: string|number|boolean|nil) Set a gameplay value; nil removes it.
+---@field save fun() Request an atomic save at the end of the frame.
+---@field get_var fun(name: string): number Read a gameplay variable shared with visual rules; unset variables are 0.
+---@field set_var fun(name: string, value: number) Set a gameplay variable shared with visual rules (finite number; name 1–64 printable bytes).
+---@field get_velocity fun(object_id: string): vec3 Linear velocity of a Dynamic body; zero for other bodies. Does not reflect add_force/add_impulse until the next frame.
+---@field set_velocity (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, velocity: vec3)) Set a Dynamic body's velocity.
+---@field add_force (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, force: vec3)) Push a Dynamic body for the length of the current frame, so calling it every frame gives a steady push at any frame rate.
+---@field add_impulse (fun(object_id: string, x: number, y: number, z: number))|(fun(object_id: string, impulse: vec3)) Give a Dynamic body an instant push (a jump or a hit).
+---@field move_character (fun(object_id: string, dx: number, dy: number, dz: number))|(fun(object_id: string, delta: vec3)) Move a Kinematic body by this much, sliding along walls. Gravity is the script's job.
+---@field raycast (fun(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, max: number, ignore_id?: string): StudioRayHit?)|(fun(origin: vec3, direction: vec3, max: number, ignore_id?: string): StudioRayHit?) Nearest hit along a ray (direction is normalized, max is capped at 10000, triggers are ignored). Pass ignore_id (an object ID) to let the ray pass through that object, such as the one casting it. Only works during callbacks; nil otherwise.
+---@field is_grounded fun(object_id: string): boolean Whether the body stands on something. Only works during callbacks; false otherwise.
+---@field set_camera fun(object_id: string) Make this camera object the active camera. Ignored (with a warning) if the object has no Camera. Takes effect after the callback. Only works during callbacks.
+---@field get_camera fun(): string? The active camera object ID, or nil when there is none.
+---@field set_follow_target fun(camera_id: string, target_id: string) Point a camera's Camera Follow at another object. Ignored (with a warning) unless the camera already has Camera Follow. Only works during callbacks.
+---@field camera_shake fun(strength: number, seconds: number) Shake the screen. strength is a finite number, at least 0; seconds is 0 to 10. Only works during callbacks.
+---@field get_state fun(): "menu"|"playing"|"paused"|"game_over" The game state: "playing" unless something changed it. Includes this callback's own set_state. It survives scene changes.
+---@field set_state fun(state: "menu"|"playing"|"paused"|"game_over") Change the game state after this callback. "paused" stops scripts' update and fixed_update, physics, timers, animation and camera follow/shake; UI clicks, on_event, key-pressed and state-changed rules keep working, and audio already playing keeps playing. Only works during callbacks.
+---@field destroy fun(object_id: string) Remove an object and its children from the running game after this callback. Only works during callbacks.
+---@field set_visible fun(object_id: string, visible: boolean) Show or hide an object and its children. Hidden objects keep running. Only works during callbacks.
+---@field set_enabled fun(object_id: string, enabled: boolean) Turn an object and its children on or off. A disabled object is not drawn, has no physics and gets no script callbacks or rules. Only works during callbacks.
+---@field is_visible fun(object_id: string): boolean Whether the object is shown, including this callback's own set_visible; false if it is missing or destroyed.
+---@field is_enabled fun(object_id: string): boolean Whether the object is enabled, including this callback's own set_enabled; false if it is missing or destroyed.
+---@type StudioEngine
+engine = {}
+
+---@class StudioScript
+---@field start? fun()
+---@field update? fun(dt: number)
+---@field fixed_update? fun(dt: number)
+---@field on_event? fun(kind: string, value: string) Keyboard events use key_pressed/key_released.
+---@field on_collision? fun(kind: "enter"|"exit"|"trigger_enter"|"trigger_exit", self_id: string, other_id: string) kind is "enter" | "exit" | "trigger_enter" | "trigger_exit", sent after a physics step; the trigger kinds fire when something enters or leaves a trigger collider. A global script receives the sorted pair.
+---@field on_state_changed? fun(old: string, new: string) Called on every script on an enabled object (and on global scripts) when the game state changes, for example "playing" to "paused".
+"#;
+const STUDIO_API_VERSION: u32 = 6;
 
 fn versioned_studio_api_lua() -> String {
     with_version_line(STUDIO_API_LUA, STUDIO_API_VERSION)
@@ -139,6 +924,14 @@ fn generated_annotation_backup(existing: &str) -> Option<&'static str> {
         Some("src/studio_api.lua.legacy.bak")
     } else if existing == with_version_line(STUDIO_API_LUA_V0, 1) {
         Some("src/studio_api.lua.v1.bak")
+    } else if existing == with_version_line(STUDIO_API_LUA_V2, 2) {
+        Some("src/studio_api.lua.v2.bak")
+    } else if existing == with_version_line(STUDIO_API_LUA_V3, 3) {
+        Some("src/studio_api.lua.v3.bak")
+    } else if existing == with_version_line(STUDIO_API_LUA_V4, 4) {
+        Some("src/studio_api.lua.v4.bak")
+    } else if existing == with_version_line(STUDIO_API_LUA_V5, 5) {
+        Some("src/studio_api.lua.v5.bak")
     } else {
         None
     }
@@ -933,7 +1726,7 @@ mod tests {
         project.refresh_lua_annotations().expect("upgrade");
 
         let updated = std::fs::read_to_string(&annotations).expect("updated annotations");
-        assert!(updated.starts_with("---@meta\n-- Studio API annotations v2\n"));
+        assert!(updated.starts_with("---@meta\n-- Studio API annotations v6\n"));
         assert!(updated.contains("get_var"));
         assert!(updated.contains("---@field change_scene"));
         assert_eq!(
@@ -980,6 +1773,223 @@ mod tests {
             v1
         );
         cleanup(&root);
+    }
+
+    #[test]
+    fn v2_annotations_are_backed_up_and_upgraded_to_v6() {
+        let root = temp_root("lua-api-v2-upgrade");
+        Project::create(&root, "Lua API v2").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let v2 = with_version_line(STUDIO_API_LUA_V2, 2);
+        std::fs::write(&annotations, &v2).expect("v2 annotations");
+
+        Project::open(&root)
+            .expect("open")
+            .refresh_lua_annotations()
+            .expect("upgrade");
+
+        let updated = std::fs::read_to_string(&annotations).expect("updated");
+        assert!(updated.starts_with("---@meta\n-- Studio API annotations v6\n"));
+        assert_eq!(updated, versioned_studio_api_lua());
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/studio_api.lua.v2.bak")).expect("v2 backup"),
+            v2
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn edited_v2_annotations_are_not_replaced() {
+        let root = temp_root("lua-api-v2-custom");
+        Project::create(&root, "Lua API v2 custom").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let edited = format!("{}-- my note\n", with_version_line(STUDIO_API_LUA_V2, 2));
+        std::fs::write(&annotations, &edited).expect("edited annotations");
+
+        let project = Project::open(&root).expect("open");
+        assert!(project.refresh_lua_annotations().is_err());
+        assert_eq!(
+            std::fs::read_to_string(&annotations).expect("untouched"),
+            edited
+        );
+        assert!(!root.join("src/studio_api.lua.v2.bak").exists());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn v3_annotations_are_backed_up_and_upgraded_to_v6() {
+        let root = temp_root("lua-api-v3-upgrade");
+        Project::create(&root, "Lua API v3").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let v3 = with_version_line(STUDIO_API_LUA_V3, 3);
+        std::fs::write(&annotations, &v3).expect("v3 annotations");
+
+        Project::open(&root)
+            .expect("open")
+            .refresh_lua_annotations()
+            .expect("upgrade");
+
+        let updated = std::fs::read_to_string(&annotations).expect("updated");
+        assert!(updated.starts_with("---@meta\n-- Studio API annotations v6\n"));
+        assert_eq!(updated, versioned_studio_api_lua());
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/studio_api.lua.v3.bak")).expect("v3 backup"),
+            v3
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn edited_v3_annotations_are_not_replaced() {
+        let root = temp_root("lua-api-v3-custom");
+        Project::create(&root, "Lua API v3 custom").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let edited = format!("{}-- my note\n", with_version_line(STUDIO_API_LUA_V3, 3));
+        std::fs::write(&annotations, &edited).expect("edited annotations");
+
+        let project = Project::open(&root).expect("open");
+        assert!(project.refresh_lua_annotations().is_err());
+        assert_eq!(
+            std::fs::read_to_string(&annotations).expect("untouched"),
+            edited
+        );
+        assert!(!root.join("src/studio_api.lua.v3.bak").exists());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn v4_annotations_are_backed_up_and_upgraded_to_v6() {
+        let root = temp_root("lua-api-v4-upgrade");
+        Project::create(&root, "Lua API v5").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let v4 = with_version_line(STUDIO_API_LUA_V4, 4);
+        std::fs::write(&annotations, &v4).expect("v4 annotations");
+
+        Project::open(&root)
+            .expect("open")
+            .refresh_lua_annotations()
+            .expect("upgrade");
+
+        let updated = std::fs::read_to_string(&annotations).expect("updated");
+        assert!(updated.starts_with("---@meta\n-- Studio API annotations v6\n"));
+        assert_eq!(updated, versioned_studio_api_lua());
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/studio_api.lua.v4.bak")).expect("v4 backup"),
+            v4
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn edited_v4_annotations_are_not_replaced() {
+        let root = temp_root("lua-api-v4-custom");
+        Project::create(&root, "Lua API v4 custom").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let edited = format!("{}-- my note\n", with_version_line(STUDIO_API_LUA_V4, 4));
+        std::fs::write(&annotations, &edited).expect("edited annotations");
+
+        let project = Project::open(&root).expect("open");
+        assert!(project.refresh_lua_annotations().is_err());
+        assert_eq!(
+            std::fs::read_to_string(&annotations).expect("untouched"),
+            edited
+        );
+        assert!(!root.join("src/studio_api.lua.v4.bak").exists());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn v5_annotations_are_backed_up_and_upgraded_to_v6() {
+        let root = temp_root("lua-api-v5-upgrade");
+        Project::create(&root, "Lua API v6").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let v5 = with_version_line(STUDIO_API_LUA_V5, 5);
+        std::fs::write(&annotations, &v5).expect("v5 annotations");
+
+        Project::open(&root)
+            .expect("open")
+            .refresh_lua_annotations()
+            .expect("upgrade");
+
+        let updated = std::fs::read_to_string(&annotations).expect("updated");
+        assert!(updated.starts_with("---@meta\n-- Studio API annotations v6\n"));
+        assert_eq!(updated, versioned_studio_api_lua());
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/studio_api.lua.v5.bak")).expect("v5 backup"),
+            v5
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn edited_v5_annotations_are_not_replaced() {
+        let root = temp_root("lua-api-v5-custom");
+        Project::create(&root, "Lua API v5 custom").expect("create");
+        let annotations = root.join("src/studio_api.lua");
+        let edited = format!("{}-- my note\n", with_version_line(STUDIO_API_LUA_V5, 5));
+        std::fs::write(&annotations, &edited).expect("edited annotations");
+
+        let project = Project::open(&root).expect("open");
+        assert!(project.refresh_lua_annotations().is_err());
+        assert_eq!(
+            std::fs::read_to_string(&annotations).expect("untouched"),
+            edited
+        );
+        assert!(!root.join("src/studio_api.lua.v5.bak").exists());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn annotations_list_every_input_name() {
+        use engine_scripting::{
+            ScriptGamepadAxis, ScriptGamepadButton, ScriptKey, ScriptMouseButton,
+        };
+        let text = STUDIO_API_LUA;
+        let alias = |name: &str| -> String {
+            let start = text
+                .find(&format!("---@alias {name}"))
+                .unwrap_or_else(|| panic!("alias {name} missing"));
+            let rest = &text[start..];
+            let end = rest[1..].find("\n---@").map_or(rest.len(), |n| n + 1);
+            rest[..end].to_owned()
+        };
+        let check = |alias_name: &str, names: Vec<&str>| {
+            let block = alias(alias_name);
+            let listed = block.matches("\n---| '").count();
+            assert_eq!(listed, names.len(), "{alias_name} entry count");
+            for name in names {
+                assert!(
+                    block.contains(&format!("---| '{name}'")),
+                    "{alias_name} missing {name}"
+                );
+            }
+        };
+        check(
+            "StudioKey",
+            ScriptKey::ALL.iter().map(|v| v.name()).collect(),
+        );
+        check(
+            "StudioMouseButton",
+            ScriptMouseButton::ALL.iter().map(|v| v.name()).collect(),
+        );
+        check(
+            "StudioGamepadButton",
+            ScriptGamepadButton::ALL.iter().map(|v| v.name()).collect(),
+        );
+        check(
+            "StudioGamepadAxis",
+            ScriptGamepadAxis::ALL.iter().map(|v| v.name()).collect(),
+        );
+        assert_eq!(ScriptKey::ALL.len(), 51);
+    }
+
+    #[test]
+    fn multi_signature_fields_parenthesise_each_function() {
+        assert!(
+            !STUDIO_API_LUA.contains("|fun("),
+            "unparenthesised fun union"
+        );
+        assert_eq!(STUDIO_API_LUA.matches(")|(fun(").count(), 11);
     }
 
     #[test]

@@ -41,6 +41,10 @@ impl Severity {
     }
 }
 
+/// [`Diagnostic::code`] of a row saying a dropped file could not be used.
+/// These are not code problems, so a refresh of those keeps them.
+pub const ASSET_DROP_CODE: &str = "asset.drop";
+
 /// One row in the Problems tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {

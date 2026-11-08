@@ -11,6 +11,105 @@
 /// Largest preview, by area: 1920×1080. A bigger panel is shown scaled up.
 pub const MAX_PREVIEW_PIXELS: f32 = 1920.0 * 1080.0;
 
+/// Whether Studio's own cursor is grabbed for the playing game.
+///
+/// The game asks for a lock (mouse look); Studio honours it only while the
+/// player has not pressed Esc, and every method returns the grab change to
+/// apply to Studio's window (`Some(true)` grab and hide, `Some(false)`
+/// release), or `None` when nothing changes.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StudioCursorLock {
+    /// What the game last asked for.
+    pub game_wants: bool,
+    /// Whether Studio's cursor is grabbed right now.
+    pub held: bool,
+    /// Esc released the lock; it stays released until the player clicks the
+    /// game or the game turns its wish off and on again.
+    pub escaped: bool,
+    /// The click that took the mouse back is still down.
+    pub click_swallowed: bool,
+}
+
+impl StudioCursorLock {
+    fn set_held(&mut self, held: bool) -> Option<bool> {
+        (self.held != held).then(|| {
+            self.held = held;
+            held
+        })
+    }
+
+    /// The game asked to lock (or release) the mouse. While the game view
+    /// is unfocused the wish is only recorded; the next click in the view
+    /// or focus regain grabs the cursor.
+    pub fn on_game_request(&mut self, locked: bool, view_focused: bool) -> Option<bool> {
+        self.game_wants = locked;
+        if !locked {
+            self.escaped = false;
+            return self.set_held(false);
+        }
+        if self.escaped || !view_focused {
+            return None;
+        }
+        self.set_held(true)
+    }
+
+    /// Esc always frees the cursor; the game's wish stays until it changes.
+    pub fn on_escape(&mut self) -> Option<bool> {
+        self.escaped = self.game_wants;
+        self.set_held(false)
+    }
+
+    /// A click in the game view locks again if the game still wants it.
+    pub fn on_click_in_view(&mut self) -> Option<bool> {
+        self.escaped = false;
+        self.set_held(self.game_wants)
+    }
+
+    /// A mouse button went down or up in the game view. Returns the grab
+    /// change and whether the game gets the event: the click that takes the
+    /// mouse back is Studio's, so a shooter does not fire on it.
+    pub fn on_mouse_button(&mut self, pressed: bool) -> (Option<bool>, bool) {
+        if pressed {
+            let change = self.on_click_in_view();
+            self.click_swallowed = change == Some(true);
+            (change, !self.click_swallowed)
+        } else {
+            (None, !std::mem::take(&mut self.click_swallowed))
+        }
+    }
+
+    /// The window or game view regained focus: re-apply a lock released by
+    /// losing focus, but not one released by Esc.
+    pub fn on_regain_focus(&mut self) -> Option<bool> {
+        if self.escaped {
+            return None;
+        }
+        self.set_held(self.game_wants)
+    }
+
+    /// Whether raw mouse motion should reach the game: always while the
+    /// lock is held; otherwise only over the view, and not after Esc freed
+    /// a lock the game still wants (the free cursor must not spin the
+    /// camera).
+    pub fn forwards_motion(&self, cursor_inside: bool) -> bool {
+        self.held || (cursor_inside && !self.game_wants)
+    }
+
+    /// The preview stopped or the game view lost focus: free the cursor.
+    /// The wish is kept so a click re-applies it.
+    pub fn on_stop_or_blur(&mut self) -> Option<bool> {
+        self.set_held(false)
+    }
+
+    /// The preview ended: forget the game's wish too.
+    pub fn reset(&mut self) -> Option<bool> {
+        self.game_wants = false;
+        self.escaped = false;
+        self.click_swallowed = false;
+        self.set_held(false)
+    }
+}
+
 /// The texture holding the newest game frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameTexture {
@@ -339,5 +438,125 @@ mod tests {
             None,
             "in the bars"
         );
+    }
+
+    #[test]
+    fn click_that_takes_the_mouse_back_does_not_reach_the_game() {
+        let mut lock = StudioCursorLock::default();
+        lock.on_game_request(true, true);
+        // While the lock is held, clicks are the game's.
+        assert_eq!(lock.on_mouse_button(true), (None, true));
+        assert_eq!(lock.on_mouse_button(false), (None, true));
+        lock.on_escape();
+        // The click after Esc re-locks; neither its press nor release is forwarded.
+        assert_eq!(lock.on_mouse_button(true), (Some(true), false));
+        assert_eq!(lock.on_mouse_button(false), (None, false));
+        // The next click is the game's again.
+        assert_eq!(lock.on_mouse_button(true), (None, true));
+        assert_eq!(lock.on_mouse_button(false), (None, true));
+    }
+
+    #[test]
+    fn clicks_reach_a_game_that_does_not_want_the_lock() {
+        // A pause menu frees the mouse: its buttons must still get clicks.
+        let mut lock = StudioCursorLock::default();
+        lock.on_game_request(true, true);
+        lock.on_game_request(false, true);
+        assert_eq!(lock.on_mouse_button(true), (None, true));
+        assert_eq!(lock.on_mouse_button(false), (None, true));
+    }
+
+    #[test]
+    fn escape_releases_studio_cursor_lock() {
+        let mut lock = StudioCursorLock::default();
+        assert_eq!(lock.on_game_request(true, true), Some(true));
+        assert_eq!(lock.on_escape(), Some(false));
+        assert_eq!(lock.on_escape(), None);
+        assert_eq!(lock.on_click_in_view(), Some(true));
+        assert_eq!(lock.on_game_request(false, true), Some(false));
+        assert_eq!(lock.on_click_in_view(), None);
+        assert_eq!(lock.on_game_request(true, true), Some(true));
+        assert_eq!(lock.on_stop_or_blur(), Some(false));
+    }
+
+    #[test]
+    fn escape_stays_released_until_a_real_click_or_new_request() {
+        let mut lock = StudioCursorLock::default();
+        lock.on_game_request(true, true);
+        lock.on_escape();
+        assert_eq!(lock.on_stop_or_blur(), None);
+        assert_eq!(lock.on_regain_focus(), None);
+        assert_eq!(
+            lock.on_game_request(true, true),
+            None,
+            "focus echo does not re-grab"
+        );
+        assert_eq!(lock.on_click_in_view(), Some(true));
+
+        lock.on_escape();
+        assert_eq!(lock.on_game_request(false, true), None);
+        assert_eq!(
+            lock.on_game_request(true, true),
+            Some(true),
+            "false then true re-locks"
+        );
+
+        lock.on_escape();
+        assert_eq!(lock.reset(), None);
+        assert_eq!(
+            lock.on_game_request(true, true),
+            Some(true),
+            "reset clears escape"
+        );
+    }
+
+    #[test]
+    fn forwards_motion_only_when_it_cannot_spin_a_free_cursor() {
+        let mut lock = StudioCursorLock::default();
+        // Not held, inside, game does not want the lock.
+        assert!(lock.forwards_motion(true));
+        // Outside and not held.
+        assert!(!lock.forwards_motion(false));
+        // Held: forwarded wherever the cursor is.
+        lock.on_game_request(true, true);
+        assert!(lock.forwards_motion(false));
+        assert!(lock.forwards_motion(true));
+        // Esc: game still wants it, not held, cursor inside.
+        lock.on_escape();
+        assert!(!lock.forwards_motion(true));
+        assert!(!lock.forwards_motion(false));
+    }
+
+    #[test]
+    fn lock_request_while_unfocused_waits_for_focus() {
+        let mut lock = StudioCursorLock::default();
+        assert_eq!(lock.on_game_request(true, false), None);
+        assert!(lock.game_wants);
+        assert_eq!(lock.on_regain_focus(), Some(true));
+
+        let mut lock = StudioCursorLock::default();
+        lock.on_game_request(true, false);
+        assert_eq!(lock.on_click_in_view(), Some(true));
+
+        let mut lock = StudioCursorLock::default();
+        lock.on_game_request(true, true);
+        lock.on_escape();
+        assert_eq!(lock.on_game_request(true, false), None);
+        assert_eq!(lock.on_regain_focus(), None);
+    }
+
+    #[test]
+    fn release_request_frees_held_lock_even_when_unfocused() {
+        let mut lock = StudioCursorLock::default();
+        assert_eq!(lock.on_game_request(true, true), Some(true));
+        assert_eq!(lock.on_game_request(false, false), Some(false));
+    }
+
+    #[test]
+    fn blur_without_escape_reapplies_on_regain() {
+        let mut lock = StudioCursorLock::default();
+        lock.on_game_request(true, true);
+        assert_eq!(lock.on_stop_or_blur(), Some(false));
+        assert_eq!(lock.on_regain_focus(), Some(true));
     }
 }

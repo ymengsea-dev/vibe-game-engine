@@ -31,13 +31,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use engine::gameplay::platform_key;
 use engine::gameplay::{GameplayError, GameplayRuntime, SceneSource, SpawnedObject};
 use engine::prelude::{
     AssetLibrary, EXPORT_SCENE_FILE, Game, GameCommand, GameConfig, GameContext, GameError,
     GameplayLanguage, LuaRuntime, Project, ProjectError, Scene, SceneError, ScriptError,
     executable_dir, open_export, run_game,
 };
-use engine::scripting::ScriptKey;
+use engine::scripting::{ScriptKey, SnapshotObject};
 
 fn script_error_record(error: &ScriptError) -> Result<Option<String>, serde_json::Error> {
     error
@@ -274,8 +275,10 @@ impl Player {
         self.pending_starts.clear();
         self.gameplay.replace_scene(ctx, scene)?;
         self.lua = Some(lua);
-        self.run_callback(ctx, |lua| lua.start())
-            .map_err(|error| GameplayError::SceneRequest(path.into(), error))?;
+        let started = self.run_callback(ctx, |lua| lua.start());
+        self.gameplay.start_rules(ctx);
+        self.flush_rule_spawns(ctx);
+        started.map_err(|error| GameplayError::SceneRequest(path.into(), error))?;
         Ok(())
     }
 
@@ -314,18 +317,83 @@ impl Player {
         let Some(lua) = &mut self.lua else {
             return Ok(());
         };
-        update_lua_input(lua, ctx.input());
-        sync_lua_scene(lua, ctx.world());
-        let commands = callback(lua).map_err(|error| {
+        lua.set_fixed_step(ctx.fixed_step_seconds());
+        update_lua_input(lua, ctx.input(), ctx.mouse_locked());
+        sync_lua_scene(lua, ctx.world(), ctx.physics());
+        lua.set_active_camera(self.gameplay.active_camera_id(ctx.world()));
+        lua.set_game_state(self.gameplay.game_state(ctx.world()).name());
+        // The queries borrow `ctx` only while the callback runs; they are gone
+        // before `apply` takes it mutably.
+        let commands = {
+            let queries = self.gameplay.queries(ctx);
+            lua.with_queries(&queries, callback).map_err(|error| {
+                report_script_error(&error);
+                error.to_string()
+            })?
+        }
+        .map_err(|error| {
             report_script_error(&error);
             error.to_string()
         })?;
-        let spawned = self
+        let mut spawned = self
             .gameplay
             .apply(ctx, commands)
             .map_err(|error| error.to_string())?;
+        // Prefabs spawned by visual rules the commands triggered (such as an
+        // emitted event) start their scripts too.
+        spawned.extend(self.gameplay.take_rule_spawns());
+        self.forget_destroyed();
         self.attach_spawned_scripts(&spawned)
             .map_err(|error| error.to_string())
+    }
+
+    /// Loads and starts the scripts of prefabs that visual rules spawned
+    /// outside a Lua callback (scene start, keys, timers, clicks, contacts).
+    fn flush_rule_spawns(&mut self, ctx: &mut GameContext<'_>) {
+        self.forget_destroyed();
+        let spawned = self.gameplay.take_rule_spawns();
+        if spawned.is_empty() || self.lua.is_none() {
+            return;
+        }
+        if let Err(error) = self.attach_spawned_scripts(&spawned) {
+            tracing::error!(%error, "rule-spawned script could not be loaded");
+            self.lua = None;
+            self.pending_starts.clear();
+            return;
+        }
+        if self.pending_starts.is_empty() {
+            return;
+        }
+        // A callback that does nothing runs the queued `start`s.
+        if let Err(error) = self.run_callback(ctx, |_| Ok(Vec::new())) {
+            tracing::error!(%error, "rule-spawned script start stopped");
+        }
+    }
+
+    /// Drops the scripts of objects the engine destroyed (by Lua, rules or
+    /// anything else) so they stop running and stop using the budget.
+    fn forget_destroyed(&mut self) {
+        let destroyed = self.gameplay.take_destroyed();
+        if let Some(lua) = self.lua.as_mut() {
+            lua.forget_objects(&destroyed);
+        }
+    }
+
+    /// Delivers the latest game state change, if any, to every script. A
+    /// change made by that callback is delivered with the next batch, so a
+    /// script that flips the state back cannot loop within a frame.
+    fn deliver_state_change(&mut self, ctx: &mut GameContext<'_>) {
+        let Some((old, new)) = self.gameplay.take_state_change() else {
+            return;
+        };
+        if self.lua.is_none() {
+            return;
+        }
+        if let Err(error) =
+            self.run_callback(ctx, |lua| lua.on_state_changed(old.name(), new.name()))
+        {
+            tracing::error!(%error, "Lua state change callback stopped");
+        }
     }
 
     /// Loads the scripts of newly spawned prefab instances and queues their `start`.
@@ -387,50 +455,152 @@ fn parse_lua_marker(bytes: &[u8]) -> Result<Option<uuid::Uuid>, ()> {
     Ok(Some(id))
 }
 
-fn update_lua_input(lua: &mut LuaRuntime, input: &engine::platform::InputState) {
+/// The Run window quits on Esc. In Scene View Play, Esc belongs to Studio
+/// (it frees a locked mouse) and Stop or Cmd-P ends the game.
+fn exits_on_escape(embedded: bool) -> bool {
+    !embedded
+}
+
+fn update_lua_input(
+    lua: &mut LuaRuntime,
+    input: &engine::platform::InputState,
+    mouse_locked: bool,
+) {
+    use engine::platform::MouseButton;
+    use engine::scripting::{
+        ButtonState, InputSnapshot, ScriptGamepadAxis, ScriptGamepadButton, ScriptMouseButton,
+    };
+    let mut snapshot = InputSnapshot {
+        mouse_position: input.cursor_position().map(|(x, y)| (x as f32, y as f32)),
+        mouse_delta: input.mouse_delta(),
+        wheel: input.scroll_delta(),
+        mouse_locked,
+        ..InputSnapshot::default()
+    };
     for key in ScriptKey::ALL {
-        let platform = platform_key(key);
-        lua.set_key_state(
-            key,
-            input.is_key_held(platform),
-            input.is_key_pressed(platform),
+        let platform = platform_key(*key);
+        snapshot.keys.insert(
+            *key,
+            ButtonState {
+                down: input.is_key_held(platform),
+                pressed: input.is_key_pressed(platform),
+                released: input.is_key_released(platform),
+            },
         );
+    }
+    for button in ScriptMouseButton::ALL {
+        let platform = match button {
+            ScriptMouseButton::Left => MouseButton::Left,
+            ScriptMouseButton::Right => MouseButton::Right,
+            ScriptMouseButton::Middle => MouseButton::Middle,
+        };
+        snapshot.mouse_buttons.insert(
+            *button,
+            ButtonState {
+                down: input.is_mouse_button_held(platform),
+                pressed: input.is_mouse_button_pressed(platform),
+                released: input.is_mouse_button_released(platform),
+            },
+        );
+    }
+    for button in ScriptGamepadButton::ALL {
+        let platform = platform_gamepad_button(*button);
+        snapshot.gamepad_buttons.insert(
+            *button,
+            ButtonState {
+                down: input.is_button_held(platform),
+                pressed: input.is_button_pressed(platform),
+                released: input.is_button_released(platform),
+            },
+        );
+    }
+    // Sticks are dead-zoned as a pair (0.15 radial); triggers per axis.
+    let left = input.stick(engine::platform::Stick::Left);
+    let right = input.stick(engine::platform::Stick::Right);
+    for axis in ScriptGamepadAxis::ALL {
+        let value = match axis {
+            ScriptGamepadAxis::LeftX => left.0,
+            ScriptGamepadAxis::LeftY => left.1,
+            ScriptGamepadAxis::RightX => right.0,
+            ScriptGamepadAxis::RightY => right.1,
+            ScriptGamepadAxis::LeftTrigger | ScriptGamepadAxis::RightTrigger => {
+                input.axis(platform_gamepad_axis(*axis))
+            }
+        };
+        snapshot.gamepad_axes.insert(*axis, value);
+    }
+    lua.set_input(snapshot);
+}
+
+fn platform_gamepad_button(
+    button: engine::scripting::ScriptGamepadButton,
+) -> engine::platform::GamepadButton {
+    use engine::platform::GamepadButton as P;
+    use engine::scripting::ScriptGamepadButton as S;
+    match button {
+        S::South => P::South,
+        S::East => P::East,
+        S::West => P::West,
+        S::North => P::North,
+        S::Start => P::Start,
+        S::Select => P::Select,
+        S::LeftShoulder => P::LeftBumper,
+        S::RightShoulder => P::RightBumper,
+        S::LeftStick => P::LeftStick,
+        S::RightStick => P::RightStick,
+        S::DPadUp => P::DPadUp,
+        S::DPadDown => P::DPadDown,
+        S::DPadLeft => P::DPadLeft,
+        S::DPadRight => P::DPadRight,
     }
 }
 
-fn sync_lua_scene(lua: &mut LuaRuntime, world: &engine::prelude::World) {
+fn platform_gamepad_axis(
+    axis: engine::scripting::ScriptGamepadAxis,
+) -> engine::platform::GamepadAxis {
+    use engine::platform::GamepadAxis as P;
+    use engine::scripting::ScriptGamepadAxis as S;
+    match axis {
+        S::LeftX => P::LeftStickX,
+        S::LeftY => P::LeftStickY,
+        S::RightX => P::RightStickX,
+        S::RightY => P::RightStickY,
+        S::LeftTrigger => P::LeftTrigger,
+        S::RightTrigger => P::RightTrigger,
+    }
+}
+
+fn sync_lua_scene(
+    lua: &mut LuaRuntime,
+    world: &engine::prelude::World,
+    physics: &engine::physics::PhysicsWorld,
+) {
     // shortcut: snapshot authored objects for each callback; use dirty-object sync if large scenes make this costly.
-    lua.set_scene_snapshot(world.iter_entities().filter_map(|entity| {
+    lua.set_scene_objects(world.iter_entities().filter_map(|entity| {
         let id = entity.get::<engine::scene::SceneObjectId>()?;
         let name = entity
             .get::<engine::ecs::components::Name>()
             .map(|name| name.0.clone());
-        let position = entity
+        let transform = entity
             .get::<engine::ecs::components::Transform>()
-            .map(|transform| transform.0.translation.to_array());
-        Some((id.0.clone(), name, position))
+            .map(|transform| transform.0);
+        Some(SnapshotObject {
+            id: id.0.clone(),
+            name,
+            position: transform.map(|t| t.translation.to_array()),
+            rotation: transform.map_or([0.0, 0.0, 0.0, 1.0], |t| t.rotation.to_array()),
+            scale: transform.map_or([1.0; 3], |t| t.scale.to_array()),
+            velocity: entity
+                .get::<engine::ecs::components::RigidBody>()
+                .and_then(|body| physics.rapier.bodies.get(body.0))
+                .filter(|body| body.is_dynamic())
+                .map(|body| body.linvel().to_array()),
+            visible: entity.get::<engine::ecs::components::Hidden>().is_none(),
+            enabled: entity.get::<engine::ecs::components::Disabled>().is_none(),
+        })
     }));
     if let Some(variables) = world.get_resource::<engine::scene::RuleVariables>() {
         lua.set_variables(variables.iter());
-    }
-}
-
-fn platform_key(key: ScriptKey) -> engine::platform::KeyCode {
-    use engine::platform::KeyCode;
-    match key {
-        ScriptKey::A => KeyCode::KeyA,
-        ScriptKey::D => KeyCode::KeyD,
-        ScriptKey::S => KeyCode::KeyS,
-        ScriptKey::W => KeyCode::KeyW,
-        ScriptKey::Space => KeyCode::Space,
-        ScriptKey::Escape => KeyCode::Escape,
-        ScriptKey::Enter => KeyCode::Enter,
-        ScriptKey::ArrowLeft => KeyCode::ArrowLeft,
-        ScriptKey::ArrowRight => KeyCode::ArrowRight,
-        ScriptKey::ArrowUp => KeyCode::ArrowUp,
-        ScriptKey::ArrowDown => KeyCode::ArrowDown,
-        ScriptKey::ShiftLeft => KeyCode::ShiftLeft,
-        ScriptKey::ShiftRight => KeyCode::ShiftRight,
     }
 }
 
@@ -447,7 +617,8 @@ fn lua_key_event(event: &engine::platform::PlatformEvent) -> Option<(&'static st
         return None;
     }
     ScriptKey::ALL
-        .into_iter()
+        .iter()
+        .copied()
         .find(|candidate| platform_key(*candidate) == *key)
         .map(|key| {
             (
@@ -491,6 +662,26 @@ fn load_project(root: &Path, selected_scene: Option<&Path>) -> Result<Player, Pl
     Ok(player)
 }
 
+/// Which Lua callbacks run this frame. Pausing the game state freezes
+/// `update` and `fixed_update`; UI clicks and state changes still reach scripts
+/// so a menu can unpause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FramePhases {
+    ui_clicks: bool,
+    update: bool,
+    fixed_update: bool,
+}
+
+impl FramePhases {
+    fn for_state(paused: bool) -> Self {
+        Self {
+            ui_clicks: true,
+            update: !paused,
+            fixed_update: !paused,
+        }
+    }
+}
+
 impl Game for Player {
     fn frame_demand(&self, now: Instant) -> engine::prelude::FrameDemand {
         if self.lua.is_some() {
@@ -523,8 +714,10 @@ impl Game for Player {
                 "loaded Lua save is invalid; preserving it: {error}"
             )));
         }
-        self.run_callback(ctx, |lua| lua.start())
-            .map_err(GameError::Setup)
+        let started = self.run_callback(ctx, |lua| lua.start());
+        self.gameplay.start_rules(ctx);
+        self.flush_rule_spawns(ctx);
+        started.map_err(GameError::Setup)
     }
 
     fn update(&mut self, ctx: &mut GameContext<'_>, dt: f32) {
@@ -533,28 +726,50 @@ impl Game for Player {
         {
             tracing::error!(scene = %path, error = %error, "scene change failed");
         }
-        if ctx.input().is_key_pressed(engine::prelude::KeyCode::Escape) {
+        if exits_on_escape(ctx.is_embedded())
+            && ctx.input().is_key_pressed(engine::prelude::KeyCode::Escape)
+        {
             ctx.request_exit();
         }
-        for id in self.gameplay.dispatch_ui_clicks(ctx) {
-            if let Err(error) = self.run_callback(ctx, |lua| lua.on_event("ui_clicked", &id)) {
+        let phases = FramePhases::for_state(ctx.simulation_paused());
+        let clicked = self.gameplay.dispatch_ui_clicks(ctx);
+        self.flush_rule_spawns(ctx);
+        for id in clicked {
+            if phases.ui_clicks
+                && let Err(error) = self.run_callback(ctx, |lua| lua.on_event("ui_clicked", &id))
+            {
                 tracing::error!(%error, "Lua UI click callback stopped");
             }
         }
-        if let Err(error) = self.run_callback(ctx, |lua| lua.update(dt)) {
+        self.gameplay.update_rules(ctx, dt);
+        self.flush_rule_spawns(ctx);
+        self.deliver_state_change(ctx);
+        // A click or state callback may have paused or resumed the game.
+        let phases = FramePhases::for_state(ctx.simulation_paused());
+        if phases.update
+            && let Err(error) = self.run_callback(ctx, |lua| lua.update(dt))
+        {
             tracing::error!(%error, "Lua update stopped");
         }
+        self.deliver_state_change(ctx);
         self.gameplay.refresh_lights(ctx);
+        // Last, so the view reflects scripts and scene changes this frame.
+        self.gameplay.present_camera(ctx, dt);
     }
 
     fn fixed_update(&mut self, ctx: &mut GameContext<'_>, dt: f32) {
+        if !FramePhases::for_state(ctx.simulation_paused()).fixed_update {
+            return;
+        }
         if let Err(error) = self.run_callback(ctx, |lua| lua.fixed_update(dt)) {
             tracing::error!(%error, "Lua fixed_update stopped");
         }
     }
 
     fn post_fixed_update(&mut self, ctx: &mut GameContext<'_>, _dt: f32) {
-        for contact in self.gameplay.sample_collisions(ctx) {
+        let contacts = self.gameplay.sample_collisions(ctx);
+        self.flush_rule_spawns(ctx);
+        for contact in contacts {
             if self.lua.is_none() {
                 break;
             }
@@ -661,6 +876,106 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn paused_player_skips_update_but_handles_ui_clicks() {
+        let paused = super::FramePhases::for_state(true);
+        assert!(paused.ui_clicks);
+        assert!(!paused.update);
+        assert!(!paused.fixed_update);
+        let playing = super::FramePhases::for_state(false);
+        assert!(playing.ui_clicks && playing.update && playing.fixed_update);
+    }
+
+    #[test]
+    fn lua_state_round_trips_through_the_player_calls() {
+        let mut lua = super::LuaRuntime::new().expect("runtime");
+        lua.load_script(
+            "assets/scripts/main.lua",
+            "return { on_state_changed = function(o, n) engine.log(o .. '>' .. n .. ':' .. engine.get_state()) end }",
+        )
+        .expect("script");
+        lua.set_game_state("paused");
+        match lua
+            .on_state_changed("playing", "paused")
+            .expect("cb")
+            .as_slice()
+        {
+            [super::GameCommand::Log(text)] => assert_eq!(text, "playing>paused:paused"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    fn left_x_for_raw_stick(x: f32, y: f32) -> String {
+        use engine::platform::{GamepadAxes, GamepadAxis, GamepadUpdate, InputState};
+        let mut axes = GamepadAxes::default();
+        axes.set(GamepadAxis::LeftStickX, x);
+        axes.set(GamepadAxis::LeftStickY, y);
+        let mut input = InputState::new();
+        input.apply_gamepad(&GamepadUpdate {
+            axes,
+            connected: 1,
+            ..GamepadUpdate::default()
+        });
+        let mut lua = super::LuaRuntime::new().expect("runtime");
+        lua.load_script(
+            "assets/scripts/main.lua",
+            "return { update = function() engine.log(tostring(engine.gamepad_axis('left_x'))) end }",
+        )
+        .expect("script");
+        super::update_lua_input(&mut lua, &input, false);
+        match lua.update(0.1).expect("update").as_slice() {
+            [super::GameCommand::Log(text)] => text.clone(),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lua_sticks_use_the_radial_dead_zone() {
+        // |(0.12, 0.12)| = 0.17 > 0.15: passes although each axis is under it.
+        assert_ne!(left_x_for_raw_stick(0.12, 0.12), "0.0");
+        assert_eq!(left_x_for_raw_stick(0.10, 0.0), "0.0");
+    }
+
+    #[test]
+    fn sync_lua_scene_reports_visible_and_enabled() {
+        use engine::ecs::components::{Disabled, Hidden};
+        let mut world = engine::prelude::World::new();
+        let spawn = |world: &mut engine::prelude::World, id: &str| {
+            world.spawn(engine::scene::SceneObjectId(id.into())).id()
+        };
+        spawn(&mut world, "plain");
+        let hidden = spawn(&mut world, "hidden");
+        world.entity_mut(hidden).insert(Hidden);
+        let disabled = spawn(&mut world, "disabled");
+        world.entity_mut(disabled).insert(Disabled);
+        let physics = engine::physics::PhysicsWorld::default();
+        let mut lua = super::LuaRuntime::new().expect("runtime");
+        super::sync_lua_scene(&mut lua, &world, &physics);
+        lua.load_script(
+            "assets/scripts/main.lua",
+            "return { update = function()
+                local t = {}
+                for _, id in ipairs({'plain', 'hidden', 'disabled'}) do
+                    t[#t + 1] = tostring(engine.is_visible(id)) .. '/' .. tostring(engine.is_enabled(id))
+                end
+                engine.log(table.concat(t, ' '))
+            end }",
+        )
+        .expect("script");
+        match lua.update(0.1).expect("update").as_slice() {
+            [super::GameCommand::Log(text)] => {
+                assert_eq!(text, "true/true false/true true/false");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn escape_quits_the_run_window_but_not_scene_view_play() {
+        assert!(super::exits_on_escape(false));
+        assert!(!super::exits_on_escape(true));
+    }
+
     #[test]
     fn lua_export_markers_keep_v1_readable_and_reject_bad_v2_identity() {
         assert_eq!(super::parse_lua_marker(b"1\n"), Ok(None));
@@ -809,27 +1124,32 @@ mod tests {
     }
 
     #[test]
-    fn authored_scene_camera_keeps_the_live_window_aspect_ratio() {
-        let authored = engine::renderer::Camera::new(
-            engine::prelude::glam::Vec3::new(1.0, 2.0, 3.0),
-            engine::prelude::glam::Vec3::ZERO,
-            1.0,
-        );
-        let live = engine::renderer::Camera::new(
-            engine::prelude::glam::Vec3::new(3.0, 3.0, 6.0),
-            engine::prelude::glam::Vec3::ZERO,
-            2.0,
-        );
-        let scene = Scene {
-            entities: vec![engine::scene::SceneEntity {
-                camera: Some(authored.into()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let result = engine::gameplay::scene_camera(&scene, live);
-        assert_eq!(result.eye, authored.eye);
-        assert_eq!(result.aspect_ratio, 2.0);
+    fn player_presents_the_active_camera_each_frame() {
+        // `GameContext` needs a GPU, so this exercises the two functions
+        // `present_camera` is built from, on a plain `World`.
+        use engine::ecs::components::{ActiveCamera, Camera, GlobalTransform, Transform};
+        use engine::prelude::glam::Vec3;
+        let mut world = engine::prelude::World::new();
+        let component = engine::renderer::Camera::new(Vec3::ZERO, Vec3::NEG_Z, 1.0);
+        let entity = world
+            .spawn((
+                Transform::from(engine::prelude::Transform::from_translation(Vec3::new(
+                    0.0, 1.0, 5.0,
+                ))),
+                Camera::from(component),
+                ActiveCamera,
+            ))
+            .id();
+        let mut eyes = Vec::new();
+        for x in [0.0, 3.0] {
+            world.get_mut::<Transform>(entity).unwrap().0.translation.x = x;
+            engine::ecs::propagate_transforms(&mut world);
+            let chosen = engine::gameplay::choose_active_camera(&mut world, &[entity]).unwrap();
+            let matrix = world.get::<GlobalTransform>(chosen).unwrap().0.to_matrix();
+            eyes.push(engine::gameplay::view_from_world(&component, matrix, 2.0).eye);
+        }
+        assert_eq!(eyes[0], Vec3::new(0.0, 1.0, 5.0));
+        assert_eq!(eyes[1], Vec3::new(3.0, 1.0, 5.0));
     }
 
     #[test]
@@ -1143,13 +1463,13 @@ mod tests {
             pressed: true,
             repeat: false,
         });
-        update_lua_input(&mut lua, &input);
+        update_lua_input(&mut lua, &input, false);
         assert_eq!(
             lua.update(0.1).expect("update"),
             vec![GameCommand::Log("true,true".into())]
         );
         input.end_frame();
-        update_lua_input(&mut lua, &input);
+        update_lua_input(&mut lua, &input, false);
         assert_eq!(
             lua.update(0.1).expect("update"),
             vec![GameCommand::Log("true,false".into())]
@@ -1244,6 +1564,37 @@ mod tests {
         assert_eq!(
             contacts.sample(&world, &physics),
             vec![event(engine::gameplay::ContactKind::Exit)]
+        );
+    }
+
+    #[test]
+    fn lua_input_snapshot_maps_platform_state() {
+        use engine::platform::{InputState, KeyCode, MouseButton, PlatformEvent};
+        let mut lua = LuaRuntime::new().expect("runtime");
+        lua.load_script(
+            "assets/scripts/main.lua",
+            "return { update = function() local dx, dy = engine.mouse_delta() \
+             engine.log(tostring(engine.key_pressed('Q')) .. ' ' .. tostring(engine.mouse_down('right')) .. ' ' .. dx .. ' ' .. dy .. ' ' .. tostring(engine.is_mouse_locked())) end }",
+        )
+        .expect("script");
+        let mut input = InputState::new();
+        input.apply_event(&PlatformEvent::KeyboardInput {
+            key: KeyCode::KeyQ,
+            pressed: true,
+            repeat: false,
+        });
+        input.apply_event(&PlatformEvent::MouseButtonInput {
+            button: MouseButton::Right,
+            pressed: true,
+        });
+        input.apply_event(&PlatformEvent::MouseMotion {
+            delta_x: 3.0,
+            delta_y: -4.0,
+        });
+        update_lua_input(&mut lua, &input, true);
+        assert_eq!(
+            lua.update(0.1).expect("update"),
+            vec![GameCommand::Log("true true 3.0 -4.0 true".into())]
         );
     }
 
@@ -1345,6 +1696,84 @@ mod tests {
     }
 
     #[test]
+    fn lua_can_raycast_during_update() {
+        use engine::gameplay::GameplayQueries;
+        use engine::physics::{ColliderBuilder, PhysicsWorld, RigidBodyBuilder};
+        let mut physics = PhysicsWorld::default();
+        let mut world = engine::prelude::World::new();
+        let (body, collider) = engine::ecs::components::RigidBody::spawn(
+            &mut physics,
+            RigidBodyBuilder::fixed().translation([0.0, 0.0, -5.0].into()),
+            ColliderBuilder::cuboid(2.0, 2.0, 0.5),
+        );
+        world.spawn((
+            engine::scene::SceneObjectId("wall-id".into()),
+            engine::ecs::components::Transform::default(),
+            body,
+            collider,
+        ));
+        physics.step(0.0).expect("refresh broad phase");
+        let mut lua = LuaRuntime::new().expect("runtime");
+        lua.load_script(
+            "assets/scripts/main.lua",
+            "return { update = function(dt)
+               local hit = engine.raycast(vec3(0,0,0), vec3(0,0,-1), 100)
+               engine.log(hit.object)
+             end }",
+        )
+        .expect("script");
+        sync_lua_scene(&mut lua, &world, &physics);
+        let queries = GameplayQueries::new(&world, &physics);
+        let commands = lua
+            .with_queries(&queries, |lua| lua.update(0.0))
+            .expect("scope")
+            .expect("frame");
+        assert_eq!(commands, vec![GameCommand::Log("wall-id".into())]);
+    }
+
+    #[test]
+    fn lua_snapshot_includes_dynamic_velocity() {
+        use engine::physics::{ColliderBuilder, PhysicsWorld, RigidBodyBuilder};
+        let mut physics = PhysicsWorld::default();
+        let mut world = engine::prelude::World::new();
+        for (id, builder) in [
+            ("ball", RigidBodyBuilder::dynamic()),
+            ("wall", RigidBodyBuilder::fixed()),
+        ] {
+            let (body, collider) = engine::ecs::components::RigidBody::spawn(
+                &mut physics,
+                builder,
+                ColliderBuilder::ball(0.5),
+            );
+            if id == "ball"
+                && let Some(rb) = physics.rapier.bodies.get_mut(body.0)
+            {
+                rb.set_linvel([1.0_f32, 2.0, 3.0].into(), true);
+            }
+            world.spawn((
+                engine::scene::SceneObjectId(id.into()),
+                engine::ecs::components::Transform::default(),
+                body,
+                collider,
+            ));
+        }
+        let mut lua = LuaRuntime::new().expect("runtime");
+        lua.load_script(
+            "assets/scripts/main.lua",
+            "return { update = function(dt) engine.log(tostring(engine.get_velocity('ball'))); engine.log(tostring(engine.get_velocity('wall'))) end }",
+        )
+        .expect("script");
+        sync_lua_scene(&mut lua, &world, &physics);
+        assert_eq!(
+            lua.update(0.0).expect("frame"),
+            vec![
+                GameCommand::Log("vec3(1, 2, 3)".into()),
+                GameCommand::Log("vec3(0, 0, 0)".into())
+            ]
+        );
+    }
+
+    #[test]
     fn lua_scene_snapshot_reads_live_world_after_movement() {
         let mut world = engine::prelude::World::new();
         world.spawn((
@@ -1359,7 +1788,7 @@ mod tests {
         )
         .expect("script");
 
-        sync_lua_scene(&mut lua, &world);
+        sync_lua_scene(&mut lua, &world, &engine::physics::PhysicsWorld::default());
         assert_eq!(
             lua.update(0.0).expect("first frame"),
             vec![GameCommand::Log("true".into())]
@@ -1371,7 +1800,7 @@ mod tests {
                 position: [2.0, 0.0, 0.0],
             }],
         );
-        sync_lua_scene(&mut lua, &world);
+        sync_lua_scene(&mut lua, &world, &engine::physics::PhysicsWorld::default());
         assert_eq!(
             lua.update(2.0).expect("next frame"),
             vec![GameCommand::Log("true".into())]
@@ -1387,7 +1816,7 @@ mod tests {
             "return { start = function() engine.set_var('coins', 2) end, update = function() engine.log(tostring(engine.get_var('coins'))) end }",
         )
         .expect("script");
-        sync_lua_scene(&mut lua, &world);
+        sync_lua_scene(&mut lua, &world, &engine::physics::PhysicsWorld::default());
         let commands = lua.start().expect("start");
         apply_commands(&mut world, commands);
         assert_eq!(
@@ -1418,7 +1847,7 @@ mod tests {
             &mut ui,
             &std::collections::HashMap::new(),
         );
-        sync_lua_scene(&mut lua, &world);
+        sync_lua_scene(&mut lua, &world, &engine::physics::PhysicsWorld::default());
         assert_eq!(
             lua.update(0.016).expect("update"),
             vec![GameCommand::Log("3".into())]
@@ -1554,12 +1983,12 @@ mod tests {
         std::fs::create_dir_all(&prefab_dir).expect("prefab directory");
         let prefab = engine::scene::Prefab::new(engine::scene::SceneEntity {
             name: Some("Crate".into()),
-            collider: Some(engine::scene::ColliderData {
-                shape: engine::scene::ColliderShape::Cuboid {
+            collider: Some(engine::scene::ColliderData::new(
+                engine::scene::ColliderShape::Cuboid {
                     half_extents: [1.0, 1.0, 1.0],
                 },
-                body: engine::scene::BodyKind::Fixed,
-            }),
+                engine::scene::BodyKind::Fixed,
+            )),
             transform: Some(engine::scene::TransformData {
                 translation: [9.0, 9.0, 9.0],
                 rotation: [0.0, 0.0, 0.0, 1.0],
@@ -1656,7 +2085,7 @@ mod tests {
         let mut world = engine::prelude::World::new();
         let lua = player.lua.as_mut().expect("Lua runtime");
         let assets = player.gameplay.assets().expect("assets");
-        sync_lua_scene(lua, &world);
+        sync_lua_scene(lua, &world, &engine::physics::PhysicsWorld::default());
         let spawned = engine::gameplay::apply_world_commands(
             &mut world,
             &lua.start().expect("start"),
@@ -1676,7 +2105,7 @@ mod tests {
         )
         .expect("commands");
         assert_eq!(spawned.len(), 1);
-        sync_lua_scene(lua, &world);
+        sync_lua_scene(lua, &world, &engine::physics::PhysicsWorld::default());
         assert_eq!(
             lua.update(0.1).expect("update"),
             vec![GameCommand::Log("true".into())]
@@ -1713,7 +2142,7 @@ mod tests {
             .scene()
             .instantiate_with_resolver(&mut world, &mut engine::scene::NullResolver);
         let lua = player.lua.as_mut().expect("Lua runtime");
-        sync_lua_scene(lua, &world);
+        sync_lua_scene(lua, &world, &engine::physics::PhysicsWorld::default());
         assert_eq!(
             lua.start().expect("start"),
             vec![GameCommand::Log("true".into())]
@@ -1733,9 +2162,9 @@ mod tests {
         let mut player = load_project(&root, None).expect("player");
         let mut world = engine::prelude::World::new();
         let lua = player.lua.as_mut().expect("Lua runtime");
-        sync_lua_scene(lua, &world);
+        sync_lua_scene(lua, &world, &engine::physics::PhysicsWorld::default());
         apply_commands(&mut world, lua.start().expect("start"));
-        sync_lua_scene(lua, &world);
+        sync_lua_scene(lua, &world, &engine::physics::PhysicsWorld::default());
         assert_eq!(
             lua.update(0.1).expect("update"),
             vec![GameCommand::Log("true".into())]
@@ -2134,5 +2563,59 @@ mod tests {
         let dir = temp_dir("noassets");
         assert!(open_assets(&dir).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn player_runs_scene_start_and_key_rules() {
+        // The window-bound hooks (`start_rules` after each start, `update_rules`
+        // in `update`) cannot run without a GPU context; this covers what the
+        // player feeds them: every key name a rule can use maps to one
+        // distinct platform key, and such rules load.
+        let mut seen = std::collections::HashSet::new();
+        for key in ScriptKey::ALL {
+            assert!(seen.insert(platform_key(*key)), "{} maps twice", key.name());
+        }
+        let scene = Scene {
+            entities: vec![engine::scene::SceneEntity {
+                object_id: Some("00000000-0000-4000-8000-0000000000a1".into()),
+                rules: vec![
+                    engine::scene::RuleData::new(
+                        engine::scene::RuleTrigger::SceneStart,
+                        engine::scene::RuleAction::SetGameState {
+                            state: engine::scene::GameStateName::Menu,
+                        },
+                    ),
+                    engine::scene::RuleData::new(
+                        engine::scene::RuleTrigger::KeyPressed {
+                            key: "Space".into(),
+                        },
+                        engine::scene::RuleAction::SetGameState {
+                            state: engine::scene::GameStateName::Playing,
+                        },
+                    ),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        scene.validate().expect("valid rules");
+        let mut world = engine::prelude::World::new();
+        scene.instantiate(&mut world);
+        let mut ui = engine::ui::Ui::new(800.0, 600.0);
+        let nodes = std::collections::HashMap::new();
+        let start = scene.apply_rule_event(
+            engine::scene::RuleEvent::SceneStart,
+            &mut world,
+            &mut ui,
+            &nodes,
+        );
+        assert_eq!(start.deferred.len(), 1);
+        let key = scene.apply_rule_event(
+            engine::scene::RuleEvent::KeyPressed("Space"),
+            &mut world,
+            &mut ui,
+            &nodes,
+        );
+        assert_eq!(key.deferred.len(), 1);
     }
 }

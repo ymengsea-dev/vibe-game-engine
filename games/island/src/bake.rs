@@ -388,14 +388,14 @@ fn build_scene(
         // Collide against the terrain model itself, not against a
         // separately generated approximation: whatever the hills look
         // like is what the player walks on.
-        collider: Some(ColliderData {
-            shape: ColliderShape::TriMesh {
+        collider: Some(ColliderData::new(
+            ColliderShape::TriMesh {
                 mesh: AssetRef {
                     id: terrain.id.clone(),
                 },
             },
-            body: BodyKind::Fixed,
-        }),
+            BodyKind::Fixed,
+        )),
         ..Default::default()
     }];
 
@@ -426,13 +426,13 @@ fn build_scene(
             transform,
             mesh_renderer: Some(trunks[variant].renderer()),
             is_static: true,
-            collider: Some(ColliderData {
-                shape: ColliderShape::Cylinder {
+            collider: Some(ColliderData::new(
+                ColliderShape::Cylinder {
                     half_height: TRUNK_COLLIDER.0,
                     radius: TRUNK_COLLIDER.1,
                 },
-                body: BodyKind::Fixed,
-            }),
+                BodyKind::Fixed,
+            )),
             ..Default::default()
         });
         entities.push(SceneEntity {
@@ -457,12 +457,12 @@ fn build_scene(
             transform: Some(TransformData::from(transform_of(placement))),
             mesh_renderer: Some(rocks[index % rocks.len()].renderer()),
             is_static: true,
-            collider: Some(ColliderData {
-                shape: ColliderShape::Ball {
+            collider: Some(ColliderData::new(
+                ColliderShape::Ball {
                     radius: ROCK_COLLIDER_RADIUS,
                 },
-                body: BodyKind::Fixed,
-            }),
+                BodyKind::Fixed,
+            )),
             ..Default::default()
         });
     }
@@ -478,6 +478,7 @@ fn build_scene(
                 },
                 gain: 0.5,
             }],
+            start_state: None,
         },
         ..Default::default()
     }

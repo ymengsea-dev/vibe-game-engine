@@ -23,7 +23,7 @@ use engine_ecs::components::{
 };
 
 use crate::capture::capture_renderables;
-use crate::format::{CameraData, Scene, SceneEntity, TransformData};
+use crate::format::{CameraData, CameraFollowData, Scene, SceneEntity, TransformData};
 use crate::resolve::{InstantiateReport, NullResolver, SceneResolver, insert_components};
 
 /// Resolves authored point lights against current parent-relative transforms.
@@ -42,6 +42,38 @@ pub fn point_lights_from_world(world: &mut World) -> Vec<engine_renderer::PointL
             range: light.0.range,
         })
         .collect()
+}
+
+/// Rewrites a captured camera's `eye`/`target`/`up` from the entity's world
+/// transform (its own `Transform` composed up the `ChildOf` chain) and marks
+/// the pose as transform-driven. An entity with no `Transform` keeps the
+/// component's own view and stays unmarked, so nothing is lost on reload.
+pub fn saved_camera_pose(world: &World, entity: Entity, mut saved: CameraData) -> CameraData {
+    saved.active = world
+        .get::<engine_ecs::components::ActiveCamera>(entity)
+        .is_some();
+    if world.get::<Transform>(entity).is_none() {
+        return saved;
+    }
+    let mut matrix = glam::Mat4::IDENTITY;
+    let mut current = Some(entity);
+    let mut steps = 0;
+    while let Some(e) = current {
+        if let Some(t) = world.get::<Transform>(e) {
+            matrix = t.0.to_matrix() * matrix;
+        }
+        steps += 1;
+        if steps > 4096 {
+            break;
+        }
+        current = world.get::<ChildOf>(e).map(ChildOf::parent);
+    }
+    let (eye, target, up) = crate::camera_pose::camera_world_pose(matrix);
+    saved.eye = eye.to_array();
+    saved.target = target.to_array();
+    saved.up = up.to_array();
+    saved.pose_from_transform = true;
+    saved
 }
 
 impl Scene {
@@ -77,6 +109,13 @@ impl Scene {
     /// doesn't depend on `Entity` internals); same-named entities keep
     /// their `World` iteration order.
     pub fn from_world(world: &mut World) -> Self {
+        Self::from_world_with_entities(world).0
+    }
+
+    /// [`Scene::from_world`], plus the entity behind each scene entry:
+    /// `result.1[i]` is the entity captured as `result.0.entities[i]`. The
+    /// editor uses it to copy part of a scene.
+    pub fn from_world_with_entities(world: &mut World) -> (Self, Vec<Entity>) {
         let mut query = world.query::<(
             Entity,
             &Name,
@@ -130,6 +169,12 @@ impl Scene {
             };
             scene_entity.object_id = Some(object_id);
             scene_entity.locked = world.get::<Lock>(*entity).is_some();
+            scene_entity.camera = scene_entity
+                .camera
+                .map(|saved| saved_camera_pose(world, *entity, saved));
+            scene_entity.camera_follow = world
+                .get::<engine_ecs::components::CameraFollow>(*entity)
+                .map(CameraFollowData::from);
             scene_entity.collider = world
                 .get::<crate::format::SceneCollider>(*entity)
                 .map(|carrier| carrier.0.clone());
@@ -170,6 +215,7 @@ impl Scene {
             .enumerate()
             .map(|(index, (entity, _))| (*entity, index))
             .collect();
+        let order: Vec<Entity> = collected.iter().map(|(entity, _)| *entity).collect();
 
         let entities = collected
             .into_iter()
@@ -183,22 +229,33 @@ impl Scene {
             })
             .collect();
 
-        Self {
-            version: crate::CURRENT_SCENE_VERSION,
-            entities,
-            // Scene-level, so it rides a world resource rather than an
-            // entity — same carrier reasoning, one level up.
-            nav_grid: world
-                .get_resource::<crate::format::SceneNavGrid>()
-                .map(|carrier| carrier.0.clone()),
-            lighting: world
-                .get_resource::<crate::format::SceneLighting>()
-                .map(|carrier| carrier.0),
-            environment: world
-                .get_resource::<crate::format::SceneEnvironment>()
-                .map(|carrier| carrier.0.clone())
-                .unwrap_or_default(),
-        }
+        (
+            Self {
+                version: crate::CURRENT_SCENE_VERSION,
+                entities,
+                // Scene-level, so it rides a world resource rather than an
+                // entity — same carrier reasoning, one level up.
+                nav_grid: world
+                    .get_resource::<crate::format::SceneNavGrid>()
+                    .map(|carrier| carrier.0.clone()),
+                lighting: world
+                    .get_resource::<crate::format::SceneLighting>()
+                    .map(|carrier| carrier.0),
+                environment: world
+                    .get_resource::<crate::format::SceneEnvironment>()
+                    .map(|carrier| carrier.0.clone())
+                    .unwrap_or_default(),
+            },
+            order,
+        )
+    }
+
+    /// Spawns `entities` into `world` as [`Scene::instantiate`] does, leaving
+    /// the world's scene-wide lighting, environment and nav grid alone. The
+    /// result is in `entities`-index order; `parent` indexes into `entities`.
+    pub fn spawn_entities(entities: &[SceneEntity], world: &mut World) -> Vec<Entity> {
+        let mut unresolved = 0;
+        spawn_scene_entities(entities, world, &mut NullResolver, &mut unresolved)
     }
 
     /// Spawns this scene's entities into `world` and returns them in
@@ -251,24 +308,7 @@ impl Scene {
         } else {
             world.insert_resource(crate::format::SceneEnvironment(self.environment.clone()));
         }
-        let spawned: Vec<Entity> = self
-            .entities
-            .iter()
-            .map(|scene_entity| {
-                let mut entity_mut = world.spawn_empty();
-                insert_components(&mut entity_mut, scene_entity, resolver, &mut unresolved);
-                entity_mut.id()
-            })
-            .collect();
-
-        for (index, scene_entity) in self.entities.iter().enumerate() {
-            if let Some(parent_index) = scene_entity.parent
-                && parent_index != index
-                && let Some(&parent) = spawned.get(parent_index)
-            {
-                world.entity_mut(spawned[index]).insert(ChildOf(parent));
-            }
-        }
+        let spawned = spawn_scene_entities(&self.entities, world, resolver, &mut unresolved);
 
         if unresolved > 0 {
             tracing::warn!(
@@ -285,12 +325,60 @@ impl Scene {
     }
 }
 
+/// Spawns every entry, then links parents: the entity-only part of
+/// [`Scene::instantiate_with_resolver`].
+fn spawn_scene_entities(
+    entities: &[SceneEntity],
+    world: &mut World,
+    resolver: &mut impl SceneResolver,
+    unresolved: &mut usize,
+) -> Vec<Entity> {
+    let spawned: Vec<Entity> = entities
+        .iter()
+        .map(|scene_entity| {
+            let mut entity_mut = world.spawn_empty();
+            insert_components(&mut entity_mut, scene_entity, resolver, unresolved);
+            entity_mut.id()
+        })
+        .collect();
+
+    for (index, scene_entity) in entities.iter().enumerate() {
+        if let Some(parent_index) = scene_entity.parent
+            && parent_index != index
+            && let Some(&parent) = spawned.get(parent_index)
+        {
+            world.entity_mut(spawned[index]).insert(ChildOf(parent));
+        }
+    }
+    spawned
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use engine_ecs::components::Script;
     use engine_utils::Transform as MathTransform;
     use glam::Vec3;
+
+    #[test]
+    fn saving_writes_eye_and_target_from_the_transform() {
+        let mut world = World::new();
+        let camera = engine_renderer::Camera::new(Vec3::ZERO, Vec3::NEG_Z, 16.0 / 9.0);
+        world.spawn((
+            Name::new("Cam"),
+            Transform(
+                MathTransform::from_translation(Vec3::new(1.0, 2.0, 3.0))
+                    .with_rotation(glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+            ),
+            Camera(camera),
+        ));
+        let scene = Scene::from_world(&mut world);
+        let saved = scene.entities[0].camera.unwrap();
+        assert!(saved.pose_from_transform);
+        assert!((Vec3::from_array(saved.eye) - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-4);
+        assert!((Vec3::from_array(saved.target) - Vec3::new(0.0, 2.0, 3.0)).length() < 1e-4);
+        assert!((camera.near - saved.near).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn authored_button_round_trips_and_mounts_as_clickable_screen_ui() {
@@ -348,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn mounted_ui_maps_labels_and_omits_disabled_objects() {
+    fn mounted_ui_maps_labels_and_hides_disabled_objects() {
         let mut scene = Scene::default();
         scene.entities.push(crate::SceneEntity {
             object_id: Some("label-id".into()),
@@ -363,10 +451,17 @@ mod tests {
         });
         let mut ui = engine_ui::Ui::new(400.0, 200.0);
         let nodes = scene.mount_ui(&mut ui);
-        assert_eq!(
-            nodes.values().collect::<Vec<_>>(),
-            vec![&"label-id".to_owned()]
-        );
+        assert_eq!(nodes.len(), 2);
+        for (node, id) in &nodes {
+            assert_eq!(ui.is_visible(*node), id == "label-id", "{id}");
+        }
+        // Showing the disabled element later works because it is mounted.
+        let (node, _) = nodes
+            .iter()
+            .find(|(_, id)| *id == "disabled-id")
+            .expect("mounted");
+        ui.set_visible(*node, true);
+        assert!(ui.is_visible(*node));
     }
 
     #[test]
@@ -1043,13 +1138,13 @@ mod tests {
         // 166 of them in the island's.
         use crate::format::{BodyKind, ColliderData, ColliderShape};
 
-        let collider = ColliderData {
-            shape: ColliderShape::Capsule {
+        let collider = ColliderData::new(
+            ColliderShape::Capsule {
                 half_height: 0.9,
                 radius: 0.35,
             },
-            body: BodyKind::Dynamic,
-        };
+            BodyKind::Dynamic,
+        );
         let scene = Scene {
             version: crate::CURRENT_SCENE_VERSION,
             entities: vec![SceneEntity {

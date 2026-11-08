@@ -79,6 +79,152 @@ impl From<engine_renderer::Camera> for Camera {
     }
 }
 
+/// Marks the [`Camera`] entity the game views the scene through.
+///
+/// When no camera carries it, the first camera in scene order is used.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActiveCamera;
+
+/// Which input turns a third-person follow camera around its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OrbitInput {
+    /// The camera never orbits.
+    None,
+    /// Mouse movement orbits.
+    #[default]
+    Mouse,
+    /// The right thumbstick orbits.
+    RightStick,
+    /// Mouse and right thumbstick both orbit.
+    Both,
+}
+
+/// How a [`CameraFollow`] camera tracks its target.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FollowMode {
+    /// Behind and above the target, orbiting around it.
+    ThirdPerson {
+        /// Distance from the look point to the camera.
+        distance: f32,
+        /// How far above the target's origin the camera looks.
+        height: f32,
+        /// Follow rate per second; higher is snappier.
+        smoothing: f32,
+        /// What input orbits the camera.
+        orbit: OrbitInput,
+        /// Lowest the camera may tilt, in degrees.
+        pitch_min_degrees: f32,
+        /// Highest the camera may tilt, in degrees.
+        pitch_max_degrees: f32,
+    },
+    /// At the target's head, turned by mouse or stick. Input-driven, so it has
+    /// no smoothing.
+    FirstPerson {
+        /// How far above the target's origin the eye sits.
+        height: f32,
+        /// What input turns the camera.
+        look: OrbitInput,
+        /// Lowest the camera may tilt, in degrees.
+        pitch_min_degrees: f32,
+        /// Highest the camera may tilt, in degrees.
+        pitch_max_degrees: f32,
+    },
+    /// Sideways 2D follow: x/y only, inside a dead zone, within bounds.
+    Side2D {
+        /// Half-size of the area around the camera the target can move in
+        /// before the camera follows.
+        dead_zone: [f32; 2],
+        /// `min_x, min_y, max_x, max_y` the camera position stays within.
+        bounds: Option<[f32; 4]>,
+        /// Follow rate per second; higher is snappier.
+        smoothing: f32,
+    },
+}
+
+impl FollowMode {
+    /// The default third-person settings.
+    pub const THIRD_PERSON: Self = Self::ThirdPerson {
+        distance: 6.0,
+        height: 1.5,
+        smoothing: 10.0,
+        orbit: OrbitInput::Mouse,
+        pitch_min_degrees: -60.0,
+        pitch_max_degrees: 70.0,
+    };
+
+    /// The default first-person settings.
+    pub const FIRST_PERSON: Self = Self::FirstPerson {
+        height: 1.6,
+        look: OrbitInput::Mouse,
+        pitch_min_degrees: -85.0,
+        pitch_max_degrees: 85.0,
+    };
+
+    /// The default 2D side settings.
+    pub const SIDE_2D: Self = Self::Side2D {
+        dead_zone: [2.0, 1.0],
+        bounds: None,
+        smoothing: 8.0,
+    };
+}
+
+/// A key that flips a follow camera between first and third person in the game.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewSwitch {
+    /// The key's script-visible name, such as `"V"`.
+    pub key: String,
+    /// The view the key switches to, with its own settings. The key swaps it
+    /// with [`CameraFollow::mode`].
+    pub other: FollowMode,
+}
+
+/// Runtime state of a third-person follow camera. Not saved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThirdPersonState {
+    /// The orbit rig: target, yaw and pitch.
+    pub rig: engine_renderer::CameraRig,
+    /// Where the smoothed eye is now; `None` until the first frame, which
+    /// snaps to the wanted position.
+    pub eye: Option<glam::Vec3>,
+    /// The last good look rotation, kept when a look is degenerate.
+    pub rotation: glam::Quat,
+}
+
+impl Default for ThirdPersonState {
+    fn default() -> Self {
+        Self {
+            rig: engine_renderer::CameraRig::new(glam::Vec3::ZERO),
+            eye: None,
+            rotation: glam::Quat::IDENTITY,
+        }
+    }
+}
+
+/// Makes a [`Camera`] object follow another object, by its stable scene id.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct CameraFollow {
+    /// `SceneObjectId` of the object to follow.
+    pub target: String,
+    /// How to follow it.
+    pub mode: FollowMode,
+    /// A key that switches view, if any.
+    pub switch: Option<ViewSwitch>,
+    /// Third-person runtime state (not saved).
+    pub state: ThirdPersonState,
+}
+
+impl CameraFollow {
+    /// A follow of `target` in `mode`, with fresh runtime state.
+    pub fn new(target: impl Into<String>, mode: FollowMode) -> Self {
+        Self {
+            target: target.into(),
+            mode,
+            switch: None,
+            state: ThirdPersonState::default(),
+        }
+    }
+}
+
 /// An entity that renders as a mesh: a handle to its geometry, a handle to
 /// its material binding, and the per-object GPU binding that lets its
 /// sibling [`Transform`] component actually move it (updated each frame by
@@ -675,12 +821,18 @@ pub struct SpriteSource {
     pub z_order: f32,
 }
 
-/// Marks an entity as disabled in the editor: the Scene view skips it and
-/// the hierarchy panel greys it out. A view-only marker for now — it
-/// does not stop simulation or scripts. Round-trips through
+/// Marks an entity as disabled. The hierarchy panel greys it out and Studio's
+/// Scene view still draws it. In a running game a disabled object is not
+/// drawn, has no physics (its body and colliders are switched off), and
+/// cannot be the active camera. Round-trips through
 /// `engine_scene::SceneEntity::disabled`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Disabled;
+
+/// Marks an entity as hidden by gameplay (`engine.set_visible`): it is not
+/// drawn, but keeps simulating. Runtime-only; it is not saved in scenes.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Hidden;
 
 /// Marks an entity as static — the editor treats it as non-moving. A
 /// view-only marker for now (a hook for later culling / batching); it

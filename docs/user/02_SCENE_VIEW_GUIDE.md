@@ -1,213 +1,156 @@
-# RustyEngine Studio — Scene View Guide
+# Scene View Guide
 
-The Scene View is where you build your game world: you place, select, move and arrange objects, sculpt terrain, paint tiles, and set scene-wide environment settings. It is an editing view. To see the game as a player will, press **Run**, which launches the game in its own window.
+The Scene View is where you build your game world. For keys and mouse moves, see [Shortcuts](01_KEYBOARD_SHORTCUTS.md).
 
-For the camera and selection controls, see [Keyboard and Mouse Shortcuts](01_KEYBOARD_SHORTCUTS.md).
+## The panel
 
----
-
-## Layout
-
-| Area | Location | Contents |
-| --- | --- | --- |
-| Header | Top of the panel | Centre: **Play**, **Pause** and **Step**. Right: navigation tools **Select** and **Hand**. Hover a button to see its name. |
-| Viewport | Centre | The 3D or 2D view of the scene |
-| Footer | Bottom of the panel | **3D / 2D**, **Global / Local**, **Overlays**, **Terrain**, **Tilemap**, **Environment** |
-
----
-
-## What you see in the viewport
-
-| Marker | Meaning |
+| Part | What is there |
 | --- | --- |
-| Yellow box | The selected object, fitted to its model. Selecting a parent also boxes its children. |
-| Arrows, rings and a centre square | The transform gizmo for the selected object (see below): red = X, green = Y, blue = Z. |
-| Round icon (camera, bulb, speaker) | An object that has a position but no visible shape: a camera, a point light, or a sound source. Click the icon to select the object. A yellow ring marks the selected icon. |
-| Red box | An object whose model is set but could not be loaded. Check that the file still exists in Project Assets. |
+| Top middle | **Play**, **Pause**, **Step** |
+| Top right | **Select** and **Hand** tools |
+| Bottom | **3D / 2D**, **Global / Local**, **Overlays**, **Terrain**, **Tilemap**, **Environment** |
 
-Objects with no shape and no special role (empty objects used to group others) show no marker. Select them in the Hierarchy.
+## What you see
 
----
+| Mark | Meaning |
+| --- | --- |
+| Yellow box | The selected object |
+| Arrows, rings, small squares | Handles to move, turn and stretch the selected object (red = X, green = Y, blue = Z) |
+| Round icon (camera, bulb, speaker) | An object you can't see in the game. Click the icon to select it. |
+| Red box | A model file that could not be loaded |
 
-## Navigation tools (header)
+Empty objects (like groups) show nothing. Select them in the Hierarchy.
 
-Two tools decide what a plain left-click or left-drag does. The highlighted button is the active tool.
+## Tools
 
-| Tool | Key | Left-click | Left-drag | Pointer |
-| --- | --- | --- | --- | --- |
-| **Select** (default) | V | Selects the object under the pointer | Drags the selected object's gizmo handles | Arrow |
-| **Hand** | H, or hold **Space** | Nothing | Moves the view; ⌘ + drag rotates it | Open hand |
+| Tool | What a left-drag does |
+| --- | --- |
+| **Select** (V) | Clicks select, drags move the handles |
+| **Hand** (H, or hold Space) | Moves the view |
 
-**Hold Space** to switch to Hand only while the key is down. Release it to return to Select. This is the quickest way to move around while editing.
+## Handles
 
-While Hand is active, gizmo handles are hidden and clicks do not change the selection. With either tool, the other camera controls keep working: ⌘ + drag or right-drag to rotate, pinch or the scroll wheel to zoom, double-click to glide, and **F** to frame the selection.
+| Handle | Drag it to |
+| --- | --- |
+| Arrow | Move along that line |
+| Ring (shows when the mouse is near the object) | Turn around that line |
+| Small square on an arrow | Stretch along that line |
+| White square in the centre | Make the whole object bigger or smaller |
 
----
-
-## Transform gizmo
-
-Select an object to show its gizmo. One gizmo moves, rotates and scales, so there is no mode to switch.
-
-| Handle | Looks like | Drag to |
-| --- | --- | --- |
-| **Arrows** | Red (X), green (Y) and blue (Z) arrows out of the object | Move the object along that axis. The object follows the pointer. |
-| **Scale knobs** | A small square on each arrow, in the arrow's colour | Stretch or squash the object along that axis only: drag toward the arrow tip to grow, toward the centre to shrink. |
-| **Rotation rings** | A thin arc around the object for each axis, in the same colours. They appear when you move the pointer near the object, and only the front half of each ring is drawn. | Turn the object around that axis, like a dial. Over a ring the pointer changes to a curved double arrow. |
-| **Centre square** | A small white square at the object's centre | Scale the whole object evenly: drag right or up to grow, left or down to shrink. Over the square or a scale knob the pointer changes to a small square with a diagonal double arrow, so scaling never looks like moving. |
-
-Away from the object you see only the arrows with their scale knobs and the centre square, so the gizmo stays uncluttered. Move the pointer toward the object and the rings appear; they stay faint until you hover one. The handle under the pointer brightens, and the handle you are dragging turns yellow. The gizmo is drawn on top of the scene and stays the same size on screen at any zoom.
-
-In the 2D view the gizmo shows the X and Y arrows (with their scale knobs) and a single ring for turning in the screen plane.
-
-A scale knob stretches the object along its own axis that lines up best with the knob's arrow. For an object that has not been rotated, that is exactly the arrow's axis. For a rotated object, check the result, or type exact values in the object's **Scale** fields in the Inspector.
-
-Every selected object that is not locked changes together. A locked object shows no gizmo.
-
----
+In 2D you get two arrows and one ring.
 
 ## Locked objects
 
-Lock an object to protect it from accidental changes while you work around it, for example the terrain while you place trees on it.
+When you drag a file from Project Assets over the Scene View, a ring with the file's name shows where it will land: on the object under the cursor (locked ones count, so a locked terrain works), else on the ground, else in front of the camera. In the 2D view it lands at the cursor. The object's own centre goes on that point, so a model whose centre is in its middle sits partly in the ground until you move it up. If a prefab can't be loaded, the Problems tab says why.
 
-| | Unlocked | Locked |
-| --- | --- | --- |
-| Click it in the Scene View | Selects it | Ignored; the click goes to whatever is behind it, or clears the selection |
-| Its icon (camera, light, sound) | Shown and clickable | Hidden |
-| Gizmo handles | Shown | Hidden; it cannot be moved, rotated or scaled with the gizmo |
-| Double-click it to glide the camera there | Works | Works; a locked terrain is still a surface you can fly to |
-| Select it in the Hierarchy | Works | Works, so you can still edit it in the Inspector or unlock it |
+The eye at the end of a Hierarchy row hides an object in the Scene View: it isn't drawn and can't be clicked, and its children go with it. This only affects the editor. It isn't saved in the scene, doesn't count as a change, and the game still shows the object. A hidden point light still lights the scene. Studio remembers what you hid the next time you open the project.
 
-To lock or unlock an object, right-click it in the Hierarchy and choose **Lock** or **Unlock**, or tick **Locked** in the Inspector. A lock icon appears next to locked objects in the Hierarchy. The lock is saved with the scene.
+A locked object can't be clicked or moved in the Scene View, so you don't change it by mistake. You can still select and edit it in the Hierarchy and Inspector. Lock it with right-click → **Lock**, or the **Locked** box in the Inspector.
 
----
+## Disabled objects
 
-## 3D / 2D
+A disabled object is still drawn in the Scene View, but in the game it is hidden, has no physics, and its scripts and rules wait. A rule or script can turn it back on. Disabling a parent also disables everything inside it.
 
-| Option | What happens |
+## Bottom bar
+
+| Button | What it does |
 | --- | --- |
-| **3D** | Perspective view. You can orbit, pan, zoom and fly. |
-| **2D** | Flat front view for sprites and tilemaps. You can pan and zoom; rotation is off. Tile painting is available only here. |
+| **3D** | Normal 3D view |
+| **2D** | Flat view for sprites and tiles. Tile painting works only here. |
+| **Global / Local** | Only **Global** works for now |
 
-Each mode keeps its own camera position.
-
-The first time you open a project, the Scene View shows its whole scene. To get that view back at any time, click empty space to select nothing and press **F**. After that, where you are looking, and whether 3D or 2D is showing, is saved automatically for each project and comes back when you reopen it. Moving, zooming or rotating the view never counts as an unsaved change, so it never makes Studio ask you to save.
-
----
-
-## Global / Local
-
-These two buttons in the footer are meant to switch the gizmo between world axes (**Global**) and the selected object's own axes (**Local**).
-
-> **Current limitation:** only **Global** works today. The gizmo always uses world axes, whichever option is chosen.
-
----
+3D and 2D each remember where you were looking. Studio also remembers your view for each project.
 
 ## Overlays
 
-Overlays are visual aids for building the scene. They are never shown in the running game. Each one turns on or off independently, and your choices are remembered per project.
+Helper drawings. The game never shows them.
 
-| Option | When on | Typical use |
-| --- | --- | --- |
-| **All colliders** | Draws every object's physics shape as a green wireframe, with the selected object's in yellow. | Checking where the player can walk or collide |
-| **Lights** | Draws a marker at each point light, with a ring at its range. | Placing lamps |
-| **Cameras** | Draws each camera's view volume. | Seeing what a game camera will show |
-| **Ground grid** | Draws a flat 40 × 40 m grid of 1 m squares at height 0, centred on the world origin. | Lining objects up and judging distances |
-| **Audio emitters** | Draws a marker at each sound source and a ring at the distance where it fades to silence. | Placing sounds and checking their reach |
-| **Nav grid** | Draws the scene's navigation grid: walkable cells outlined, blocked cells crossed out in red. | Checking where characters can find a path |
+| Overlay | Shows |
+| --- | --- |
+| **All colliders** | Physics shapes: green, the selected one yellow, triggers purple |
+| **Lights** | Each lamp and how far its light reaches |
+| **Cameras** | What each game camera sees |
+| **Ground grid** | 1 m squares on the floor |
+| **Audio emitters** | Each sound and how far it can be heard |
+| **Nav grid** | Where characters can walk (red = blocked) |
 
-With every overlay off, the scene looks the way it will in the game, apart from the selection markers.
+## Cameras
 
----
+A camera looks the way its object faces. Move and turn the object to aim it.
+
+| Setting | What it does |
+| --- | --- |
+| **Projection** | **Perspective** (normal 3D) or **Orthographic** (flat, for 2D) |
+| **Field of view** | How wide the camera sees (perspective) |
+| **Size** | How much fits on screen (orthographic) |
+| **Near**, **Far** | Closest and farthest things the camera draws |
+| **Active camera** | The camera the game uses. Only one. If none is ticked, the first camera is used. |
+
+**Camera Follow** (Add component, cameras only) makes the camera follow a **Target**:
+
+| Mode | Settings |
+| --- | --- |
+| **Third person** | **Distance** and **Height** behind the target, **Smoothing**, **Orbit with** (mouse or stick), **Pitch limits** |
+| **First person** | **Height** of the eye above the target's origin, **Look with** (mouse or stick), **Pitch limits**. The camera does not turn or move the target: walking still needs a Lua or Rust script, which can walk the way the camera faces |
+| **2D side** | **Dead zone** (how far the target moves before the camera does), **Limit to area**, **Smoothing** |
+
+**Switch view with a key** (first and third person only) flips the camera between the two while playing, like pressing V in many games, still looking the same way. Each view keeps its own settings: choose the other **Mode** to edit them.
+
+When the mouse turns a first- or third-person camera, the game locks the mouse by itself while it is being played and frees it when paused or in a menu. Buttons on screen can't be clicked while it is locked, so pause first, or free it from a script.
+
+Smoothing: higher stays closer, lower lags behind, 0 follows exactly.
+
+Limits: a following camera can't be inside another object. Things moved by animation show one frame late.
 
 ## Terrain
 
-| Option | What happens |
+| Option | What it does |
 | --- | --- |
-| **Create terrain** | Adds a flat terrain to the scene and saves it as a terrain file plus a model in Project Assets. |
-| **Create water** | Adds a water surface. Edit its size, waves and current in the Inspector. |
-| **Sculpt in Scene View** | Turns the left mouse button into a sculpting brush on the selected terrain. Each stroke is saved when you release the button and can be undone with ⌘Z. While on, left clicks do not select objects. |
-| **Brush** | **Raise** builds up, **Lower** digs down, **Smooth** evens out bumps, **Flatten** levels toward a fixed height. |
-| **Radius** | Size of the brush (0.01–100 m). |
-| **Strength** | How strongly each stroke changes the ground. |
-| **Density**, **Spacing**, **Seed** | Settings for foliage scatter (below). The same seed always gives the same layout. |
-| **Scatter selected model on terrain** | Places copies of a model across the terrain. Select the terrain in the Hierarchy and a model in Project Assets first. |
+| **Create terrain** | Adds flat ground |
+| **Create water** | Adds water. Change waves in the Inspector. |
+| **Sculpt in Scene View** | Drag on the ground to shape it with the **Brush**: **Raise**, **Lower**, **Smooth**, **Flatten**. Set **Radius** and **Strength**. |
+| **Scatter selected model** | Spreads copies of a model (trees, rocks) over the ground. **Density**, **Spacing**, **Seed** control how. |
 
-Scattered foliage is placed once. If you sculpt the terrain afterwards, delete the foliage group and scatter it again.
+If you reshape the ground after scattering, delete the copies and scatter again.
 
----
+## Tilemap (2D view)
 
-## Tilemap
-
-Available in the **2D** view.
-
-| Option | What happens |
+| Option | What it does |
 | --- | --- |
-| **Create from selected image** | Creates a tilemap that uses the image selected in Project Assets as its tile sheet. Set the grid and tile size in the Inspector. |
-| **Paint in Scene View** | Click or drag on the selected tilemap to paint the brush tile chosen in the Inspector. While on, left clicks do not select objects. |
-| **Erase cells** | Painting removes tiles instead of adding them. |
+| **Create from selected image** | Makes a tile map from an image in Project Assets |
+| **Paint in Scene View** | Click or drag to paint tiles |
+| **Erase cells** | Painting removes tiles |
 
-Turn on **Paint solid tiles** in the tilemap's Inspector to make painted tiles block movement. Tile painting can be undone with ⌘Z.
-
----
+Tick **Paint solid tiles** in the Inspector to make tiles block movement.
 
 ## Playing in the Scene View
 
-The three buttons in the middle of the header play your game inside the Scene View, for a quick look while you build the world.
-
-| Button | Shortcut | What it does |
+| Button | Key | What it does |
 | --- | --- | --- |
-| ▶ **Play** (■ **Stop** while playing) | ⌘P | Starts the game in the Scene View, or stops it |
-| ⏸ **Pause** | ⇧⌘P | Freezes the game: no time passes, nothing moves, sound is muted. Click again to resume. |
-| ⏭ **Step** | ⌥⌘P | While paused, advances the game by exactly one frame |
+| **Play / Stop** | ⌘P | Run the game right here |
+| **Pause** | ⇧⌘P | Freeze the game |
+| **Step** | ⌥⌘P | When paused, move one frame ahead |
 
-**What happens when you press Play:**
+- Play saves your scene first. Lua games start at once; Rust games build first if the code changed.
+- Click the game to control it. Click another panel to get the keyboard back.
+- If the game holds the mouse, press **Esc** to free it. Esc does not stop the game. Click the game to lock the mouse again; that click does not count as a click in the game.
+- You can't edit the scene while playing.
+- Errors show in **Output** and **Problems**.
 
-1. Unsaved changes to the scene are saved, as with **Run**.
-2. A Rust game is checked first, always in the Debug configuration (the fastest to compile). If you only changed the world (objects, lights, terrain), nothing needs compiling: the Scene View says "Starting the game…" and the game appears in about a second. Your world is read from the scene file when the game starts, so it never needs compiling. Only when Rust code changed does it say "Building the game…", compiling just the game's own code, with progress in the **Output** tab. A Lua game never compiles.
-3. The game appears in the Scene View with a thin frame around it (blue while the game has the keyboard), at the same shape as its picture (bars fill any leftover space).
+**Play or Run?** Play is a quick check inside Studio. **Run** opens the game in its own window, the way players see it.
 
-**Playing:**
-
-- **Click the game** to give it the keyboard and mouse. The frame turns brighter. Click any other panel to take the keyboard back.
-- While paused, a **Paused** badge shows at the top of the game.
-- The **Hierarchy** and **Inspector** are read-only while playing. The game runs from the saved scene file, so edits made now could not reach it.
-- Game messages appear in **Output**, and Lua errors in **Problems**, the same as with Run.
-- If the game stops with an error, a red banner across the Scene View says why. It disappears the next time you press Play.
-
-**Play compared with Run:**
-
-| | Play | Run |
-| --- | --- | --- |
-| Where | Inside the Scene View | The game's own window |
-| The game | The same program as Run | The same program |
-| Build | Always Debug | The selected build configuration |
-| Picture size | The Scene View's size (up to 1920×1080) | The game's own window size |
-| Pause and Step | Yes | No |
-
-Use Play for quick checks while you work, and Run to see exactly what players get, including full speed in a Release build.
-
-**Limits:**
-
-- Rust projects created with an older Studio need **File → Upgrade Rust SDK** before they can play in the Scene View. Studio says so if a game does not start in preview mode. **Run** works either way.
-- While paused you see the frozen picture only. You cannot move the editor camera around a paused game yet.
-- Only one game runs at a time: Play and Run cannot both be active.
-
----
+Limits: older Rust projects need **File → Upgrade Rust SDK** to play here. Play and Run can't both be on.
 
 ## Environment
 
-Scene-wide settings that have no position in the world.
+Settings for the whole scene.
 
-| Option | What happens |
+| Option | What it does |
 | --- | --- |
-| **Ambient sounds** | Sounds that loop at the same volume everywhere in the scene, such as wind or background music. Each has a **Volume** (0–4) and a **Remove** button. Up to 8 per scene. |
-| **Add selected sound** | Adds the sound file selected in Project Assets (WAV) as an ambient sound. |
-| **Create point light** | Adds a light at a position. Move it with the gizmo; set its color, strength and range in the Inspector. Up to 16 point lights nearest the camera light the scene at once. |
-| **Override scene lighting** | Gives the scene its own sun and ambient light instead of the default daylight. |
-| **Sun direction**, **Sun strength**, **Sun color** | Where the sunlight comes from, how bright it is, and its color. While this menu is open, a yellow arrow in the middle of the view shows which way the sunlight travels. |
-| **Ambient** | How bright the shaded areas are. |
+| **Ambient sounds** | Sounds heard everywhere, like wind or music (up to 8) |
+| **Add selected sound** | Adds the WAV file picked in Project Assets |
+| **Create point light** | Adds a lamp |
+| **Override scene lighting** | Set your own sun: **Sun direction**, **Sun strength**, **Sun color**, **Ambient** (shadow brightness) |
+| **Start state** | How the game starts: **Playing**, **Menu**, **Paused** or **Game over**. Only the first scene's choice counts. |
 
-A sound that belongs to an object (footsteps, an engine, a waterfall) is not an ambient sound. Add an **Audio Emitter** component to that object instead (Inspector → **Add component**), so the sound comes from the object and fades with distance.
-
-Ambient sounds play when the game runs (Play, Run or an exported game). They do not play while editing.
-
+A sound that comes from one thing (footsteps, a waterfall) goes on that object instead: Add component → **Audio Emitter**.

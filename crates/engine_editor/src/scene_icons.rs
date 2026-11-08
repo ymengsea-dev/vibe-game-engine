@@ -6,7 +6,7 @@
 //! select their object. Collecting and picking are pure and unit-tested; the
 //! shell supplies the camera matrix and paints with egui.
 
-use engine_ecs::components::{Disabled, Lock};
+use engine_ecs::components::{Disabled, Hidden, Lock};
 use engine_ecs::prelude::{Camera, Entity, World};
 use engine_scene::{SceneAudioEmitter, ScenePointLight};
 use glam::{Mat4, Vec2, Vec3};
@@ -39,7 +39,7 @@ pub struct SceneIcon {
     pub position: Vec3,
 }
 
-/// Every enabled, unlocked camera, point light and sound emitter, one icon each
+/// Every enabled, unlocked, unhidden camera, point light and sound emitter, one icon each
 /// (a camera wins over a light, a light over a sound, if one object is several).
 pub fn collect(world: &mut World) -> Vec<SceneIcon> {
     let mut query = world.query::<(
@@ -49,10 +49,13 @@ pub fn collect(world: &mut World) -> Vec<SceneIcon> {
         Option<&SceneAudioEmitter>,
         Option<&Disabled>,
         Option<&Lock>,
+        Option<&Hidden>,
     )>();
     let tagged: Vec<(Entity, IconKind)> = query
         .iter(world)
-        .filter(|(.., disabled, locked)| disabled.is_none() && locked.is_none())
+        .filter(|(.., disabled, locked, hidden)| {
+            disabled.is_none() && locked.is_none() && hidden.is_none()
+        })
         .filter_map(|(entity, camera, light, sound, ..)| {
             let kind = if camera.is_some() {
                 IconKind::Camera
@@ -105,39 +108,49 @@ pub fn paint(painter: &egui::Painter, kind: IconKind, at: egui::Pos2, selected: 
         egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70))
     };
     painter.circle_stroke(at, ICON_RADIUS_PX, ring);
-    let stroke = egui::Stroke::new(1.6, ink);
+    paint_glyph(painter, kind, at, 1.0, ink, palette.highlight);
+}
+
+/// Paints the symbol of `kind` centred at `at`, without a badge; the Hierarchy
+/// rows draw the same shapes smaller. `core` colours the light's centre dot.
+pub(crate) fn paint_glyph(
+    painter: &egui::Painter,
+    kind: IconKind,
+    at: egui::Pos2,
+    scale: f32,
+    ink: egui::Color32,
+    core: egui::Color32,
+) {
+    let point = |x: f32, y: f32| at + egui::vec2(x, y) * scale;
+    let stroke = egui::Stroke::new(1.6 * scale, ink);
     match kind {
         IconKind::Camera => {
             let body =
-                egui::Rect::from_center_size(at + egui::vec2(-2.5, 0.0), egui::vec2(11.0, 8.0));
-            painter.rect_filled(body, 1.5, ink);
+                egui::Rect::from_center_size(point(-2.5, 0.0), egui::vec2(11.0, 8.0) * scale);
+            painter.rect_filled(body, 1.5 * scale, ink);
             painter.add(egui::Shape::convex_polygon(
-                vec![
-                    at + egui::vec2(3.0, 0.0),
-                    at + egui::vec2(8.0, -4.0),
-                    at + egui::vec2(8.0, 4.0),
-                ],
+                vec![point(3.0, 0.0), point(8.0, -4.0), point(8.0, 4.0)],
                 ink,
                 egui::Stroke::NONE,
             ));
         }
         IconKind::Light => {
-            painter.circle_filled(at, 3.5, palette.highlight);
+            painter.circle_filled(at, 3.5 * scale, core);
             for step in 0..8 {
                 let angle = step as f32 * std::f32::consts::FRAC_PI_4;
-                let direction = egui::vec2(angle.cos(), angle.sin());
-                painter.line_segment([at + direction * 5.5, at + direction * 8.5], stroke);
+                let (x, y) = (angle.cos(), angle.sin());
+                painter.line_segment([point(x * 5.5, y * 5.5), point(x * 8.5, y * 8.5)], stroke);
             }
         }
         IconKind::Sound => {
             painter.add(egui::Shape::convex_polygon(
                 vec![
-                    at + egui::vec2(-7.0, -2.5),
-                    at + egui::vec2(-4.5, -2.5),
-                    at + egui::vec2(-0.5, -6.0),
-                    at + egui::vec2(-0.5, 6.0),
-                    at + egui::vec2(-4.5, 2.5),
-                    at + egui::vec2(-7.0, 2.5),
+                    point(-7.0, -2.5),
+                    point(-4.5, -2.5),
+                    point(-0.5, -6.0),
+                    point(-0.5, 6.0),
+                    point(-4.5, 2.5),
+                    point(-7.0, 2.5),
                 ],
                 ink,
                 egui::Stroke::NONE,
@@ -146,7 +159,7 @@ pub fn paint(painter: &egui::Painter, kind: IconKind, at: egui::Pos2, selected: 
                 let points: Vec<_> = (-3..=3)
                     .map(|step| {
                         let angle = step as f32 * 0.22;
-                        at + egui::vec2(1.0 + radius * angle.cos(), radius * angle.sin())
+                        point(1.0 + radius * angle.cos(), radius * angle.sin())
                     })
                     .collect();
                 painter.add(egui::Shape::line(points, stroke));
@@ -245,5 +258,26 @@ mod tests {
             projected[0].1.distance(Vec2::splat(100.0)) < 1e-3,
             "origin is centred"
         );
+    }
+
+    /// Writes `scene-icons.png`: the Scene View badges, plain and selected.
+    #[test]
+    #[ignore = "needs a GPU; writes scene-icons.png"]
+    fn snapshot_scene_icons() {
+        let path = crate::ui_snapshot::snapshot_dir().join("scene-icons.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(140.0, 100.0), 3.0, |ui| {
+            let painter = ui.painter();
+            painter.rect_filled(ui.max_rect(), 0.0, crate::theme::NIGHT.panel);
+            for (row, selected) in [(30.0, false), (70.0, true)] {
+                for (x, kind) in [
+                    (30.0, IconKind::Camera),
+                    (70.0, IconKind::Light),
+                    (110.0, IconKind::Sound),
+                ] {
+                    paint(painter, kind, egui::pos2(x, row), selected);
+                }
+            }
+        })
+        .expect("snapshot");
     }
 }

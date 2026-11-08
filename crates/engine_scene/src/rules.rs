@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use engine_ecs::prelude::World;
 use engine_ui::{NodeId, Ui};
 
-use crate::{RuleAction, RuleTrigger, Scene, SceneObjectId};
+use crate::{GameStateName, RuleAction, RuleTrigger, Scene, SceneObjectId};
 
 const MAX_RULE_EVENT_DISPATCHES: usize = 64;
 const MAX_RULE_ACTIONS_PER_DISPATCH: usize = 1024;
@@ -118,33 +118,179 @@ pub fn expand_variables(text: &str, variables: &RuleVariables) -> String {
 enum PendingEvent {
     UiClicked(String),
     Named(String),
+    SceneStart,
+    KeyPressed(String),
+    Contact {
+        kind: ContactRuleKind,
+        owner: String,
+        other: String,
+    },
+    Timer {
+        owner: String,
+        rule_index: usize,
+    },
+    VariableChanged(String),
+    StateChanged(GameStateName),
 }
 
-/// A UI click or a named gameplay event sent by Lua or Rust code.
+/// Which contact transition a [`RuleEvent::Contact`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactRuleKind {
+    /// Two solid objects began touching.
+    CollisionEnter,
+    /// Two solid objects stopped touching.
+    CollisionExit,
+    /// An overlap with a trigger volume began.
+    TriggerEnter,
+    /// An overlap with a trigger volume ended.
+    TriggerExit,
+}
+
+/// Something that can run visual rules: a UI click, a named event, or one of
+/// the runtime's own triggers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleEvent<'a> {
     /// Stable object ID of an authored UI Button.
     UiClicked(&'a str),
     /// Developer-defined event name.
     Named(&'a str),
+    /// The scene finished starting.
+    SceneStart,
+    /// The named key went down this frame.
+    KeyPressed(&'a str),
+    /// A contact seen from `owner`'s side; `other` is the object it touched.
+    Contact {
+        /// Transition reported.
+        kind: ContactRuleKind,
+        /// Object whose rules are considered.
+        owner: &'a str,
+        /// The object on the other side.
+        other: &'a str,
+    },
+    /// The timer rule `rule_index` of `owner` is due.
+    Timer {
+        /// Object that owns the rule.
+        owner: &'a str,
+        /// Position of the rule in the owner's rule list.
+        rule_index: usize,
+    },
+    /// The named variable changed value.
+    VariableChanged(&'a str),
+    /// The game state changed to this state.
+    StateChanged(GameStateName),
+}
+
+/// What dispatching one event did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuleOutcome {
+    /// Actions the dispatcher carried out itself.
+    pub applied: usize,
+    /// Actions that need the gameplay runtime (scene changes, object changes,
+    /// spawns, game state), in rule order.
+    pub deferred: Vec<RuleAction>,
+}
+
+impl PendingEvent {
+    fn from_event(event: RuleEvent<'_>) -> Self {
+        match event {
+            RuleEvent::UiClicked(id) => Self::UiClicked(id.to_owned()),
+            RuleEvent::Named(name) => Self::Named(name.to_owned()),
+            RuleEvent::SceneStart => Self::SceneStart,
+            RuleEvent::KeyPressed(key) => Self::KeyPressed(key.to_owned()),
+            RuleEvent::Contact { kind, owner, other } => Self::Contact {
+                kind,
+                owner: owner.to_owned(),
+                other: other.to_owned(),
+            },
+            RuleEvent::Timer { owner, rule_index } => Self::Timer {
+                owner: owner.to_owned(),
+                rule_index,
+            },
+            RuleEvent::VariableChanged(name) => Self::VariableChanged(name.to_owned()),
+            RuleEvent::StateChanged(state) => Self::StateChanged(state),
+        }
+    }
+
+    /// Whether the rule at `rule_index` of the object `owner_id` listens to this event.
+    fn matches(&self, owner_id: Option<&str>, rule_index: usize, trigger: &RuleTrigger) -> bool {
+        let with_ok = |with: &Option<String>, other: &String| {
+            with.as_deref().is_none_or(|expected| expected == other)
+        };
+        match (trigger, self) {
+            (RuleTrigger::UiClicked, Self::UiClicked(id)) => owner_id == Some(id.as_str()),
+            (RuleTrigger::Named(name), Self::Named(event_name)) => name == event_name,
+            (RuleTrigger::SceneStart, Self::SceneStart) => true,
+            (RuleTrigger::KeyPressed { key }, Self::KeyPressed(pressed)) => key == pressed,
+            (
+                RuleTrigger::CollisionEnter { with },
+                Self::Contact {
+                    kind: ContactRuleKind::CollisionEnter,
+                    owner,
+                    other,
+                },
+            )
+            | (
+                RuleTrigger::CollisionExit { with },
+                Self::Contact {
+                    kind: ContactRuleKind::CollisionExit,
+                    owner,
+                    other,
+                },
+            )
+            | (
+                RuleTrigger::TriggerEnter { with },
+                Self::Contact {
+                    kind: ContactRuleKind::TriggerEnter,
+                    owner,
+                    other,
+                },
+            )
+            | (
+                RuleTrigger::TriggerExit { with },
+                Self::Contact {
+                    kind: ContactRuleKind::TriggerExit,
+                    owner,
+                    other,
+                },
+            ) => owner_id == Some(owner.as_str()) && with_ok(with, other),
+            (
+                RuleTrigger::Timer { .. },
+                Self::Timer {
+                    owner,
+                    rule_index: due,
+                },
+            ) => owner_id == Some(owner.as_str()) && rule_index == *due,
+            (RuleTrigger::VariableChanged { name }, Self::VariableChanged(changed)) => {
+                name == changed
+            }
+            (RuleTrigger::StateChanged { state }, Self::StateChanged(entered)) => state == entered,
+            _ => false,
+        }
+    }
 }
 
 impl Scene {
-    /// Runs matching visual rules and returns the number of actions applied.
-    /// Missing targets are reported and skipped without stopping other rules.
-    /// Rules run in scene order, so a variable changed by one rule is seen by
-    /// the conditions of later rules in the same dispatch.
+    /// Runs matching visual rules. Missing targets are reported and skipped
+    /// without stopping other rules. Rules run in scene order, so a variable
+    /// changed by one rule is seen by the conditions of later rules in the
+    /// same dispatch.
+    ///
+    /// An owner with an object ID runs only while its live object exists and
+    /// is not `Disabled`, so enabling a scene-disabled object turns its rules
+    /// on. An owner without an ID does not run if disabled in the scene data.
+    /// Rules of objects created at
+    /// runtime (such as spawned prefabs) are not part of the scene and do not run.
     pub fn apply_rule_event(
         &self,
         event: RuleEvent<'_>,
         world: &mut World,
         ui: &mut Ui,
         ui_nodes: &HashMap<NodeId, String>,
-    ) -> usize {
+    ) -> RuleOutcome {
         let mut variables = world.remove_resource::<RuleVariables>().unwrap_or_default();
-        let applied = self.dispatch_rules(event, world, ui, ui_nodes, &mut variables);
+        let outcome = self.dispatch_rules(event, world, ui, ui_nodes, &mut variables);
         world.insert_resource(variables);
-        applied
+        outcome
     }
 
     fn dispatch_rules(
@@ -154,38 +300,36 @@ impl Scene {
         ui: &mut Ui,
         ui_nodes: &HashMap<NodeId, String>,
         variables: &mut RuleVariables,
-    ) -> usize {
-        let initial = match event {
-            RuleEvent::UiClicked(id) => PendingEvent::UiClicked(id.to_owned()),
-            RuleEvent::Named(name) => PendingEvent::Named(name.to_owned()),
-        };
-        let mut pending = VecDeque::from([initial]);
+    ) -> RuleOutcome {
+        // Which objects exist and are not disabled right now.
+        let mut live: HashMap<String, bool> = HashMap::new();
+        for entity in world.iter_entities() {
+            if let Some(id) = entity.get::<SceneObjectId>() {
+                live.insert(
+                    id.0.clone(),
+                    !entity.contains::<engine_ecs::components::Disabled>(),
+                );
+            }
+        }
+        let mut pending = VecDeque::from([PendingEvent::from_event(event)]);
+        let mut outcome = RuleOutcome::default();
         let mut dispatched = 0;
-        let mut applied = 0;
         let mut attempted = 0;
         let mut warned_limit = false;
         while let Some(event) = pending.pop_front() {
             dispatched += 1;
             for owner in &self.entities {
-                if owner.disabled {
-                    continue;
+                // An owner with an id is judged by the live `Disabled` marker,
+                // so enabling a scene-disabled object turns its rules on. An
+                // owner without one has only the scene data to go by.
+                match &owner.object_id {
+                    Some(id) if live.get(id) != Some(&true) => continue,
+                    None if owner.disabled => continue,
+                    _ => {}
                 }
-                for rule in &owner.rules {
-                    let matches = match (&rule.trigger, &event) {
-                        (RuleTrigger::UiClicked, PendingEvent::UiClicked(id)) => {
-                            owner.object_id.as_deref() == Some(id.as_str())
-                        }
-                        (RuleTrigger::Named(name), PendingEvent::Named(event_name)) => {
-                            name == event_name
-                        }
-                        _ => false,
-                    };
-                    if !matches
-                        || rule.condition.as_ref().is_some_and(|condition| {
-                            !condition
-                                .compare
-                                .holds(variables.get(&condition.variable), condition.value)
-                        })
+                for (rule_index, rule) in owner.rules.iter().enumerate() {
+                    if !event.matches(owner.object_id.as_deref(), rule_index, &rule.trigger)
+                        || !rule.conditions_hold(variables)
                     {
                         continue;
                     }
@@ -194,7 +338,7 @@ impl Scene {
                             limit = MAX_RULE_ACTIONS_PER_DISPATCH,
                             "visual rule action chain stopped at its action limit"
                         );
-                        return applied;
+                        return outcome;
                     }
                     attempted += 1;
                     let success = match &rule.action {
@@ -243,9 +387,19 @@ impl Scene {
                                 false
                             }
                         }
+                        // The gameplay runtime carries these out.
+                        RuleAction::ChangeScene { .. }
+                        | RuleAction::SetVisible { .. }
+                        | RuleAction::SetEnabled { .. }
+                        | RuleAction::SpawnPrefab { .. }
+                        | RuleAction::Destroy { .. }
+                        | RuleAction::SetGameState { .. } => {
+                            outcome.deferred.push(rule.action.clone());
+                            false
+                        }
                     };
                     if success {
-                        applied += 1;
+                        outcome.applied += 1;
                     } else if matches!(
                         rule.action,
                         RuleAction::SetUiText { .. } | RuleAction::PlayAudio { .. }
@@ -255,7 +409,7 @@ impl Scene {
                 }
             }
         }
-        applied
+        outcome
     }
 }
 
@@ -279,7 +433,7 @@ mod tests {
 
     fn rule(trigger: &str, action: RuleAction, condition: Option<RuleCondition>) -> RuleData {
         RuleData {
-            condition,
+            conditions: condition.into_iter().collect(),
             ..RuleData::new(RuleTrigger::Named(trigger.into()), action)
         }
     }
@@ -349,8 +503,11 @@ mod tests {
         let mut ui = Ui::new(800.0, 600.0);
         let nodes = scene.mount_ui(&mut ui);
         let mut world = World::new();
+        scene.instantiate(&mut world);
         let coin = |world: &mut World, ui: &mut Ui| {
-            scene.apply_rule_event(RuleEvent::Named("coin"), world, ui, &nodes)
+            scene
+                .apply_rule_event(RuleEvent::Named("coin"), world, ui, &nodes)
+                .applied
         };
 
         assert_eq!(coin(&mut world, &mut ui), 2, "win rule is skipped below 3");
@@ -372,6 +529,7 @@ mod tests {
         let mut ui = Ui::new(800.0, 600.0);
         let nodes = scene.mount_ui(&mut ui);
         let mut world = World::new();
+        scene.instantiate(&mut world);
         let mut variables = RuleVariables::default();
         variables.set("coins", 10.0).expect("set");
         world.insert_resource(variables);
@@ -388,7 +546,7 @@ mod tests {
             )],
         )"#;
         let scene = Scene::from_ron_str(text).expect("old rule format");
-        assert_eq!(scene.entities[0].rules[0].condition, None);
+        assert!(scene.entities[0].rules[0].conditions.is_empty());
         let saved = scene.to_ron_string().expect("serialize");
         assert!(
             !saved.contains("condition"),
@@ -419,6 +577,260 @@ mod tests {
             }),
         );
         assert!(scene.validate().is_err(), "condition name");
+    }
+
+    fn named_rule(trigger: RuleTrigger, action: RuleAction) -> RuleData {
+        RuleData::new(trigger, action)
+    }
+
+    fn cond(variable: &str, value: f64) -> RuleCondition {
+        RuleCondition {
+            variable: variable.into(),
+            compare: RuleCompare::GreaterOrEqual,
+            value,
+        }
+    }
+
+    fn scene_with(rules: Vec<RuleData>) -> Scene {
+        Scene {
+            entities: vec![SceneEntity {
+                rules,
+                ..SceneEntity::default()
+            }],
+            ..Scene::default()
+        }
+    }
+
+    #[test]
+    fn legacy_single_condition_round_trips_in_legacy_form() {
+        let text = r#"(
+            version: 5,
+            entities: [(
+                rules: [(trigger: Named("a"), action: EmitEvent(name: "b"),
+                    condition: Some((variable: "coins", compare: GreaterOrEqual, value: 3.0)))],
+            )],
+        )"#;
+        let scene = Scene::from_ron_str(text).expect("legacy condition");
+        let rule = &scene.entities[0].rules[0];
+        assert_eq!(rule.conditions.len(), 1);
+        assert_eq!(rule.match_mode, crate::RuleMatch::All);
+        let saved = scene.to_ron_string().expect("serialize");
+        assert!(saved.contains("condition:"), "{saved}");
+        assert!(!saved.contains("conditions:"), "{saved}");
+    }
+
+    #[test]
+    fn two_conditions_write_the_list_form() {
+        let mut rule = named_rule(
+            RuleTrigger::Named("a".into()),
+            RuleAction::EmitEvent { name: "b".into() },
+        );
+        rule.conditions = vec![cond("coins", 1.0), cond("lives", 1.0)];
+        rule.match_mode = crate::RuleMatch::Any;
+        let scene = scene_with(vec![rule]);
+        let saved = scene.to_ron_string().expect("serialize");
+        assert!(saved.contains("conditions:"), "{saved}");
+        assert!(saved.contains("match_mode: Any"), "{saved}");
+        assert_eq!(Scene::from_ron_str(&saved).expect("parse"), scene);
+    }
+
+    #[test]
+    fn any_and_all_conditions_evaluate() {
+        let mut variables = RuleVariables::default();
+        variables.set("coins", 2.0).expect("set");
+        variables.set("lives", 0.0).expect("set");
+        let mut rule = named_rule(
+            RuleTrigger::Named("a".into()),
+            RuleAction::EmitEvent { name: "b".into() },
+        );
+        assert!(rule.conditions_hold(&variables), "empty is true");
+        rule.conditions = vec![cond("coins", 1.0), cond("lives", 1.0)];
+        assert!(!rule.conditions_hold(&variables));
+        rule.match_mode = crate::RuleMatch::Any;
+        assert!(rule.conditions_hold(&variables));
+    }
+
+    #[test]
+    fn new_triggers_and_actions_round_trip() {
+        use crate::{GameStateName, SpawnAt};
+        let triggers = vec![
+            RuleTrigger::SceneStart,
+            RuleTrigger::KeyPressed {
+                key: "Space".into(),
+            },
+            RuleTrigger::CollisionEnter { with: None },
+            RuleTrigger::CollisionExit {
+                with: Some("3fa85f64-5717-4562-b3fc-2c963f66afa6".into()),
+            },
+            RuleTrigger::TriggerEnter { with: None },
+            RuleTrigger::TriggerExit { with: None },
+            RuleTrigger::Timer {
+                seconds: 1.5,
+                repeat: true,
+            },
+            RuleTrigger::VariableChanged {
+                name: "coins".into(),
+            },
+            RuleTrigger::StateChanged {
+                state: GameStateName::Paused,
+            },
+        ];
+        let actions = vec![
+            RuleAction::ChangeScene {
+                path: "scenes/b.ron".into(),
+            },
+            RuleAction::SetVisible {
+                target: LABEL.into(),
+                visible: false,
+            },
+            RuleAction::SetEnabled {
+                target: LABEL.into(),
+                enabled: true,
+            },
+            RuleAction::SpawnPrefab {
+                path: "assets/prefabs/Crate.prefab".into(),
+                at: SpawnAt::Object(LABEL.into()),
+            },
+            RuleAction::SpawnPrefab {
+                path: "assets/prefabs/Crate.prefab".into(),
+                at: SpawnAt::Position([1.0, 2.0, 3.0]),
+            },
+            RuleAction::Destroy {
+                target: LABEL.into(),
+            },
+            RuleAction::SetGameState {
+                state: GameStateName::GameOver,
+            },
+        ];
+        let mut rules: Vec<RuleData> = triggers
+            .into_iter()
+            .map(|t| named_rule(t, RuleAction::EmitEvent { name: "x".into() }))
+            .collect();
+        rules.extend(
+            actions
+                .into_iter()
+                .map(|a| named_rule(RuleTrigger::SceneStart, a)),
+        );
+        let scene = scene_with(rules);
+        scene.validate().expect("valid");
+        let text = scene.to_ron_string().expect("serialize");
+        assert_eq!(Scene::from_ron_str(&text).expect("parse"), scene);
+    }
+
+    #[test]
+    fn validate_rejects_bad_new_rules() {
+        use crate::SpawnAt;
+        let emit = || RuleAction::EmitEvent { name: "x".into() };
+        let trig = |t: RuleTrigger| scene_with(vec![named_rule(t, emit())]);
+        let act = |a: RuleAction| scene_with(vec![named_rule(RuleTrigger::SceneStart, a)]);
+
+        let mut many = named_rule(RuleTrigger::SceneStart, emit());
+        many.conditions = (0..9).map(|_| cond("a", 0.0)).collect();
+        assert!(scene_with(vec![many.clone()]).validate().is_err(), "9");
+        many.conditions.truncate(8);
+        assert!(scene_with(vec![many]).validate().is_ok(), "8");
+
+        for seconds in [0.0, 0.04, 3601.0, f32::NAN] {
+            assert!(
+                trig(RuleTrigger::Timer {
+                    seconds,
+                    repeat: false
+                })
+                .validate()
+                .is_err(),
+                "{seconds}"
+            );
+        }
+        for seconds in [0.05, 3600.0] {
+            assert!(
+                trig(RuleTrigger::Timer {
+                    seconds,
+                    repeat: true
+                })
+                .validate()
+                .is_ok(),
+                "{seconds}"
+            );
+        }
+        for key in [
+            "",
+            "a
+b",
+            &"k".repeat(33),
+        ] {
+            assert!(
+                trig(RuleTrigger::KeyPressed { key: key.into() })
+                    .validate()
+                    .is_err()
+            );
+        }
+        assert!(
+            trig(RuleTrigger::VariableChanged {
+                name: String::new()
+            })
+            .validate()
+            .is_err()
+        );
+        assert!(
+            act(RuleAction::SetVisible {
+                target: String::new(),
+                visible: true
+            })
+            .validate()
+            .is_err()
+        );
+        assert!(
+            act(RuleAction::SetEnabled {
+                target: String::new(),
+                enabled: true
+            })
+            .validate()
+            .is_err()
+        );
+        assert!(
+            act(RuleAction::Destroy {
+                target: String::new()
+            })
+            .validate()
+            .is_err()
+        );
+        for path in [
+            "assets/a.ron",
+            "scenes/a.txt",
+            "../scenes/a.ron",
+            "/scenes/a.ron",
+        ] {
+            assert!(
+                act(RuleAction::ChangeScene { path: path.into() })
+                    .validate()
+                    .is_err(),
+                "{path}"
+            );
+        }
+        for path in [
+            "scenes/a.prefab",
+            "assets/other/a.prefab",
+            "assets/prefabs/../a.prefab",
+            "assets/prefabs/a.ron",
+        ] {
+            assert!(
+                act(RuleAction::SpawnPrefab {
+                    path: path.into(),
+                    at: SpawnAt::Position([0.0; 3])
+                })
+                .validate()
+                .is_err(),
+                "{path}"
+            );
+        }
+        assert!(
+            act(RuleAction::SpawnPrefab {
+                path: "assets/prefabs/a.prefab".into(),
+                at: SpawnAt::Position([f32::INFINITY, 0.0, 0.0]),
+            })
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
@@ -487,5 +899,212 @@ mod tests {
         assert!(scene.validate().is_err());
         scene.entities[0].rules[1].graph_position = Some([0.0, 2.0e6]);
         assert!(scene.validate().is_err());
+    }
+
+    const OWNER: &str = "00000000-0000-4000-8000-0000000000a1";
+    const OTHER: &str = "00000000-0000-4000-8000-0000000000b2";
+
+    fn owner_scene(triggers: Vec<RuleTrigger>) -> Scene {
+        Scene {
+            entities: vec![SceneEntity {
+                object_id: Some(OWNER.into()),
+                rules: triggers
+                    .into_iter()
+                    .map(|trigger| {
+                        RuleData::new(
+                            trigger,
+                            RuleAction::AddToVariable {
+                                name: "hits".into(),
+                                amount: 1.0,
+                            },
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn fire(scene: &Scene, world: &mut World, event: RuleEvent<'_>) -> RuleOutcome {
+        let mut ui = Ui::new(800.0, 600.0);
+        scene.apply_rule_event(event, world, &mut ui, &HashMap::new())
+    }
+
+    fn hits(world: &World) -> f64 {
+        world
+            .get_resource::<RuleVariables>()
+            .map_or(0.0, |variables| variables.get("hits"))
+    }
+
+    #[test]
+    fn contact_rules_match_the_owner_side_and_the_with_filter() {
+        let scene = owner_scene(vec![
+            RuleTrigger::CollisionEnter { with: None },
+            RuleTrigger::CollisionEnter {
+                with: Some(OTHER.into()),
+            },
+            RuleTrigger::TriggerExit { with: None },
+        ]);
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        let contact = |kind, owner, other| RuleEvent::Contact { kind, owner, other };
+        let enter = ContactRuleKind::CollisionEnter;
+        // Any object matches the first rule, OTHER also matches the second.
+        assert_eq!(
+            fire(&scene, &mut world, contact(enter, OWNER, OTHER)).applied,
+            2
+        );
+        assert_eq!(
+            fire(&scene, &mut world, contact(enter, OWNER, "stranger")).applied,
+            1
+        );
+        // A contact seen from another object's side is not this owner's.
+        assert_eq!(
+            fire(&scene, &mut world, contact(enter, "stranger", OWNER)).applied,
+            0
+        );
+        // The wrong kind does not match.
+        let exit = ContactRuleKind::CollisionExit;
+        assert_eq!(
+            fire(&scene, &mut world, contact(exit, OWNER, OTHER)).applied,
+            0
+        );
+        let trigger_exit = ContactRuleKind::TriggerExit;
+        assert_eq!(
+            fire(&scene, &mut world, contact(trigger_exit, OWNER, "any")).applied,
+            1
+        );
+        assert_eq!(hits(&world), 4.0);
+    }
+
+    #[test]
+    fn runtime_triggers_match_their_events() {
+        let scene = owner_scene(vec![
+            RuleTrigger::SceneStart,
+            RuleTrigger::KeyPressed {
+                key: "Space".into(),
+            },
+            RuleTrigger::Timer {
+                seconds: 1.0,
+                repeat: false,
+            },
+            RuleTrigger::VariableChanged {
+                name: "score".into(),
+            },
+            RuleTrigger::StateChanged {
+                state: GameStateName::Paused,
+            },
+        ]);
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        let count = |world: &mut World, event| fire(&scene, world, event).applied;
+        assert_eq!(count(&mut world, RuleEvent::SceneStart), 1);
+        assert_eq!(count(&mut world, RuleEvent::KeyPressed("Space")), 1);
+        assert_eq!(count(&mut world, RuleEvent::KeyPressed("W")), 0);
+        let timer = |owner, rule_index| RuleEvent::Timer { owner, rule_index };
+        assert_eq!(count(&mut world, timer(OWNER, 2)), 1);
+        assert_eq!(count(&mut world, timer(OWNER, 1)), 0, "not a timer rule");
+        assert_eq!(count(&mut world, timer("stranger", 2)), 0);
+        assert_eq!(count(&mut world, RuleEvent::VariableChanged("score")), 1);
+        assert_eq!(count(&mut world, RuleEvent::VariableChanged("other")), 0);
+        assert_eq!(
+            count(&mut world, RuleEvent::StateChanged(GameStateName::Paused)),
+            1
+        );
+        assert_eq!(
+            count(&mut world, RuleEvent::StateChanged(GameStateName::Menu)),
+            0
+        );
+    }
+
+    #[test]
+    fn rules_of_destroyed_or_disabled_owners_do_not_fire() {
+        let scene = owner_scene(vec![RuleTrigger::SceneStart]);
+        let mut world = World::new();
+        let spawned = scene.instantiate(&mut world);
+        assert_eq!(fire(&scene, &mut world, RuleEvent::SceneStart).applied, 1);
+
+        world
+            .entity_mut(spawned[0])
+            .insert(engine_ecs::components::Disabled);
+        assert_eq!(fire(&scene, &mut world, RuleEvent::SceneStart).applied, 0);
+
+        world
+            .entity_mut(spawned[0])
+            .remove::<engine_ecs::components::Disabled>();
+        assert_eq!(fire(&scene, &mut world, RuleEvent::SceneStart).applied, 1);
+
+        world.despawn(spawned[0]);
+        assert_eq!(fire(&scene, &mut world, RuleEvent::SceneStart).applied, 0);
+
+        let mut scene = scene;
+        scene.entities[0].disabled = true;
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        assert_eq!(fire(&scene, &mut world, RuleEvent::SceneStart).applied, 0);
+    }
+
+    #[test]
+    fn a_scene_disabled_owner_fires_once_it_is_enabled() {
+        let mut scene = owner_scene(vec![RuleTrigger::SceneStart]);
+        scene.entities[0].disabled = true;
+        let mut world = World::new();
+        let spawned = scene.instantiate(&mut world);
+        assert_eq!(fire(&scene, &mut world, RuleEvent::SceneStart).applied, 0);
+        world
+            .entity_mut(spawned[0])
+            .remove::<engine_ecs::components::Disabled>();
+        assert_eq!(fire(&scene, &mut world, RuleEvent::SceneStart).applied, 1);
+    }
+
+    #[test]
+    fn runtime_actions_are_deferred_in_rule_order() {
+        let actions = vec![
+            RuleAction::ChangeScene {
+                path: "scenes/b.ron".into(),
+            },
+            RuleAction::SetVisible {
+                target: OTHER.into(),
+                visible: false,
+            },
+            RuleAction::SetEnabled {
+                target: OTHER.into(),
+                enabled: false,
+            },
+            RuleAction::SpawnPrefab {
+                path: "assets/prefabs/Crate.prefab".into(),
+                at: crate::SpawnAt::Object(OTHER.into()),
+            },
+            RuleAction::Destroy {
+                target: OTHER.into(),
+            },
+            RuleAction::SetGameState {
+                state: GameStateName::GameOver,
+            },
+        ];
+        let mut scene = owner_scene(vec![]);
+        scene.entities[0].rules = actions
+            .iter()
+            .map(|action| RuleData::new(RuleTrigger::SceneStart, action.clone()))
+            .collect();
+        scene.entities[0].rules.insert(
+            3,
+            RuleData::new(
+                RuleTrigger::SceneStart,
+                RuleAction::AddToVariable {
+                    name: "hits".into(),
+                    amount: 1.0,
+                },
+            ),
+        );
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        let outcome = fire(&scene, &mut world, RuleEvent::SceneStart);
+        assert_eq!(
+            outcome.applied, 1,
+            "the variable change ran in the dispatcher"
+        );
+        assert_eq!(outcome.deferred, actions);
     }
 }

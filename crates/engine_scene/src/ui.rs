@@ -50,15 +50,13 @@ impl From<UiAnchor> for Anchor {
 
 impl Scene {
     /// Rebuilds authored labels and buttons for this scene. Node IDs map to
-    /// stable scene object IDs for gameplay commands. Disabled objects are omitted.
+    /// stable scene object IDs for gameplay commands. Disabled elements are mounted
+    /// hidden, so showing or enabling them later works.
     pub fn mount_ui(&self, ui: &mut Ui) -> HashMap<NodeId, String> {
         ui.clear();
         let mut nodes = HashMap::new();
         for entity in &self.entities {
             let Some(data) = &entity.ui else { continue };
-            if entity.disabled {
-                continue;
-            }
             let color = Color {
                 r: data.color[0],
                 g: data.color[1],
@@ -89,6 +87,9 @@ impl Scene {
                 },
                 widget,
             );
+            if entity.disabled {
+                ui.set_visible(node, false);
+            }
             if let Some(id) = &entity.object_id {
                 nodes.insert(node, id.clone());
             }
@@ -141,7 +142,8 @@ mod rule_tests {
                                 target: label_id.into(),
                                 text: "First".into(),
                             },
-                            condition: None,
+                            conditions: Vec::new(),
+                            match_mode: crate::RuleMatch::All,
                             graph_position: None,
                         },
                         RuleData {
@@ -149,7 +151,8 @@ mod rule_tests {
                             action: RuleAction::EmitEvent {
                                 name: "stage_two".into(),
                             },
-                            condition: None,
+                            conditions: Vec::new(),
+                            match_mode: crate::RuleMatch::All,
                             graph_position: None,
                         },
                     ],
@@ -164,7 +167,8 @@ mod rule_tests {
                             target: label_id.into(),
                             text: "Second".into(),
                         },
-                        condition: None,
+                        conditions: Vec::new(),
+                        match_mode: crate::RuleMatch::All,
                         graph_position: None,
                     }],
                     ..Default::default()
@@ -178,8 +182,11 @@ mod rule_tests {
         let mut ui = Ui::new(800.0, 600.0);
         let nodes = scene.mount_ui(&mut ui);
         let mut world = World::new();
+        scene.instantiate(&mut world);
         assert_eq!(
-            scene.apply_rule_event(RuleEvent::UiClicked(button_id), &mut world, &mut ui, &nodes),
+            scene
+                .apply_rule_event(RuleEvent::UiClicked(button_id), &mut world, &mut ui, &nodes)
+                .applied,
             3
         );
         let label_node = nodes
@@ -201,7 +208,8 @@ mod rule_tests {
                     action: RuleAction::EmitEvent {
                         name: "again".into(),
                     },
-                    condition: None,
+                    conditions: Vec::new(),
+                    match_mode: crate::RuleMatch::All,
                     graph_position: None,
                 }],
                 ..Default::default()
@@ -211,12 +219,14 @@ mod rule_tests {
         scene.validate().expect("valid cyclic graph");
         let mut ui = Ui::new(800.0, 600.0);
         let mut world = World::new();
-        let count = scene.apply_rule_event(
-            RuleEvent::Named("again"),
-            &mut world,
-            &mut ui,
-            &HashMap::new(),
-        );
+        let count = scene
+            .apply_rule_event(
+                RuleEvent::Named("again"),
+                &mut world,
+                &mut ui,
+                &HashMap::new(),
+            )
+            .applied;
         assert!((1..=64).contains(&count), "a cycle must terminate promptly");
     }
 
@@ -238,7 +248,8 @@ mod rule_tests {
                         target: label_id.into(),
                         text: "Still running".into(),
                     },
-                    condition: None,
+                    conditions: Vec::new(),
+                    match_mode: crate::RuleMatch::All,
                     graph_position: None,
                 });
                 rules.push(RuleData {
@@ -246,7 +257,8 @@ mod rule_tests {
                     action: RuleAction::EmitEvent {
                         name: "loop".into(),
                     },
-                    condition: None,
+                    conditions: Vec::new(),
+                    match_mode: crate::RuleMatch::All,
                     graph_position: None,
                 });
             }
@@ -259,7 +271,9 @@ mod rule_tests {
         let mut ui = Ui::new(800.0, 600.0);
         let nodes = scene.mount_ui(&mut ui);
         let mut world = World::new();
-        let count = scene.apply_rule_event(RuleEvent::Named("loop"), &mut world, &mut ui, &nodes);
+        let count = scene
+            .apply_rule_event(RuleEvent::Named("loop"), &mut world, &mut ui, &nodes)
+            .applied;
         assert!((1..=1024).contains(&count), "actions must stay bounded");
     }
 
@@ -278,7 +292,8 @@ mod rule_tests {
                             target: label_id.into(),
                             text: "Ready".into(),
                         },
-                        condition: None,
+                        conditions: Vec::new(),
+                        match_mode: crate::RuleMatch::All,
                         graph_position: None,
                     }],
                     ..Default::default()
@@ -294,8 +309,11 @@ mod rule_tests {
         let mut ui = Ui::new(800.0, 600.0);
         let nodes = scene.mount_ui(&mut ui);
         let mut world = World::new();
+        scene.instantiate(&mut world);
         assert_eq!(
-            scene.apply_rule_event(RuleEvent::UiClicked(button_id), &mut world, &mut ui, &nodes),
+            scene
+                .apply_rule_event(RuleEvent::UiClicked(button_id), &mut world, &mut ui, &nodes)
+                .applied,
             1
         );
         let label_node = nodes
@@ -307,7 +325,9 @@ mod rule_tests {
             Widget::Label { text, .. } if text == "Ready"
         ));
         assert_eq!(
-            scene.apply_rule_event(RuleEvent::UiClicked(label_id), &mut world, &mut ui, &nodes),
+            scene
+                .apply_rule_event(RuleEvent::UiClicked(label_id), &mut world, &mut ui, &nodes)
+                .applied,
             0
         );
     }
@@ -324,7 +344,8 @@ mod rule_tests {
                         action: RuleAction::PlayAudio {
                             target: audio_id.into(),
                         },
-                        condition: None,
+                        conditions: Vec::new(),
+                        match_mode: crate::RuleMatch::All,
                         graph_position: None,
                     },
                     RuleData {
@@ -332,7 +353,8 @@ mod rule_tests {
                         action: RuleAction::PlayAudio {
                             target: missing_id.into(),
                         },
-                        condition: None,
+                        conditions: Vec::new(),
+                        match_mode: crate::RuleMatch::All,
                         graph_position: None,
                     },
                 ],
@@ -351,11 +373,15 @@ mod rule_tests {
         let nodes = HashMap::new();
 
         assert_eq!(
-            scene.apply_rule_event(RuleEvent::Named("other"), &mut world, &mut ui, &nodes),
+            scene
+                .apply_rule_event(RuleEvent::Named("other"), &mut world, &mut ui, &nodes)
+                .applied,
             0
         );
         assert_eq!(
-            scene.apply_rule_event(RuleEvent::Named("game_start"), &mut world, &mut ui, &nodes),
+            scene
+                .apply_rule_event(RuleEvent::Named("game_start"), &mut world, &mut ui, &nodes)
+                .applied,
             1
         );
     }

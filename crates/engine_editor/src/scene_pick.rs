@@ -155,6 +155,23 @@ pub struct PickHit {
     pub point: Vec3,
 }
 
+/// How far past the camera's orbit distance the ground still catches a drop,
+/// as a multiple of it. A ray near the horizon meets the ground very far away.
+const GROUND_RANGE: f32 = 50.0;
+
+/// Where something dropped along `ray` lands: on the object hit, else on the
+/// ground (`y = 0`), else `fallback_distance` in front of the camera.
+pub fn placement_point(hit: Option<Vec3>, ray: Ray, fallback_distance: f32) -> Vec3 {
+    if let Some(point) = hit {
+        return point;
+    }
+    let to_ground = -ray.origin.y / ray.direction.y;
+    if to_ground.is_finite() && to_ground > 0.0 && to_ground <= fallback_distance * GROUND_RANGE {
+        return ray.origin + ray.direction * to_ground;
+    }
+    ray.origin + ray.direction * fallback_distance
+}
+
 /// The object nearest along `ray` and the point where it was hit.
 /// `mesh_geometry` returns a mesh's imported vertices and indices; objects
 /// without loaded geometry (other than sprites) are not hit, nor are
@@ -171,11 +188,14 @@ pub fn pick_hit<'a>(
         Option<&SpriteSource>,
         Option<&Disabled>,
         Option<&Lock>,
+        Option<&engine_ecs::components::Hidden>,
     )>();
     let candidates: Vec<(Entity, Option<MeshSource>, Option<[f32; 2]>)> = query
         .iter(world)
-        .filter(|(.., disabled, lock)| {
-            disabled.is_none() && (lock.is_none() || locked == LockedObjects::Include)
+        .filter(|(.., disabled, lock, hidden)| {
+            disabled.is_none()
+                && hidden.is_none()
+                && (lock.is_none() || locked == LockedObjects::Include)
         })
         .filter(|(_, mesh, sprite, ..)| mesh.is_some() || sprite.is_some())
         .map(|(entity, mesh, sprite, ..)| (entity, mesh.cloned(), sprite.map(|s| s.size)))
@@ -219,6 +239,37 @@ pub fn pick_hit<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_drop_lands_on_the_object_then_the_ground_then_in_front_of_the_camera() {
+        let down = Ray {
+            origin: Vec3::new(1.0, 10.0, 2.0),
+            direction: Vec3::NEG_Y,
+        };
+        let on_object = Vec3::new(1.0, 4.0, 2.0);
+        assert_eq!(placement_point(Some(on_object), down, 5.0), on_object);
+        assert_eq!(placement_point(None, down, 5.0), Vec3::new(1.0, 0.0, 2.0));
+
+        let up = Ray {
+            origin: Vec3::new(0.0, 1.0, 0.0),
+            direction: Vec3::Y,
+        };
+        assert_eq!(placement_point(None, up, 5.0), Vec3::new(0.0, 6.0, 0.0));
+
+        let level = Ray {
+            origin: Vec3::new(0.0, 1.0, 0.0),
+            direction: Vec3::X,
+        };
+        assert_eq!(placement_point(None, level, 5.0), Vec3::new(5.0, 1.0, 0.0));
+
+        // Nearly level: the ground is too far away to be what was meant.
+        let horizon = Ray {
+            origin: Vec3::new(0.0, 100.0, 0.0),
+            direction: Vec3::new(1.0, -0.001, 0.0).normalize(),
+        };
+        let landed = placement_point(None, horizon, 5.0);
+        assert!(landed.x < 6.0, "stayed near the camera, got {landed}");
+    }
     use engine_ecs::components::Transform;
     use engine_utils::Transform as MathTransform;
 

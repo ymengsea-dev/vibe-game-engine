@@ -220,6 +220,8 @@ pub struct Node {
     /// button stops being reachable, and a [`Widget::Panel`] acting as a
     /// list row becomes reachable.
     pub focusable: bool,
+    /// Whether this node (and so its children) is shown; see [`Ui::set_visible`].
+    visible: bool,
     /// Child node ids, painted after (on top of) this node.
     children: Vec<NodeId>,
     /// Filled by [`Ui::layout`]; meaningless before the first call.
@@ -362,6 +364,7 @@ impl Ui {
             style,
             widget,
             focusable,
+            visible: true,
             children: Vec::new(),
             computed: Rect {
                 x: 0.0,
@@ -403,6 +406,28 @@ impl Ui {
             }
         };
         self.add(Some(root), style, widget)
+    }
+
+    /// Shows or hides a node. A hidden node and all its children are not
+    /// drawn, not hit-tested and not focusable; layout is unchanged. Focus on a
+    /// node that becomes hidden is dropped. Returns `false` if `id` does not exist.
+    pub fn set_visible(&mut self, id: NodeId, visible: bool) -> bool {
+        let Some(node) = self.nodes.get_mut(id) else {
+            return false;
+        };
+        node.visible = visible;
+        if let Some(focus) = self.focus
+            && !self.focusables().contains(&focus)
+        {
+            self.focus = None;
+        }
+        true
+    }
+
+    /// Whether the node itself is marked visible (its ancestors may still hide
+    /// it). `false` for a missing node.
+    pub fn is_visible(&self, id: NodeId) -> bool {
+        self.nodes.get(id).is_some_and(|node| node.visible)
     }
 
     /// This node's laid-out rectangle (valid after [`Ui::layout`]).
@@ -464,6 +489,9 @@ impl Ui {
 
     fn hit_node(&self, id: NodeId, point: [f32; 2]) -> Option<NodeId> {
         let node = &self.nodes[id];
+        if !node.visible {
+            return None;
+        }
         // Children are on top; test them back-to-front.
         for &child in node.children.iter().rev() {
             if let Some(hit) = self.hit_node(child, point) {
@@ -544,6 +572,9 @@ impl Ui {
 
     fn collect_focusables(&self, id: NodeId, out: &mut Vec<NodeId>) {
         let node = &self.nodes[id];
+        if !node.visible {
+            return;
+        }
         if node.focusable {
             out.push(id);
         }
@@ -659,6 +690,9 @@ impl Ui {
     /// not a second kind of event.
     pub fn activate(&mut self) -> Option<NodeId> {
         let id = self.focus?;
+        if !self.focusables().contains(&id) {
+            return None;
+        }
         matches!(self.nodes.get(id)?.widget, Widget::Button { .. }).then_some(id)
     }
 
@@ -717,7 +751,9 @@ impl Ui {
     /// new [`DrawKind`] keeps every renderer that can already draw a
     /// rectangle able to draw a focus ring.
     fn collect_focus_ring(&self, out: &mut Vec<DrawCommand>) {
-        let Some(id) = self.focus else { return };
+        let Some(id) = self.focus.filter(|id| self.focusables().contains(id)) else {
+            return;
+        };
         let Some(node) = self.nodes.get(id) else {
             return;
         };
@@ -767,6 +803,9 @@ impl Ui {
 
     fn collect_draw(&self, id: NodeId, hot: Option<NodeId>, out: &mut Vec<DrawCommand>) {
         let node = &self.nodes[id];
+        if !node.visible {
+            return;
+        }
         let rect = node.computed;
         if rect.w > 0.0 && rect.h > 0.0 {
             match &node.widget {
@@ -1239,6 +1278,51 @@ mod tests {
             other => panic!("expected text, got {other:?}"),
         }
         assert_eq!(ui.rect_of(label).unwrap().w, 40.0);
+    }
+
+    #[test]
+    fn hidden_ui_node_is_not_drawn_or_clicked() {
+        let mut ui = Ui::new(200.0, 200.0);
+        let root = ui.add(None, Style::default(), panel(Color::TRANSPARENT));
+        let group = ui.add(
+            Some(root),
+            Style {
+                size: [100.0, 100.0],
+                ..Style::default()
+            },
+            panel(Color::WHITE),
+        );
+        let child = ui.add(
+            Some(group),
+            Style {
+                size: [60.0, 40.0],
+                ..Style::default()
+            },
+            button(),
+        );
+        ui.layout();
+        let centre = centre(ui.rect_of(child).unwrap());
+        let click = |ui: &mut Ui| {
+            ui.interact(PointerInput {
+                position: centre,
+                pressed: true,
+                released: true,
+            })
+        };
+        assert_eq!(click(&mut ui), vec![child]);
+        assert!(!ui.draw_list(centre).is_empty());
+
+        assert!(ui.set_visible(group, false));
+        assert!(!ui.is_visible(group));
+        assert!(click(&mut ui).is_empty());
+        assert!(ui.draw_list(centre).is_empty(), "no focus ring either");
+        assert!(ui.focusables().is_empty());
+        assert_eq!(ui.focus(), None, "focus dropped with the node");
+
+        ui.set_visible(group, true);
+        assert_eq!(click(&mut ui), vec![child]);
+        assert!(!ui.draw_list(centre).is_empty());
+        assert!(!ui.set_visible(99, true));
     }
 
     #[test]

@@ -62,11 +62,21 @@ pub enum PlatformEvent {
         /// New cursor Y position.
         y: f64,
     },
+    /// The cursor left the window (or the game view in Studio).
+    CursorLeft,
     /// The mouse wheel (or touchpad scroll) moved.
     MouseWheel {
         /// Horizontal scroll delta (lines, or approximated from pixels).
         delta_x: f32,
         /// Vertical scroll delta (lines, or approximated from pixels).
+        delta_y: f32,
+    },
+    /// Raw mouse motion from the device, independent of the cursor
+    /// position. Still arrives while the cursor is locked.
+    MouseMotion {
+        /// Horizontal motion since the previous event.
+        delta_x: f32,
+        /// Vertical motion since the previous event.
         delta_y: f32,
     },
     /// A file was dragged from the desktop and dropped on the window.
@@ -115,6 +125,7 @@ pub fn map_window_event(event: &winit::event::WindowEvent) -> Option<PlatformEve
             x: position.x,
             y: position.y,
         }),
+        WE::CursorLeft { .. } => Some(PlatformEvent::CursorLeft),
         WE::MouseWheel { delta, .. } => {
             let (delta_x, delta_y) = match *delta {
                 winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
@@ -278,6 +289,15 @@ mod tests {
             map_window_event(&event),
             Some(PlatformEvent::CursorMoved { x: 12.5, y: 34.0 })
         );
+    }
+
+    #[test]
+    fn maps_cursor_left() {
+        use winit::event::DeviceId;
+        let event = WE::CursorLeft {
+            device_id: DeviceId::dummy(),
+        };
+        assert_eq!(map_window_event(&event), Some(PlatformEvent::CursorLeft));
     }
 
     #[test]

@@ -73,6 +73,16 @@ pub enum FrameDemand {
     AnimateUntil(Instant),
 }
 
+/// Fixed steps to run this frame. A paused simulation banks no time, so
+/// resuming never replays the pause as a burst of catch-up steps.
+pub(crate) fn steps_for_frame(paused: bool, ticker: &mut FixedTimestep, frame_seconds: f32) -> u32 {
+    if paused {
+        0
+    } else {
+        ticker.advance(frame_seconds)
+    }
+}
+
 fn clamp_frame_seconds(seconds: f32) -> f32 {
     if seconds.is_finite() && seconds >= 0.0 {
         seconds.min(MAX_FRAME_SECONDS)
@@ -393,6 +403,49 @@ pub trait Game {
     }
 }
 
+/// Bookkeeping for the mouse lock: the game's wish, whether the window has
+/// focus, and what was last applied to the OS. The effective lock is
+/// `wish && focused`, so losing focus releases the cursor and regaining it
+/// re-applies the wish.
+#[derive(Debug)]
+pub(crate) struct CursorLockState {
+    wish: bool,
+    focused: bool,
+    applied: std::cell::Cell<bool>,
+}
+
+impl Default for CursorLockState {
+    fn default() -> Self {
+        Self {
+            wish: false,
+            // The runner delivers the window's real focus as its first
+            // `FocusChanged` event.
+            focused: true,
+            applied: std::cell::Cell::new(false),
+        }
+    }
+}
+
+impl CursorLockState {
+    pub(crate) fn set_wish(&mut self, locked: bool) {
+        self.wish = locked;
+    }
+
+    pub(crate) fn wish(&self) -> bool {
+        self.wish
+    }
+
+    pub(crate) fn focus(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    /// `Some(effective)` when the OS lock should change, else `None`.
+    pub(crate) fn take_change(&self) -> Option<bool> {
+        let effective = self.wish && self.focused;
+        (effective != self.applied.replace(effective)).then_some(effective)
+    }
+}
+
 /// Everything [`run_game`] owns for a running game. `GameContext` is a
 /// borrow view over this; it is never handed out directly.
 struct Runtime {
@@ -434,12 +487,18 @@ struct Runtime {
     loaded_world: Option<engine_scene::WorldSnapshot>,
     assets: RenderAssets,
     input: engine_platform::InputState,
+    cursor_lock: CursorLockState,
     /// Gamepad backend. Polled once per frame — gilrs has its own event
     /// loop and does not arrive through `winit`.
     gamepads: engine_platform::Gamepads,
     time: Time,
     ticker: FixedTimestep,
+    /// The game state is `paused`: no fixed steps and no animation advance.
+    /// Separate from Studio's own Play pause.
+    simulation_paused: bool,
     exit_requested: bool,
+    /// Running inside Studio's Scene View rather than in its own window.
+    embedded: bool,
 
     pipeline: Pipeline,
     shadow_pipeline: ShadowPipeline,
@@ -531,6 +590,119 @@ fn collider_world_transform(world: &engine_ecs::prelude::World, entity: Entity) 
 
 fn collider_scale(scale: glam::Vec3) -> glam::Vec3 {
     scale.abs()
+}
+
+/// Turns authored collider data into rapier builders, or `None` (logged)
+/// when the shape cannot be built. `name` is only for log messages.
+pub(crate) fn build_collider(
+    data: &engine_scene::ColliderData,
+    transform: &Transform,
+    library: &engine_scene::AssetLibrary,
+    name: Option<&str>,
+) -> Option<(
+    engine_physics::RigidBodyBuilder,
+    engine_physics::ColliderBuilder,
+)> {
+    use engine_scene::{BodyKind, ColliderShape};
+
+    // One number for shapes with a single radius: a sphere
+    // scaled 2x on X only is not a sphere, and silently picking
+    // the wrong axis would put collision where the art is not.
+    let scale = collider_scale(transform.scale);
+    let uniform = scale.max_element();
+
+    let shape = match &data.shape {
+        ColliderShape::Ball { radius } => {
+            Some(engine_physics::ColliderBuilder::ball(radius * uniform))
+        }
+        ColliderShape::Cuboid { half_extents } => {
+            let scaled = glam::Vec3::from_array(*half_extents) * scale;
+            Some(engine_physics::ColliderBuilder::cuboid(
+                scaled.x, scaled.y, scaled.z,
+            ))
+        }
+        ColliderShape::Cylinder {
+            half_height,
+            radius,
+        } => Some(engine_physics::ColliderBuilder::cylinder(
+            half_height * scale.y,
+            radius * uniform,
+        )),
+        ColliderShape::Capsule {
+            half_height,
+            radius,
+        } => Some(engine_physics::ColliderBuilder::capsule_y(
+            half_height * scale.y,
+            radius * uniform,
+        )),
+        ColliderShape::TriMesh { mesh } => match engine_scene::load_mesh_geometry(library, mesh) {
+            Ok(Some((vertices, indices))) => {
+                let points: Vec<glam::Vec3> = vertices
+                    .iter()
+                    .map(|vertex| glam::Vec3::from_array(vertex.position) * scale)
+                    .collect();
+                let triangles: Vec<[u32; 3]> = indices.as_chunks::<3>().0.to_vec();
+                match engine_physics::ColliderBuilder::trimesh(points, triangles) {
+                    Ok(builder) => Some(builder),
+                    Err(err) => {
+                        tracing::warn!(
+                            entity = name.unwrap_or("<unnamed>"),
+                            error = %err,
+                            "skipping collider: rapier rejected the mesh"
+                        );
+                        None
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    entity = name.unwrap_or("<unnamed>"),
+                    mesh = %mesh.id,
+                    "skipping collider: the project does not carry that mesh"
+                );
+                None
+            }
+            Err(err) => {
+                tracing::warn!(
+                    entity = name.unwrap_or("<unnamed>"),
+                    error = %err,
+                    "skipping collider: mesh could not be loaded"
+                );
+                None
+            }
+        },
+    };
+    let shape = shape?;
+    let mut shape = shape
+        .friction(data.friction)
+        .restitution(data.bounciness)
+        .sensor(data.trigger);
+    if let Some(mass) = data.mass {
+        shape = shape.mass(mass);
+    }
+    if data.trigger {
+        // Fixed-fixed pairs stay inactive so a trigger resting on level
+        // geometry does not fire at scene start; kinematic characters still
+        // trigger fixed zones.
+        shape = shape.active_collision_types(
+            engine_physics::ActiveCollisionTypes::default()
+                | engine_physics::ActiveCollisionTypes::KINEMATIC_FIXED
+                | engine_physics::ActiveCollisionTypes::KINEMATIC_KINEMATIC,
+        );
+    }
+
+    let mut body = match data.body {
+        BodyKind::Fixed => engine_physics::RigidBodyBuilder::fixed(),
+        BodyKind::Dynamic => engine_physics::RigidBodyBuilder::dynamic(),
+        BodyKind::Kinematic => engine_physics::RigidBodyBuilder::kinematic_position_based(),
+    }
+    .translation(transform.translation)
+    .rotation(transform.rotation.to_scaled_axis())
+    .gravity_scale(data.gravity_scale);
+    if data.lock_rotation {
+        body = body.lock_rotations();
+    }
+    Some((body, shape))
 }
 
 impl GameContext<'_> {
@@ -673,8 +845,6 @@ impl GameContext<'_> {
         report: &engine_scene::InstantiateReport,
         library: &engine_scene::AssetLibrary,
     ) -> usize {
-        use engine_scene::{BodyKind, ColliderShape};
-
         engine_ecs::propagate_transforms(self.runtime.ecs.world_mut());
         let mut built = 0;
         for (index, scene_entity) in scene.entities.iter().enumerate() {
@@ -685,84 +855,11 @@ impl GameContext<'_> {
                 continue;
             };
             let transform = collider_world_transform(self.runtime.ecs.world(), entity);
-            // One number for shapes with a single radius: a sphere
-            // scaled 2x on X only is not a sphere, and silently picking
-            // the wrong axis would put collision where the art is not.
-            let scale = collider_scale(transform.scale);
-            let uniform = scale.max_element();
-
-            let shape = match &collider.shape {
-                ColliderShape::Ball { radius } => {
-                    Some(engine_physics::ColliderBuilder::ball(radius * uniform))
-                }
-                ColliderShape::Cuboid { half_extents } => {
-                    let scaled = glam::Vec3::from_array(*half_extents) * scale;
-                    Some(engine_physics::ColliderBuilder::cuboid(
-                        scaled.x, scaled.y, scaled.z,
-                    ))
-                }
-                ColliderShape::Cylinder {
-                    half_height,
-                    radius,
-                } => Some(engine_physics::ColliderBuilder::cylinder(
-                    half_height * scale.y,
-                    radius * uniform,
-                )),
-                ColliderShape::Capsule {
-                    half_height,
-                    radius,
-                } => Some(engine_physics::ColliderBuilder::capsule_y(
-                    half_height * scale.y,
-                    radius * uniform,
-                )),
-                ColliderShape::TriMesh { mesh } => {
-                    match engine_scene::load_mesh_geometry(library, mesh) {
-                        Ok(Some((vertices, indices))) => {
-                            let points: Vec<glam::Vec3> = vertices
-                                .iter()
-                                .map(|vertex| glam::Vec3::from_array(vertex.position) * scale)
-                                .collect();
-                            let triangles: Vec<[u32; 3]> = indices.as_chunks::<3>().0.to_vec();
-                            match engine_physics::ColliderBuilder::trimesh(points, triangles) {
-                                Ok(builder) => Some(builder),
-                                Err(err) => {
-                                    tracing::warn!(
-                                        entity = scene_entity.name.as_deref().unwrap_or("<unnamed>"),
-                                        error = %err,
-                                        "skipping collider: rapier rejected the mesh"
-                                    );
-                                    None
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            tracing::warn!(
-                                entity = scene_entity.name.as_deref().unwrap_or("<unnamed>"),
-                                mesh = %mesh.id,
-                                "skipping collider: the project does not carry that mesh"
-                            );
-                            None
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                entity = scene_entity.name.as_deref().unwrap_or("<unnamed>"),
-                                error = %err,
-                                "skipping collider: mesh could not be loaded"
-                            );
-                            None
-                        }
-                    }
-                }
+            let Some((body, shape)) =
+                build_collider(collider, &transform, library, scene_entity.name.as_deref())
+            else {
+                continue;
             };
-            let Some(shape) = shape else { continue };
-
-            let body = match collider.body {
-                BodyKind::Fixed => engine_physics::RigidBodyBuilder::fixed(),
-                BodyKind::Dynamic => engine_physics::RigidBodyBuilder::dynamic(),
-                BodyKind::Kinematic => engine_physics::RigidBodyBuilder::kinematic_position_based(),
-            }
-            .translation(transform.translation)
-            .rotation(transform.rotation.to_scaled_axis());
 
             let (rigid_body, collider_component) =
                 engine_ecs::components::RigidBody::spawn(&mut self.runtime.physics, body, shape);
@@ -771,6 +868,21 @@ impl GameContext<'_> {
                 .world_mut()
                 .entity_mut(entity)
                 .insert((rigid_body, collider_component));
+            // An object authored as Disabled has no physics in the game.
+            if self
+                .runtime
+                .ecs
+                .world()
+                .get::<engine_ecs::components::Disabled>(entity)
+                .is_some()
+            {
+                crate::gameplay::objects::set_physics_enabled(
+                    self.runtime.ecs.world(),
+                    &mut self.runtime.physics,
+                    entity,
+                    false,
+                );
+            }
             built += 1;
         }
 
@@ -875,6 +987,56 @@ impl GameContext<'_> {
         &mut self.runtime.physics
     }
 
+    /// Freezes or resumes the simulation: while set, the frame loop runs no
+    /// fixed steps (`fixed_update`, physics, `post_fixed_update`) and advances
+    /// no sprite or skeletal animation. `update`, `on_event`, UI, audio and
+    /// rendering keep running. [`GameplayRuntime`](crate::gameplay::GameplayRuntime)
+    /// sets this from the `paused` game state. It is separate from Studio's
+    /// own Play pause.
+    pub fn set_simulation_paused(&mut self, paused: bool) {
+        self.runtime.simulation_paused = paused;
+    }
+
+    /// Whether the simulation is frozen (see [`Self::set_simulation_paused`]).
+    pub fn simulation_paused(&self) -> bool {
+        self.runtime.simulation_paused
+    }
+
+    /// Seconds per fixed physics step.
+    pub fn fixed_step_seconds(&self) -> f32 {
+        self.runtime.ticker.step_seconds()
+    }
+
+    /// World, physics, UI and render assets together, for object commands
+    /// that change all four (destroying an object releases its GPU assets).
+    pub(crate) fn object_parts(
+        &mut self,
+    ) -> (
+        &mut engine_ecs::prelude::World,
+        &mut engine_physics::PhysicsWorld,
+        &mut engine_ui::Ui,
+        &mut RenderAssets,
+    ) {
+        let runtime = &mut *self.runtime;
+        (
+            runtime.ecs.world_mut(),
+            &mut runtime.physics,
+            &mut runtime.ui,
+            &mut runtime.assets,
+        )
+    }
+
+    /// The ECS world (read-only) and the physics world (mutable) together,
+    /// for code that looks up an entity's body and then changes the body.
+    pub(crate) fn world_and_physics_mut(
+        &mut self,
+    ) -> (
+        &engine_ecs::prelude::World,
+        &mut engine_physics::PhysicsWorld,
+    ) {
+        (self.runtime.ecs.world(), &mut self.runtime.physics)
+    }
+
     /// Spawns an entity with a simulated rigid body: inserts the body and
     /// collider into the physics world and gives the entity the matching
     /// `RigidBody`, `Collider`, and `Transform` components.
@@ -944,6 +1106,18 @@ impl GameContext<'_> {
         &mut self.runtime.ecs
     }
 
+    /// Asks Studio or the OS to lock and hide the mouse for look controls.
+    /// The lock is released while the window is unfocused and re-applied when
+    /// focus returns.
+    pub fn set_mouse_locked(&mut self, locked: bool) {
+        self.runtime.cursor_lock.set_wish(locked);
+    }
+
+    /// Whether the game wants the mouse locked (not whether the OS granted it).
+    pub fn mouse_locked(&self) -> bool {
+        self.runtime.cursor_lock.wish()
+    }
+
     /// This frame's input snapshot.
     pub fn input(&self) -> &engine_platform::InputState {
         &self.runtime.input
@@ -995,6 +1169,13 @@ impl GameContext<'_> {
     /// This frame's timing.
     pub fn time(&self) -> Time {
         self.runtime.time
+    }
+
+    /// Whether the game runs inside Studio's Scene View (started by Play)
+    /// instead of its own window. Games use this to leave Esc to Studio:
+    /// Esc there frees a locked mouse, and Stop or Cmd-P ends Play.
+    pub fn is_embedded(&self) -> bool {
+        self.runtime.embedded
     }
 
     /// Ask the engine to close the window and end [`run_game`] after this
@@ -1139,6 +1320,7 @@ pub(crate) struct GameRunner<G: Game> {
     error_slot: Rc<Cell<Option<GameError>>>,
     last_frame: Option<Instant>,
     finished: bool,
+    embedded: bool,
 }
 
 impl<G: Game> GameRunner<G> {
@@ -1154,7 +1336,14 @@ impl<G: Game> GameRunner<G> {
             error_slot,
             last_frame: None,
             finished: false,
+            embedded: false,
         }
+    }
+
+    /// Marks this runner as driven by Studio's Scene View (see
+    /// [`GameContext::is_embedded`]).
+    pub(crate) fn set_embedded(&mut self, embedded: bool) {
+        self.embedded = embedded;
     }
 
     fn fail(&mut self, error: GameError) {
@@ -1177,6 +1366,7 @@ impl<G: Game> GameRunner<G> {
     /// Loads any save, runs [`Game::setup`] and [`Game::on_ready`], and
     /// keeps `runtime` for the frame loop.
     fn start(&mut self, mut runtime: Runtime) {
+        runtime.embedded = self.embedded;
         // Read before `setup` so the snapshot is available to it, but
         // hand the game's own data over *after*, so a game applies saved
         // state to a world it has finished building.
@@ -1301,7 +1491,11 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
 
                 runtime.time.advance(frame_seconds);
 
-                let steps = runtime.ticker.advance(frame_seconds);
+                let steps = steps_for_frame(
+                    runtime.simulation_paused,
+                    &mut runtime.ticker,
+                    frame_seconds,
+                );
                 let step_seconds = runtime.ticker.step_seconds();
                 // Per fixed step, in this order: the game applies
                 // forces, physics integrates them, then simulated poses
@@ -1381,8 +1575,14 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
                 // transform propagation of its own.
                 // Animation before propagation: a pose written here is
                 // what this frame's transforms and rendering see.
-                engine_ecs::update_animations(runtime.ecs.world_mut(), &runtime.gpu, frame_seconds);
-                engine_scene::advance_sprite_animations(runtime.ecs.world_mut(), frame_seconds);
+                let animation_seconds =
+                    simulation_seconds(frame_seconds, runtime.simulation_paused);
+                engine_ecs::update_animations(
+                    runtime.ecs.world_mut(),
+                    &runtime.gpu,
+                    animation_seconds,
+                );
+                engine_scene::advance_sprite_animations(runtime.ecs.world_mut(), animation_seconds);
                 engine_ecs::propagate_transforms(runtime.ecs.world_mut());
                 update_audio(runtime);
                 update_shadow_fit(runtime);
@@ -1402,6 +1602,9 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
                 }
             }
             other => {
+                if let PlatformEvent::FocusChanged { focused } = other {
+                    runtime.cursor_lock.focus(focused);
+                }
                 runtime.input.apply_event(&other);
                 self.game.on_event(
                     &mut GameContext {
@@ -1411,6 +1614,10 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
                 );
             }
         }
+    }
+
+    fn cursor_lock(&self) -> Option<bool> {
+        self.runtime.as_ref()?.cursor_lock.take_change()
     }
 
     fn should_exit(&self) -> bool {
@@ -1784,10 +1991,13 @@ fn build_runtime_with(
         loaded_world: None,
         assets: RenderAssets::new(),
         input: engine_platform::InputState::new(),
+        cursor_lock: CursorLockState::default(),
         gamepads: engine_platform::Gamepads::new(),
         time: Time::default(),
         ticker,
+        simulation_paused: false,
         exit_requested: false,
+        embedded: false,
         pipeline,
         shadow_pipeline,
         shadow_map,
@@ -1857,7 +2067,10 @@ fn update_water_render_data(runtime: &mut Runtime, delta: f32) {
     let surfaces: Vec<_> = {
         let world = runtime.ecs.world_mut();
         world
-            .query::<(Entity, &engine_ecs::components::WaterVolume)>()
+            .query_filtered::<(Entity, &engine_ecs::components::WaterVolume), (
+                engine_ecs::prelude::Without<engine_ecs::components::Hidden>,
+                engine_ecs::prelude::Without<engine_ecs::components::Disabled>,
+            )>()
             .iter(world)
             .map(|(entity, volume)| (entity, volume.surface))
             .collect()
@@ -1958,6 +2171,12 @@ fn update_water_render_data(runtime: &mut Runtime, delta: f32) {
     }
 }
 
+/// The seconds animations, particles and wind advance this frame: none while
+/// the simulation is paused.
+fn simulation_seconds(frame_seconds: f32, paused: bool) -> f32 {
+    if paused { 0.0 } else { frame_seconds }
+}
+
 fn render_frame(runtime: &mut Runtime, dt: f32) {
     if !runtime.camera.is_valid() {
         if !runtime.warned_invalid_camera {
@@ -1985,8 +2204,10 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
     // Emitters step here so a game only has to spawn a `ParticleEmitter`
     // to get particles; wind advances on a bounded clock so `sin` stays
     // precise.
-    engine_ecs::update_particles(runtime.ecs.world_mut(), dt);
-    runtime.wind_time = (runtime.wind_time + dt.max(0.0)) % 1000.0;
+    // Both stand still while the simulation is paused, like animations.
+    let sim_dt = simulation_seconds(dt, runtime.simulation_paused);
+    engine_ecs::update_particles(runtime.ecs.world_mut(), sim_dt);
+    runtime.wind_time = (runtime.wind_time + sim_dt.max(0.0)) % 1000.0;
     runtime
         .gpu
         .write_wind(&runtime.wind_binding, &runtime.wind, runtime.wind_time);
@@ -2011,7 +2232,7 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
 
     // Owned here so the slices outlive the render call that uploads them.
     let (alpha_particles, additive_particles) =
-        engine_ecs::extract_particles(runtime.ecs.world_mut());
+        engine_ecs::extract_particles(runtime.ecs.world_mut(), false);
     let particle_frame = ParticleFrame {
         pipelines: &runtime.particle_pipelines,
         camera: &runtime.particle_camera,
@@ -2081,6 +2302,8 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
         Some((&runtime.vegetation_pipeline, &runtime.wind_binding)),
         water,
         (!ui_quads.is_empty()).then_some((&runtime.ui_pipeline, ui_quads.as_slice())),
+        // A running game does not draw disabled objects.
+        false,
     ) {
         Ok(stats) => runtime.render_stats = stats,
         Err(err) => tracing::error!(error = %err, "frame render failed"),
@@ -2119,7 +2342,10 @@ pub fn run_game(config: GameConfig, game: impl Game + 'static) -> Result<(), Gam
     // Started by Studio's Play button: render into the Scene View instead
     // of opening a window.
     match crate::embed::EmbedTarget::from_env() {
-        Ok(Some(target)) => crate::embed::run(&mut runner, &target)?,
+        Ok(Some(target)) => {
+            runner.set_embedded(true);
+            crate::embed::run(&mut runner, &target)?
+        }
         Ok(None) => run_windowed(window_config, runner)?,
         Err(err) => return Err(err),
     }
@@ -2133,6 +2359,94 @@ pub fn run_game(config: GameConfig, game: impl Game + 'static) -> Result<(), Gam
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paused_simulation_freezes_animations_particles_and_wind() {
+        assert_eq!(simulation_seconds(0.016, true), 0.0);
+        assert_eq!(simulation_seconds(0.016, false), 0.016);
+    }
+
+    fn test_library() -> engine_scene::AssetLibrary {
+        let dir = std::env::temp_dir().join(format!("vge-collider-lib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        engine_scene::AssetLibrary::index(&dir).unwrap()
+    }
+
+    fn cuboid_data() -> engine_scene::ColliderData {
+        engine_scene::ColliderData::new(
+            engine_scene::ColliderShape::Cuboid {
+                half_extents: [0.5; 3],
+            },
+            engine_scene::BodyKind::Dynamic,
+        )
+    }
+
+    #[test]
+    fn defaults_build_the_same_body_as_before() {
+        let (body, collider) =
+            build_collider(&cuboid_data(), &Transform::IDENTITY, &test_library(), None).unwrap();
+        let (body, collider) = (body.build(), collider.build());
+        assert_eq!(collider.friction(), 0.5);
+        assert_eq!(collider.restitution(), 0.0);
+        assert!(!collider.is_sensor());
+        assert_eq!(body.gravity_scale(), 1.0);
+        assert!(!body.is_rotation_locked()[0]);
+        let plain = engine_physics::ColliderBuilder::cuboid(0.5, 0.5, 0.5).build();
+        assert_eq!(collider.mass(), plain.mass());
+    }
+
+    #[test]
+    fn collider_settings_reach_rapier() {
+        let mut data = cuboid_data();
+        data.trigger = true;
+        data.friction = 0.9;
+        data.bounciness = 0.3;
+        data.mass = Some(4.0);
+        data.gravity_scale = 0.0;
+        data.lock_rotation = true;
+        let (body, collider) =
+            build_collider(&data, &Transform::IDENTITY, &test_library(), None).unwrap();
+        let (body, collider) = (body.build(), collider.build());
+        assert!(collider.is_sensor());
+        assert_eq!(collider.friction(), 0.9);
+        assert_eq!(collider.restitution(), 0.3);
+        assert!((collider.mass() - 4.0).abs() < 1e-4);
+        assert_eq!(body.gravity_scale(), 0.0);
+        assert!(body.is_rotation_locked().iter().all(|locked| *locked));
+    }
+
+    #[test]
+    fn focus_loss_releases_and_regain_reapplies_cursor_lock() {
+        let mut lock = CursorLockState::default();
+        lock.set_wish(true);
+        assert_eq!(lock.take_change(), Some(true));
+        lock.focus(false);
+        assert_eq!(lock.take_change(), Some(false));
+        lock.focus(true);
+        assert_eq!(lock.take_change(), Some(true));
+        lock.set_wish(true);
+        assert_eq!(lock.take_change(), None);
+    }
+
+    #[test]
+    fn a_wish_set_while_unfocused_waits_for_focus() {
+        let mut lock = CursorLockState::default();
+        lock.focus(false);
+        lock.set_wish(true);
+        assert_eq!(lock.take_change(), None);
+        lock.focus(true);
+        assert_eq!(lock.take_change(), Some(true));
+    }
+
+    #[test]
+    fn no_wish_stays_quiet_across_focus_changes() {
+        let mut lock = CursorLockState::default();
+        lock.focus(false);
+        lock.set_wish(false);
+        assert_eq!(lock.take_change(), None);
+        lock.focus(true);
+        assert_eq!(lock.take_change(), None);
+    }
 
     #[test]
     fn unreadable_save_is_distinct_from_a_missing_save() {
@@ -2202,6 +2516,7 @@ mod tests {
             error_slot: Rc::new(Cell::new(None)),
             last_frame: None,
             finished: false,
+            embedded: false,
         };
 
         assert_eq!(runner.redraw_policy(), engine_platform::RedrawPolicy::Wait);
@@ -2225,6 +2540,7 @@ mod tests {
             error_slot: Rc::new(Cell::new(None)),
             last_frame: None,
             finished: false,
+            embedded: false,
         };
         assert_eq!(runner.redraw_policy(), engine_platform::RedrawPolicy::Wait);
         assert_eq!(FrameDemand::Idle, FrameDemand::Idle);

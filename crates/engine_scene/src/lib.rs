@@ -23,10 +23,12 @@
 //! [`SceneEntity`] shape as a reusable entity template, instantiable into
 //! a live `World` any number of times.
 
+mod camera_pose;
 mod capture;
 mod environment;
 mod error;
 mod format;
+mod game_state;
 mod io;
 mod migration;
 mod prefab;
@@ -37,28 +39,32 @@ mod save;
 mod sprite_atlas;
 mod ui;
 mod validate;
+pub use validate::{valid_prefab_path, valid_scene_path};
 mod world;
 
+pub use camera_pose::{adopt_legacy_camera_poses, camera_world_pose, look_rotation};
 pub use capture::capture_renderables;
 pub use environment::{AmbientSound, spawn_ambient_sounds};
 pub use error::SceneError;
 pub use format::{
     AmbientSoundData, AppliedMaterialOverride, AssetRef, AudioEmitterData, BodyKind, CameraData,
-    ColliderData, ColliderShape, EnvironmentData, FoliageData, LightingData, MaterialOverrideData,
-    MeshRendererData, NavGridData, PointLightData, ProjectionData, RuleAction, RuleCompare,
-    RuleCondition, RuleData, RuleTrigger, Scene, SceneAudioEmitter, SceneCollider, SceneEntity,
-    SceneEnvironment, SceneFoliage, SceneLighting, SceneMaterialOverride, SceneNavGrid,
-    SceneObjectId, ScenePointLight, SceneRules, SceneSpriteAnimation, SceneTilemap, SceneUi,
-    SiblingOrder, SpriteAnimationData, SpriteData, TilemapData, TransformData, UiAnchor,
-    UiElementData, UiKind, WaterData,
+    CameraFollowData, CameraFollowMode, ColliderData, ColliderShape, EnvironmentData, FoliageData,
+    LightingData, MAX_RULE_CONDITIONS, MaterialOverrideData, MeshRendererData, NavGridData,
+    OrbitInput, PointLightData, ProjectionData, RuleAction, RuleCompare, RuleCondition, RuleData,
+    RuleMatch, RuleTrigger, Scene, SceneAudioEmitter, SceneCollider, SceneEntity, SceneEnvironment,
+    SceneFoliage, SceneLighting, SceneMaterialOverride, SceneNavGrid, SceneObjectId,
+    ScenePointLight, SceneRules, SceneSpriteAnimation, SceneTilemap, SceneUi, SiblingOrder,
+    SpawnAt, SpriteAnimationData, SpriteData, TilemapData, TransformData, UiAnchor, UiElementData,
+    UiKind, WaterData,
 };
+pub use game_state::{GameState, GameStateName};
 pub use io::write_atomic;
 pub use migration::CURRENT_SCENE_VERSION;
 pub use prefab::Prefab;
 pub use resolve::{InstantiateReport, NullResolver, SceneResolver};
 pub use rules::{
-    RuleEvent, RuleVariableError, RuleVariables, expand_variables, format_variable,
-    valid_variable_name,
+    ContactRuleKind, RuleEvent, RuleOutcome, RuleVariableError, RuleVariables, expand_variables,
+    format_variable, valid_variable_name,
 };
 pub use runtime::{
     AssetLibrary, BUNDLE_FILE, EXPORT_SCENE_FILE, ExportContent, LoadedSkinnedMesh, MeshGeometry,
@@ -72,3 +78,4 @@ pub use sprite_atlas::{
 };
 pub use ui::set_authored_ui_text;
 pub use world::point_lights_from_world;
+pub use world::saved_camera_pose;

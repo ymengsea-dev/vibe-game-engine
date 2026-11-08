@@ -56,9 +56,12 @@ pub fn capture(world: &World, entity: Entity) -> Result<Prefab, EditorError> {
         transform: world
             .get::<Transform>(entity)
             .map(|transform| TransformData::from(transform.0)),
-        camera: world
-            .get::<Camera>(entity)
-            .map(|camera| CameraData::from(camera.0)),
+        camera: world.get::<Camera>(entity).map(|camera| {
+            engine_scene::saved_camera_pose(world, entity, CameraData::from(camera.0))
+        }),
+        camera_follow: world
+            .get::<engine_ecs::components::CameraFollow>(entity)
+            .map(engine_scene::CameraFollowData::from),
         asset_source: asset_source.map(|source| source.path.clone()),
         asset_id: asset_source.and_then(|source| source.id.clone()),
         disabled: world.get::<Disabled>(entity).is_some(),
@@ -254,12 +257,12 @@ mod tests {
     #[test]
     fn capture_preserves_a_scene_collider_for_runtime_prefab_spawns() {
         let mut world = World::new();
-        let collider = engine_scene::ColliderData {
-            shape: engine_scene::ColliderShape::Cuboid {
+        let collider = engine_scene::ColliderData::new(
+            engine_scene::ColliderShape::Cuboid {
                 half_extents: [0.5, 1.0, 0.5],
             },
-            body: engine_scene::BodyKind::Dynamic,
-        };
+            engine_scene::BodyKind::Dynamic,
+        );
         let entity = world
             .spawn((
                 Name::new("Crate"),
@@ -268,6 +271,21 @@ mod tests {
             .id();
         let prefab = capture(&world, entity).expect("capture");
         assert_eq!(prefab.entity().collider, Some(collider));
+    }
+
+    #[test]
+    fn capture_keeps_camera_follow() {
+        use engine_ecs::components::{CameraFollow, FollowMode};
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                Name::new("Cam"),
+                CameraFollow::new("hero", FollowMode::THIRD_PERSON),
+            ))
+            .id();
+        let prefab = capture(&world, entity).unwrap();
+        let data = prefab.entity().camera_follow.clone().expect("follow kept");
+        assert_eq!(data.target, "hero");
     }
 
     #[test]

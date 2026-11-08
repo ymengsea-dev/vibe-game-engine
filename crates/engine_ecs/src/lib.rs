@@ -77,9 +77,9 @@ pub mod prelude {
 
     pub use crate::Ecs;
     pub use crate::components::{
-        AssetSource, Camera, Collider, Disabled, GlobalTransform, InstancedMeshRenderer, Lock,
-        MeshRenderer, Name, RigidBody, Script, SkinnedMeshRenderer, Sprite, Static, Transform,
-        VegetationRenderer, WaterVolume,
+        ActiveCamera, AssetSource, Camera, Collider, Disabled, GlobalTransform, Hidden,
+        InstancedMeshRenderer, Lock, MeshRenderer, Name, RigidBody, Script, SkinnedMeshRenderer,
+        Sprite, Static, Transform, VegetationRenderer, WaterVolume,
     };
     pub use crate::despawn_instanced_mesh_renderer;
     pub use crate::despawn_mesh_renderer;

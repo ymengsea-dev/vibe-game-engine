@@ -306,11 +306,20 @@ pub fn update_particles(world: &mut World, dt: f32) {
 /// list their `config.blend` selects.
 ///
 /// Does not simulate — call [`update_particles`] first.
-pub fn extract_particles(world: &mut World) -> (Vec<ParticleInstance>, Vec<ParticleInstance>) {
+pub fn extract_particles(
+    world: &mut World,
+    draw_disabled: bool,
+) -> (Vec<ParticleInstance>, Vec<ParticleInstance>) {
     let mut alpha = Vec::new();
     let mut additive = Vec::new();
-    let mut query = world.query::<&ParticleEmitter>();
-    for emitter in query.iter(&*world) {
+    let mut query = world.query_filtered::<(
+        &ParticleEmitter,
+        bevy_ecs::query::Has<crate::components::Disabled>,
+    ), bevy_ecs::query::Without<crate::components::Hidden>>();
+    for (emitter, disabled) in query.iter(&*world) {
+        if disabled && !draw_disabled {
+            continue;
+        }
         match emitter.config.blend {
             BlendMode::Alpha => emitter.extract_into(&mut alpha),
             BlendMode::Additive => emitter.extract_into(&mut additive),
@@ -530,7 +539,7 @@ mod tests {
         world.spawn(alpha_emitter);
         world.spawn(add_emitter);
 
-        let (alpha, additive) = extract_particles(&mut world);
+        let (alpha, additive) = extract_particles(&mut world, false);
         assert_eq!(alpha.len(), alpha_len);
         assert_eq!(additive.len(), add_len);
     }
@@ -538,7 +547,7 @@ mod tests {
     #[test]
     fn extract_particles_on_an_empty_world_is_empty() {
         let mut world = World::new();
-        let (alpha, additive) = extract_particles(&mut world);
+        let (alpha, additive) = extract_particles(&mut world, false);
         assert!(alpha.is_empty() && additive.is_empty());
     }
 }

@@ -18,5 +18,8 @@ engine_scene.workspace = true
 engine_asset.workspace = true
 engine_renderer.workspace = true
 
+[dev-dependencies]
+engine_scripting.workspace = true
+
 [lints]
 workspace = true

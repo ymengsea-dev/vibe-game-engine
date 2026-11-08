@@ -40,6 +40,7 @@ engine_editor = { workspace = true, optional = true }
 [dev-dependencies]
 # The embed_spike example records its own render pass.
 wgpu.workspace = true
+tracing-subscriber.workspace = true
 
 [features]
 default = ["studio"]

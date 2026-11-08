@@ -63,6 +63,10 @@ pub struct EditorSession {
     /// else starts folded. Additive.
     #[serde(default)]
     pub hierarchy_open: BTreeSet<String>,
+    /// Objects hidden in the Scene View with the Hierarchy's eye, by stable
+    /// object id. Additive.
+    #[serde(default)]
+    pub hierarchy_hidden: BTreeSet<String>,
     /// Asset folders the user unfolded, relative to `assets/` (empty is
     /// the `assets` root itself). Everything else starts folded. Additive.
     #[serde(default)]
@@ -86,6 +90,7 @@ impl Default for EditorSession {
             configuration_index: 0,
             overlays: OverlayToggles::default(),
             hierarchy_open: BTreeSet::new(),
+            hierarchy_hidden: BTreeSet::new(),
             asset_folders_open: BTreeSet::new(),
             scene_view: None,
         }
@@ -197,6 +202,7 @@ mod tests {
             },
             last_scene: Some(PathBuf::from("scenes/level2.ron")),
             hierarchy_open: BTreeSet::from(["4ba9d28d-97bf-41b2-a670-97eaac2bc149".to_owned()]),
+            hierarchy_hidden: BTreeSet::from(["0c5d7d1e-2f0a-4b57-9a11-6b1f3e0a7c42".to_owned()]),
             asset_folders_open: BTreeSet::from([PathBuf::new(), PathBuf::from("models/trees")]),
             ..EditorSession::default()
         };

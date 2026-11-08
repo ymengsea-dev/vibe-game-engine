@@ -47,14 +47,16 @@ mod raycast;
 mod water;
 mod world;
 
-pub use character::{CharacterController, CharacterMovement, move_character};
+pub use character::{
+    CharacterAutostep, CharacterController, CharacterLength, CharacterMovement, move_character,
+};
 pub use character2d::{CharacterMovement2D, move_character_2d};
 pub use collision2d::{
     Aabb2d, Circle2d, Collider2d, aabb_vs_aabb, aabb_vs_circle, circle_vs_circle,
 };
 pub use debug::{DebugLine, DebugRenderMode, DebugRenderStyle, debug_render_lines};
 pub use error::PhysicsError;
-pub use raycast::{RayHit, cast_ray};
+pub use raycast::{RayHit, cast_ray, cast_ray_filtered};
 pub use water::{BuoyancySettings, WaterSample, WaterSurface, WaterWave, buoyancy_force};
 pub use world::PhysicsWorld;
 
@@ -62,4 +64,7 @@ pub use world::PhysicsWorld;
 // components) can build and reference rapier bodies/colliders without
 // adding `rapier3d` as a direct dependency of their own — the same reason
 // `engine_renderer` re-exports the `wgpu` handle types its bindings hold.
-pub use rapier3d::prelude::{ColliderBuilder, ColliderHandle, RigidBodyBuilder, RigidBodyHandle};
+pub use rapier3d::prelude::{
+    ActiveCollisionTypes, ColliderBuilder, ColliderHandle, QueryFilter, RigidBodyBuilder,
+    RigidBodyHandle,
+};

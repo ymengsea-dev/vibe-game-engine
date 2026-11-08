@@ -217,6 +217,12 @@ pub(crate) fn insert_components(
     }
     if let Some(camera) = data.camera {
         entity_mut.insert(Camera::from(engine_renderer::Camera::from(camera)));
+        if camera.active {
+            entity_mut.insert(engine_ecs::components::ActiveCamera);
+        }
+    }
+    if let Some(follow) = &data.camera_follow {
+        entity_mut.insert(engine_ecs::components::CameraFollow::from(follow.clone()));
     }
     if data.asset_source.is_some() || data.asset_id.is_some() {
         entity_mut.insert(AssetSource {

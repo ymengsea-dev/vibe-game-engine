@@ -16,16 +16,19 @@
 //! entity in the editor so far.
 
 use std::any::TypeId;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
+use std::path::PathBuf;
 
 use engine_ecs::components::{
-    AssetSource, Camera, Disabled, GlobalTransform, Lock, Name, Sprite, SpriteSource, Static,
-    Transform as TransformComponent,
+    AssetSource, Camera, Disabled, GlobalTransform, Hidden, Lock, MeshRenderer, MeshSource, Name,
+    Sprite, SpriteSource, Static, Transform as TransformComponent, WaterVolume,
 };
 use engine_ecs::prelude::{ChildOf, Children, Entity, With, Without, World};
 use engine_scene::SiblingOrder;
 use engine_utils::Transform as MathTransform;
 use glam::Vec3;
+
+use crate::object_clipboard::{self, ObjectClipboard};
 
 /// Deepest `ChildOf` chain walked before bailing — a malformed cycle
 /// would otherwise stack-overflow `engine_ecs::propagate`, so every
@@ -63,6 +66,22 @@ pub struct HierarchyState {
     /// Every other row starts folded. Saved with the project's editor
     /// session, so folders stay as the user left them.
     pub(crate) open: BTreeSet<String>,
+    /// Objects hidden with the row's eye, by stable object id. Editor only:
+    /// saved with the session, never in the scene, so the game ignores it.
+    /// [`sync_editor_hidden`] turns it into [`Hidden`] markers.
+    pub(crate) hidden: BTreeSet<String>,
+    /// The objects Copy last took, for Paste.
+    pub(crate) clipboard: Option<ObjectClipboard>,
+    /// Set when the user picks a Create menu entry: the command, and the
+    /// row it should go under. The shell drains it, as with
+    /// [`Self::prefab_request`], because the commands need the whole state.
+    pub(crate) create_request: Option<(crate::MenuCommand, Option<Entity>)>,
+    /// Whether an image is selected in Project Assets, which Create Sprite
+    /// needs. Set by the shell before drawing.
+    pub(crate) image_selected: bool,
+    /// A file dropped from Project Assets: its path, and the row it should go
+    /// under. The shell drains it, as with [`Self::create_request`].
+    pub(crate) asset_drop_request: Option<(PathBuf, Option<Entity>)>,
 }
 
 impl HierarchyState {
@@ -166,34 +185,264 @@ fn reparent_at_end(world: &mut World, child: Entity, parent: Option<Entity>) -> 
     true
 }
 
-fn reorder_relative(world: &mut World, dragged: Entity, target: Entity, after: bool) -> bool {
-    if dragged == target
-        || world.get_entity(dragged).is_err()
-        || world.get_entity(target).is_err()
-        || world.get::<Lock>(dragged).is_some()
+/// `entity`'s parent, if it has one.
+pub(crate) fn parent_of(world: &World, entity: Entity) -> Option<Entity> {
+    world
+        .get::<ChildOf>(entity)
+        .map(|child_of| child_of.parent())
+}
+
+/// Selects `entities`, with the last one primary.
+pub(crate) fn select_many(
+    selected: &mut Option<Entity>,
+    secondary: &mut Vec<Entity>,
+    entities: &[Entity],
+) {
+    if let Some((&last, rest)) = entities.split_last() {
+        *selected = Some(last);
+        *secondary = rest.to_vec();
+    }
+}
+
+/// Copies `entities` next to their originals and selects the copies.
+pub(crate) fn duplicate_and_select(
+    world: &mut World,
+    selected: &mut Option<Entity>,
+    secondary: &mut Vec<Entity>,
+    entities: &[Entity],
+) -> bool {
+    let copies = object_clipboard::duplicate_objects(world, entities);
+    select_many(selected, secondary, &copies);
+    !copies.is_empty()
+}
+
+/// Pastes the clipboard next to the primary selection, or at the scene root
+/// with nothing selected, and selects the copies.
+pub(crate) fn paste_and_select(
+    world: &mut World,
+    selected: &mut Option<Entity>,
+    secondary: &mut Vec<Entity>,
+    clipboard: &ObjectClipboard,
+) -> bool {
+    let after = selected.filter(|&entity| world.get_entity(entity).is_ok());
+    let parent = after.and_then(|entity| parent_of(world, entity));
+    let copies = object_clipboard::paste_objects(world, clipboard, parent, after);
+    select_many(selected, secondary, &copies);
+    !copies.is_empty()
+}
+
+/// Makes the new object `child` a child of `parent`, keeping its local
+/// transform, so it appears at its parent rather than at the world origin.
+pub(crate) fn adopt_new_object(world: &mut World, child: Entity, parent: Entity) {
+    let local = world.get::<TransformComponent>(child).copied();
+    if reparent_at_end(world, child, Some(parent))
+        && let Some(local) = local
+        && let Ok(mut entity_mut) = world.get_entity_mut(child)
     {
-        return false;
+        entity_mut.insert(local);
     }
-    let target_parent = world
-        .get::<ChildOf>(target)
-        .map(|child_of| child_of.parent());
-    if target_parent.is_some_and(|parent| is_descendant(world, parent, dragged)) {
-        return false;
+}
+
+/// Gives every object the [`Hidden`] marker that `hidden` calls for: those
+/// listed, and everything under them. Undo rebuilds the world and drops the
+/// markers, so this runs every frame. [`Hidden`] is not saved in scenes.
+pub fn sync_editor_hidden(world: &mut World, hidden: &BTreeSet<String>) {
+    let mut query = world.query::<(
+        Entity,
+        Option<&engine_scene::SceneObjectId>,
+        bevy_ecs::query::Has<Hidden>,
+    )>();
+    let objects: Vec<(Entity, bool, bool)> = query
+        .iter(world)
+        .map(|(entity, id, marked)| {
+            let listed = id.is_some_and(|id| hidden.contains(&id.0));
+            (entity, listed, marked)
+        })
+        .collect();
+    let listed: HashSet<Entity> = objects
+        .iter()
+        .filter(|(_, listed, _)| *listed)
+        .map(|(entity, ..)| *entity)
+        .collect();
+    for (entity, own, marked) in objects {
+        if listed.is_empty() && !marked {
+            continue;
+        }
+        let wanted = own
+            || ancestors(world, entity)
+                .iter()
+                .any(|ancestor| listed.contains(ancestor));
+        if wanted != marked
+            && let Ok(mut entity_mut) = world.get_entity_mut(entity)
+        {
+            if wanted {
+                entity_mut.insert(Hidden);
+            } else {
+                entity_mut.remove::<Hidden>();
+            }
+        }
     }
-    let old_parent = world
-        .get::<ChildOf>(dragged)
-        .map(|child_of| child_of.parent());
-    let mut siblings = siblings_of(world, target_parent);
-    let before = siblings.clone();
-    siblings.retain(|&entity| entity != dragged);
-    let Some(index) = siblings.iter().position(|&entity| entity == target) else {
+}
+
+/// The selection if `entity` is part of it, otherwise `entity` alone: what a
+/// row's menu or eye acts on.
+fn row_targets(entity: Entity, selected: Option<Entity>, secondary: &[Entity]) -> Vec<Entity> {
+    if selected == Some(entity) || secondary.contains(&entity) {
+        selection_list(selected, secondary)
+    } else {
+        vec![entity]
+    }
+}
+
+/// Hides `entities` in the editor, or shows them again.
+fn set_editor_hidden(
+    world: &mut World,
+    hidden: &mut BTreeSet<String>,
+    entities: &[Entity],
+    hide: bool,
+) {
+    for &entity in entities {
+        if let Some(id) = object_clipboard::ensure_object_id(world, entity) {
+            if hide {
+                hidden.insert(id);
+            } else {
+                hidden.remove(&id);
+            }
+        }
+    }
+}
+
+/// The Create entries, shared by the `+` menu and the right-click menus. A
+/// new object goes under `parent`, or at the scene root.
+fn create_menu_items(ui: &mut egui::Ui, state: &mut HierarchyState, parent: Option<Entity>) {
+    use crate::MenuCommand as Command;
+    for (label, command) in [
+        ("Empty", Command::CreateEmpty),
+        ("Camera", Command::CreateCamera),
+        ("Point Light", Command::CreatePointLight),
+        ("Sound", Command::CreateSound),
+    ] {
+        if ui.button(label).clicked() {
+            state.create_request = Some((command, parent));
+            ui.close();
+        }
+    }
+    if ui
+        .add_enabled(state.image_selected, egui::Button::new("Sprite"))
+        .on_disabled_hover_text("Select an image in Project Assets first")
+        .clicked()
+    {
+        state.create_request = Some((Command::CreateSprite, parent));
+        ui.close();
+    }
+    for (label, command) in [
+        ("UI Label", Command::CreateUiLabel),
+        ("UI Button", Command::CreateUiButton),
+    ] {
+        if ui.button(label).clicked() {
+            state.create_request = Some((command, parent));
+            ui.close();
+        }
+    }
+}
+
+/// `entities` without any whose parent is also listed, in tree order.
+pub(crate) fn top_objects(world: &mut World, entities: &[Entity]) -> Vec<Entity> {
+    let tops = without_descendants(world, entities);
+    tree_order(world)
+        .into_iter()
+        .filter(|entity| tops.contains(entity))
+        .collect()
+}
+
+/// Puts `objects`, already children of `parent`, together in the sibling
+/// list directly after `after`, or last when `after` is not a sibling.
+pub(crate) fn place_among_siblings(
+    world: &mut World,
+    objects: &[Entity],
+    parent: Option<Entity>,
+    after: Option<Entity>,
+) {
+    let mut siblings = siblings_of(world, parent);
+    siblings.retain(|entity| !objects.contains(entity));
+    let index = after
+        .and_then(|after| siblings.iter().position(|&entity| entity == after))
+        .map_or(siblings.len(), |index| index + 1);
+    siblings.splice(index..index, objects.iter().copied());
+    set_sibling_order(world, &siblings);
+}
+
+/// What a drop would move and the parent it would move to: the selection if
+/// `dragged` is part of it, otherwise `dragged` alone, leaving out locked
+/// objects and any whose parent also moves. A `target` of `None` with
+/// [`DropPlacement::Into`] means the scene root. `None` if the drop is not
+/// allowed: `dragged` is locked, the target is one of the moved objects, or
+/// the destination is inside one.
+fn drop_plan(
+    world: &mut World,
+    dragged: Entity,
+    selection: &[Entity],
+    placement: DropPlacement,
+    target: Option<Entity>,
+) -> Option<(Vec<Entity>, Option<Entity>)> {
+    if world.get_entity(dragged).is_err() || world.get::<Lock>(dragged).is_some() {
+        return None;
+    }
+    let listed = if selection.contains(&dragged) {
+        selection.to_vec()
+    } else {
+        vec![dragged]
+    };
+    let mut moving = top_objects(world, &listed);
+    moving.retain(|&entity| world.get::<Lock>(entity).is_none());
+    let parent = match placement {
+        DropPlacement::Into => target,
+        DropPlacement::Before | DropPlacement::After => {
+            target.and_then(|target| parent_of(world, target))
+        }
+    };
+    let refused = moving.is_empty()
+        || target.is_some_and(|target| moving.contains(&target))
+        || parent.is_some_and(|parent| {
+            moving
+                .iter()
+                .any(|&entity| is_descendant(world, parent, entity))
+        });
+    (!refused).then_some((moving, parent))
+}
+
+/// Carries out [`drop_plan`], keeping the moved objects in tree order and
+/// where they are in the world. Returns whether anything changed.
+fn drop_objects(
+    world: &mut World,
+    dragged: Entity,
+    selection: &[Entity],
+    placement: DropPlacement,
+    target: Option<Entity>,
+) -> bool {
+    let Some((moving, parent)) = drop_plan(world, dragged, selection, placement, target) else {
         return false;
     };
-    siblings.insert(index + usize::from(after), dragged);
-    if old_parent == target_parent && siblings == before {
-        return false;
+    let before = siblings_of(world, parent);
+    let mut reparented = false;
+    for &entity in &moving {
+        if parent_of(world, entity) != parent && reparent(world, entity, parent) {
+            reparented = true;
+        }
     }
-    if old_parent != target_parent && !reparent(world, dragged, target_parent) {
+    let mut siblings = siblings_of(world, parent);
+    siblings.retain(|entity| !moving.contains(entity));
+    let index = match (placement, target) {
+        (DropPlacement::Into, _) | (_, None) => siblings.len(),
+        (DropPlacement::Before | DropPlacement::After, Some(target)) => {
+            let Some(index) = siblings.iter().position(|&entity| entity == target) else {
+                return reparented;
+            };
+            index + usize::from(matches!(placement, DropPlacement::After))
+        }
+    };
+    siblings.splice(index..index, moving.iter().copied());
+    if !reparented && siblings == before {
         return false;
     }
     set_sibling_order(world, &siblings);
@@ -243,6 +492,7 @@ pub fn is_group(world: &World, entity: Entity) -> bool {
         TypeId::of::<Disabled>(),
         TypeId::of::<Lock>(),
         TypeId::of::<Static>(),
+        TypeId::of::<Hidden>(),
     ];
     !children_of(world, entity).is_empty()
         && world.inspect_entity(entity).is_ok_and(|mut components| {
@@ -380,32 +630,10 @@ fn rename(world: &mut World, entity: Entity, name: &str) {
 /// root's name, and returns the new root. Carries the editor's
 /// round-tripped component set (`Name`, `Transform`, `Camera`,
 /// `AssetSource`, `Disabled`) — the same one `engine_scene` saves.
-pub fn duplicate_entity(world: &mut World, entity: Entity) -> Entity {
-    let mut copied_ids = HashMap::new();
-    let mut copies = Vec::new();
-    let copy = clone_subtree(world, entity, None, &mut copied_ids, &mut copies);
-    for copied in copies {
-        if let Some(mut rules) = world.get_mut::<engine_scene::SceneRules>(copied) {
-            for rule in &mut rules.0 {
-                let target = match &mut rule.action {
-                    engine_scene::RuleAction::SetUiText { target, .. }
-                    | engine_scene::RuleAction::PlayAudio { target } => Some(target),
-                    engine_scene::RuleAction::EmitEvent { .. }
-                    | engine_scene::RuleAction::SetVariable { .. }
-                    | engine_scene::RuleAction::AddToVariable { .. } => None,
-                };
-                if let Some(target) = target
-                    && let Some(new_id) = copied_ids.get(target)
-                {
-                    *target = new_id.clone();
-                }
-            }
-        }
-    }
-    if let Some(mut name) = world.get_mut::<Name>(copy) {
-        name.0.push_str(" Copy");
-    }
-    copy
+pub fn duplicate_entity(world: &mut World, entity: Entity) -> Option<Entity> {
+    crate::object_clipboard::duplicate_objects(world, &[entity])
+        .first()
+        .copied()
 }
 
 /// `entity`'s world-space transform: its local [`TransformComponent`]
@@ -582,85 +810,6 @@ pub fn select_toggle(primary: &mut Option<Entity>, secondary: &mut Vec<Entity>, 
     }
 }
 
-/// Recursively clones `src` under `parent`, returning the clone.
-fn clone_subtree(
-    world: &mut World,
-    src: Entity,
-    parent: Option<Entity>,
-    copied_ids: &mut HashMap<String, String>,
-    copies: &mut Vec<Entity>,
-) -> Entity {
-    let name = world.get::<Name>(src).map(|n| n.0.clone());
-    let transform = world.get::<TransformComponent>(src).copied();
-    let camera = world.get::<Camera>(src).copied();
-    let asset = world.get::<AssetSource>(src).cloned();
-    let sprite_source = world.get::<SpriteSource>(src).cloned();
-    let sprite = world.get::<Sprite>(src).copied();
-    let sprite_animation = world
-        .get::<engine_scene::SceneSpriteAnimation>(src)
-        .copied();
-    let tilemap = world.get::<engine_scene::SceneTilemap>(src).cloned();
-    let rules = world.get::<engine_scene::SceneRules>(src).cloned();
-    let ui = world.get::<engine_scene::SceneUi>(src).cloned();
-    let audio = world.get::<engine_scene::SceneAudioEmitter>(src).cloned();
-    let object_id = world.get::<engine_scene::SceneObjectId>(src).cloned();
-    let disabled = is_disabled(world, src);
-    let children = children_of(world, src);
-
-    let mut clone = world.spawn_empty();
-    if let Some(name) = name {
-        clone.insert(Name::new(name));
-    }
-    if let Some(transform) = transform {
-        clone.insert(transform);
-    }
-    if let Some(camera) = camera {
-        clone.insert(camera);
-    }
-    if let Some(asset) = asset {
-        clone.insert(asset);
-    }
-    if let Some(source) = sprite_source {
-        clone.insert(source);
-    }
-    if let Some(sprite) = sprite {
-        clone.insert(sprite);
-    }
-    if let Some(animation) = sprite_animation {
-        clone.insert(animation);
-    }
-    if let Some(tilemap) = tilemap {
-        clone.insert(tilemap);
-    }
-    if let Some(rules) = rules {
-        clone.insert(rules);
-    }
-    if let Some(ui) = ui {
-        clone.insert(ui);
-    }
-    if let Some(audio) = audio {
-        clone.insert(audio);
-    }
-    if let Some(object_id) = object_id {
-        let new_id = uuid::Uuid::new_v4().to_string();
-        copied_ids.insert(object_id.0, new_id.clone());
-        clone.insert(engine_scene::SceneObjectId(new_id));
-    }
-    if disabled {
-        clone.insert(Disabled);
-    }
-    if let Some(parent) = parent {
-        clone.insert(ChildOf(parent));
-    }
-    let new_entity = clone.id();
-    copies.push(new_entity);
-
-    for child in children {
-        clone_subtree(world, child, Some(new_entity), copied_ids, copies);
-    }
-    new_entity
-}
-
 /// Fills `out` with every entity in `entity`'s subtree (including
 /// `entity`) that either matches `query` itself or has a descendant that
 /// does. Returns whether `entity`'s subtree matched at all.
@@ -677,7 +826,7 @@ fn collect_matches(world: &World, entity: Entity, query: &str, out: &mut HashSet
     matched
 }
 
-/// Draws the hierarchy panel into `ui`: a toolbar (+ Cube / Duplicate /
+/// Draws the hierarchy panel into `ui`: a toolbar (Create / Duplicate /
 /// Delete), a search box, then the entity tree.
 ///
 /// Every row is selectable at any depth (a manual header row splits the
@@ -702,25 +851,15 @@ pub fn show(
             ui.add_space(14.0);
             ui.menu_button("+", |ui| {
                 crate::theme::style_context_menu(ui);
-                if ui.button("Cube").clicked() {
-                    let offset = roots(world).len() as f32 * 1.5;
-                    let entity = spawn_entity(world, "Cube", Vec3::new(offset, 0.0, 0.0));
-                    select_only(selected, secondary, entity);
-                    ui.close();
-                }
+                create_menu_items(ui, state, None);
+                ui.separator();
                 let selection = selection_list(*selected, secondary);
                 let has_selection = !selection.is_empty();
                 if ui
-                    .add_enabled(has_selection, egui::Button::new("Duplicate"))
+                    .add_enabled(has_selection, egui::Button::new("Duplicate   ⌘D"))
                     .clicked()
                 {
-                    let mut last = None;
-                    for source in &selection {
-                        last = Some(duplicate_entity(world, *source));
-                    }
-                    if let Some(new) = last {
-                        select_only(selected, secondary, new);
-                    }
+                    duplicate_and_select(world, selected, secondary, &selection);
                     ui.close();
                 }
                 if ui
@@ -814,11 +953,18 @@ pub fn show(
                 egui::Label::new(egui::RichText::new("\u{25b8} Scene root").weak())
                     .sense(egui::Sense::click()),
             );
-            if let Some(dragged) = root_strip.dnd_release_payload::<Entity>()
-                && reparent_at_end(world, *dragged, None)
+            let selection = selection_list(*selected, secondary);
+            if let Some(path) = root_strip.dnd_release_payload::<PathBuf>() {
+                state.asset_drop_request = Some(((*path).clone(), None));
+            } else if let Some(dragged) = root_strip.dnd_release_payload::<Entity>()
+                && drop_objects(world, *dragged, &selection, DropPlacement::Into, None)
             {
-                select_only(selected, secondary, *dragged);
-            } else if root_strip.dnd_hover_payload::<Entity>().is_some() {
+                if !selection.contains(&dragged) {
+                    select_only(selected, secondary, *dragged);
+                }
+            } else if root_strip.dnd_hover_payload::<Entity>().is_some()
+                || root_strip.dnd_hover_payload::<PathBuf>().is_some()
+            {
                 ui.painter().rect_filled(
                     root_strip.rect,
                     2.0,
@@ -869,12 +1015,71 @@ pub fn show(
                         );
                     }
                     if let Some(&last) = root_entities.last() {
-                        end_drop_target(ui, world, last, selected, secondary);
+                        end_drop_target(ui, world, last, selected, secondary, state);
                     }
+                    // The empty space below the rows: right-click to create
+                    // at the scene root or paste.
+                    let (_, empty) = ui.allocate_at_least(
+                        egui::vec2(ui.available_width(), ui.available_height().max(40.0)),
+                        egui::Sense::click(),
+                    );
+                    if let Some(path) = empty.dnd_release_payload::<PathBuf>() {
+                        state.asset_drop_request = Some(((*path).clone(), None));
+                    }
+                    empty.context_menu(|ui| {
+                        crate::theme::style_context_menu(ui);
+                        ui.menu_button("Create", |ui| {
+                            crate::theme::style_context_menu(ui);
+                            create_menu_items(ui, state, None);
+                        });
+                        let clipboard = state.clipboard.clone();
+                        if ui
+                            .add_enabled(clipboard.is_some(), egui::Button::new("Paste   ⌘V"))
+                            .clicked()
+                            && let Some(clipboard) = clipboard
+                        {
+                            *selected = None;
+                            secondary.clear();
+                            paste_and_select(world, selected, secondary, &clipboard);
+                            ui.close();
+                        }
+                    });
                 });
             state.reveal = None;
             state.reveal_ancestors.clear();
+            paint_drag_count(ui, *selected, secondary);
         });
+}
+
+/// While several objects are being dragged, says how many beside the pointer:
+/// only the row under the pointer is drawn moving.
+fn paint_drag_count(ui: &egui::Ui, selected: Option<Entity>, secondary: &[Entity]) {
+    let Some(dragged) = egui::DragAndDrop::payload::<Entity>(ui.ctx()) else {
+        return;
+    };
+    let count = row_targets(*dragged, selected, secondary).len();
+    if count < 2 {
+        return;
+    }
+    let Some(pointer) = ui.input(|input| input.pointer.hover_pos()) else {
+        return;
+    };
+    let palette = crate::theme::NIGHT;
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("hierarchy_drag_count"),
+    ));
+    let galley = painter.layout_no_wrap(
+        format!("{count} objects"),
+        egui::TextStyle::Small.resolve(ui.style()),
+        palette.text,
+    );
+    let rect = egui::Rect::from_min_size(
+        pointer + egui::vec2(14.0, 14.0),
+        galley.size() + egui::vec2(12.0, 6.0),
+    );
+    painter.rect_filled(rect, 6.0, palette.accent_fill);
+    painter.galley(rect.min + egui::vec2(6.0, 3.0), galley, palette.text);
 }
 
 /// Appends `entity` and its visible descendants to `out` in draw order
@@ -924,8 +1129,15 @@ fn show_entity(
             ui.add_space(22.0);
             entity_row(ui, world, entity, selected, secondary, state);
         });
-        let drop_into =
-            entity_drop_target(ui, world, entity, row.response.rect, selected, secondary);
+        let drop_into = entity_drop_target(
+            ui,
+            world,
+            entity,
+            row.response.rect,
+            selected,
+            secondary,
+            state,
+        );
         paint_hierarchy_row(ui, highlight, row.response.rect, in_selection || drop_into);
         return;
     }
@@ -970,8 +1182,15 @@ fn show_entity(
             state.open.remove(&key);
         }
     }
-    let drop_into =
-        entity_drop_target(ui, world, entity, header.response.rect, selected, secondary);
+    let drop_into = entity_drop_target(
+        ui,
+        world,
+        entity,
+        header.response.rect,
+        selected,
+        secondary,
+        state,
+    );
     paint_hierarchy_row(
         ui,
         highlight,
@@ -983,9 +1202,16 @@ fn show_entity(
             show_entity(ui, world, child, selected, secondary, state, visible);
         }
         if let Some(&last) = children.last() {
-            end_drop_target(ui, world, last, selected, secondary);
+            end_drop_target(ui, world, last, selected, secondary, state);
         }
     });
+}
+
+/// One place on a row that a drag can be dropped.
+struct DropZone {
+    target: Entity,
+    hit_rect: egui::Rect,
+    placement: DropPlacement,
 }
 
 #[derive(Clone, Copy)]
@@ -1002,6 +1228,7 @@ fn entity_drop_target(
     rect: egui::Rect,
     selected: &mut Option<Entity>,
     secondary: &mut Vec<Entity>,
+    state: &mut HierarchyState,
 ) -> bool {
     let hit_rect = egui::Rect::from_min_max(rect.min - egui::vec2(0.0, 4.0), rect.max);
     let pointer = ui.input(|input| input.pointer.hover_pos());
@@ -1010,7 +1237,12 @@ fn entity_drop_target(
     } else {
         DropPlacement::Into
     };
-    handle_entity_drop(ui, world, target, hit_rect, placement, selected, secondary)
+    let zone = DropZone {
+        target,
+        hit_rect,
+        placement,
+    };
+    handle_entity_drop(ui, world, zone, selected, secondary, state)
 }
 
 fn end_drop_target(
@@ -1019,29 +1251,31 @@ fn end_drop_target(
     target: Entity,
     selected: &mut Option<Entity>,
     secondary: &mut Vec<Entity>,
+    state: &mut HierarchyState,
 ) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::hover());
-    handle_entity_drop(
-        ui,
-        world,
+    let zone = DropZone {
         target,
-        rect,
-        DropPlacement::After,
-        selected,
-        secondary,
-    );
+        hit_rect: rect,
+        placement: DropPlacement::After,
+    };
+    handle_entity_drop(ui, world, zone, selected, secondary, state);
 }
 
 fn handle_entity_drop(
     ui: &mut egui::Ui,
     world: &mut World,
-    target: Entity,
-    hit_rect: egui::Rect,
-    placement: DropPlacement,
+    zone: DropZone,
     selected: &mut Option<Entity>,
     secondary: &mut Vec<Entity>,
+    state: &mut HierarchyState,
 ) -> bool {
+    let DropZone {
+        target,
+        hit_rect,
+        placement,
+    } = zone;
     let response = ui.interact(
         hit_rect,
         ui.make_persistent_id((
@@ -1051,45 +1285,30 @@ fn handle_entity_drop(
         )),
         egui::Sense::hover(),
     );
+    // A file from Project Assets becomes a child of the row. The gaps between
+    // rows ignore files.
+    if response.dnd_hover_payload::<PathBuf>().is_some() {
+        if !matches!(placement, DropPlacement::Into) {
+            return false;
+        }
+        if let Some(path) = response.dnd_release_payload::<PathBuf>() {
+            state.asset_drop_request = Some(((*path).clone(), Some(target)));
+            return false;
+        }
+        return true;
+    }
     let Some(dragged) = response.dnd_hover_payload::<Entity>() else {
         return false;
     };
     let dragged = *dragged;
-    if dragged == target || world.get::<Lock>(dragged).is_some() {
-        return false;
-    }
-    let parent = match placement {
-        DropPlacement::Into => Some(target),
-        DropPlacement::Before | DropPlacement::After => world
-            .get::<ChildOf>(target)
-            .map(|child_of| child_of.parent()),
-    };
-    if parent.is_some_and(|parent| is_descendant(world, parent, dragged)) {
+    let selection = selection_list(*selected, secondary);
+    if drop_plan(world, dragged, &selection, placement, Some(target)).is_none() {
         return false;
     }
     if response.dnd_release_payload::<Entity>().is_some() {
-        let moved = match placement {
-            DropPlacement::Before => reorder_relative(world, dragged, target, false),
-            DropPlacement::After => reorder_relative(world, dragged, target, true),
-            DropPlacement::Into => {
-                let group = if *selected == Some(dragged) || secondary.contains(&dragged) {
-                    selection_list(*selected, secondary)
-                } else {
-                    vec![dragged]
-                };
-                let mut moved = false;
-                for child in group {
-                    if world.get::<Lock>(child).is_none()
-                        && !is_descendant(world, target, child)
-                        && reparent_at_end(world, child, Some(target))
-                    {
-                        moved = true;
-                    }
-                }
-                moved
-            }
-        };
-        if moved {
+        if drop_objects(world, dragged, &selection, placement, Some(target))
+            && !selection.contains(&dragged)
+        {
             select_only(selected, secondary, dragged);
         }
         return false;
@@ -1149,9 +1368,68 @@ fn paint_search_icon(ui: &mut egui::Ui) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowIcon {
     Camera,
+    Light,
+    Sound,
+    /// An on-screen label or button.
+    Ui,
+    Tilemap,
+    Water,
+    Sprite,
+    Terrain,
+    Model,
     /// A folder: an [`is_group`] object.
     Group,
     Object,
+}
+
+/// Whether `path` looks like a terrain mesh: a `.gltf` in a `terrain` folder,
+/// where [`crate::terrain_tools::write_new_terrain`] creates them. Terrain has
+/// no component of its own, and this runs per row per frame, so the `.terrain`
+/// file beside the mesh is not checked.
+fn is_terrain_path(path: &str) -> bool {
+    let path = std::path::Path::new(path);
+    path.extension()
+        .is_some_and(|extension| extension == "gltf")
+        && path
+            .parent()
+            .is_some_and(|parent| parent.ends_with("terrain"))
+}
+
+/// The icon for `entity`'s row. An object that is several things takes the
+/// first match, with the Scene View's camera > light > sound order.
+fn row_icon(world: &World, entity: Entity) -> RowIcon {
+    let Ok(object) = world.get_entity(entity) else {
+        return RowIcon::Object;
+    };
+    if object.contains::<Camera>() {
+        RowIcon::Camera
+    } else if object.contains::<engine_scene::ScenePointLight>() {
+        RowIcon::Light
+    } else if object.contains::<engine_scene::SceneAudioEmitter>() {
+        RowIcon::Sound
+    } else if object.contains::<engine_scene::SceneUi>() {
+        RowIcon::Ui
+    } else if object.contains::<engine_scene::SceneTilemap>() {
+        RowIcon::Tilemap
+    } else if object.contains::<WaterVolume>() {
+        RowIcon::Water
+    } else if object.contains::<Sprite>() || object.contains::<SpriteSource>() {
+        RowIcon::Sprite
+    } else if object
+        .get::<AssetSource>()
+        .is_some_and(|source| is_terrain_path(&source.path))
+    {
+        RowIcon::Terrain
+    } else if object.contains::<AssetSource>()
+        || object.contains::<MeshSource>()
+        || object.contains::<MeshRenderer>()
+    {
+        RowIcon::Model
+    } else if is_group(world, entity) {
+        RowIcon::Group
+    } else {
+        RowIcon::Object
+    }
 }
 
 /// Groups the panel's selection (the panel-side twin of
@@ -1189,53 +1467,144 @@ fn ungroup_selection(
 fn paint_entity_icon(ui: &mut egui::Ui, icon: RowIcon) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
     let at = |x: f32, y: f32| rect.min + egui::vec2(x, y);
-    let stroke = egui::Stroke::new(1.2, crate::theme::NIGHT.muted);
+    let ink = crate::theme::NIGHT.muted;
+    let stroke = egui::Stroke::new(1.2, ink);
     let painter = ui.painter();
-    if icon == RowIcon::Group {
+    let line = |points: &[(f32, f32)]| {
         painter.add(egui::Shape::line(
-            vec![
-                at(1.0, 3.0),
-                at(5.5, 3.0),
-                at(7.0, 4.5),
-                at(13.0, 4.5),
-                at(13.0, 12.0),
-                at(1.0, 12.0),
-                at(1.0, 3.0),
-            ],
+            points.iter().map(|&(x, y)| at(x, y)).collect(),
             stroke,
         ));
-        painter.line_segment([at(1.0, 6.5), at(13.0, 6.5)], stroke);
-    } else if icon == RowIcon::Camera {
-        painter.add(egui::Shape::line(
-            vec![
-                at(1.0, 3.0),
-                at(9.0, 3.0),
-                at(9.0, 11.0),
-                at(1.0, 11.0),
-                at(1.0, 3.0),
-            ],
-            stroke,
-        ));
-        painter.add(egui::Shape::line(
-            vec![at(9.0, 5.0), at(13.0, 3.0), at(13.0, 11.0), at(9.0, 9.0)],
-            stroke,
-        ));
+    };
+    let glyph = |kind| {
+        crate::scene_icons::paint_glyph(painter, kind, rect.center(), 0.75, ink, ink);
+    };
+    match icon {
+        RowIcon::Camera => glyph(crate::scene_icons::IconKind::Camera),
+        RowIcon::Light => glyph(crate::scene_icons::IconKind::Light),
+        RowIcon::Sound => glyph(crate::scene_icons::IconKind::Sound),
+        RowIcon::Ui => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(at(1.0, 3.5), at(13.0, 10.5)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            line(&[(4.0, 7.0), (10.0, 7.0)]);
+        }
+        RowIcon::Tilemap => {
+            line(&[
+                (2.0, 2.0),
+                (12.0, 2.0),
+                (12.0, 12.0),
+                (2.0, 12.0),
+                (2.0, 2.0),
+            ]);
+            line(&[(7.0, 2.0), (7.0, 12.0)]);
+            line(&[(2.0, 7.0), (12.0, 7.0)]);
+        }
+        RowIcon::Water => {
+            for y in [5.0, 9.5] {
+                line(&[
+                    (1.0, y),
+                    (3.0, y - 1.5),
+                    (5.0, y),
+                    (7.0, y + 1.5),
+                    (9.0, y),
+                    (11.0, y - 1.5),
+                    (13.0, y),
+                ]);
+            }
+        }
+        RowIcon::Sprite => {
+            line(&[
+                (1.0, 2.5),
+                (13.0, 2.5),
+                (13.0, 11.5),
+                (1.0, 11.5),
+                (1.0, 2.5),
+            ]);
+            line(&[
+                (1.0, 10.0),
+                (5.0, 6.0),
+                (8.0, 9.0),
+                (10.0, 7.5),
+                (13.0, 10.0),
+            ]);
+        }
+        RowIcon::Terrain => {
+            line(&[(1.0, 9.0), (4.5, 4.5), (7.0, 7.0), (9.5, 3.0), (13.0, 9.0)]);
+            line(&[(1.0, 12.0), (13.0, 12.0)]);
+        }
+        RowIcon::Model => {
+            line(&[
+                (7.0, 1.0),
+                (13.0, 4.0),
+                (13.0, 10.0),
+                (7.0, 13.0),
+                (1.0, 10.0),
+                (1.0, 4.0),
+                (7.0, 1.0),
+            ]);
+            line(&[(1.0, 4.0), (7.0, 7.0)]);
+            line(&[(13.0, 4.0), (7.0, 7.0)]);
+            line(&[(7.0, 7.0), (7.0, 13.0)]);
+        }
+        RowIcon::Group => {
+            line(&[
+                (1.0, 3.0),
+                (5.5, 3.0),
+                (7.0, 4.5),
+                (13.0, 4.5),
+                (13.0, 12.0),
+                (1.0, 12.0),
+                (1.0, 3.0),
+            ]);
+            line(&[(1.0, 6.5), (13.0, 6.5)]);
+        }
+        RowIcon::Object => {
+            line(&[(7.0, 3.5), (10.5, 7.0), (7.0, 10.5), (3.5, 7.0), (7.0, 3.5)]);
+        }
+    }
+}
+
+/// Width kept free at the end of a row for the eye.
+const EYE_SLOT_WIDTH: f32 = 22.0;
+
+/// The show/hide eye, slashed when `hidden`. Fainter when it is `inherited`
+/// from a hidden parent, and brighter under the pointer.
+fn paint_eye_icon(ui: &egui::Ui, rect: egui::Rect, hidden: bool, inherited: bool, hovered: bool) {
+    let palette = crate::theme::NIGHT;
+    let ink = if hovered {
+        palette.text
+    } else if inherited {
+        palette.subtle.gamma_multiply(0.6)
+    } else if hidden {
+        palette.subtle
     } else {
-        painter.add(egui::Shape::line(
-            vec![
-                at(7.0, 1.0),
-                at(13.0, 4.0),
-                at(13.0, 10.0),
-                at(7.0, 13.0),
-                at(1.0, 10.0),
-                at(1.0, 4.0),
-                at(7.0, 1.0),
-            ],
-            stroke,
-        ));
-        painter.line_segment([at(1.0, 4.0), at(7.0, 7.0)], stroke);
-        painter.line_segment([at(13.0, 4.0), at(7.0, 7.0)], stroke);
-        painter.line_segment([at(7.0, 7.0), at(7.0, 13.0)], stroke);
+        palette.muted
+    };
+    let stroke = egui::Stroke::new(1.2, ink);
+    let at = rect.center();
+    let point = |x: f32, y: f32| at + egui::vec2(x, y);
+    let painter = ui.painter();
+    painter.add(egui::Shape::line(
+        vec![
+            point(-6.5, 0.0),
+            point(-3.5, -3.0),
+            point(0.0, -4.0),
+            point(3.5, -3.0),
+            point(6.5, 0.0),
+            point(3.5, 3.0),
+            point(0.0, 4.0),
+            point(-3.5, 3.0),
+            point(-6.5, 0.0),
+        ],
+        stroke,
+    ));
+    painter.circle_filled(at, 1.8, ink);
+    if hidden {
+        painter.line_segment([point(-5.5, 5.0), point(5.5, -5.0)], stroke);
     }
 }
 
@@ -1305,10 +1674,16 @@ fn entity_row(
     let disabled = is_disabled(world, entity);
     let locked = world.get::<Lock>(entity).is_some();
     let name = display_name(world, entity);
+    let hidden_itself = world
+        .get::<engine_scene::SceneObjectId>(entity)
+        .is_some_and(|id| state.hidden.contains(&id.0));
+    let hidden = hidden_itself || world.get::<Hidden>(entity).is_some();
     let text = if disabled {
         egui::RichText::new(name)
             .color(crate::theme::NIGHT.subtle)
             .italics()
+    } else if hidden {
+        egui::RichText::new(name).color(crate::theme::NIGHT.subtle)
     } else if *selected == Some(entity) || secondary.contains(&entity) {
         egui::RichText::new(name).color(crate::theme::NIGHT.text)
     } else {
@@ -1321,19 +1696,10 @@ fn entity_row(
             let row_rect =
                 egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 27.0));
             ui.horizontal(|ui| {
-                let icon = if world.get::<Camera>(entity).is_some() {
-                    RowIcon::Camera
-                } else if is_group(world, entity) {
-                    RowIcon::Group
-                } else {
-                    RowIcon::Object
-                };
-                paint_entity_icon(ui, icon);
+                paint_entity_icon(ui, row_icon(world, entity));
+                let reserved = EYE_SLOT_WIDTH + if locked { 20.0 } else { 0.0 };
                 ui.allocate_ui_with_layout(
-                    egui::vec2(
-                        (ui.available_width() - if locked { 20.0 } else { 0.0 }).max(0.0),
-                        27.0,
-                    ),
+                    egui::vec2((ui.available_width() - reserved).max(0.0), 27.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
                         ui.add(
@@ -1350,9 +1716,35 @@ fn entity_row(
             row_rect
         })
         .inner;
+    let eye_rect = egui::Rect::from_center_size(
+        egui::pos2(row_rect.right() - EYE_SLOT_WIDTH / 2.0, row_rect.center().y),
+        egui::vec2(EYE_SLOT_WIDTH - 6.0, 14.0),
+    );
     let response = ui.interact(row_rect, row_id, egui::Sense::click_and_drag());
     if state.reveal == Some(entity) {
         response.scroll_to_me(Some(egui::Align::Center));
+    }
+    // After the row, so a click on the eye toggles instead of selecting.
+    let eye = ui.interact(eye_rect, row_id.with("eye"), egui::Sense::click());
+    if hidden || response.hovered() || eye.hovered() {
+        paint_eye_icon(
+            ui,
+            eye_rect,
+            hidden,
+            hidden && !hidden_itself,
+            eye.hovered(),
+        );
+    }
+    if eye
+        .on_hover_text(if hidden_itself {
+            "Show in the Scene View"
+        } else {
+            "Hide in the Scene View (the game is not affected)"
+        })
+        .clicked()
+    {
+        let targets = row_targets(entity, *selected, secondary);
+        set_editor_hidden(world, &mut state.hidden, &targets, !hidden_itself);
     }
     if response.clicked() {
         let (multi, range) =
@@ -1384,6 +1776,11 @@ fn entity_row(
 
     response.context_menu(|ui| {
         crate::theme::style_context_menu(ui);
+        ui.menu_button("Create", |ui| {
+            crate::theme::style_context_menu(ui);
+            create_menu_items(ui, state, Some(entity));
+        });
+        ui.separator();
         if ui.button("Rename").clicked() {
             state.renaming = Some(Renaming {
                 entity,
@@ -1392,8 +1789,23 @@ fn entity_row(
             });
             ui.close();
         }
-        if ui.button("Duplicate").clicked() {
-            select_only(selected, secondary, duplicate_entity(world, entity));
+        let targets = row_targets(entity, *selected, secondary);
+        if ui.button("Duplicate   ⌘D").clicked() {
+            duplicate_and_select(world, selected, secondary, &targets);
+            ui.close();
+        }
+        if ui.button("Copy   ⌘C").clicked() {
+            state.clipboard = object_clipboard::copy_objects(world, &targets);
+            ui.close();
+        }
+        let clipboard = state.clipboard.clone();
+        if ui
+            .add_enabled(clipboard.is_some(), egui::Button::new("Paste   ⌘V"))
+            .clicked()
+            && let Some(clipboard) = clipboard
+        {
+            select_only(selected, secondary, entity);
+            paste_and_select(world, selected, secondary, &clipboard);
             ui.close();
         }
         // Group acts on the whole selection when this row is part of it,
@@ -1528,6 +1940,367 @@ mod tests {
         });
         output.textures_delta.clear();
         assert!(!emoji);
+    }
+
+    #[test]
+    fn terrain_paths_are_gltf_files_in_a_terrain_folder() {
+        assert!(is_terrain_path("terrain/Terrain.gltf"));
+        assert!(is_terrain_path("terrain/Terrain 2.gltf"));
+        assert!(!is_terrain_path("props/barrel.gltf"));
+        assert!(!is_terrain_path("terrain/notes.txt"));
+        assert!(!is_terrain_path("terrain.gltf"));
+    }
+
+    fn test_camera() -> Camera {
+        Camera(engine_renderer::Camera::new(Vec3::ONE, Vec3::ZERO, 1.0))
+    }
+
+    /// One object of every row kind, in the order [`RowIcon`] lists them, for
+    /// the icon tests and the snapshot.
+    fn one_object_of_each_kind(world: &mut World) -> Vec<(Entity, RowIcon)> {
+        let no_asset = || engine_scene::AssetRef { id: String::new() };
+        let camera = spawn_entity(world, "Camera", Vec3::ZERO);
+        world.entity_mut(camera).insert(test_camera());
+        let light = spawn_entity(world, "Point Light", Vec3::ZERO);
+        world
+            .entity_mut(light)
+            .insert(engine_scene::ScenePointLight(
+                engine_scene::PointLightData::default(),
+            ));
+        let sound = spawn_entity(world, "Sound", Vec3::ZERO);
+        world
+            .entity_mut(sound)
+            .insert(engine_scene::SceneAudioEmitter(
+                engine_scene::AudioEmitterData::new(no_asset()),
+            ));
+        let ui = spawn_entity(world, "Start Button", Vec3::ZERO);
+        world
+            .entity_mut(ui)
+            .insert(engine_scene::SceneUi(engine_scene::UiElementData::button()));
+        let tilemap = spawn_entity(world, "Level", Vec3::ZERO);
+        world.entity_mut(tilemap).insert(engine_scene::SceneTilemap(
+            engine_scene::TilemapData::new(no_asset()),
+        ));
+        let water = spawn_entity(world, "Lake", Vec3::ZERO);
+        world.entity_mut(water).insert(WaterVolume {
+            surface: engine_physics::WaterSurface::default(),
+        });
+        let sprite = spawn_entity(world, "Player Sprite", Vec3::ZERO);
+        world.entity_mut(sprite).insert(SpriteSource {
+            atlas: String::new(),
+            region: "full".into(),
+            size: [1.0, 1.0],
+            color: [1.0; 4],
+            z_order: 0.0,
+        });
+        let terrain = spawn_entity(world, "Terrain", Vec3::ZERO);
+        world
+            .entity_mut(terrain)
+            .insert(AssetSource::new("terrain/Terrain.gltf"));
+        let model = spawn_entity(world, "Barrel", Vec3::ZERO);
+        world
+            .entity_mut(model)
+            .insert(AssetSource::new("props/barrel.gltf"));
+        let group = spawn_entity(world, "Trees", Vec3::ZERO);
+        let leaf = spawn_entity(world, "Tree", Vec3::ZERO);
+        reparent(world, leaf, Some(group));
+        let object = spawn_entity(world, "Empty", Vec3::ZERO);
+        vec![
+            (camera, RowIcon::Camera),
+            (light, RowIcon::Light),
+            (sound, RowIcon::Sound),
+            (ui, RowIcon::Ui),
+            (tilemap, RowIcon::Tilemap),
+            (water, RowIcon::Water),
+            (sprite, RowIcon::Sprite),
+            (terrain, RowIcon::Terrain),
+            (model, RowIcon::Model),
+            (group, RowIcon::Group),
+            (object, RowIcon::Object),
+        ]
+    }
+
+    #[test]
+    fn every_kind_of_object_gets_its_own_row_icon() {
+        let mut world = World::new();
+        for (entity, expected) in one_object_of_each_kind(&mut world) {
+            assert_eq!(
+                row_icon(&world, entity),
+                expected,
+                "{}",
+                display_name(&world, entity)
+            );
+        }
+    }
+
+    #[test]
+    fn an_object_that_is_several_things_takes_the_scene_view_order() {
+        let mut world = World::new();
+        let both = spawn_entity(&mut world, "Both", Vec3::ZERO);
+        world.entity_mut(both).insert((
+            engine_scene::ScenePointLight(engine_scene::PointLightData::default()),
+            test_camera(),
+        ));
+        assert_eq!(row_icon(&world, both), RowIcon::Camera);
+
+        // A model with children is still a model, never a folder.
+        let parent = spawn_entity(&mut world, "Crate", Vec3::ZERO);
+        world
+            .entity_mut(parent)
+            .insert(AssetSource::new("props/crate.gltf"));
+        let child = spawn_entity(&mut world, "Lid", Vec3::ZERO);
+        reparent(&mut world, child, Some(parent));
+        assert_eq!(row_icon(&world, parent), RowIcon::Model);
+    }
+
+    /// Three roots, plus a `Folder` holding `Inner`.
+    fn drag_fixture(world: &mut World) -> [Entity; 5] {
+        let [a, b, c, folder, inner] =
+            ["A", "B", "C", "Folder", "Inner"].map(|name| spawn_entity(world, name, Vec3::ZERO));
+        reparent(world, inner, Some(folder));
+        set_sibling_order(world, &[a, b, c, folder]);
+        [a, b, c, folder, inner]
+    }
+
+    #[test]
+    fn dragging_several_rows_moves_them_together_in_order() {
+        let mut world = World::new();
+        let [a, b, c, folder, inner] = drag_fixture(&mut world);
+
+        // Selection order does not matter: they keep the tree's order.
+        let selection = [c, a];
+        assert!(drop_objects(
+            &mut world,
+            a,
+            &selection,
+            DropPlacement::Before,
+            Some(inner)
+        ));
+        assert_eq!(children_of(&world, folder), vec![a, c, inner]);
+        assert_eq!(roots(&mut world), vec![b, folder]);
+
+        assert!(drop_objects(
+            &mut world,
+            c,
+            &[a, c],
+            DropPlacement::After,
+            Some(inner)
+        ));
+        assert_eq!(children_of(&world, folder), vec![inner, a, c]);
+
+        assert!(drop_objects(
+            &mut world,
+            a,
+            &[a, c],
+            DropPlacement::Into,
+            None
+        ));
+        assert_eq!(roots(&mut world), vec![b, folder, a, c]);
+
+        assert!(drop_objects(
+            &mut world,
+            a,
+            &[a, b],
+            DropPlacement::Into,
+            Some(folder)
+        ));
+        assert_eq!(children_of(&world, folder), vec![inner, b, a]);
+    }
+
+    #[test]
+    fn a_row_outside_the_selection_drags_alone() {
+        let mut world = World::new();
+        let [a, b, c, folder, _] = drag_fixture(&mut world);
+        assert!(drop_objects(
+            &mut world,
+            c,
+            &[a, b],
+            DropPlacement::Into,
+            Some(folder)
+        ));
+        assert_eq!(roots(&mut world), vec![a, b, folder]);
+    }
+
+    #[test]
+    fn a_drop_onto_or_inside_a_moved_object_is_refused() {
+        let mut world = World::new();
+        let [a, b, _, folder, inner] = drag_fixture(&mut world);
+        for (target, placement) in [
+            (b, DropPlacement::Before),
+            (folder, DropPlacement::Into),
+            (inner, DropPlacement::Into),
+            (inner, DropPlacement::After),
+        ] {
+            assert!(!drop_objects(
+                &mut world,
+                a,
+                &[a, b, folder],
+                placement,
+                Some(target)
+            ));
+        }
+        assert_eq!(children_of(&world, folder), vec![inner]);
+    }
+
+    #[test]
+    fn locked_objects_stay_behind_a_multi_drag() {
+        let mut world = World::new();
+        let [a, b, _, folder, inner] = drag_fixture(&mut world);
+        world.entity_mut(b).insert(Lock);
+        assert!(drop_objects(
+            &mut world,
+            a,
+            &[a, b],
+            DropPlacement::Into,
+            Some(folder)
+        ));
+        assert_eq!(children_of(&world, folder), vec![inner, a]);
+        assert!(parent_of(&world, b).is_none());
+        assert!(!drop_objects(
+            &mut world,
+            b,
+            &[b],
+            DropPlacement::Into,
+            Some(folder)
+        ));
+    }
+
+    #[test]
+    fn a_multi_drag_keeps_world_positions() {
+        let mut world = World::new();
+        let folder = spawn_entity(&mut world, "Folder", Vec3::new(10.0, 0.0, 0.0));
+        let a = spawn_entity(&mut world, "A", Vec3::new(1.0, 0.0, 0.0));
+        let b = spawn_entity(&mut world, "B", Vec3::new(2.0, 0.0, 0.0));
+        assert!(drop_objects(
+            &mut world,
+            a,
+            &[a, b],
+            DropPlacement::Into,
+            Some(folder)
+        ));
+        assert!(
+            world_transform(&world, b)
+                .translation
+                .abs_diff_eq(Vec3::new(2.0, 0.0, 0.0), 1e-5)
+        );
+    }
+
+    #[test]
+    fn hiding_marks_children_survives_a_rebuild_and_never_touches_the_scene() {
+        let mut world = World::new();
+        let parent = spawn_entity(&mut world, "Parent", Vec3::ZERO);
+        let child = spawn_entity(&mut world, "Child", Vec3::ZERO);
+        let other = spawn_entity(&mut world, "Other", Vec3::ZERO);
+        reparent(&mut world, child, Some(parent));
+        let mut hidden = BTreeSet::new();
+        let before = engine_scene::Scene::from_world(&mut world);
+
+        set_editor_hidden(&mut world, &mut hidden, &[parent], true);
+        sync_editor_hidden(&mut world, &hidden);
+        assert!(world.get::<Hidden>(parent).is_some());
+        assert!(world.get::<Hidden>(child).is_some(), "children follow");
+        assert!(world.get::<Hidden>(other).is_none());
+        assert_eq!(
+            engine_scene::Scene::from_world(&mut world),
+            before,
+            "the scene is unchanged"
+        );
+
+        // Undo rebuilds the world from a scene, dropping every marker.
+        let mut rebuilt = World::new();
+        let spawned = before.instantiate(&mut rebuilt);
+        assert!(spawned.iter().all(|&e| rebuilt.get::<Hidden>(e).is_none()));
+        sync_editor_hidden(&mut rebuilt, &hidden);
+        assert_eq!(
+            spawned
+                .iter()
+                .filter(|&&e| rebuilt.get::<Hidden>(e).is_some())
+                .count(),
+            2
+        );
+
+        set_editor_hidden(&mut world, &mut hidden, &[parent], false);
+        sync_editor_hidden(&mut world, &hidden);
+        assert!(world.get::<Hidden>(parent).is_none());
+        assert!(world.get::<Hidden>(child).is_none());
+    }
+
+    #[test]
+    fn a_hidden_group_is_still_a_group() {
+        let mut world = World::new();
+        let group = spawn_entity(&mut world, "Trees", Vec3::ZERO);
+        let tree = spawn_entity(&mut world, "Tree", Vec3::ZERO);
+        reparent(&mut world, tree, Some(group));
+        let mut hidden = BTreeSet::new();
+        set_editor_hidden(&mut world, &mut hidden, &[group], true);
+        sync_editor_hidden(&mut world, &hidden);
+        assert!(is_group(&world, group));
+        assert_eq!(row_icon(&world, group), RowIcon::Group);
+    }
+
+    #[test]
+    fn hiding_an_object_with_no_id_gives_it_one() {
+        let mut world = World::new();
+        let entity = world.spawn(Name::new("New")).id();
+        let mut hidden = BTreeSet::new();
+        set_editor_hidden(&mut world, &mut hidden, &[entity], true);
+        sync_editor_hidden(&mut world, &hidden);
+        assert_eq!(hidden.len(), 1);
+        assert!(world.get::<Hidden>(entity).is_some());
+    }
+
+    #[test]
+    fn hidden_objects_cannot_be_clicked_in_the_scene_view() {
+        let mut world = World::new();
+        let light = spawn_entity(&mut world, "Light", Vec3::ZERO);
+        world
+            .entity_mut(light)
+            .insert(engine_scene::ScenePointLight(
+                engine_scene::PointLightData::default(),
+            ));
+        assert_eq!(crate::scene_icons::collect(&mut world).len(), 1);
+        world.entity_mut(light).insert(Hidden);
+        assert!(crate::scene_icons::collect(&mut world).is_empty());
+    }
+
+    #[test]
+    fn a_new_child_keeps_its_local_transform() {
+        let mut world = World::new();
+        let parent = spawn_entity(&mut world, "Parent", Vec3::new(10.0, 0.0, 0.0));
+        let light = spawn_entity(&mut world, "Light", Vec3::new(0.0, 2.0, 0.0));
+        adopt_new_object(&mut world, light, parent);
+        assert_eq!(parent_of(&world, light), Some(parent));
+        assert!(
+            world_transform(&world, light)
+                .translation
+                .abs_diff_eq(Vec3::new(10.0, 2.0, 0.0), 1e-5),
+            "it appears at its parent"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs a GPU; writes hierarchy-icons.png"]
+    fn snapshot_hierarchy_icons() {
+        let mut world = World::new();
+        let objects = one_object_of_each_kind(&mut world);
+        let mut state = HierarchyState::default();
+        // A multi-selection, one hidden object and one hidden parent.
+        let (mut selected, mut secondary) = (Some(objects[0].0), vec![objects[1].0]);
+        let by_icon = |icon| objects.iter().find(|(_, kind)| *kind == icon).unwrap().0;
+        set_editor_hidden(
+            &mut world,
+            &mut state.hidden,
+            &[by_icon(RowIcon::Water), by_icon(RowIcon::Group)],
+            true,
+        );
+        sync_editor_hidden(&mut world, &state.hidden);
+        let path = crate::ui_snapshot::snapshot_dir().join("hierarchy-icons.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(280.0, 480.0), 2.0, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+            });
+        })
+        .expect("snapshot");
     }
 
     #[test]
@@ -1908,6 +2681,54 @@ mod tests {
     }
 
     #[test]
+    fn dropping_a_file_on_a_row_asks_for_a_child_of_that_row() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        let row = spawn_entity(&mut world, "Target", Vec3::ZERO);
+        let (mut selected, mut secondary) = (None, Vec::new());
+        let mut state = HierarchyState::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show(ui, &mut world, &mut selected, &mut secondary, &mut state);
+        });
+        let to = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == "Target" => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center())
+                }
+                _ => None,
+            })
+            .unwrap();
+        output.textures_delta.clear();
+        let path = PathBuf::from("props/barrel.gltf");
+        egui::DragAndDrop::set_payload(&ctx, path.clone());
+        for (time, events) in [
+            (0.1, vec![egui::Event::PointerMoved(to)]),
+            (
+                0.2,
+                vec![egui::Event::PointerButton {
+                    pos: to,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            ),
+        ] {
+            let mut frame = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+            );
+            frame.textures_delta.clear();
+        }
+        assert_eq!(state.asset_drop_request, Some((path, Some(row))));
+    }
+
+    #[test]
     fn reordering_between_parents_keeps_sibling_order_and_world_position() {
         let mut world = World::new();
         let first_parent = spawn_at(&mut world, "First parent", Vec3::new(10.0, 0.0, 0.0));
@@ -1922,7 +2743,13 @@ mod tests {
         let target = child_at(&mut world, "Target", Vec3::ZERO, second_parent);
         set_sibling_order(&mut world, &[before, target]);
 
-        assert!(reorder_relative(&mut world, dragged, target, false));
+        assert!(drop_objects(
+            &mut world,
+            dragged,
+            &[],
+            DropPlacement::Before,
+            Some(target)
+        ));
         assert_eq!(
             children_of(&world, second_parent),
             vec![before, dragged, target]
@@ -1955,7 +2782,13 @@ mod tests {
         let child = child_at(&mut world, "Child", Vec3::ZERO, parent);
         let descendant = child_at(&mut world, "Descendant", Vec3::ZERO, child);
 
-        assert!(!reorder_relative(&mut world, parent, descendant, false));
+        assert!(!drop_objects(
+            &mut world,
+            parent,
+            &[],
+            DropPlacement::Before,
+            Some(descendant)
+        ));
         assert_eq!(
             world.get::<ChildOf>(child).map(|p| p.parent()),
             Some(parent)
@@ -2196,7 +3029,7 @@ mod tests {
         opening.textures_delta.clear();
         let mut menu = draw(0.2, vec![]);
         let rename = text_center(&menu, "Rename").unwrap();
-        let duplicate = text_center(&menu, "Duplicate").unwrap();
+        let duplicate = text_center(&menu, "Duplicate   ⌘D").unwrap();
         menu.textures_delta.clear();
         assert!(duplicate.y - rename.y >= 30.0);
     }
@@ -2315,6 +3148,67 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_keeps_camera_follow_and_remaps_target_inside_subtree() {
+        use engine_ecs::components::{ActiveCamera, CameraFollow, FollowMode};
+        let mut world = World::new();
+        let root = world
+            .spawn((Name::new("Rig"), engine_scene::SceneObjectId("rig".into())))
+            .id();
+        let target = world
+            .spawn((
+                Name::new("Hero"),
+                engine_scene::SceneObjectId("hero".into()),
+                ChildOf(root),
+            ))
+            .id();
+        let cam = world
+            .spawn((
+                Name::new("Cam"),
+                CameraFollow::new("hero", FollowMode::THIRD_PERSON),
+                ActiveCamera,
+                ChildOf(root),
+            ))
+            .id();
+        let _ = (target, cam);
+
+        let copy = duplicate_entity(&mut world, root).unwrap();
+        let kids = children_of(&world, copy);
+        let copied_cam = kids
+            .iter()
+            .copied()
+            .find(|e| world.get::<CameraFollow>(*e).is_some())
+            .expect("follow copied");
+        let copied_hero = kids.iter().copied().find(|e| *e != copied_cam).unwrap();
+        let new_id = world
+            .get::<engine_scene::SceneObjectId>(copied_hero)
+            .unwrap()
+            .0
+            .clone();
+        assert_ne!(new_id, "hero");
+        assert_eq!(
+            world.get::<CameraFollow>(copied_cam).unwrap().target,
+            new_id
+        );
+        assert!(world.get::<ActiveCamera>(copied_cam).is_none());
+        // Original untouched.
+        assert_eq!(world.get::<CameraFollow>(cam).unwrap().target, "hero");
+    }
+
+    #[test]
+    fn duplicate_keeps_camera_follow_target_outside_subtree() {
+        use engine_ecs::components::{CameraFollow, FollowMode};
+        let mut world = World::new();
+        let cam = world
+            .spawn((
+                Name::new("Cam"),
+                CameraFollow::new("elsewhere", FollowMode::SIDE_2D),
+            ))
+            .id();
+        let copy = duplicate_entity(&mut world, cam).unwrap();
+        assert_eq!(world.get::<CameraFollow>(copy).unwrap().target, "elsewhere");
+    }
+
+    #[test]
     fn duplicate_entity_deep_copies_subtree_and_suffixes_the_root() {
         let mut world = World::new();
         let parent = spawn_entity(&mut world, "Parent", Vec3::new(1.0, 0.0, 0.0));
@@ -2327,7 +3221,7 @@ mod tests {
             ))
             .id();
 
-        let copy = duplicate_entity(&mut world, parent);
+        let copy = duplicate_entity(&mut world, parent).unwrap();
 
         assert_ne!(copy, parent);
         assert_eq!(display_name(&world, copy), "Parent Copy");
@@ -2372,7 +3266,7 @@ mod tests {
             },
         ));
 
-        let copy = duplicate_entity(&mut world, parent);
+        let copy = duplicate_entity(&mut world, parent).unwrap();
         assert!(world.get::<engine_scene::SceneTilemap>(copy).is_some());
         let copied_child = children_of(&world, copy)[0];
         assert_eq!(
@@ -2395,10 +3289,18 @@ mod tests {
         let original = world
             .spawn((
                 Name::new("Coin"),
+                // A scene saves an animation as part of its sprite.
+                SpriteSource {
+                    atlas: String::new(),
+                    region: "full".into(),
+                    size: [1.0, 1.0],
+                    color: [1.0; 4],
+                    z_order: 0.0,
+                },
                 engine_scene::SceneSpriteAnimation::new(data),
             ))
             .id();
-        let copy = duplicate_entity(&mut world, original);
+        let copy = duplicate_entity(&mut world, original).unwrap();
         assert_eq!(
             world
                 .get::<engine_scene::SceneSpriteAnimation>(copy)
@@ -2423,13 +3325,14 @@ mod tests {
                         target: original_id.clone(),
                         text: "Ready".into(),
                     },
-                    condition: None,
+                    conditions: Vec::new(),
+                    match_mode: engine_scene::RuleMatch::All,
                     graph_position: None,
                 }]),
             ))
             .id();
 
-        let copy = duplicate_entity(&mut world, original);
+        let copy = duplicate_entity(&mut world, original).unwrap();
         let copy_id = &world.get::<engine_scene::SceneObjectId>(copy).unwrap().0;
         assert_ne!(copy_id, &original_id);
         assert!(world.get::<engine_scene::SceneUi>(copy).is_some());
@@ -2457,7 +3360,8 @@ mod tests {
                         target: label_id.clone(),
                         text: "Ready".into(),
                     },
-                    condition: None,
+                    conditions: Vec::new(),
+                    match_mode: engine_scene::RuleMatch::All,
                     graph_position: None,
                 }]),
             ))
@@ -2469,7 +3373,7 @@ mod tests {
             engine_scene::SceneUi(engine_scene::UiElementData::label()),
         ));
 
-        let copy = duplicate_entity(&mut world, button);
+        let copy = duplicate_entity(&mut world, button).unwrap();
         let child = children_of(&world, copy)[0];
         let copied_label_id = &world.get::<engine_scene::SceneObjectId>(child).unwrap().0;
         assert_ne!(copied_label_id, &label_id);
@@ -2477,6 +3381,48 @@ mod tests {
             &world.get::<engine_scene::SceneRules>(copy).unwrap().0[0].action,
             engine_scene::RuleAction::SetUiText { target, .. } if target == copied_label_id
         ));
+    }
+
+    #[test]
+    fn duplicating_remaps_spawn_and_trigger_object_ids() {
+        use engine_scene::{RuleAction, RuleData, RuleTrigger, SpawnAt};
+        let mut world = World::new();
+        let child_id = uuid::Uuid::new_v4().to_string();
+        let root = world
+            .spawn((
+                Name::new("Root"),
+                engine_scene::SceneObjectId(uuid::Uuid::new_v4().to_string()),
+                engine_scene::SceneRules(vec![RuleData::new(
+                    RuleTrigger::TriggerEnter {
+                        with: Some(child_id.clone()),
+                    },
+                    RuleAction::SpawnPrefab {
+                        path: "assets/prefabs/a.prefab".into(),
+                        at: SpawnAt::Object(child_id.clone()),
+                    },
+                )]),
+            ))
+            .id();
+        world.spawn((
+            Name::new("Child"),
+            ChildOf(root),
+            engine_scene::SceneObjectId(child_id.clone()),
+        ));
+        let copy = duplicate_entity(&mut world, root).unwrap();
+        let child = children_of(&world, copy)[0];
+        let new_id = world
+            .get::<engine_scene::SceneObjectId>(child)
+            .unwrap()
+            .0
+            .clone();
+        assert_ne!(new_id, child_id);
+        let rule = &world.get::<engine_scene::SceneRules>(copy).unwrap().0[0];
+        assert!(
+            matches!(&rule.trigger, RuleTrigger::TriggerEnter { with: Some(id) } if *id == new_id)
+        );
+        assert!(
+            matches!(&rule.action, RuleAction::SpawnPrefab { at: SpawnAt::Object(id), .. } if *id == new_id)
+        );
     }
 
     #[test]

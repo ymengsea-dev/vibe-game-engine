@@ -58,6 +58,26 @@ pub fn cast_ray(
     max_distance: f32,
     exclude: Option<ColliderHandle>,
 ) -> Result<Option<RayHit>, PhysicsError> {
+    let filter = match exclude {
+        Some(handle) => QueryFilter::default().exclude_collider(handle),
+        None => QueryFilter::default(),
+    };
+    cast_ray_filtered(physics, origin, direction, max_distance, filter)
+}
+
+/// Like [`cast_ray`], with a full rapier [`QueryFilter`] (for example
+/// `QueryFilter::default().exclude_sensors()` to look through triggers).
+///
+/// # Errors
+///
+/// The same as [`cast_ray`].
+pub fn cast_ray_filtered(
+    physics: &PhysicsWorld,
+    origin: Vec3,
+    direction: Vec3,
+    max_distance: f32,
+    filter: QueryFilter,
+) -> Result<Option<RayHit>, PhysicsError> {
     let invalid = || PhysicsError::InvalidRay {
         origin,
         direction,
@@ -78,10 +98,6 @@ pub fn cast_ray(
     }
 
     let ray = Ray::new(origin, unit_direction);
-    let filter = match exclude {
-        Some(handle) => QueryFilter::default().exclude_collider(handle),
-        None => QueryFilter::default(),
-    };
 
     let hit = physics
         .rapier

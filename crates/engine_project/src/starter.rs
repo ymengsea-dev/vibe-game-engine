@@ -59,6 +59,8 @@ pub(super) fn create_scene(
                     projection: ProjectionData::Orthographic { height: 6.0 },
                     near: 0.1,
                     far: 100.0,
+                    pose_from_transform: false,
+                    active: false,
                 },
                 "Your first 2D game",
             )
@@ -98,12 +100,12 @@ pub(super) fn create_scene(
                             ..Default::default()
                         }),
                     }),
-                    collider: Some(ColliderData {
-                        shape: ColliderShape::Cuboid {
+                    collider: Some(ColliderData::new(
+                        ColliderShape::Cuboid {
                             half_extents: [0.5; 3],
                         },
-                        body: BodyKind::Fixed,
-                    }),
+                        BodyKind::Fixed,
+                    )),
                     asset_source: Some("assets/models/first_cube.gltf".into()),
                     asset_id: Some(asset.id.clone()),
                     ..Default::default()
@@ -119,6 +121,8 @@ pub(super) fn create_scene(
                     projection: ProjectionData::Perspective { fov_y_radians: 1.0 },
                     near: 0.1,
                     far: 200.0,
+                    pose_from_transform: false,
+                    active: false,
                 },
                 "Your first 3D game",
             )
@@ -152,7 +156,8 @@ pub(super) fn create_scene(
                 target: label_id,
                 text: "It works! Try editing this scene.".into(),
             },
-            condition: None,
+            conditions: Vec::new(),
+            match_mode: engine_scene::RuleMatch::All,
             graph_position: None,
         }],
         ..Default::default()

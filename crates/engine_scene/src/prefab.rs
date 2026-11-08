@@ -14,7 +14,7 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 use crate::error::SceneError;
-use crate::format::SceneEntity;
+use crate::format::{Scene, SceneEntity};
 use crate::resolve::{NullResolver, SceneResolver, insert_components};
 
 /// A reusable entity template.
@@ -54,7 +54,17 @@ impl Prefab {
     /// [`SceneError::Deserialize`] if `text` isn't valid RON matching a
     /// [`Prefab`].
     pub fn from_ron_str(text: &str) -> Result<Self, SceneError> {
-        ron::from_str(text).map_err(|err| SceneError::Deserialize(err.to_string()))
+        let mut prefab: Self =
+            ron::from_str(text).map_err(|err| SceneError::Deserialize(err.to_string()))?;
+        // Prefabs written before a camera's transform became its pose carry
+        // eye/target/up only; fold them into the transform like a scene does.
+        let mut holder = Scene {
+            entities: vec![std::mem::take(&mut prefab.entity)],
+            ..Default::default()
+        };
+        crate::adopt_legacy_camera_poses(&mut holder);
+        prefab.entity = holder.entities.pop().unwrap_or_default();
+        Ok(prefab)
     }
 
     /// Validates the template, then writes it to `path` as RON,
@@ -188,6 +198,65 @@ mod tests {
     use super::*;
     use crate::format::TransformData;
     use engine_ecs::components::{Camera as EcsCamera, Name as EcsName, Transform as EcsTransform};
+
+    fn moved_camera_entity() -> (World, Entity) {
+        let mut world = World::new();
+        let camera = engine_renderer::Camera::new(Vec3::ZERO, Vec3::NEG_Z, 16.0 / 9.0);
+        let entity = world
+            .spawn((
+                EcsName::new("Cam"),
+                EcsTransform(
+                    engine_utils::Transform::from_translation(Vec3::new(1.0, 2.0, 3.0))
+                        .with_rotation(glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+                ),
+                EcsCamera(camera),
+                engine_ecs::components::ActiveCamera,
+            ))
+            .id();
+        (world, entity)
+    }
+
+    #[test]
+    fn captured_camera_data_carries_the_world_pose_and_active_flag() {
+        let (world, entity) = moved_camera_entity();
+        let data = crate::saved_camera_pose(
+            &world,
+            entity,
+            crate::CameraData::from(world.get::<EcsCamera>(entity).unwrap().0),
+        );
+        assert!(data.pose_from_transform && data.active);
+        let reloaded = Prefab::new(SceneEntity {
+            camera: Some(data),
+            transform: Some(TransformData::from(
+                world.get::<EcsTransform>(entity).unwrap().0,
+            )),
+            ..Default::default()
+        });
+        let text = reloaded.to_ron_string().unwrap();
+        let reloaded = Prefab::from_ron_str(&text).unwrap();
+        let mut target = World::new();
+        let spawned = reloaded.instantiate(&mut target);
+        let (eye, look, _) =
+            crate::camera_world_pose(target.get::<EcsTransform>(spawned).unwrap().0.to_matrix());
+        assert!((eye - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-4);
+        assert!((look - Vec3::new(0.0, 2.0, 3.0)).length() < 1e-4);
+        assert!(
+            target
+                .get::<engine_ecs::components::ActiveCamera>(spawned)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn legacy_prefab_camera_is_adopted_on_load() {
+        let text = "(entity: (camera: Some((eye: (0.0, 2.0, 6.0), target: (0.0, 0.0, 0.0), \
+                    up: (0.0, 1.0, 0.0), aspect_ratio: 1.5, \
+                    projection: Perspective(fov_y_radians: 1.0), near: 0.1, far: 50.0))))";
+        let prefab = Prefab::from_ron_str(text).unwrap();
+        let entity = prefab.entity();
+        assert!(entity.camera.unwrap().pose_from_transform);
+        assert_eq!(entity.transform.unwrap().translation, [0.0, 2.0, 6.0]);
+    }
 
     #[test]
     fn prefab_copies_receive_distinct_object_ids() {

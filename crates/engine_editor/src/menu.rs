@@ -52,6 +52,16 @@ pub enum MenuCommand {
     CreateWater,
     /// Create a positionable point light.
     CreatePointLight,
+    /// Create a camera.
+    CreateCamera,
+    /// Create a sound emitter, to be pointed at a sound in the Inspector.
+    CreateSound,
+    /// Copy the selected objects next to themselves.
+    DuplicateSelection,
+    /// Keep the selected objects for pasting.
+    CopySelection,
+    /// Paste the copied objects.
+    Paste,
     /// Delete selected entities.
     DeleteSelected,
     /// Open the Settings window.
@@ -211,6 +221,44 @@ impl MenuCommand {
                     ));
                 state.select_only(entity);
                 state.mark_dirty();
+            }
+            Self::CreateCamera => {
+                let entity =
+                    hierarchy::spawn_entity(&mut state.world, "Camera", Vec3::new(0.0, 2.0, 8.0));
+                state
+                    .world
+                    .entity_mut(entity)
+                    .insert(crate::inspector::default_camera());
+                state.select_only(entity);
+                state.mark_dirty();
+            }
+            Self::CreateSound => {
+                let entity = hierarchy::spawn_entity(&mut state.world, "Sound", Vec3::ZERO);
+                state
+                    .world
+                    .entity_mut(entity)
+                    .insert(engine_scene::SceneAudioEmitter(
+                        engine_scene::AudioEmitterData::new(engine_scene::AssetRef {
+                            id: String::new(),
+                        }),
+                    ));
+                state.select_only(entity);
+                state.mark_dirty();
+            }
+            Self::DuplicateSelection => {
+                if state.duplicate_selection() {
+                    state.mark_dirty();
+                }
+            }
+            Self::CopySelection => {
+                if state.selection_len() > 0 {
+                    state.copy_selection();
+                }
+            }
+            Self::Paste => {
+                if state.paste_objects() {
+                    state.mark_dirty();
+                }
             }
             Self::DeleteSelected => {
                 if state.selection_len() > 0 {

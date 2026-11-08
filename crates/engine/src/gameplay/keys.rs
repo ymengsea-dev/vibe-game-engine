@@ -1,0 +1,62 @@
+//! Mapping between the key names scripts and rules use and platform keys.
+
+use engine_platform::KeyCode;
+use engine_scripting::ScriptKey;
+
+/// The platform key a script-visible key name stands for.
+pub fn platform_key(key: ScriptKey) -> KeyCode {
+    use ScriptKey as K;
+    match key {
+        K::A => KeyCode::KeyA,
+        K::D => KeyCode::KeyD,
+        K::S => KeyCode::KeyS,
+        K::W => KeyCode::KeyW,
+        K::B => KeyCode::KeyB,
+        K::C => KeyCode::KeyC,
+        K::E => KeyCode::KeyE,
+        K::F => KeyCode::KeyF,
+        K::G => KeyCode::KeyG,
+        K::H => KeyCode::KeyH,
+        K::I => KeyCode::KeyI,
+        K::J => KeyCode::KeyJ,
+        K::K => KeyCode::KeyK,
+        K::L => KeyCode::KeyL,
+        K::M => KeyCode::KeyM,
+        K::N => KeyCode::KeyN,
+        K::O => KeyCode::KeyO,
+        K::P => KeyCode::KeyP,
+        K::Q => KeyCode::KeyQ,
+        K::R => KeyCode::KeyR,
+        K::T => KeyCode::KeyT,
+        K::U => KeyCode::KeyU,
+        K::V => KeyCode::KeyV,
+        K::X => KeyCode::KeyX,
+        K::Y => KeyCode::KeyY,
+        K::Z => KeyCode::KeyZ,
+        K::Digit0 => KeyCode::Digit0,
+        K::Digit1 => KeyCode::Digit1,
+        K::Digit2 => KeyCode::Digit2,
+        K::Digit3 => KeyCode::Digit3,
+        K::Digit4 => KeyCode::Digit4,
+        K::Digit5 => KeyCode::Digit5,
+        K::Digit6 => KeyCode::Digit6,
+        K::Digit7 => KeyCode::Digit7,
+        K::Digit8 => KeyCode::Digit8,
+        K::Digit9 => KeyCode::Digit9,
+        K::Space => KeyCode::Space,
+        K::Escape => KeyCode::Escape,
+        K::Enter => KeyCode::Enter,
+        K::ArrowLeft => KeyCode::ArrowLeft,
+        K::ArrowRight => KeyCode::ArrowRight,
+        K::ArrowUp => KeyCode::ArrowUp,
+        K::ArrowDown => KeyCode::ArrowDown,
+        K::ShiftLeft => KeyCode::ShiftLeft,
+        K::ShiftRight => KeyCode::ShiftRight,
+        K::Tab => KeyCode::Tab,
+        K::Backspace => KeyCode::Backspace,
+        K::ControlLeft => KeyCode::ControlLeft,
+        K::ControlRight => KeyCode::ControlRight,
+        K::AltLeft => KeyCode::AltLeft,
+        K::AltRight => KeyCode::AltRight,
+    }
+}

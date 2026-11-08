@@ -221,7 +221,7 @@ mod tests {
         Scene {
             entities: vec![SceneEntity {
                 transform: Some(TransformData {
-                    translation: [1.0, 2.0, 3.0],
+                    translation: [0.0, 0.0, 5.0],
                     rotation: glam::Quat::IDENTITY.to_array(),
                     scale: [1.0, 1.0, 1.0],
                 }),
@@ -235,6 +235,8 @@ mod tests {
                     },
                     near: 0.1,
                     far: 100.0,
+                    pose_from_transform: true,
+                    active: false,
                 }),
                 ..Default::default()
             }],

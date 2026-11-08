@@ -1,7 +1,5 @@
 //! Runtime instances of packaged single-object prefabs.
 
-use std::path::{Component, Path};
-
 use engine_ecs::prelude::{Entity, World};
 use engine_scene::{AssetLibrary, Prefab, Scene, SceneResolver, TransformData};
 
@@ -11,16 +9,7 @@ use super::commands::valid_new_object;
 /// Prefab files larger than this are refused before parsing.
 const MAX_PREFAB_BYTES: usize = 1024 * 1024;
 
-/// Whether `path` is a project-relative `assets/prefabs/**/*.prefab` path.
-pub fn valid_prefab_path(path: &str) -> bool {
-    let relative = Path::new(path);
-    !relative.is_absolute()
-        && relative
-            .components()
-            .all(|part| matches!(part, Component::Normal(_)))
-        && relative.starts_with("assets/prefabs")
-        && relative.extension().and_then(|ext| ext.to_str()) == Some("prefab")
-}
+pub use engine_scene::valid_prefab_path;
 
 /// Instantiates the prefab at `path` as a runtime object with `object_id` at `position`.
 ///

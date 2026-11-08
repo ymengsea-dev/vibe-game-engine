@@ -274,6 +274,10 @@ pub struct EditorShell {
     clear_color: wgpu::Color,
     repaint_deadline: Arc<Mutex<Option<Instant>>>,
     new_project: Option<NewProjectDialog>,
+    /// The keyboard modifiers winit last reported.
+    window_modifiers: egui_winit::winit::keyboard::ModifiersState,
+    /// Cmd+V was pressed since the last frame; see [`object_shortcuts`].
+    paste_key_pressed: bool,
     #[cfg(feature = "dock-shell")]
     dock: dock::Host,
 }
@@ -337,6 +341,8 @@ impl EditorShell {
             clear_color: shell_clear_color(surface_format),
             repaint_deadline,
             new_project: None,
+            window_modifiers: Default::default(),
+            paste_key_pressed: false,
             #[cfg(feature = "dock-shell")]
             dock: dock::Host::new(),
         }
@@ -366,6 +372,13 @@ impl EditorShell {
     /// `true` — e.g. a click that landed on an egui panel shouldn't also
     /// register as a click in a 3D viewport underneath it.
     pub fn handle_window_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::ModifiersChanged(modifiers) => self.window_modifiers = modifiers.state(),
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.paste_key_pressed |= is_paste_key(event, self.window_modifiers);
+            }
+            _ => {}
+        }
         self.winit_state.on_window_event(window, event).consumed
     }
 
@@ -666,6 +679,11 @@ impl EditorShell {
         }
 
         delete_shortcut(&self.context, state);
+        object_shortcuts(
+            &self.context,
+            state,
+            std::mem::take(&mut self.paste_key_pressed),
+        );
 
         // Cmd+S saves (see `save_shortcut`).
         if self
@@ -691,6 +709,9 @@ impl EditorShell {
             // back the way they were leaves the scene clean.
             state.sync_scene_dirty();
         }
+
+        // After undo and redo, which rebuild the world and drop the markers.
+        hierarchy::sync_editor_hidden(&mut state.world, &state.hierarchy.hidden);
 
         self.winit_state
             .handle_platform_output(window, output.platform_output.clone());
@@ -1040,6 +1061,7 @@ fn lock_while_previewing(ui: &mut egui::Ui, state: &EditorState) {
 
 fn show_hierarchy(ui: &mut egui::Ui, state: &mut EditorState) {
     lock_while_previewing(ui, state);
+    state.hierarchy.image_selected = state.selected_texture_asset().is_some();
     hierarchy::show(
         ui,
         &mut state.world,
@@ -1049,6 +1071,18 @@ fn show_hierarchy(ui: &mut egui::Ui, state: &mut EditorState) {
     );
     if let Some(entity) = state.hierarchy.prefab_request.take() {
         state.create_prefab_request = Some(entity);
+    }
+    if let Some((command, parent)) = state.hierarchy.create_request.take() {
+        let before = state.selected_entity;
+        command.apply(state);
+        if let (Some(parent), Some(new)) = (parent, state.selected_entity)
+            && state.selected_entity != before
+        {
+            hierarchy::adopt_new_object(&mut state.world, new, parent);
+        }
+    }
+    if let Some((path, parent)) = state.hierarchy.asset_drop_request.take() {
+        state.drop_asset(&path, None, parent);
     }
     if std::mem::take(&mut state.hierarchy.frame_request) {
         state.frame_selection();
@@ -1194,6 +1228,102 @@ fn show_scene_viewport(ui: &mut egui::Ui, viewport: &Viewport, state: &mut Edito
     }
 }
 
+/// A file from Project Assets over the Scene View: shows where it would land,
+/// and adds it there on release. Scene edits wait until the game stops.
+fn handle_asset_drop(
+    ui: &egui::Ui,
+    viewport: &Viewport,
+    state: &mut EditorState,
+    response: &egui::Response,
+) {
+    if state.play.is_playing() {
+        return;
+    }
+    let released = response.dnd_release_payload::<std::path::PathBuf>();
+    let Some(path) = released
+        .clone()
+        .or_else(|| response.dnd_hover_payload::<std::path::PathBuf>())
+    else {
+        return;
+    };
+    let Some(pointer) = ui.input(|input| input.pointer.latest_pos()) else {
+        return;
+    };
+    let point = drop_point(viewport, state, response.rect, pointer);
+    if released.is_some() {
+        state.drop_asset(&path, Some(point), None);
+        return;
+    }
+    let rect = response.rect;
+    if let Some(at) = crate::gizmo::project_to_screen(
+        viewport.view_projection_matrix(),
+        point,
+        Vec2::new(rect.width(), rect.height()),
+    ) {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        paint_drop_marker(ui, rect, rect.min + egui::vec2(at.x, at.y), &name);
+    }
+}
+
+/// The world point a file dropped at `pointer` lands on: in 3D, whatever is
+/// under the cursor, else the ground, else in front of the camera; in 2D, the
+/// cursor on the 2D plane.
+fn drop_point(
+    viewport: &Viewport,
+    state: &mut EditorState,
+    rect: egui::Rect,
+    pointer: egui::Pos2,
+) -> glam::Vec3 {
+    let local = Vec2::new(pointer.x - rect.min.x, pointer.y - rect.min.y);
+    let ndc = Vec2::new(
+        local.x / rect.width().max(1.0) * 2.0 - 1.0,
+        1.0 - local.y / rect.height().max(1.0) * 2.0,
+    );
+    if state.dimension.is_2d() {
+        let aspect = rect.width() / rect.height().max(1.0);
+        let mut point = state.scene_camera().point_under(ndc, true, aspect);
+        point.z = 0.0;
+        return point;
+    }
+    let view_proj = viewport.view_projection_matrix();
+    let hit = pick_scene(
+        state,
+        view_proj,
+        rect,
+        local,
+        crate::scene_pick::LockedObjects::Include,
+    )
+    .map(|hit| hit.point);
+    let camera = state.scene_camera();
+    match crate::scene_pick::ray_from_screen(view_proj, ndc) {
+        Some(ray) => crate::scene_pick::placement_point(hit, ray, camera.distance),
+        None => hit.unwrap_or(camera.focus),
+    }
+}
+
+/// Where a dragged file will land: a ring and dot at `at`, and its name.
+fn paint_drop_marker(ui: &egui::Ui, clip: egui::Rect, at: egui::Pos2, name: &str) {
+    let palette = crate::theme::NIGHT;
+    let painter = ui.painter().with_clip_rect(clip);
+    painter.circle_filled(at, 10.0, palette.accent.gamma_multiply(0.25));
+    painter.circle_stroke(at, 10.0, egui::Stroke::new(1.5, palette.accent));
+    painter.circle_filled(at, 2.5, palette.accent);
+    let galley = painter.layout_no_wrap(
+        name.to_owned(),
+        egui::TextStyle::Small.resolve(ui.style()),
+        palette.text,
+    );
+    let pill = egui::Rect::from_min_size(
+        at + egui::vec2(16.0, -galley.size().y * 0.5 - 3.0),
+        galley.size() + egui::vec2(12.0, 6.0),
+    );
+    painter.rect_filled(pill, 6.0, palette.accent_fill);
+    painter.galley(pill.min + egui::vec2(6.0, 3.0), galley, palette.text);
+}
+
 /// Everything a Scene View image responds to: camera navigation first; when
 /// the camera does not own the drag, the gizmo or active brush; then asset
 /// drops and the cursor.
@@ -1217,26 +1347,7 @@ fn handle_scene_view_input(
     }
     paint_scene_icons(ui, state, image_response.rect, &icons);
     let gizmo_hover = paint_gizmo(ui, viewport, state, image_response);
-    if let Some(path) = image_response.dnd_release_payload::<std::path::PathBuf>() {
-        let is_prefab = path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("prefab"));
-        let spawned = if is_prefab {
-            match state.spawn_prefab(&path) {
-                Ok(entity) => Some(entity),
-                Err(err) => {
-                    tracing::warn!(error = %err, path = %path.display(), "could not instantiate prefab");
-                    None
-                }
-            }
-        } else {
-            Some(state.spawn_asset_entity(&path))
-        };
-        if let Some(entity) = spawned {
-            state.select_only(entity);
-            state.mark_dirty();
-        }
-    }
+    handle_asset_drop(ui, viewport, state, image_response);
     let cursor = match camera_gesture {
         Some(CameraGesture::Pan) => egui::CursorIcon::AllScroll,
         Some(CameraGesture::Orbit | CameraGesture::Look) => egui::CursorIcon::Grabbing,
@@ -1538,11 +1649,13 @@ fn ui_preview_rect(screen: egui::Rect, data: &engine_scene::UiElementData) -> eg
 }
 
 fn paint_scene_ui_preview(ui: &egui::Ui, state: &mut EditorState, screen: egui::Rect) {
-    use engine_ecs::components::Disabled;
-    use engine_ecs::prelude::Entity;
+    use engine_ecs::components::{Disabled, Hidden};
+    use engine_ecs::prelude::{Entity, Without};
     use engine_scene::{SceneUi, UiKind};
 
-    let mut query = state.world.query::<(Entity, &SceneUi, Option<&Disabled>)>();
+    let mut query = state
+        .world
+        .query_filtered::<(Entity, &SceneUi, Option<&Disabled>), Without<Hidden>>();
     let elements: Vec<_> = query
         .iter(&state.world)
         .filter(|(_, _, disabled)| disabled.is_none())
@@ -2472,6 +2585,50 @@ fn delete_shortcut(ctx: &egui::Context, state: &mut EditorState) {
     }
 }
 
+/// Whether `event` is the paste shortcut being pressed.
+fn is_paste_key(
+    event: &egui_winit::winit::event::KeyEvent,
+    modifiers: egui_winit::winit::keyboard::ModifiersState,
+) -> bool {
+    use egui_winit::winit::keyboard::{Key, KeyCode, PhysicalKey};
+    let command = if cfg!(target_os = "macos") {
+        modifiers.super_key()
+    } else {
+        modifiers.control_key()
+    };
+    let is_v = matches!(&event.logical_key, Key::Character(text) if text.eq_ignore_ascii_case("v"))
+        || event.physical_key == PhysicalKey::Code(KeyCode::KeyV);
+    command && is_v && event.state.is_pressed() && !event.repeat
+}
+
+/// Cmd+D duplicates the selected objects, Cmd+C copies them and Cmd+V pastes.
+/// egui-winit turns Cmd+C into `Event::Copy`, and swallows Cmd+V when the
+/// system clipboard holds no text, so the paste key comes from
+/// [`EditorShell::handle_window_event`] as `paste_key`.
+fn object_shortcuts(ctx: &egui::Context, state: &mut EditorState, paste_key: bool) {
+    if state.play.is_playing() || ctx.text_edit_focused() || terminal_has_keyboard(ctx, state) {
+        return;
+    }
+    let (duplicate, copy) = ctx.input(|input| {
+        (
+            input.modifiers.command && input.key_pressed(egui::Key::D),
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Copy)),
+        )
+    });
+    if duplicate {
+        MenuCommand::DuplicateSelection.apply(state);
+    }
+    if copy {
+        MenuCommand::CopySelection.apply(state);
+    }
+    if paste_key {
+        MenuCommand::Paste.apply(state);
+    }
+}
+
 /// Whether the integrated terminal has the keyboard.
 fn terminal_has_keyboard(ctx: &egui::Context, state: &EditorState) -> bool {
     #[cfg(feature = "terminal")]
@@ -2709,7 +2866,39 @@ fn menu_gameobject(ui: &mut egui::Ui, state: &mut EditorState) {
             MenuCommand::CreateUiButton.apply(state);
             ui.close();
         }
+        if ui.button("Create Camera").clicked() {
+            MenuCommand::CreateCamera.apply(state);
+            ui.close();
+        }
+        if ui.button("Create Sound").clicked() {
+            MenuCommand::CreateSound.apply(state);
+            ui.close();
+        }
         let has_selection = state.selection_len() > 0;
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Duplicate   ⌘D"))
+            .clicked()
+        {
+            MenuCommand::DuplicateSelection.apply(state);
+            ui.close();
+        }
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Copy Objects   ⌘C"))
+            .clicked()
+        {
+            MenuCommand::CopySelection.apply(state);
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                state.can_paste_objects(),
+                egui::Button::new("Paste Objects   ⌘V"),
+            )
+            .clicked()
+        {
+            MenuCommand::Paste.apply(state);
+            ui.close();
+        }
         if ui
             .add_enabled(has_selection, egui::Button::new("Group Selection   ⌘G"))
             .clicked()
@@ -3868,6 +4057,8 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
             state.aiming_sun = true;
             environment_ambient_ui(ui, state);
             ui.separator();
+            environment_start_state_ui(ui, state);
+            ui.separator();
             ui.label("Lighting");
             if ui.button("Create point light").clicked() {
                 MenuCommand::CreatePointLight.apply(state);
@@ -3935,6 +4126,35 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
             }
         });
     });
+}
+
+/// Writes the scene's start state. "Playing" is the default, so it is
+/// stored as no setting at all.
+fn set_start_state(state: &mut EditorState, chosen: engine_scene::GameStateName) {
+    let mut environment = state.environment();
+    let value = (chosen != engine_scene::GameStateName::Playing).then_some(chosen);
+    if environment.start_state == value {
+        return;
+    }
+    environment.start_state = value;
+    state.set_environment(environment);
+}
+
+/// The state the scene starts in, such as Menu for a title screen.
+fn environment_start_state_ui(ui: &mut egui::Ui, state: &mut EditorState) {
+    ui.label("Start state");
+    ui.weak("The game state when this scene begins.");
+    let current = state.environment().start_state.unwrap_or_default();
+    for candidate in engine_scene::GameStateName::ALL {
+        let label = if candidate == engine_scene::GameStateName::Playing {
+            "Playing (default)"
+        } else {
+            candidate.label()
+        };
+        if ui.radio(candidate == current, label).clicked() {
+            set_start_state(state, candidate);
+        }
+    }
 }
 
 /// Scene-wide ambient sounds (wind, music): they loop at the same volume
@@ -4091,17 +4311,8 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
-        if matches!(tab, StudioTab::Hierarchy) {
-            lock_while_previewing(ui, self.state);
-        }
         match tab {
-            StudioTab::Hierarchy => hierarchy::show(
-                ui,
-                &mut self.state.world,
-                &mut self.state.selected_entity,
-                &mut self.state.secondary_selection,
-                &mut self.state.hierarchy,
-            ),
+            StudioTab::Hierarchy => show_hierarchy(ui, self.state),
             StudioTab::Scene => {
                 scene_view_tabs(ui);
                 ui.separator();
@@ -4114,20 +4325,7 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
                     .sense(egui::Sense::click_and_drag()),
                 );
                 handle_scene_interaction(self.viewport, self.state, &response);
-                if let Some(path) = response.dnd_release_payload::<std::path::PathBuf>() {
-                    let spawned = if path
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("prefab"))
-                    {
-                        self.state.spawn_prefab(&path).ok()
-                    } else {
-                        Some(self.state.spawn_asset_entity(&path))
-                    };
-                    if let Some(entity) = spawned {
-                        self.state.select_only(entity);
-                        self.state.mark_dirty();
-                    }
-                }
+                handle_asset_drop(ui, self.viewport, self.state, &response);
             }
             StudioTab::AssetBrowser => assets::show(
                 ui,
@@ -4234,6 +4432,25 @@ mod ui_tests {
             crate::ConsoleLog::new(),
         );
         (root, state)
+    }
+
+    #[test]
+    fn start_state_menu_writes_none_for_playing() {
+        use engine_scene::GameStateName;
+        let (root, mut state) = menu_test_state();
+        super::set_start_state(&mut state, GameStateName::Paused);
+        assert_eq!(state.environment().start_state, Some(GameStateName::Paused));
+        super::set_start_state(&mut state, GameStateName::Menu);
+        assert_eq!(state.environment().start_state, Some(GameStateName::Menu));
+        super::set_start_state(&mut state, GameStateName::Playing);
+        assert_eq!(state.environment().start_state, None);
+        assert!(
+            state
+                .world
+                .get_resource::<engine_scene::SceneEnvironment>()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4985,19 +5202,20 @@ mod ui_tests {
                 Transform::from(transform),
                 Static,
                 MeshSource::new("mesh-id", "material-id"),
-                engine_scene::SceneCollider(engine_scene::ColliderData {
-                    shape: engine_scene::ColliderShape::Cylinder {
+                engine_scene::SceneCollider(engine_scene::ColliderData::new(
+                    engine_scene::ColliderShape::Cylinder {
                         half_height: 1.6,
                         radius: 0.35,
                     },
-                    body: engine_scene::BodyKind::Fixed,
-                }),
+                    engine_scene::BodyKind::Fixed,
+                )),
                 engine_scene::SceneRules(vec![engine_scene::RuleData {
                     trigger: engine_scene::RuleTrigger::Named("game_start".into()),
                     action: engine_scene::RuleAction::EmitEvent {
                         name: "open_gate".into(),
                     },
-                    condition: None,
+                    conditions: Vec::new(),
+                    match_mode: engine_scene::RuleMatch::All,
                     graph_position: None,
                 }]),
                 engine_scene::SceneMaterialOverride(engine_scene::MaterialOverrideData {
@@ -5058,6 +5276,191 @@ mod ui_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Writes `inspector-collider.png`: a Dynamic sprite with a collider, so
+    /// the physics rows and the fit buttons can be checked. Needs a GPU
+    /// adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_collider() {
+        let (root, mut state) = menu_test_state();
+        let mut data = engine_scene::ColliderData::new(
+            engine_scene::ColliderShape::Ball { radius: 0.5 },
+            engine_scene::BodyKind::Dynamic,
+        );
+        data.mass = Some(2.5);
+        let crate_entity = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Crate"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                engine_ecs::components::SpriteSource {
+                    atlas: uuid::Uuid::nil().to_string(),
+                    region: "full".into(),
+                    size: [1.0, 1.0],
+                    color: [1.0; 4],
+                    z_order: 0.0,
+                },
+                engine_scene::SceneCollider(data),
+            ))
+            .id();
+        state.select_only(crate_entity);
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-collider.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 900.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `inspector-camera.png`: the Camera section of an active
+    /// camera. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_camera() {
+        let (root, mut state) = menu_test_state();
+        let camera = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Main Camera"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::from_translation(
+                    glam::Vec3::new(0.0, 2.0, 6.0),
+                )),
+                engine_ecs::components::Camera::from(engine_renderer::Camera::new(
+                    glam::Vec3::ZERO,
+                    glam::Vec3::NEG_Z,
+                    16.0 / 9.0,
+                )),
+                engine_ecs::components::ActiveCamera,
+            ))
+            .id();
+        let player_id = "00000000-0000-4000-8000-000000000001".to_string();
+        state.world.spawn((
+            engine_ecs::components::Name::new("Player"),
+            engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+            engine_scene::SceneObjectId(player_id.clone()),
+        ));
+        state
+            .world
+            .entity_mut(camera)
+            .insert(engine_ecs::components::CameraFollow::new(
+                player_id,
+                engine_ecs::components::FollowMode::THIRD_PERSON,
+            ));
+        state.select_only(camera);
+        for (file, mode) in [
+            (
+                "inspector-camera.png",
+                engine_ecs::components::FollowMode::THIRD_PERSON,
+            ),
+            (
+                "inspector-camera-follow-first-person.png",
+                engine_ecs::components::FollowMode::FIRST_PERSON,
+            ),
+            (
+                "inspector-camera-follow-2d.png",
+                engine_ecs::components::FollowMode::Side2D {
+                    dead_zone: [2.0, 1.0],
+                    bounds: Some([-10.0, -10.0, 10.0, 10.0]),
+                    smoothing: 8.0,
+                },
+            ),
+        ] {
+            if let Some(mut follow) = state
+                .world
+                .get_mut::<engine_ecs::components::CameraFollow>(camera)
+            {
+                follow.mode = mode;
+                follow.switch =
+                    matches!(mode, engine_ecs::components::FollowMode::FirstPerson { .. }).then(
+                        || engine_ecs::components::ViewSwitch {
+                            key: "V".to_owned(),
+                            other: engine_ecs::components::FollowMode::THIRD_PERSON,
+                        },
+                    );
+            }
+            let path = crate::ui_snapshot::snapshot_dir().join(file);
+            crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 1100.0), 2.0, |ui| {
+                egui::Panel::right("snapshot_inspector")
+                    .exact_size(420.0)
+                    .frame(super::studio_panel_frame())
+                    .show_separator_line(false)
+                    .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                    .show(ui, |_| {});
+            })
+            .expect("snapshot");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `inspector-rules.png`: a Timer rule with two conditions on
+    /// "Any" and a "Set game state" action. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_rules() {
+        use engine_scene::{
+            GameStateName, RuleAction, RuleCompare, RuleCondition, RuleData, RuleMatch, RuleTrigger,
+        };
+        let (root, mut state) = menu_test_state();
+        let condition = |variable: &str, compare, value| RuleCondition {
+            variable: variable.into(),
+            compare,
+            value,
+        };
+        let owner = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Round timer"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                engine_scene::SceneRules(vec![
+                    RuleData {
+                        trigger: RuleTrigger::Timer {
+                            seconds: 30.0,
+                            repeat: true,
+                        },
+                        action: RuleAction::SetGameState {
+                            state: GameStateName::GameOver,
+                        },
+                        conditions: vec![
+                            condition("lives", RuleCompare::LessOrEqual, 0.0),
+                            condition("time_left", RuleCompare::LessOrEqual, 0.0),
+                        ],
+                        match_mode: RuleMatch::Any,
+                        graph_position: None,
+                    },
+                    RuleData::new(
+                        RuleTrigger::CollisionEnter { with: None },
+                        RuleAction::ChangeScene {
+                            path: "scenes/level2.ron".into(),
+                        },
+                    ),
+                ]),
+            ))
+            .id();
+        state.select_only(owner);
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-rules.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 1000.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Writes `console.png` (a wide Console) and `console-narrow.png`, with
     /// the lines Studio logs at start-up, for a visual check. Needs a GPU
     /// adapter.
@@ -5078,12 +5481,12 @@ mod ui_tests {
             tracing::warn!(
                 log.target = "egui_wgpu::renderer",
                 log.module_path = "egui_wgpu::renderer",
-                log.file = "/Users/macbook/.cargo/registry/src/egui-wgpu-0.36.1/src/renderer.rs",
+                log.file = "/Users/me/.cargo/registry/src/egui-wgpu-0.36.1/src/renderer.rs",
                 log.line = 407,
                 "Detected a linear (sRGBA aware) framebuffer Bgra8UnormSrgb. egui prefers Rgba8Unorm or Bgra8Unorm"
             );
-            tracing::info!(target: "editor_code", monaco_dir = "/Users/macbook/Drive D/Source Code/Game engine/vge/target/debug/RustyEngine Studio.app/Contents/MacOS/../../../monaco", "code editor webview created");
-            tracing::info!(target: "editor_lsp", root = "/Users/macbook/Drive D/Source Code/Game engine/vge/games/island", server = "rust-analyzer", "language server started");
+            tracing::info!(target: "editor_code", monaco_dir = "/Applications/RustyEngine Studio.app/Contents/Resources/monaco", "code editor webview created");
+            tracing::info!(target: "editor_lsp", root = "/Users/me/Projects/my-game", server = "rust-analyzer", "language server started");
             tracing::error!(target: "engine_editor::play", "build failed: see the Output tab");
             tracing::debug!(target: "engine_editor::assets", "watching 4 folders");
         });
@@ -5189,6 +5592,20 @@ mod ui_tests {
         })
         .expect("snapshot");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `drop-marker.png`: where a dragged file will land.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_drop_marker() {
+        let path = crate::ui_snapshot::snapshot_dir().join("drop-marker.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(320.0, 120.0), 2.0, |ui| {
+            let rect = ui.max_rect();
+            ui.painter()
+                .rect_filled(rect, 0.0, crate::theme::NIGHT.panel);
+            super::paint_drop_marker(ui, rect, egui::pos2(60.0, 60.0), "barrel.gltf");
+        })
+        .expect("snapshot");
     }
 
     /// Writes `scene-chrome.png`: the Scene panel's header and footer, for

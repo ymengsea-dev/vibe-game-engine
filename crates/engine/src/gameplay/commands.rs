@@ -12,7 +12,7 @@ use engine_physics::{PhysicsWorld, RigidBodyHandle};
 use engine_scene::{RuleVariables, Scene, SceneObjectId, SceneSpriteAnimation};
 use engine_scripting::GameCommand;
 use engine_utils::Transform;
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use super::GameplayError;
 
@@ -35,7 +35,7 @@ pub type PrefabSpawner<'a> =
 /// Applies the world-level commands in order and returns spawned prefab instances,
 /// which still need colliders and sprite atlas updates from the caller.
 ///
-/// UI text, rule events, saves and scene changes are not world changes; they
+/// UI text, mouse lock, body velocity/force/impulse, rule events, saves and scene changes are not world changes; they
 /// are skipped here and handled by [`super::GameplayRuntime::apply`]. Invalid
 /// requests and missing targets log a warning and do not stop the batch; a
 /// failed prefab spawn does, because it means a broken package.
@@ -51,7 +51,19 @@ pub fn apply_world_commands(
             GameCommand::RequestSave
             | GameCommand::ChangeScene { .. }
             | GameCommand::UiSetText { .. }
-            | GameCommand::EmitEvent { .. } => {}
+            | GameCommand::SetMouseLocked { .. }
+            | GameCommand::EmitEvent { .. }
+            | GameCommand::SetVelocity { .. }
+            | GameCommand::AddForce { .. }
+            | GameCommand::AddImpulse { .. }
+            | GameCommand::MoveCharacter { .. }
+            | GameCommand::SetCamera { .. }
+            | GameCommand::Destroy { .. }
+            | GameCommand::SetVisible { .. }
+            | GameCommand::SetEnabled { .. }
+            | GameCommand::SetFollowTarget { .. }
+            | GameCommand::CameraShake { .. }
+            | GameCommand::SetGameState { .. } => {}
             GameCommand::SetVariable { name, value } => {
                 let mut variables = world.get_resource_or_insert_with(RuleVariables::default);
                 if let Err(error) = variables.set(name, *value) {
@@ -91,6 +103,14 @@ pub fn apply_world_commands(
             GameCommand::Translate { object_id, delta } => {
                 move_object(world, object_id, *delta, true);
             }
+            GameCommand::SetRotation {
+                object_id,
+                rotation,
+            } => rotate_object(world, object_id, *rotation, false),
+            GameCommand::Rotate { object_id, delta } => {
+                rotate_object(world, object_id, *delta, true);
+            }
+            GameCommand::SetScale { object_id, scale } => scale_object(world, object_id, *scale),
         }
     }
     Ok(spawned_prefabs)
@@ -141,13 +161,55 @@ fn move_object(world: &mut World, object_id: &str, value: [f32; 3], additive: bo
     }
 }
 
-/// Object IDs moved by `SetPosition`/`Translate` in a command batch.
+fn rotate_object(world: &mut World, object_id: &str, value: [f32; 4], additive: bool) {
+    let requested = Quat::from_array(value);
+    if !requested.is_finite() || requested.length_squared() < 1e-12 {
+        tracing::warn!(%object_id, "requested a non-finite or zero rotation");
+        return;
+    }
+    let requested = requested.normalize();
+    let Some(mut transform) = find_object(world, object_id)
+        .and_then(|target| world.get_mut::<TransformComponent>(target))
+    else {
+        tracing::warn!(%object_id, "rotation target has no transform");
+        return;
+    };
+    let next = if additive {
+        transform.0.rotation * requested
+    } else {
+        requested
+    };
+    if next.is_finite() {
+        transform.0.rotation = next.normalize();
+    } else {
+        tracing::warn!(%object_id, "rotation became non-finite");
+    }
+}
+
+fn scale_object(world: &mut World, object_id: &str, value: [f32; 3]) {
+    let scale = Vec3::from_array(value);
+    if !scale.is_finite() || value.contains(&0.0) {
+        tracing::warn!(%object_id, "requested a non-finite or zero scale");
+        return;
+    }
+    let Some(mut transform) = find_object(world, object_id)
+        .and_then(|target| world.get_mut::<TransformComponent>(target))
+    else {
+        tracing::warn!(%object_id, "scale target has no transform");
+        return;
+    };
+    transform.0.scale = scale;
+}
+
+/// Object IDs moved or rotated by a command batch.
 pub(super) fn moved_object_ids(commands: &[GameCommand]) -> Vec<&str> {
     commands
         .iter()
         .filter_map(|command| match command {
             GameCommand::SetPosition { object_id, .. }
-            | GameCommand::Translate { object_id, .. } => Some(object_id.as_str()),
+            | GameCommand::Translate { object_id, .. }
+            | GameCommand::SetRotation { object_id, .. }
+            | GameCommand::Rotate { object_id, .. } => Some(object_id.as_str()),
             _ => None,
         })
         .collect()
@@ -157,7 +219,10 @@ pub(super) fn moved_object_ids(commands: &[GameCommand]) -> Vec<&str> {
 ///
 /// A parented body would need its parent's world pose; that is unsupported and
 /// reported rather than silently teleported to the wrong place.
-pub(super) fn moved_body_poses(world: &World, object_ids: &[&str]) -> Vec<(RigidBodyHandle, Vec3)> {
+pub(super) fn moved_body_poses(
+    world: &World,
+    object_ids: &[&str],
+) -> Vec<(RigidBodyHandle, Vec3, Quat)> {
     let moved: HashSet<_> = object_ids.iter().copied().collect();
     world
         .iter_entities()
@@ -166,23 +231,30 @@ pub(super) fn moved_body_poses(world: &World, object_ids: &[&str]) -> Vec<(Rigid
             if !moved.contains(id.0.as_str()) {
                 return None;
             }
+            // A parented object with no body, like a first-person camera, is fine.
+            let body = entity.get::<RigidBody>()?.0;
             if entity.get::<ChildOf>().is_some() {
                 tracing::warn!(object_id = %id.0, "moving a parented physics body is unsupported");
                 return None;
             }
             Some((
-                entity.get::<RigidBody>()?.0,
+                body,
                 entity.get::<TransformComponent>()?.0.translation,
+                entity.get::<TransformComponent>()?.0.rotation,
             ))
         })
         .collect()
 }
 
 /// Teleports bodies so physics starts the next step from the commanded pose.
-pub(super) fn sync_moved_bodies(physics: &mut PhysicsWorld, poses: &[(RigidBodyHandle, Vec3)]) {
-    for (handle, position) in poses {
+pub(super) fn sync_moved_bodies(
+    physics: &mut PhysicsWorld,
+    poses: &[(RigidBodyHandle, Vec3, Quat)],
+) {
+    for (handle, position, rotation) in poses {
         if let Some(body) = physics.rapier.bodies.get_mut(*handle) {
             body.set_translation(*position, true);
+            body.set_rotation(*rotation, true);
         }
     }
 }

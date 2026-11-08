@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+glam = { workspace = true, optional = true }
 mlua = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
@@ -15,7 +16,7 @@ uuid = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [features]
-lua = ["dep:mlua", "dep:serde", "dep:serde_json", "dep:uuid"]
+lua = ["dep:glam", "dep:mlua", "dep:serde", "dep:serde_json", "dep:uuid"]
 
 [lints]
 workspace = true

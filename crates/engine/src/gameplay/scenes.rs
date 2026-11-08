@@ -2,12 +2,12 @@
 //! between them.
 
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use engine_ecs::components::{
     InstancedMeshRenderer, MeshRenderer, SkinnedMeshRenderer, VegetationRenderer,
 };
-use engine_ecs::prelude::World;
+use engine_ecs::prelude::{Entity, World};
 use engine_physics::PhysicsWorld;
 use engine_project::Project;
 use engine_renderer::RenderAssets;
@@ -26,18 +26,7 @@ pub enum SceneSource {
     Export(PathBuf),
 }
 
-/// Whether `path` is a portable, project-relative `scenes/**/*.ron` path.
-pub fn valid_scene_path(path: &str) -> bool {
-    let relative = Path::new(path);
-    !relative.is_absolute()
-        && !path.contains('\\')
-        && !path.contains("//")
-        && relative
-            .components()
-            .all(|part| matches!(part, Component::Normal(_)))
-        && relative.starts_with("scenes")
-        && relative.extension().and_then(|ext| ext.to_str()) == Some("ron")
-}
+pub use engine_scene::valid_scene_path;
 
 impl SceneSource {
     /// Reads, validates and assigns object IDs to the scene at `path`.
@@ -70,6 +59,27 @@ impl SceneSource {
     }
 }
 
+/// Releases the GPU meshes and materials one entity holds, so a mesh shared
+/// with other entities survives and an unshared one is freed. Does not despawn.
+pub(crate) fn release_entity_assets(world: &World, entity: Entity, assets: &mut RenderAssets) {
+    if let Some(renderer) = world.get::<MeshRenderer>(entity) {
+        assets.meshes.release(renderer.mesh);
+        assets.materials.release(renderer.material);
+    }
+    if let Some(renderer) = world.get::<SkinnedMeshRenderer>(entity) {
+        assets.skinned_meshes.release(renderer.mesh);
+        assets.materials.release(renderer.material);
+    }
+    if let Some(renderer) = world.get::<InstancedMeshRenderer>(entity) {
+        assets.meshes.release(renderer.mesh);
+        assets.materials.release(renderer.material);
+    }
+    if let Some(renderer) = world.get::<VegetationRenderer>(entity) {
+        assets.meshes.release(renderer.mesh);
+        assets.materials.release(renderer.material);
+    }
+}
+
 /// Despawns every non-resource entity and releases its GPU meshes/materials.
 ///
 /// Resources (such as gameplay variables) survive, so values carry across a
@@ -86,22 +96,7 @@ pub fn clear_world(world: &mut World, assets: &mut RenderAssets) {
         .filter(|entity| !resources.contains(entity))
         .collect();
     for entity in &entities {
-        if let Some(renderer) = world.get::<MeshRenderer>(*entity) {
-            assets.meshes.release(renderer.mesh);
-            assets.materials.release(renderer.material);
-        }
-        if let Some(renderer) = world.get::<SkinnedMeshRenderer>(*entity) {
-            assets.skinned_meshes.release(renderer.mesh);
-            assets.materials.release(renderer.material);
-        }
-        if let Some(renderer) = world.get::<InstancedMeshRenderer>(*entity) {
-            assets.meshes.release(renderer.mesh);
-            assets.materials.release(renderer.material);
-        }
-        if let Some(renderer) = world.get::<VegetationRenderer>(*entity) {
-            assets.meshes.release(renderer.mesh);
-            assets.materials.release(renderer.material);
-        }
+        release_entity_assets(world, *entity, assets);
     }
     for entity in entities {
         world.despawn(entity);

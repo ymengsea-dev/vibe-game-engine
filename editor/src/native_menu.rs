@@ -42,6 +42,11 @@ fn command_for_id(id: &str, recent: &[PathBuf]) -> Option<MenuCommand> {
         "create_point_light" => MenuCommand::CreatePointLight,
         "create_ui_label" => MenuCommand::CreateUiLabel,
         "create_ui_button" => MenuCommand::CreateUiButton,
+        "create_camera" => MenuCommand::CreateCamera,
+        "create_sound" => MenuCommand::CreateSound,
+        "duplicate_selection" => MenuCommand::DuplicateSelection,
+        "copy_selection" => MenuCommand::CopySelection,
+        "paste_objects" => MenuCommand::Paste,
         "delete_selected" => MenuCommand::DeleteSelected,
         "group_selection" => MenuCommand::GroupSelection,
         "ungroup" => MenuCommand::Ungroup,
@@ -106,7 +111,8 @@ fn enabled(id: &str, state: &EditorState) -> bool {
     match id {
         "undo" => state.history.can_undo(),
         "redo" => state.history.can_redo(),
-        "delete_selected" => state.selection_len() > 0,
+        "delete_selected" | "duplicate_selection" | "copy_selection" => state.selection_len() > 0,
+        "paste_objects" => state.can_paste_objects(),
         "create_sprite" | "create_tilemap" => state.selected_texture_asset().is_some(),
         "upgrade_rust_sdk" => {
             state.project.language() == engine::project::GameplayLanguage::Rust
@@ -207,6 +213,26 @@ impl NativeMenu {
             &mut items,
             "create_ui_button",
             "Create UI Button",
+        )?;
+        add_item(&gameobject, &mut items, "create_camera", "Create Camera")?;
+        add_item(&gameobject, &mut items, "create_sound", "Create Sound")?;
+        add_item(
+            &gameobject,
+            &mut items,
+            "duplicate_selection",
+            "Duplicate (⌘D)",
+        )?;
+        add_item(
+            &gameobject,
+            &mut items,
+            "copy_selection",
+            "Copy Objects (⌘C)",
+        )?;
+        add_item(
+            &gameobject,
+            &mut items,
+            "paste_objects",
+            "Paste Objects (⌘V)",
         )?;
         add_item(
             &gameobject,

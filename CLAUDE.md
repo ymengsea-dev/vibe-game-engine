@@ -31,8 +31,8 @@ Implementation plans and design specs are managed by the superpowers skill under
 - Runtime builds (`apps/player`, game projects) must not link editor or AI crates: they use `engine` with `default-features = false`. The `studio` feature pulls in `engine_editor`; `lua` enables `engine_scripting/lua` (mlua 0.12, vendored Lua 5.4).
 - glTF 2.0 is the native 3D format; no hand-written FBX importer.
 - **Building or changing any UI: follow `docs/dev/04_UI_STYLE.md`.** It covers the Tokyo Night palette (`theme::NIGHT`, no hard-coded colours), the soft Apple-like shapes (fills, not outlines), SF Pro and Menlo type with semibold titles only, the shared controls in `engine_editor/src/widgets.rs`, and the writing rules. Update it when a token, control or rule changes.
-- Look at UI changes before handing them over: `crates/engine_editor/src/ui_snapshot.rs` renders egui UI to a PNG on the headless GPU. Run `VGE_SNAPSHOT_DIR=<dir> cargo test -p engine_editor -- --ignored snapshot`, then view the PNGs (`settings.png`, `settings-automatic.png`, `scene-chrome.png`, `inspector.png`, `inspector-narrow.png`, `inspector-empty.png`, `scrub-cursor.png`, `console.png`, `console-narrow.png`, `panel-grips.png`). Add a snapshot test for any new window or panel.
-- The user verifies UI by running the editor and sending screenshots. "Done" means visible in `cargo run -p editor`, not only green tests — say explicitly when something was not checked in a running editor/player.
+- Look at UI changes before handing them over: `crates/engine_editor/src/ui_snapshot.rs` renders egui UI to a PNG on the headless GPU. Run `VGE_SNAPSHOT_DIR=<dir> cargo test -p engine_editor -- --ignored snapshot`, then view the PNGs (`settings.png`, `settings-automatic.png`, `scene-chrome.png`, `inspector.png`, `inspector-narrow.png`, `inspector-empty.png`, `inspector-collider.png`, `inspector-camera.png`, `inspector-rules.png`, `scrub-cursor.png`, `console.png`, `console-narrow.png`, `panel-grips.png`, `hierarchy-icons.png`, `scene-icons.png`, `drop-marker.png`). Add a snapshot test for any new window or panel.
+- A feature counts as done (✅) once it is built and its tests pass. The user then tests it in the editor and reports bugs. 🟡 is only for work that is actually missing. Still say explicitly in each report what was not checked in a running editor/player.
 
 ## Commands (run from `vge/`; cargo in `~/.cargo/bin`)
 
@@ -45,7 +45,7 @@ cargo test -p engine_scripting --features lua <name>
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 cargo deny check                          # licenses/advisories (deny.toml)
-cargo build -p editor -p player --release && cargo run -p studio_packager -- target/release target/<new-dir>
+RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo build -p editor -p player --release && cargo run -p studio_packager -- target/release target/<new-dir>   # the packager refuses binaries holding the home folder path
 ```
 
 zsh note: don't `echo ======` (zsh `=` expansion errors); use `echo '---'`.
@@ -68,8 +68,9 @@ Workspace members: `crates/*`, `apps/*`, `games/*`, `editor`.
 - `editor/` — Studio binary: winit/egui host, macOS app/menu (`mac_app.rs`, `native_menu.rs`), Play process management (`play_process.rs`), embedded Rust SDK snapshot (`build.rs` → `sdk_files.rs`) and SDK upgrade.
 - `crates/engine/src/gameplay/` — `GameplayRuntime`, the language-neutral game runtime shared by Lua and Rust games: applies `GameCommand`s (from `engine_scripting::command`), dispatches visual rules, samples collisions, switches scenes. New gameplay features go here, not in the player.
 - `apps/player` — standalone player: thin Lua glue (script loading, input/scene snapshots, callbacks, diagnostics, saves) over `GameplayRuntime`; also runs exports.
-- `apps/studio_packager` — stages a portable host-OS distribution (Studio + player + Monaco + LuaLS 3.19.2, SHA-256 pinned).
+- `apps/studio_packager` — stages a portable host-OS distribution (Studio + player + Monaco + LuaLS 3.19.2, SHA-256 pinned). Never add games: `games/island` stays in the repo but must not ship in the app or its embedded SDK (guard tests in the packager and `editor`).
 - `games/island` — Rust showcase/regression project. Opening it in Studio migrates its manifest; keep it working.
+- `games/*` other than `island` — local, gitignored game projects (not part of Studio): `platformer_2d`, `third_person`, `first_person`. Their tests, `apps/player/tests/demos.rs`, are gitignored too and need those folders. `games/_demo_builders/` is the old builder code kept for reference; it is not compiled.
 - `.superpowers/` — design specs and implementation plans (gitignored, repo root). Five files that used to live in `docs/superpowers/` are still tracked in git history until their removal is committed.
 
 ## Where the previous work left off (as of 2026-10-31)

@@ -20,7 +20,7 @@
 //! Everything appends into one [`DebugDraw`], which is one vertex buffer
 //! and one draw call however many overlays are on.
 
-use engine_ecs::prelude::{Camera, Children, Entity, GlobalTransform, Transform, World};
+use engine_ecs::prelude::{Camera, Children, Entity, GlobalTransform, Transform, Without, World};
 use engine_renderer::{Aabb, DebugDraw, LightSet};
 use engine_scene::{ColliderShape, SceneAudioEmitter, SceneCollider, SceneNavGrid};
 use glam::{Mat4, Vec3};
@@ -29,6 +29,10 @@ use serde::{Deserialize, Serialize};
 /// Colour of collider wireframes: rapier-green, the convention every
 /// physics debug view uses. Dimmed, because it is background information.
 const COLLIDER_COLOR: [f32; 4] = [0.35, 0.9, 0.45, 0.55];
+/// Colour of trigger (sensor) collider wireframes: `theme::NIGHT.purple`
+/// (#BB9AF7) at the same dimmed strength as solid colliders, so a zone that
+/// detects overlaps reads differently from one that blocks.
+const TRIGGER_COLOR: [f32; 4] = [0.733, 0.604, 0.969, 0.55];
 /// Colour of everything that marks the selection: bounds and colliders.
 const SELECTION_COLOR: [f32; 4] = [0.88, 0.69, 0.41, 1.0];
 /// Most selected objects (including descendants) outlined per frame.
@@ -158,7 +162,7 @@ pub fn build(
 /// otherwise, and placing emitters by ear means running the game.
 fn draw_audio_emitters(world: &mut World, draw: &mut DebugDraw) {
     let emitters: Vec<(Entity, f32)> = world
-        .query::<(Entity, &SceneAudioEmitter)>()
+        .query_filtered::<(Entity, &SceneAudioEmitter), Without<engine_ecs::components::Hidden>>()
         .iter(world)
         .map(|(entity, emitter)| (entity, emitter.0.radius))
         .collect();
@@ -297,19 +301,21 @@ fn draw_selection_bounds(
     }
 }
 
-/// Collider wireframes, when `all` is on: green, with the selection's in
-/// orange. Off, nothing is drawn: the selection box already marks the
+/// Collider wireframes, when `all` is on: green (purple for triggers), with
+/// the selection's in orange. Off, nothing is drawn: the selection box already marks the
 /// selection, and a second outline on top of it only adds clutter.
 fn draw_colliders(world: &mut World, draw: &mut DebugDraw, selected: &[Entity], all: bool) {
     if !all {
         return;
     }
     let carriers: Vec<(Entity, ColliderShape, [f32; 4])> = world
-        .query::<(Entity, &SceneCollider)>()
+        .query_filtered::<(Entity, &SceneCollider), Without<engine_ecs::components::Hidden>>()
         .iter(world)
         .map(|(entity, collider)| {
             let color = if selected.contains(&entity) {
                 SELECTION_COLOR
+            } else if collider.0.trigger {
+                TRIGGER_COLOR
             } else {
                 COLLIDER_COLOR
             };
@@ -346,21 +352,22 @@ fn draw_colliders(world: &mut World, draw: &mut DebugDraw, selected: &[Entity], 
 /// A view volume per camera entity.
 fn draw_cameras(world: &mut World, draw: &mut DebugDraw) {
     let cameras: Vec<(Entity, engine_renderer::Camera)> = world
-        .query::<(Entity, &Camera)>()
+        .query_filtered::<(Entity, &Camera), Without<engine_ecs::components::Hidden>>()
         .iter(world)
         .map(|(entity, camera)| (entity, camera.0))
         .collect();
 
     for (entity, mut camera) in cameras {
-        // The entity's transform is where the camera is; a camera
-        // component carries its own eye/target, so only move it if the
-        // entity has been placed somewhere else.
-        let matrix = world_matrix(world, entity);
-        let placed = matrix.transform_point3(Vec3::ZERO);
-        if placed != Vec3::ZERO {
-            let offset = placed - camera.eye;
-            camera.eye = placed;
-            camera.target += offset;
+        // A camera looks along its object's -Z with up = +Y, so the volume
+        // turns with the object. An object with no transform keeps the
+        // component's own eye/target.
+        if world.get::<Transform>(entity).is_some()
+            || world.get::<GlobalTransform>(entity).is_some()
+        {
+            let (eye, target, up) = engine_scene::camera_world_pose(world_matrix(world, entity));
+            camera.eye = eye;
+            camera.target = target;
+            camera.up = up;
         }
         draw.frustum(camera.view_projection_matrix(), CAMERA_COLOR);
     }
@@ -408,12 +415,12 @@ mod tests {
                     0.0,
                     0.0,
                 ))),
-                SceneCollider(ColliderData {
-                    shape: ColliderShape::Cuboid {
+                SceneCollider(ColliderData::new(
+                    ColliderShape::Cuboid {
                         half_extents: [1.0, 1.0, 1.0],
                     },
-                    body: BodyKind::Fixed,
-                }),
+                    BodyKind::Fixed,
+                )),
             ));
         }
         world
@@ -577,6 +584,60 @@ mod tests {
     }
 
     #[test]
+    fn camera_frustum_follows_object_rotation() {
+        let component = engine_renderer::Camera::new(Vec3::ZERO, Vec3::NEG_Z, 16.0 / 9.0);
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                Transform::from(engine_utils::Transform::from_translation(Vec3::new(
+                    0.0, 1.0, 5.0,
+                ))),
+                Camera::from(component),
+            ))
+            .id();
+        let frustum = |world: &mut World| {
+            let mut draw = DebugDraw::new();
+            draw_cameras(world, &mut draw);
+            draw.vertices()
+                .iter()
+                .map(|v| Vec3::from_array(v.position))
+                .collect::<Vec<_>>()
+        };
+        let expected = |eye: Vec3, target: Vec3| {
+            let mut draw = DebugDraw::new();
+            let view = engine_renderer::Camera {
+                eye,
+                target,
+                up: Vec3::Y,
+                ..component
+            };
+            draw.frustum(view.view_projection_matrix(), CAMERA_COLOR);
+            draw.vertices()
+                .iter()
+                .map(|v| Vec3::from_array(v.position))
+                .collect::<Vec<_>>()
+        };
+        let same = |a: &[Vec3], b: &[Vec3]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (*x - *y).length() < 1e-3)
+        };
+
+        let before = frustum(&mut world);
+        assert!(same(
+            &before,
+            &expected(Vec3::new(0.0, 1.0, 5.0), Vec3::new(0.0, 1.0, 4.0))
+        ));
+
+        world.get_mut::<Transform>(entity).unwrap().0.rotation =
+            glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let after = frustum(&mut world);
+        assert!(same(
+            &after,
+            &expected(Vec3::new(0.0, 1.0, 5.0), Vec3::new(-1.0, 1.0, 5.0))
+        ));
+        assert!(!same(&before, &after));
+    }
+
+    #[test]
     fn audio_and_nav_overlays_draw_what_the_scene_authored() {
         use engine_scene::{AssetRef, AudioEmitterData, NavGridData};
 
@@ -683,6 +744,36 @@ mod tests {
         // each, and nothing per-shape beyond that.
         assert_eq!(draw.len(), 1000 * 24);
         assert_eq!(draw.vertices().len(), draw.len());
+    }
+
+    #[test]
+    fn trigger_colliders_use_a_distinct_colour() {
+        let [r, g, b, _] = TRIGGER_COLOR;
+        let purple = crate::theme::NIGHT.purple;
+        for (got, want) in [(r, purple.r()), (g, purple.g()), (b, purple.b())] {
+            assert!((got - f32::from(want) / 255.0).abs() < 0.002);
+        }
+        assert_ne!(TRIGGER_COLOR, COLLIDER_COLOR);
+
+        let mut world = world_with_a_box_collider(1);
+        for mut collider in world.query::<&mut SceneCollider>().iter_mut(&mut world) {
+            collider.0.trigger = true;
+        }
+        let mut draw = DebugDraw::new();
+        build(
+            &mut world,
+            &LightSet::default(),
+            OverlayToggles {
+                all_colliders: true,
+                ..Default::default()
+            },
+            None,
+            &[],
+            |_, _| None,
+            &mut draw,
+        );
+        assert!(!draw.vertices().is_empty());
+        assert!(draw.vertices().iter().all(|v| v.color == TRIGGER_COLOR));
     }
 
     #[test]
