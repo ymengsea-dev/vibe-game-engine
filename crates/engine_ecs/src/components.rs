@@ -821,8 +821,8 @@ pub struct SpriteSource {
     pub z_order: f32,
 }
 
-/// Marks an entity as disabled. The hierarchy panel greys it out and Studio's
-/// Scene view still draws it. In a running game a disabled object is not
+/// Marks an entity as disabled. The hierarchy panel greys it out, and Studio's
+/// Scene view leaves it out unless it is selected. In a running game a disabled object is not
 /// drawn, has no physics (its body and colliders are switched off), and
 /// cannot be the active camera. Round-trips through
 /// `engine_scene::SceneEntity::disabled`.
@@ -834,16 +834,10 @@ pub struct Disabled;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Hidden;
 
-/// Marks an entity as static — the editor treats it as non-moving. A
-/// view-only marker for now (a hook for later culling / batching); it
-/// has no runtime effect yet. Round-trips through
-/// `engine_scene::SceneEntity::is_static`.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Static;
-
-/// Marks an entity as locked in the editor: the Scene-view gizmo, batch
-/// transform, and hierarchy reparent-drag all skip it, so it can't be
-/// moved or re-parented by accident. View-only — no runtime effect.
+/// Marks an entity as locked in the editor: nothing in Studio changes it until
+/// it is unlocked. The Scene-view gizmo, batch transform and hierarchy
+/// reparent-drag skip it, the Inspector shows it read-only, and it cannot be
+/// deleted or renamed. No runtime effect.
 /// Round-trips through `engine_scene::SceneEntity::locked`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Lock;

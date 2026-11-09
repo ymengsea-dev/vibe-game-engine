@@ -1,5 +1,5 @@
-//! Editor-side prefab helpers: capture a selected entity into an
-//! `engine_scene::Prefab` and write it to a `.prefab` file under the
+//! Editor-side prefab helpers: capture a selected object and everything under
+//! it into an `engine_scene::Prefab` and write it to a `.prefab` file under the
 //! project's assets directory.
 //!
 //! Instantiating a `.prefab` back into the scene lives on
@@ -8,21 +8,16 @@
 //! [`unique_path`]) are unit-tested; the file write in [`write_prefab`]
 //! is covered by a temp-dir test and the editor boot smoke.
 //!
-//! ## Not done here
-//!
-//! - Single-entity prefabs only — `engine_scene::Prefab` wraps one
-//!   `SceneEntity`, so a selected entity's children are not captured.
-//! - No prefab linking: an instantiated prefab is a plain detached copy,
-//!   with no back-reference to the file and no override tracking.
-//! - Live GPU handles are not captured; asset references are.
+//! Live GPU handles are not captured; asset references are.
 
 use std::path::{Path, PathBuf};
 
-use engine_ecs::components::{AssetSource, Camera, Disabled, Name, Static, Transform};
+use std::collections::HashSet;
+
 use engine_ecs::prelude::{Entity, World};
-use engine_scene::{
-    CameraData, Prefab, SceneCollider, SceneEntity, SceneError, TransformData, capture_renderables,
-};
+use engine_scene::{Prefab, Scene, SceneError, ScenePrefabLink};
+
+use crate::object_clipboard::ensure_object_id;
 
 use crate::error::EditorError;
 
@@ -33,65 +28,42 @@ pub const PREFAB_DIR: &str = "prefabs";
 /// File stem used when a captured entity has no `Name`.
 const DEFAULT_STEM: &str = "Prefab";
 
-/// Builds a single-entity [`Prefab`] from `entity`'s editor-relevant
-/// components (`Name` / `Transform` / `Camera` / `AssetSource` /
-/// `SceneCollider` / `Disabled` / `Static`). Mirrors the per-entity mapping in
-/// `engine_scene::Scene::from_world`; `parent` is left unset — a lone
-/// prefab has no sibling list to index into.
+/// Builds a [`Prefab`] from `entity` and everything under it, through the same
+/// capture a scene save uses, so a prefab holds all that a scene object does.
 ///
 /// # Errors
 ///
-/// [`EditorError::PrefabEntityMissing`] if `entity` is not alive in
-/// `world`.
-pub fn capture(world: &World, entity: Entity) -> Result<Prefab, EditorError> {
+/// [`EditorError::PrefabEntityMissing`] if `entity` is not alive in `world`, or
+/// has no name and so is not a scene object.
+pub fn capture(world: &mut World, entity: Entity) -> Result<Prefab, EditorError> {
     if !world.entities().contains(entity) {
         return Err(EditorError::PrefabEntityMissing);
     }
-    let asset_source = world.get::<AssetSource>(entity);
-    // Shared with `Scene::from_world` so a prefab and a scene capture the
-    // same entity identically — these were divergent copies before T-02.
-    let (mesh_renderer, sprite) = capture_renderables(world, entity);
-    let scene_entity = SceneEntity {
-        name: world.get::<Name>(entity).map(|name| name.0.clone()),
-        transform: world
-            .get::<Transform>(entity)
-            .map(|transform| TransformData::from(transform.0)),
-        camera: world.get::<Camera>(entity).map(|camera| {
-            engine_scene::saved_camera_pose(world, entity, CameraData::from(camera.0))
-        }),
-        camera_follow: world
-            .get::<engine_ecs::components::CameraFollow>(entity)
-            .map(engine_scene::CameraFollowData::from),
-        asset_source: asset_source.map(|source| source.path.clone()),
-        asset_id: asset_source.and_then(|source| source.id.clone()),
-        disabled: world.get::<Disabled>(entity).is_some(),
-        is_static: world.get::<Static>(entity).is_some(),
-        collider: world
-            .get::<SceneCollider>(entity)
-            .map(|value| value.0.clone()),
-        ui: world
-            .get::<engine_scene::SceneUi>(entity)
-            .map(|value| value.0.clone()),
-        mesh_renderer,
-        foliage: world
-            .get::<engine_scene::SceneFoliage>(entity)
-            .map(|source| source.0.clone()),
-        sprite,
-        tilemap: world
-            .get::<engine_scene::SceneTilemap>(entity)
-            .map(|source| source.0.clone()),
-        rules: world
-            .get::<engine_scene::SceneRules>(entity)
-            .map_or_else(Vec::new, |source| source.0.clone()),
-        ..Default::default()
-    };
-    Ok(Prefab::new(scene_entity))
+    let root_id = ensure_object_id(world, entity).ok_or(EditorError::PrefabEntityMissing)?;
+    let members = subtree(world, entity);
+    let entities = Scene::capture_entities(world, &members);
+    Prefab::from_captured(entities, &root_id).ok_or(EditorError::PrefabEntityMissing)
+}
+
+/// `entity` and every object under it.
+fn subtree(world: &World, entity: Entity) -> HashSet<Entity> {
+    let mut members = HashSet::from([entity]);
+    let mut stack = vec![entity];
+    while let Some(at) = stack.pop() {
+        for child in crate::hierarchy::children_of(world, at) {
+            if members.insert(child) {
+                stack.push(child);
+            }
+        }
+    }
+    members
 }
 
 /// Captures `entity` and writes it as a new `.prefab` file under
 /// `assets_dir`/[`PREFAB_DIR`], with a non-clobbering name derived from
 /// the entity's `Name` (or `"Prefab"`). Creates the directory if
-/// needed. Returns the file's absolute path.
+/// needed. The object it came from becomes a linked copy of the new file.
+/// Returns the file's absolute path.
 ///
 /// # Errors
 ///
@@ -99,7 +71,7 @@ pub fn capture(world: &World, entity: Entity) -> Result<Prefab, EditorError> {
 /// [`EditorError::Prefab`] if the directory can't be created or the file
 /// can't be validated / serialized / written.
 pub fn write_prefab(
-    world: &World,
+    world: &mut World,
     entity: Entity,
     assets_dir: &Path,
 ) -> Result<PathBuf, EditorError> {
@@ -116,6 +88,20 @@ pub fn write_prefab(
 
     let path = unique_path(&dir, &stem);
     prefab.save_to_file(&path)?;
+    if let Some(file) = path.file_name().and_then(|name| name.to_str()) {
+        let link_path = format!("assets/{PREFAB_DIR}/{file}");
+        for member in subtree(world, entity) {
+            if let Some(id) = ensure_object_id(world, member) {
+                world
+                    .entity_mut(member)
+                    .insert(ScenePrefabLink(engine_scene::PrefabLink {
+                        path: link_path.clone(),
+                        member: id,
+                        overrides: Vec::new(),
+                    }));
+            }
+        }
+    }
     Ok(path)
 }
 
@@ -159,7 +145,8 @@ pub fn unique_path(dir: &Path, stem: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_ecs::components::Name;
+    use engine_ecs::components::{AssetSource, Name, Transform};
+    use engine_scene::SceneObjectId;
     use engine_utils::Transform as MathTransform;
     use glam::Vec3;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -191,7 +178,7 @@ mod tests {
             ))
             .id();
 
-        let prefab = capture(&world, entity).expect("capture should succeed");
+        let prefab = capture(&mut world, entity).expect("capture should succeed");
 
         let mesh_renderer = prefab
             .entity()
@@ -228,7 +215,7 @@ mod tests {
                 engine_scene::SceneFoliage(foliage.clone()),
             ))
             .id();
-        let prefab = capture(&world, entity).unwrap();
+        let prefab = capture(&mut world, entity).unwrap();
         assert_eq!(prefab.entity().foliage, Some(foliage));
     }
 
@@ -240,17 +227,15 @@ mod tests {
                 Name::new("Turret"),
                 Transform::from(MathTransform::from_translation(Vec3::new(1.0, 2.0, 3.0))),
                 AssetSource::with_id("props/turret.gltf", "abc"),
-                Static,
             ))
             .id();
 
-        let prefab = capture(&world, entity).unwrap();
+        let prefab = capture(&mut world, entity).unwrap();
         let data = prefab.entity();
         assert_eq!(data.name.as_deref(), Some("Turret"));
         assert_eq!(data.transform.unwrap().translation, [1.0, 2.0, 3.0]);
         assert_eq!(data.asset_source.as_deref(), Some("props/turret.gltf"));
         assert_eq!(data.asset_id.as_deref(), Some("abc"));
-        assert!(data.is_static);
         assert!(!data.disabled);
     }
 
@@ -269,7 +254,7 @@ mod tests {
                 engine_scene::SceneCollider(collider.clone()),
             ))
             .id();
-        let prefab = capture(&world, entity).expect("capture");
+        let prefab = capture(&mut world, entity).expect("capture");
         assert_eq!(prefab.entity().collider, Some(collider));
     }
 
@@ -283,7 +268,7 @@ mod tests {
                 CameraFollow::new("hero", FollowMode::THIRD_PERSON),
             ))
             .id();
-        let prefab = capture(&world, entity).unwrap();
+        let prefab = capture(&mut world, entity).unwrap();
         let data = prefab.entity().camera_follow.clone().expect("follow kept");
         assert_eq!(data.target, "hero");
     }
@@ -294,7 +279,7 @@ mod tests {
         let entity = world.spawn(Name::new("Gone")).id();
         world.despawn(entity);
         assert!(matches!(
-            capture(&world, entity),
+            capture(&mut world, entity),
             Err(EditorError::PrefabEntityMissing)
         ));
     }
@@ -333,7 +318,7 @@ mod tests {
             ))
             .id();
 
-        let path = write_prefab(&world, entity, &assets).unwrap();
+        let path = write_prefab(&mut world, entity, &assets).unwrap();
         assert_eq!(path, assets.join(PREFAB_DIR).join("Barrel.prefab"));
         assert!(path.exists());
 
@@ -342,14 +327,41 @@ mod tests {
     }
 
     #[test]
-    fn write_prefab_on_a_nameless_entity_uses_the_default_stem() {
-        let assets = temp_dir("nameless");
+    fn capture_takes_children_scripts_and_lights_and_links_the_source() {
+        let assets = temp_dir("children");
         let mut world = World::new();
-        let entity = world
-            .spawn(Transform::from(MathTransform::from_translation(Vec3::ZERO)))
+        let top = world
+            .spawn((
+                Name::new("Zed"),
+                engine_ecs::components::Script::new("assets/scripts/z.lua"),
+                engine_scene::ScenePointLight(engine_scene::PointLightData::default()),
+            ))
+            .id();
+        let kid = world
+            .spawn((Name::new("Arm"), engine_ecs::prelude::ChildOf(top)))
             .id();
 
-        let path = write_prefab(&world, entity, &assets).unwrap();
+        let path = write_prefab(&mut world, top, &assets).unwrap();
+        let loaded = Prefab::load_from_file(&path).unwrap();
+        let list: Vec<_> = loaded.entities().collect();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name.as_deref(), Some("Zed"));
+        assert_eq!(list[0].script.as_deref(), Some("assets/scripts/z.lua"));
+        assert!(list[0].point_light.is_some());
+        assert_eq!(list[1].parent, Some(0));
+
+        let link = &world.get::<ScenePrefabLink>(kid).unwrap().0;
+        assert_eq!(link.path, "assets/prefabs/Zed.prefab");
+        assert_eq!(link.member, world.get::<SceneObjectId>(kid).unwrap().0);
+    }
+
+    #[test]
+    fn write_prefab_on_a_blank_name_uses_the_default_stem() {
+        let assets = temp_dir("nameless");
+        let mut world = World::new();
+        let entity = world.spawn(Name::new("   ")).id();
+
+        let path = write_prefab(&mut world, entity, &assets).unwrap();
         assert_eq!(path, assets.join(PREFAB_DIR).join("Prefab.prefab"));
     }
 }

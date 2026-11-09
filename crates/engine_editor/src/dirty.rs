@@ -104,8 +104,12 @@ impl DirtyState {
 pub enum PendingAction {
     /// Close the editor.
     Quit,
-    /// Replace the scene with a fresh empty one.
-    NewScene,
+    /// Open the scene at this project-relative path.
+    OpenScene(PathBuf),
+    /// Close a scene that was opened beside another.
+    CloseScene(String),
+    /// Make the loading screen scene and open it.
+    CreateLoadingScreen,
     /// Reload the current scene from disk, discarding in-memory edits.
     RevertScene,
     /// Open an existing project at this directory.
@@ -120,19 +124,17 @@ pub enum PendingAction {
 
 impl PendingAction {
     /// Every payload-free variant, for exhaustiveness in tests. The
-    /// project actions are excluded because they carry a path with no
-    /// meaningful sample value.
-    pub const ALL: [PendingAction; 3] = [
-        PendingAction::Quit,
-        PendingAction::NewScene,
-        PendingAction::RevertScene,
-    ];
+    /// scene and project actions are excluded because they carry a path or
+    /// name with no meaningful sample value.
+    pub const ALL: [PendingAction; 2] = [PendingAction::Quit, PendingAction::RevertScene];
 
     /// The action phrased for the dialog: "Save changes before {verb}?"
     pub fn verb(&self) -> &'static str {
         match self {
             PendingAction::Quit => "closing",
-            PendingAction::NewScene => "starting a new scene",
+            PendingAction::OpenScene(_) => "opening another scene",
+            PendingAction::CloseScene(_) => "closing the scene",
+            PendingAction::CreateLoadingScreen => "making the loading screen",
             PendingAction::RevertScene => "reverting the scene",
             PendingAction::OpenProject(_) => "opening another project",
             PendingAction::NewProject(_, _, _) => "creating a new project",

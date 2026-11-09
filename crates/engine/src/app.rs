@@ -461,11 +461,13 @@ struct Runtime {
     /// The game's retained UI tree, laid out and drawn each frame.
     ui: engine_ui::Ui,
     /// Glyph sheet plus the white texel solid fills sample.
-    glyph_atlas: engine_renderer::GlyphAtlas,
+    ui_font: engine_renderer::UiFont,
+    ui_font_texture: engine_renderer::Texture,
     ui_pipeline: engine_renderer::UiPipeline,
     /// Where the UI atlas's opaque white texel sits, for untextured
     /// quads.
-    ui_white_uv: [f32; 4],
+    /// Textures for image widgets, by asset.
+    ui_images: HashMap<engine_utils::AssetId, engine_renderer::UiImage>,
     /// Nodes clicked this frame, from the pre-`update` hit test plus any
     /// keyboard/gamepad activation.
     ui_clicked: Vec<engine_ui::NodeId>,
@@ -812,6 +814,60 @@ impl GameContext<'_> {
             )
         });
         Ok(())
+    }
+
+    /// Loads the images `scene`'s image widgets show, reusing ones already
+    /// loaded and dropping ones no longer used. A missing or unreadable image
+    /// is logged, and its widget draws as a plain tinted rectangle.
+    pub fn set_scene_ui_images(
+        &mut self,
+        scene: &engine_scene::Scene,
+        library: &engine_scene::AssetLibrary,
+    ) {
+        let wanted = scene.ui_image_refs();
+        let wanted_ids: Vec<_> = wanted
+            .iter()
+            .filter_map(|image| image.parse_id().ok())
+            .map(engine_utils::AssetId::from_uuid)
+            .collect();
+        self.runtime
+            .ui_images
+            .retain(|id, _| wanted_ids.contains(id));
+        for image in wanted {
+            let Ok(uuid) = image.parse_id() else { continue };
+            let id = engine_utils::AssetId::from_uuid(uuid);
+            if self.runtime.ui_images.contains_key(&id) {
+                continue;
+            }
+            let decoded = match library.read(&image.id) {
+                Ok(Some(bytes)) => {
+                    engine_asset::import_texture_bytes(&bytes).map_err(|error| error.to_string())
+                }
+                Ok(None) => Err("the file is missing".to_owned()),
+                Err(error) => Err(error.to_string()),
+            };
+            let texture = match decoded {
+                Ok(texture) => texture,
+                Err(error) => {
+                    tracing::warn!(asset_id = %image.id, %error, "UI image could not be loaded");
+                    continue;
+                }
+            };
+            let Some(base) = texture.mip_levels.first() else {
+                continue;
+            };
+            let gpu_texture = self.runtime.gpu.create_texture_from_rgba(
+                "ui image",
+                texture.width,
+                texture.height,
+                base,
+            );
+            let binding = self
+                .runtime
+                .gpu
+                .create_ui_image(&self.runtime.ui_pipeline, &gpu_texture);
+            self.runtime.ui_images.insert(id, binding);
+        }
     }
 
     /// Builds a physics body for every entity in `scene` that carries
@@ -1533,17 +1589,33 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
                         .input
                         .is_mouse_button_released(engine_platform::MouseButton::Left),
                 };
+                let was_typing = runtime.ui.editing().is_some();
                 runtime.ui.layout();
                 let mut clicked = runtime.ui.interact(pointer);
+                // Enter in a text field counts as clicking it.
+                if let Some(submitted) = runtime.ui.type_text(runtime.input.typed_text()) {
+                    clicked.push(submitted);
+                }
+                // Includes the frame typing ended on, so the Enter or Escape
+                // that ended it does not also reach the game.
+                let typing = was_typing || runtime.ui.editing().is_some();
+                runtime.input.set_keyboard_captured(typing);
 
                 // Menu navigation after the pointer pass, so a click this
                 // frame has already moved focus and an activation lands
                 // on the node the player just touched.
-                if runtime.ui_navigation {
+                if runtime.ui_navigation && !typing {
                     let (direction, activate) =
                         ui_navigation_input(&runtime.input, &mut runtime.ui_nav_stick);
                     if let Some(direction) = direction {
-                        runtime.ui.focus_direction(direction);
+                        let nudge = match direction {
+                            engine_ui::FocusDirection::Left => -1.0,
+                            engine_ui::FocusDirection::Right => 1.0,
+                            _ => 0.0,
+                        };
+                        if nudge == 0.0 || !runtime.ui.nudge_focused(nudge) {
+                            runtime.ui.focus_direction(direction);
+                        }
                     }
                     if activate
                         && let Some(id) = runtime.ui.activate()
@@ -1717,33 +1789,6 @@ fn step_physics(runtime: &mut Runtime, step_seconds: f32) {
     engine_ecs::sync_rigid_bodies(runtime.ecs.world_mut(), &runtime.physics);
 }
 
-/// Extends the glyph atlas with one opaque white row, returning the
-/// combined RGBA8 image and the UV of a white texel inside it.
-///
-/// Solid-colour UI quads need *something* to sample. Giving them a white
-/// texel in the same atlas means fills, images and glyphs all go through
-/// one pipeline and one bind group, instead of a second pipeline whose
-/// only difference is "no texture".
-fn ui_atlas_with_white(atlas: &engine_renderer::GlyphAtlas) -> (u32, u32, Vec<u8>, [f32; 4]) {
-    let (width, glyph_height) = atlas.size();
-    let height = glyph_height + 1;
-    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-    pixels.extend_from_slice(atlas.pixels());
-    // The extra row: fully opaque white.
-    pixels.extend(std::iter::repeat_n(255u8, (width * 4) as usize));
-
-    // Sample the middle of that row, away from any filtering bleed at the
-    // boundary with the glyph rows above.
-    let v = (glyph_height as f32 + 0.5) / height as f32;
-    let u = 0.5 / width as f32;
-    (width, height, pixels, [u, v, u, v])
-}
-
-/// Turns the UI tree's draw list into instanced quads.
-///
-/// Text expands here rather than in `engine_ui`, which deliberately knows
-/// nothing about fonts — it emits a string and a rect, and this is where
-/// that becomes glyph quads.
 /// Deadzone the left stick must clear before it counts as a menu
 /// direction. Higher than the gameplay deadzone: a stick resting just
 /// off centre must not walk the focus across a menu.
@@ -1833,58 +1878,136 @@ fn ui_navigation_input(
     (direction, activate)
 }
 
+/// An on-screen (sRGB) colour as the linear tint the UI pass blends with. The
+/// pass draws to an sRGB target, which converts back on write, so a colour
+/// picked in the Inspector appears unchanged.
+fn linear_tint(color: engine_ui::Color) -> [f32; 4] {
+    let channel = |value: f32| {
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    [
+        channel(color.r),
+        channel(color.g),
+        channel(color.b),
+        color.a,
+    ]
+}
+
+/// Turns the UI tree's draw list into instanced quads.
+///
+/// Text expands here rather than in `engine_ui`, which deliberately knows
+/// nothing about fonts — it emits a string and a rect, and this is where
+/// that becomes glyph quads.
 fn ui_quads(
     commands: &[engine_ui::DrawCommand],
-    atlas: &engine_renderer::GlyphAtlas,
-    white_uv: [f32; 4],
-) -> Vec<engine_renderer::UiQuad> {
-    /// Text height in pixels. Fixed for now — `engine_ui` has no
-    /// per-node font size, so inventing one here would be a lie.
-    const TEXT_PIXEL_HEIGHT: f32 = 16.0;
+    font: &mut engine_renderer::UiFont,
+    has_image: impl Fn(engine_utils::AssetId) -> bool,
+) -> UiBatch {
+    let generation = font.generation();
+    let batch = build_ui_quads(commands, font, &has_image);
+    // The atlas filled up and started over part way, so the first glyphs'
+    // places are stale. A second pass finds or redraws them all.
+    if font.generation() == generation {
+        batch
+    } else {
+        build_ui_quads(commands, font, &has_image)
+    }
+}
 
+fn build_ui_quads(
+    commands: &[engine_ui::DrawCommand],
+    font: &mut engine_renderer::UiFont,
+    has_image: &impl Fn(engine_utils::AssetId) -> bool,
+) -> UiBatch {
+    let white_uv = font.white_uv();
     let mut quads = Vec::new();
+    let mut runs: Vec<(std::ops::Range<u32>, Option<engine_utils::AssetId>)> = Vec::new();
     for command in commands {
         let rect = command.rect;
+        let start = quads.len() as u32;
+        let image = match &command.kind {
+            engine_ui::DrawKind::Image { texture, .. } if has_image(*texture) => Some(*texture),
+            _ => None,
+        };
+        let solid = |color: engine_ui::Color, shape: [f32; 4]| engine_renderer::UiQuad {
+            rect: [rect.x, rect.y, rect.w, rect.h],
+            uv: white_uv,
+            tint: linear_tint(color),
+            shape,
+        };
         match &command.kind {
-            engine_ui::DrawKind::Fill(color) => quads.push(engine_renderer::UiQuad {
-                rect: [rect.x, rect.y, rect.w, rect.h],
-                uv: white_uv,
-                tint: [color.r, color.g, color.b, color.a],
-            }),
-            engine_ui::DrawKind::Image { tint, .. } => {
-                // No texture store to resolve an `AssetId` against yet, so
-                // an image draws as its tint rather than vanishing. Wiring
-                // real image widgets needs a texture registry (see the
-                // `DrawKind::Image` note in the task write-up).
-                quads.push(engine_renderer::UiQuad {
-                    rect: [rect.x, rect.y, rect.w, rect.h],
-                    uv: white_uv,
-                    tint: [tint.r, tint.g, tint.b, tint.a],
-                });
+            engine_ui::DrawKind::Fill(color) => quads.push(solid(*color, [0.0; 4])),
+            engine_ui::DrawKind::RoundedFill { color, radius } => {
+                quads.push(solid(*color, [*radius, 0.0, 0.0, 0.0]));
             }
-            engine_ui::DrawKind::Text { text, color } => {
-                let layout = engine_renderer::layout_text(
-                    text,
-                    TEXT_PIXEL_HEIGHT,
-                    Some(rect.w.max(TEXT_PIXEL_HEIGHT)),
-                );
+            engine_ui::DrawKind::Outline {
+                color,
+                radius,
+                width,
+            } => quads.push(solid(*color, [*radius, *width, 0.0, 0.0])),
+            engine_ui::DrawKind::Image { tint, radius, .. } => {
+                // A texture that could not be loaded draws as its tint
+                // rather than vanishing.
+                let mut quad = solid(*tint, [*radius, 0.0, 0.0, 0.0]);
+                if image.is_some() {
+                    quad.uv = [0.0, 0.0, 1.0, 1.0];
+                }
+                quads.push(quad);
+            }
+            engine_ui::DrawKind::Text {
+                text,
+                color,
+                size,
+                bold,
+                align,
+            } => {
+                use engine_ui::TextAlign;
+                let wrap = (*align != TextAlign::Tail).then(|| rect.w.max(*size));
+                let layout = font.layout(text, *size, *bold, wrap);
+                let x_shift = match align {
+                    TextAlign::Left => 0.0,
+                    TextAlign::Center => ((rect.w - layout.width) * 0.5).max(0.0).round(),
+                    TextAlign::Tail => (rect.w - layout.width).min(0.0).round(),
+                };
+                let y_shift = ((rect.h - layout.height) * 0.5).max(0.0).round();
                 for glyph in &layout.glyphs {
-                    let uv = atlas.uv(glyph.character);
+                    let x = rect.x.round() + x_shift + glyph.x;
+                    // Typed text scrolled past the field's left edge.
+                    if x < rect.x {
+                        continue;
+                    }
                     quads.push(engine_renderer::UiQuad {
                         rect: [
-                            rect.x + glyph.x,
-                            rect.y + glyph.y,
+                            x,
+                            rect.y.round() + y_shift + glyph.y,
                             glyph.width,
                             glyph.height,
                         ],
-                        uv: [uv.min[0], uv.min[1], uv.max[0], uv.max[1]],
-                        tint: [color.r, color.g, color.b, color.a],
+                        uv: glyph.uv,
+                        tint: linear_tint(*color),
+                        shape: [0.0; 4],
                     });
                 }
             }
         }
+        let end = quads.len() as u32;
+        match runs.last_mut() {
+            // Neighbours sharing a texture draw together.
+            Some((range, last)) if *last == image => range.end = end,
+            _ => runs.push((start..end, image)),
+        }
     }
-    quads
+    UiBatch { quads, runs }
+}
+
+/// A frame's UI quads and the texture each span of them samples.
+struct UiBatch {
+    quads: Vec<engine_renderer::UiQuad>,
+    runs: Vec<(std::ops::Range<u32>, Option<engine_utils::AssetId>)>,
 }
 
 /// Builds the standard 3D render setup and an empty world from `config`,
@@ -1955,11 +2078,10 @@ fn build_runtime_with(
     // The UI atlas is the glyph sheet with one opaque white texel
     // appended, so solid fills and text share a single pipeline and
     // binding.
-    let glyph_atlas = engine_renderer::GlyphAtlas::build();
-    let (atlas_width, atlas_height, atlas_pixels, ui_white_uv) = ui_atlas_with_white(&glyph_atlas);
-    let atlas_texture =
-        gpu.create_texture_from_rgba("ui atlas", atlas_width, atlas_height, &atlas_pixels);
-    let ui_pipeline = gpu.create_ui_pipeline("ui", &atlas_texture, ui_white_uv);
+    let ui_font = engine_renderer::UiFont::new()
+        .map_err(|error| GameError::Setup(format!("built-in UI font: {error}")))?;
+    let ui_font_texture = gpu.create_ui_font_texture(&ui_font);
+    let ui_pipeline = gpu.create_ui_pipeline("ui", &ui_font_texture, ui_font.white_uv());
 
     let ticker = FixedTimestep::from_hz(config.fixed_hz)
         .map_err(|err| GameError::InvalidConfig(err.to_string()))?;
@@ -1978,9 +2100,10 @@ fn build_runtime_with(
         },
         buses: Vec::new(),
         ui: engine_ui::Ui::new(width as f32, height as f32),
-        glyph_atlas,
+        ui_font,
+        ui_font_texture,
         ui_pipeline,
-        ui_white_uv,
+        ui_images: HashMap::new(),
         ui_clicked: Vec::new(),
         ui_navigation: config.ui_navigation,
         ui_nav_stick: (0, 0),
@@ -2197,9 +2320,12 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
                 .map(|(x, y)| [x as f32, y as f32])
                 .unwrap_or([f32::MIN, f32::MIN]),
         ),
-        &runtime.glyph_atlas,
-        runtime.ui_white_uv,
+        &mut runtime.ui_font,
+        |id| runtime.ui_images.contains_key(&id),
     );
+    runtime
+        .gpu
+        .upload_ui_font(&runtime.ui_font_texture, &mut runtime.ui_font);
 
     // Emitters step here so a game only has to spawn a `ParticleEmitter`
     // to get particles; wind advances on a bounded clock so `sin` stays
@@ -2280,6 +2406,14 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
         pipeline: &runtime.water_pipeline,
         draws: &water_draws,
     });
+    let ui_runs: Vec<engine_renderer::UiRun<'_>> = ui_quads
+        .runs
+        .iter()
+        .map(|(quads, image)| engine_renderer::UiRun {
+            quads: quads.clone(),
+            image: image.and_then(|id| runtime.ui_images.get(&id)),
+        })
+        .collect();
     match engine_ecs::extract_and_render(
         runtime.ecs.world_mut(),
         &runtime.assets,
@@ -2301,7 +2435,11 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
         particles,
         Some((&runtime.vegetation_pipeline, &runtime.wind_binding)),
         water,
-        (!ui_quads.is_empty()).then_some((&runtime.ui_pipeline, ui_quads.as_slice())),
+        (!ui_quads.quads.is_empty()).then_some(engine_renderer::UiFrame {
+            pipeline: &runtime.ui_pipeline,
+            quads: &ui_quads.quads,
+            runs: &ui_runs,
+        }),
         // A running game does not draw disabled objects.
         false,
     ) {
@@ -2359,6 +2497,112 @@ pub fn run_game(config: GameConfig, game: impl Game + 'static) -> Result<(), Gam
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text_command(align: engine_ui::TextAlign, size: f32) -> engine_ui::DrawCommand {
+        engine_ui::DrawCommand {
+            rect: engine_ui::Rect {
+                x: 100.0,
+                y: 50.0,
+                w: 80.0,
+                h: 40.0,
+            },
+            kind: engine_ui::DrawKind::Text {
+                text: "abcdefghijklmnopqrstuvwxyz".into(),
+                color: engine_ui::Color::WHITE,
+                size,
+                bold: false,
+                align,
+            },
+        }
+    }
+
+    fn test_font() -> engine_renderer::UiFont {
+        engine_renderer::UiFont::new().expect("built-in font")
+    }
+
+    #[test]
+    fn typed_text_keeps_its_end_inside_the_field() {
+        let mut font = test_font();
+        let batch = ui_quads(
+            &[text_command(engine_ui::TextAlign::Tail, 16.0)],
+            &mut font,
+            |_| false,
+        );
+        assert!(!batch.quads.is_empty());
+        assert!(batch.quads.len() < 26, "the start scrolled away");
+        let last = batch.quads.last().expect("glyph").rect;
+        assert!(batch.quads.iter().all(|quad| quad.rect[0] >= 100.0));
+        assert!(last[0] + last[2] <= 182.0);
+    }
+
+    #[test]
+    fn font_size_scales_glyphs_and_text_centres_vertically() {
+        let mut font = test_font();
+        let mut command = text_command(engine_ui::TextAlign::Left, 8.0);
+        if let engine_ui::DrawKind::Text { text, .. } = &mut command.kind {
+            *text = "H".into();
+        }
+        let small = ui_quads(std::slice::from_ref(&command), &mut font, |_| false);
+        if let engine_ui::DrawKind::Text { size, .. } = &mut command.kind {
+            *size = 16.0;
+        }
+        let big = ui_quads(std::slice::from_ref(&command), &mut font, |_| false);
+        assert!((big.quads[0].rect[3] / small.quads[0].rect[3] - 2.0).abs() < 0.4);
+        let centre = big.quads[0].rect[1] + big.quads[0].rect[3] * 0.5;
+        assert!((centre - 70.0).abs() < 4.0, "{centre}");
+    }
+
+    #[test]
+    fn colours_appear_as_picked_after_the_srgb_target_converts_back() {
+        let tint = linear_tint(engine_ui::Color {
+            r: 0.5,
+            g: 0.0,
+            b: 1.0,
+            a: 0.25,
+        });
+        assert!((tint[0] - 0.214).abs() < 0.001, "{}", tint[0]);
+        assert_eq!(&tint[1..], &[0.0, 1.0, 0.25]);
+    }
+
+    #[test]
+    fn images_get_their_own_runs_and_paint_order_is_kept() {
+        let mut font = test_font();
+        let white_uv = font.white_uv();
+        let picture = engine_utils::AssetId::new();
+        let missing = engine_utils::AssetId::new();
+        let rect = engine_ui::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+        };
+        let command = |kind| engine_ui::DrawCommand { rect, kind };
+        let fill = || command(engine_ui::DrawKind::Fill(engine_ui::Color::WHITE));
+        let image = |texture| {
+            command(engine_ui::DrawKind::Image {
+                texture,
+                tint: engine_ui::Color::WHITE,
+                radius: 0.0,
+            })
+        };
+        let batch = ui_quads(
+            &[
+                fill(),
+                image(missing),
+                image(picture),
+                image(picture),
+                fill(),
+            ],
+            &mut font,
+            |id| id == picture,
+        );
+        assert_eq!(
+            batch.runs,
+            vec![(0..2, None), (2..4, Some(picture)), (4..5, None)]
+        );
+        assert_eq!(batch.quads[1].uv, white_uv, "a missing image is its tint");
+        assert_eq!(batch.quads[2].uv, [0.0, 0.0, 1.0, 1.0]);
+    }
 
     #[test]
     fn paused_simulation_freezes_animations_particles_and_wind() {

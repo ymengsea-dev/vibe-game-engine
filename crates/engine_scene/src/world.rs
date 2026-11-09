@@ -18,9 +18,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::hierarchy::ChildOf;
 use bevy_ecs::prelude::{Entity, World};
-use engine_ecs::components::{
-    AssetSource, Camera, Disabled, Lock, Name, Script, Static, Transform,
-};
+use engine_ecs::components::{AssetSource, Camera, Disabled, Lock, Name, Script, Transform};
 
 use crate::capture::capture_renderables;
 use crate::format::{CameraData, CameraFollowData, Scene, SceneEntity, TransformData};
@@ -32,7 +30,10 @@ pub fn point_lights_from_world(world: &mut World) -> Vec<engine_renderer::PointL
     let mut query = world.query_filtered::<(
         &engine_ecs::components::GlobalTransform,
         &crate::format::ScenePointLight,
-    ), bevy_ecs::prelude::Without<Disabled>>();
+    ), (
+        bevy_ecs::prelude::Without<Disabled>,
+        bevy_ecs::prelude::Without<engine_ecs::components::Hidden>,
+    )>();
     query
         .iter(world)
         .map(|(transform, light)| engine_renderer::PointLight {
@@ -98,6 +99,122 @@ impl Scene {
         }
     }
 
+    /// Removes the objects with these IDs and everything under them, keeping
+    /// the remaining `parent` indices right. Going back to a scene whose kept
+    /// object is already alive uses this, so it is not created twice.
+    pub fn remove_objects(&mut self, ids: &HashSet<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        let old = std::mem::take(&mut self.entities);
+        let mut removed = vec![false; old.len()];
+        // Bounded: a cyclic `parent` chain in unvalidated data must not hang.
+        for (index, slot) in removed.iter_mut().enumerate() {
+            let mut current = Some(index);
+            let mut steps = 0;
+            while let Some(at) = current.filter(|_| steps <= old.len()) {
+                let Some(entity) = old.get(at) else { break };
+                if entity.object_id.as_ref().is_some_and(|id| ids.contains(id)) {
+                    *slot = true;
+                    break;
+                }
+                current = entity.parent;
+                steps += 1;
+            }
+        }
+        let mut new_index = vec![None; old.len()];
+        let mut next = 0;
+        for (index, gone) in removed.iter().enumerate() {
+            if !gone {
+                new_index[index] = Some(next);
+                next += 1;
+            }
+        }
+        self.entities = old
+            .into_iter()
+            .zip(removed)
+            .filter(|(_, gone)| !gone)
+            .map(|(mut entity, _)| {
+                entity.parent = entity
+                    .parent
+                    .and_then(|parent| new_index.get(parent).copied().flatten());
+                entity
+            })
+            .collect();
+    }
+
+    /// Splits a capture of several open scenes by the file each object goes in:
+    /// this scene's own objects, and each of `files` with its objects. An object
+    /// goes where its top object goes, and a top object naming a file that isn't
+    /// listed stays here, so nothing is lost. `parent` is reindexed in each part.
+    pub fn split_by_file(mut self, files: &[String]) -> (Self, Vec<Vec<SceneEntity>>) {
+        let entities = std::mem::take(&mut self.entities);
+        let part_of: Vec<usize> = (0..entities.len())
+            .map(|index| {
+                let mut top = index;
+                for _ in 0..entities.len() {
+                    match entities.get(top).and_then(|entity| entity.parent) {
+                        Some(parent) => top = parent,
+                        None => break,
+                    }
+                }
+                entities
+                    .get(top)
+                    .and_then(|entity| entity.open_from.as_ref())
+                    .and_then(|file| files.iter().position(|listed| listed == file))
+                    .map_or(0, |at| at + 1)
+            })
+            .collect();
+        let mut sizes = vec![0; files.len() + 1];
+        let new_index: Vec<usize> = part_of
+            .iter()
+            .map(|&part| {
+                let at = sizes[part];
+                sizes[part] += 1;
+                at
+            })
+            .collect();
+        let mut parts: Vec<Vec<SceneEntity>> = vec![Vec::new(); files.len() + 1];
+        for (index, mut entity) in entities.into_iter().enumerate() {
+            let part = part_of[index];
+            entity.parent = entity
+                .parent
+                .filter(|&parent| part_of.get(parent) == Some(&part))
+                .and_then(|parent| new_index.get(parent).copied());
+            entity.open_from = None;
+            parts[part].push(entity);
+        }
+        let mut parts = parts.into_iter();
+        self.entities = parts.next().unwrap_or_default();
+        (self, parts.collect())
+    }
+
+    /// Captures `entities` as scene data, with `parent` indexing the returned
+    /// list. A parent outside `entities` becomes no parent.
+    pub fn capture_entities(world: &mut World, entities: &HashSet<Entity>) -> Vec<SceneEntity> {
+        let (scene, order) = Self::from_world_with_entities(world);
+        let mut new_index = vec![None; order.len()];
+        let mut next = 0;
+        for (index, entity) in order.iter().enumerate() {
+            if entities.contains(entity) {
+                new_index[index] = Some(next);
+                next += 1;
+            }
+        }
+        scene
+            .entities
+            .into_iter()
+            .zip(&new_index)
+            .filter(|(_, index)| index.is_some())
+            .map(|(mut entity, _)| {
+                entity.parent = entity
+                    .parent
+                    .and_then(|parent| new_index.get(parent).copied().flatten());
+                entity
+            })
+            .collect()
+    }
+
     /// Captures every **named** entity in `world` — its `Name`, plus its
     /// `Transform`/`Camera` if present, plus its parent (as an index into
     /// the returned scene's `entities`) if it has a `ChildOf`.
@@ -123,12 +240,11 @@ impl Scene {
             Option<&Camera>,
             Option<&AssetSource>,
             Option<&Disabled>,
-            Option<&Static>,
         )>();
         let mut collected: Vec<(Entity, SceneEntity)> = query
             .iter(world)
             .map(
-                |(entity, name, transform, camera, asset_source, disabled, is_static)| {
+                |(entity, name, transform, camera, asset_source, disabled)| {
                     (
                         entity,
                         SceneEntity {
@@ -138,7 +254,6 @@ impl Scene {
                             asset_source: asset_source.map(|source| source.path.clone()),
                             asset_id: asset_source.and_then(|source| source.id.clone()),
                             disabled: disabled.is_some(),
-                            is_static: is_static.is_some(),
                             locked: false,
                             ..Default::default()
                         },
@@ -169,6 +284,17 @@ impl Scene {
             };
             scene_entity.object_id = Some(object_id);
             scene_entity.locked = world.get::<Lock>(*entity).is_some();
+            scene_entity.keep_between_scenes =
+                world.get::<crate::KeepBetweenScenes>(*entity).is_some();
+            scene_entity.tags = world
+                .get::<crate::SceneTags>(*entity)
+                .map_or_else(Vec::new, |tags| tags.0.clone());
+            scene_entity.prefab = world
+                .get::<crate::ScenePrefabLink>(*entity)
+                .map(|link| link.0.clone());
+            scene_entity.open_from = world
+                .get::<crate::SceneFileOwner>(*entity)
+                .map(|file| file.0.clone());
             scene_entity.camera = scene_entity
                 .camera
                 .map(|saved| saved_camera_pose(world, *entity, saved));
@@ -327,7 +453,7 @@ impl Scene {
 
 /// Spawns every entry, then links parents: the entity-only part of
 /// [`Scene::instantiate_with_resolver`].
-fn spawn_scene_entities(
+pub(crate) fn spawn_scene_entities(
     entities: &[SceneEntity],
     world: &mut World,
     resolver: &mut impl SceneResolver,
@@ -351,6 +477,148 @@ fn spawn_scene_entities(
         }
     }
     spawned
+}
+
+#[cfg(test)]
+mod keep_tests {
+    use super::*;
+
+    #[test]
+    fn splitting_sends_each_object_with_its_top_object_and_keeps_parents_right() {
+        let in_file = |entity: SceneEntity, file: &str| SceneEntity {
+            open_from: Some(file.into()),
+            ..entity
+        };
+        let scene = Scene {
+            entities: vec![
+                with_id("main-top", None),
+                in_file(with_id("b-top", None), "scenes/b.ron"),
+                // No owner of its own: it follows the top object it is under.
+                with_id("b-kid", Some(1)),
+                with_id("main-kid", Some(0)),
+                in_file(with_id("lost", None), "scenes/closed.ron"),
+            ],
+            ..Default::default()
+        };
+        let (main, others) = scene.split_by_file(&["scenes/b.ron".to_owned()]);
+        let names = |list: &[SceneEntity]| -> Vec<(String, Option<usize>)> {
+            list.iter()
+                .map(|e| (e.object_id.clone().unwrap(), e.parent))
+                .collect()
+        };
+        assert_eq!(
+            names(&main.entities),
+            [
+                ("main-top".to_owned(), None),
+                ("main-kid".to_owned(), Some(0)),
+                ("lost".to_owned(), None),
+            ]
+        );
+        assert_eq!(
+            names(&others[0]),
+            [("b-top".to_owned(), None), ("b-kid".to_owned(), Some(0))]
+        );
+        assert!(others[0].iter().all(|e| e.open_from.is_none()));
+    }
+
+    #[test]
+    fn the_file_an_object_belongs_to_is_never_written() {
+        let scene = Scene {
+            entities: vec![SceneEntity {
+                open_from: Some("scenes/b.ron".into()),
+                ..with_id("a", None)
+            }],
+            ..Default::default()
+        };
+        assert!(!scene.to_ron_string().unwrap().contains("scenes/b.ron"));
+    }
+
+    #[test]
+    fn a_scene_saved_with_the_old_static_tick_still_loads() {
+        let text = "(version: 5, entities: [(name: Some(\"Old\"), is_static: true)])";
+        let scene = Scene::from_ron_str(text).unwrap();
+        assert_eq!(scene.entities[0].name.as_deref(), Some("Old"));
+        assert!(!scene.to_ron_string().unwrap().contains("is_static"));
+    }
+
+    fn with_id(id: &str, parent: Option<usize>) -> SceneEntity {
+        SceneEntity {
+            object_id: Some(id.into()),
+            name: Some(id.into()),
+            parent,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn removing_an_object_takes_its_children_and_keeps_parents_right() {
+        let mut scene = Scene {
+            entities: vec![
+                with_id("kept", None),
+                with_id("child", Some(0)),
+                with_id("other", None),
+                with_id("under-other", Some(2)),
+            ],
+            ..Default::default()
+        };
+        scene.remove_objects(&HashSet::from(["kept".to_owned()]));
+        let left: Vec<_> = scene
+            .entities
+            .iter()
+            .map(|entity| (entity.object_id.as_deref().unwrap(), entity.parent))
+            .collect();
+        assert_eq!(left, [("other", None), ("under-other", Some(0))]);
+    }
+
+    #[test]
+    fn removing_survives_a_cyclic_parent_chain() {
+        let mut scene = Scene {
+            entities: vec![with_id("a", Some(1)), with_id("b", Some(0))],
+            ..Default::default()
+        };
+        scene.remove_objects(&HashSet::from(["none".to_owned()]));
+        assert_eq!(scene.entities.len(), 2);
+    }
+
+    #[test]
+    fn tags_and_keep_round_trip_through_the_world_and_ron() {
+        let scene = Scene {
+            entities: vec![SceneEntity {
+                tags: vec!["enemy".into()],
+                keep_between_scenes: true,
+                prefab: Some(crate::PrefabLink {
+                    path: "assets/prefabs/a.prefab".into(),
+                    member: "m".into(),
+                    overrides: vec!["name".into()],
+                }),
+                ..with_id("a", None)
+            }],
+            ..Default::default()
+        };
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        let saved = Scene::from_world(&mut world);
+        assert_eq!(saved.entities[0].tags, ["enemy"]);
+        assert!(saved.entities[0].keep_between_scenes);
+        assert_eq!(saved.entities[0].prefab, scene.entities[0].prefab);
+        let text = saved.to_ron_string().unwrap();
+        assert_eq!(
+            Scene::from_ron_str(&text).unwrap().entities[0].tags,
+            ["enemy"]
+        );
+    }
+
+    #[test]
+    fn bad_tags_do_not_validate() {
+        let tagged = |tags: Vec<String>| SceneEntity {
+            tags,
+            ..Default::default()
+        };
+        assert!(tagged(vec!["a".into()]).validate().is_ok());
+        assert!(tagged(vec![String::new()]).validate().is_err());
+        assert!(tagged(vec!["x".repeat(65)]).validate().is_err());
+        assert!(tagged(vec!["a".into(); 33]).validate().is_err());
+    }
 }
 
 #[cfg(test)]
@@ -397,6 +665,7 @@ mod tests {
                 offset: [-20.0, -15.0],
                 size: [100.0, 30.0],
                 color: [0.2, 0.3, 0.4, 1.0],
+                ..UiElementData::button()
             }),
         ));
         let text = Scene::from_world(&mut world).to_ron_string().unwrap();
@@ -663,23 +932,19 @@ mod tests {
     }
 
     #[test]
-    fn disabled_and_static_round_trip_and_default_off() {
+    fn disabled_round_trips_and_defaults_off() {
         let mut source = World::new();
         source.spawn((Name::new("Plain"), Transform::default()));
-        source.spawn((Name::new("Static"), Transform::default(), Static));
         source.spawn((Name::new("Zzz"), Transform::default(), Disabled));
         let scene = Scene::from_world(&mut source);
 
-        // Name-sorted: "Plain", "Static", "Zzz".
-        assert!(!scene.entities[0].disabled && !scene.entities[0].is_static);
-        assert!(scene.entities[1].is_static && !scene.entities[1].disabled);
-        assert!(scene.entities[2].disabled && !scene.entities[2].is_static);
+        assert!(!scene.entities[0].disabled);
+        assert!(scene.entities[1].disabled);
 
         let mut target = World::new();
         let spawned = scene.instantiate(&mut target);
-        assert!(target.get::<Static>(spawned[0]).is_none());
-        assert!(target.get::<Static>(spawned[1]).is_some());
-        assert!(target.get::<Disabled>(spawned[2]).is_some());
+        assert!(target.get::<Disabled>(spawned[0]).is_none());
+        assert!(target.get::<Disabled>(spawned[1]).is_some());
 
         assert_eq!(Scene::from_world(&mut target), scene);
     }

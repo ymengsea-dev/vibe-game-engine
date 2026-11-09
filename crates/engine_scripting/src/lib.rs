@@ -25,6 +25,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lua_reads_ui_text_and_sees_its_own_change() {
+        let mut runtime = LuaRuntime::new().expect("runtime");
+        let id = "67d09e47-5520-4b5a-a132-a68a4a60f452";
+        runtime.set_ui_texts([(id, "Ana")]);
+        runtime
+            .load_script(
+                "assets/scripts/main.lua",
+                &format!(
+                    "return {{ start = function()
+                        engine.set_var('read', engine.ui_get_text('{id}') == 'Ana' and 1 or 0)
+                        engine.ui_set_text('{id}', 'Bo')
+                        engine.set_var('same', engine.ui_get_text('{id}') == 'Bo' and 1 or 0)
+                        engine.set_var('missing', engine.ui_get_text('nothing') == nil and 1 or 0)
+                    end }}"
+                ),
+            )
+            .expect("script");
+        let commands = runtime.start().expect("start");
+        for name in ["read", "same", "missing"] {
+            assert!(
+                commands.contains(&GameCommand::SetVariable {
+                    name: name.into(),
+                    value: 1.0,
+                }),
+                "{name}: {commands:?}"
+            );
+        }
+    }
+
+    #[test]
     fn lua_can_change_authored_ui_text_but_rejects_oversized_text() {
         let id = "67d09e47-5520-4b5a-a132-a68a4a60f452";
         let mut runtime = LuaRuntime::new().expect("runtime");
@@ -787,6 +817,7 @@ mod tests {
             velocity: None,
             visible: true,
             enabled: true,
+            tags: Vec::new(),
         }]);
         assert_eq!(runtime.scene_scale("actor"), Some([2.0, 2.0, 2.0]));
         assert_eq!(runtime.scene_rotation("actor"), Some([0.0, 0.0, 0.0, 1.0]));

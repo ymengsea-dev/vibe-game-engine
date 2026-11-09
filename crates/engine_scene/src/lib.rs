@@ -32,6 +32,7 @@ mod game_state;
 mod io;
 mod migration;
 mod prefab;
+mod prefab_link;
 mod resolve;
 mod rules;
 mod runtime;
@@ -39,7 +40,7 @@ mod save;
 mod sprite_atlas;
 mod ui;
 mod validate;
-pub use validate::{valid_prefab_path, valid_scene_path};
+pub use validate::{MAX_TAG_BYTES, MAX_TAGS, valid_prefab_path, valid_scene_path};
 mod world;
 
 pub use camera_pose::{adopt_legacy_camera_poses, camera_world_pose, look_rotation};
@@ -49,18 +50,23 @@ pub use error::SceneError;
 pub use format::{
     AmbientSoundData, AppliedMaterialOverride, AssetRef, AudioEmitterData, BodyKind, CameraData,
     CameraFollowData, CameraFollowMode, ColliderData, ColliderShape, EnvironmentData, FoliageData,
-    LightingData, MAX_RULE_CONDITIONS, MaterialOverrideData, MeshRendererData, NavGridData,
-    OrbitInput, PointLightData, ProjectionData, RuleAction, RuleCompare, RuleCondition, RuleData,
-    RuleMatch, RuleTrigger, Scene, SceneAudioEmitter, SceneCollider, SceneEntity, SceneEnvironment,
-    SceneFoliage, SceneLighting, SceneMaterialOverride, SceneNavGrid, SceneObjectId,
-    ScenePointLight, SceneRules, SceneSpriteAnimation, SceneTilemap, SceneUi, SiblingOrder,
-    SpawnAt, SpriteAnimationData, SpriteData, TilemapData, TransformData, UiAnchor, UiElementData,
-    UiKind, WaterData,
+    KeepBetweenScenes, LightingData, MAX_RULE_CONDITIONS, MaterialOverrideData, MeshRendererData,
+    NavGridData, OrbitInput, PointLightData, PrefabLink, ProjectionData, RuleAction, RuleCompare,
+    RuleCondition, RuleData, RuleMatch, RuleTrigger, Scene, SceneAudioEmitter, SceneCollider,
+    SceneEntity, SceneEnvironment, SceneFileOwner, SceneFoliage, SceneLighting,
+    SceneMaterialOverride, SceneNavGrid, SceneObjectId, ScenePointLight, ScenePrefabLink,
+    SceneRules, SceneSpriteAnimation, SceneTags, SceneTilemap, SceneUi, SiblingOrder, SpawnAt,
+    SpriteAnimationData, SpriteData, TilemapData, TransformData, UiAnchor, UiElementData, UiKind,
+    UiLayoutDirection, WaterData,
 };
 pub use game_state::{GameState, GameStateName};
 pub use io::write_atomic;
 pub use migration::CURRENT_SCENE_VERSION;
 pub use prefab::Prefab;
+pub use prefab_link::{
+    apply_copy, changed_fields, copy_changes, copy_root_of, refresh_copies,
+    remap_object_references, revert_copy, stamp_overrides,
+};
 pub use resolve::{InstantiateReport, NullResolver, SceneResolver};
 pub use rules::{
     ContactRuleKind, RuleEvent, RuleOutcome, RuleVariableError, RuleVariables, expand_variables,
@@ -76,6 +82,8 @@ pub use sprite_atlas::{
     GridRegion, PackedSpriteAtlas, advance_sprite_animations, apply_packed_sprite_uvs,
     next_sprite_animation_frame, pack_sprite_textures, pack_world_sprite_atlas,
 };
-pub use ui::set_authored_ui_text;
+pub use ui::{
+    UiMountItem, authored_ui_text, mount_ui_elements, set_authored_ui_text, sync_ui_variables,
+};
 pub use world::point_lights_from_world;
 pub use world::saved_camera_pose;

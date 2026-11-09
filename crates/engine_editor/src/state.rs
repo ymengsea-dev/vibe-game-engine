@@ -6,6 +6,7 @@
 //! entity, plus the asset browser's entries + selection — with console
 //! and gizmos still to come).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use engine_ecs::components::{
@@ -91,6 +92,10 @@ pub struct EditorState {
     /// `selected_asset`, rebuilt when the selection or import pass
     /// changes. See the `preview` module.
     pub preview: PreviewCache,
+    /// Pictures for the game UI drawn over the Scene View, with the import
+    /// pass they came from. See `shell::ui_preview_image`.
+    pub ui_preview_images:
+        std::collections::HashMap<engine_utils::AssetId, (u64, egui::TextureHandle)>,
     /// Captured `tracing` events, shown in the console panel — see
     /// [`crate::ConsoleLayer`] for how it gets fed.
     pub console: ConsoleLog,
@@ -282,6 +287,21 @@ pub struct EditorState {
     /// Prefab"). The host writes the file and refreshes the asset list.
     /// Drained each frame.
     pub create_prefab_request: Option<Entity>,
+    /// Whether the Scenes window is open.
+    pub scenes_window_open: bool,
+    /// The dialog naming a new scene, while it is open.
+    pub(crate) scene_name_dialog: Option<SceneNameDialog>,
+    /// A problem to show in the Scenes window.
+    pub(crate) scenes_error: Option<String>,
+    /// Scenes open beside the main one, whose objects are in the world too.
+    extra_scenes: Vec<ExtraScene>,
+    /// The project's scene files, project-relative, and when they were listed.
+    scene_files: Vec<PathBuf>,
+    /// The folders under `scenes`, listed with `scene_files`.
+    scene_folders: Vec<String>,
+    scene_files_listed: Option<std::time::Instant>,
+    /// The selected prefab copy's status, and when it was worked out.
+    prefab_status_cache: Option<(Entity, std::time::Instant, Option<PrefabStatus>)>,
     /// Set by the Terrain menu; the host writes an editable terrain mesh
     /// and refreshes imports after the UI frame.
     pub create_terrain_request: bool,
@@ -322,6 +342,149 @@ pub fn recovery_candidate(autosave: &Path, scene: &Path) -> bool {
     }
 }
 
+/// What the scene naming dialog is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SceneNameKind {
+    /// A new empty scene.
+    New,
+    /// The open scene under another name.
+    SaveAs,
+    /// A scene's file gets this name.
+    Rename(PathBuf),
+    /// A new group, with this scene moved into it if there is one.
+    NewGroup(Option<PathBuf>),
+    /// A group gets this name.
+    RenameGroup(String),
+}
+
+/// The dialog that names a scene.
+#[derive(Debug, Clone)]
+pub(crate) struct SceneNameDialog {
+    pub(crate) kind: SceneNameKind,
+    pub(crate) name: String,
+    pub(crate) error: Option<String>,
+    pub(crate) focused: bool,
+}
+
+impl SceneNameDialog {
+    pub(crate) fn new(kind: SceneNameKind) -> Self {
+        Self {
+            kind,
+            name: String::new(),
+            error: None,
+            focused: false,
+        }
+    }
+
+    /// The dialog with `name` already typed in.
+    pub(crate) fn named(kind: SceneNameKind, name: String) -> Self {
+        Self {
+            name,
+            ..Self::new(kind)
+        }
+    }
+}
+
+/// The group a scene is in: the folder it sits in under `scenes`.
+pub fn scene_group_of(scene: &Path) -> Option<String> {
+    let parent = scene
+        .strip_prefix(engine_project::SCENES_DIR)
+        .ok()?
+        .parent()?;
+    let group = parent.to_string_lossy().replace('\\', "/");
+    (!group.is_empty()).then_some(group)
+}
+
+/// A scene's name without its group: `scenes/forest/Level 2.ron` is `Level 2`.
+pub fn scene_leaf_name(scene: &Path) -> String {
+    scene
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Every folder under `dir`, as paths relative to `root` with forward slashes.
+fn folders_under(root: &Path, dir: &Path, found: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.is_dir()
+            && let Ok(relative) = path.strip_prefix(root)
+        {
+            found.push(relative.to_string_lossy().replace('\\', "/"));
+            folders_under(root, &path, found);
+        }
+    }
+}
+
+/// Every file under `dir` with one of `extensions`.
+fn files_under(dir: &Path, extensions: &[&str], found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.is_dir() {
+            files_under(&path, extensions, found);
+        } else if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extensions.contains(&extension))
+        {
+            found.push(path);
+        }
+    }
+}
+
+/// Points a scene's rules at a moved scene file. Returns whether any changed.
+fn retarget_scene_rules(rules: &mut [engine_scene::RuleData], from: &str, to: &str) -> bool {
+    let mut changed = false;
+    for rule in rules {
+        if let engine_scene::RuleAction::ChangeScene { path }
+        | engine_scene::RuleAction::LoadScene { path }
+        | engine_scene::RuleAction::UnloadScene { path } = &mut rule.action
+            && path == from
+        {
+            to.clone_into(path);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// A scene file's name as people read it: `scenes/forest/Level 2.ron` is
+/// `forest/Level 2`.
+pub fn scene_display_name(scene: &Path) -> String {
+    let inner = scene
+        .strip_prefix(engine_project::SCENES_DIR)
+        .unwrap_or(scene);
+    inner
+        .with_extension("")
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// A scene open beside the main one.
+#[derive(Debug, Clone)]
+struct ExtraScene {
+    /// Its project-relative path, with forward slashes.
+    path: String,
+    /// Its file's settings: lighting, environment and nav grid, with no objects.
+    /// Only the main scene's show in Studio, but this one's must not be lost.
+    settings: Scene,
+}
+
+/// What the Inspector shows for a linked prefab copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefabStatus {
+    /// The prefab file, project-relative.
+    pub path: String,
+    /// Whether the file cannot be read.
+    pub missing: bool,
+    /// What this copy changes from the prefab.
+    pub changes: Vec<String>,
+}
+
 impl EditorState {
     /// Starts inside `project` from `world`, `assets`, and `console` with
     /// nothing selected and no drag in progress. The scene path defaults
@@ -345,6 +508,7 @@ impl EditorState {
             assets,
             asset_index: AssetIndex::new(),
             importer: AssetImporter::new(),
+            ui_preview_images: std::collections::HashMap::new(),
             selected_asset: None,
             asset_browser: AssetBrowser::default(),
             preview: PreviewCache::new(),
@@ -410,6 +574,14 @@ impl EditorState {
             search: crate::search::SearchState::default(),
             open_script_request: None,
             create_prefab_request: None,
+            scenes_window_open: false,
+            scene_name_dialog: None,
+            scenes_error: None,
+            extra_scenes: Vec::new(),
+            scene_files: Vec::new(),
+            scene_folders: Vec::new(),
+            scene_files_listed: None,
+            prefab_status_cache: None,
             create_terrain_request: false,
             import_request: false,
             dropped_files: Vec::new(),
@@ -537,20 +709,726 @@ impl EditorState {
         }
     }
 
-    /// Replaces the world with a fresh empty scene: clears the selection
-    /// and any in-progress gizmo drag, resets the undo history, and marks
-    /// the scene dirty (the empty world is not yet on disk). The scene
-    /// path is unchanged, so the next save writes over the same file.
-    pub fn new_scene(&mut self) {
-        self.world = World::new();
-        self.clear_selection();
-        self.dragging_handle = None;
+    /// The project's scene files, project-relative and sorted. Listed from
+    /// disk at most every two seconds; a create or save lists them at once.
+    pub fn scene_list(&mut self) -> &[PathBuf] {
+        let stale = self
+            .scene_files_listed
+            .is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(2));
+        if stale {
+            self.relist_scene_files();
+        }
+        &self.scene_files
+    }
+
+    fn relist_scene_files(&mut self) {
+        self.scene_files = self
+            .project
+            .ordered_scenes()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        self.scene_files_listed = Some(std::time::Instant::now());
+        let mut folders = Vec::new();
+        folders_under(
+            &self.project.scenes_dir(),
+            &self.project.scenes_dir(),
+            &mut folders,
+        );
+        folders.sort();
+        self.scene_folders = folders;
+    }
+
+    /// The groups of scenes, by name. Follows [`Self::scene_list`].
+    pub(crate) fn scene_folders(&self) -> &[String] {
+        &self.scene_folders
+    }
+
+    /// Moves a scene `steps` places up (negative) or down the project's scene
+    /// order, saved in `project.ron`.
+    ///
+    /// # Errors
+    ///
+    /// A message if the project file can't be written; the order stays.
+    pub fn move_scene_in_order(&mut self, scene: &Path, steps: i32) -> Result<(), String> {
+        self.relist_scene_files();
+        let mut order = self.scene_files.clone();
+        let Some(at) = order.iter().position(|listed| listed == scene) else {
+            return Ok(());
+        };
+        let to = at
+            .saturating_add_signed(steps as isize)
+            .min(order.len() - 1);
+        let moved = order.remove(at);
+        order.insert(to, moved);
+        let previous = std::mem::replace(&mut self.project.manifest_mut().scene_order, order);
+        if let Err(err) = self.project.save_manifest() {
+            self.project.manifest_mut().scene_order = previous;
+            return Err(err.to_string());
+        }
+        self.relist_scene_files();
+        Ok(())
+    }
+
+    /// The scenes open beside the main one, project-relative.
+    pub fn extra_scenes(&self) -> impl Iterator<Item = &str> {
+        self.extra_scenes.iter().map(|extra| extra.path.as_str())
+    }
+
+    /// The files of the scenes open beside the main one.
+    fn extra_scene_files(&self) -> Vec<String> {
+        self.extra_scenes.iter().map(|e| e.path.clone()).collect()
+    }
+
+    /// Opens the scene at the project-relative `relative` beside the ones
+    /// already open, with its objects in the world. Refuses one already open,
+    /// and one sharing object IDs with what is open, as a copy made with Save
+    /// Scene As does: the two could not be told apart.
+    ///
+    /// # Errors
+    ///
+    /// A message to show the user; nothing has changed.
+    pub fn open_scene_beside(&mut self, relative: &Path) -> Result<(), String> {
+        let key = relative.to_string_lossy().replace('\\', "/");
+        let name = scene_display_name(relative);
+        let is_open = self.current_scene().as_deref() == Some(relative)
+            || self.extra_scenes.iter().any(|extra| extra.path == key);
+        if is_open {
+            return Err(format!("{name} is already open."));
+        }
+        self.sync_scene_dirty();
+        let absolute = self.project.resolve(relative).map_err(|e| e.to_string())?;
+        let mut scene = Scene::load_from_file(&absolute).map_err(|e| e.to_string())?;
+        scene.validate().map_err(|e| e.to_string())?;
+        let project = self.project.clone();
+        engine_scene::refresh_copies(&mut scene, &mut |path| {
+            Self::read_linked_prefab(&project, path)
+        });
+        scene.assign_missing_object_ids();
+        let open = Scene::from_world(&mut self.world);
+        let taken: std::collections::HashSet<&String> = open
+            .entities
+            .iter()
+            .filter_map(|entity| entity.object_id.as_ref())
+            .collect();
+        let shared = scene
+            .entities
+            .iter()
+            .filter_map(|entity| entity.object_id.as_ref())
+            .any(|id| taken.contains(id));
+        if shared {
+            return Err(format!(
+                "{name} has the same objects as a scene already open, so it can't open beside it."
+            ));
+        }
+        let mut entities = std::mem::take(&mut scene.entities);
+        for entity in &mut entities {
+            entity.open_from = Some(key.clone());
+        }
+        Scene::spawn_entities(&entities, &mut self.world);
+        self.extra_scenes.push(ExtraScene {
+            path: key,
+            settings: scene,
+        });
+        self.after_scene_set_changed();
+        Ok(())
+    }
+
+    /// Makes the scene at `relative` the working one: what the Scene View shows,
+    /// where new objects go, what Play runs and what the Environment menu edits.
+    /// A closed scene opens first. Nothing is saved or lost: unsaved edits stay in
+    /// the world and still count as unsaved.
+    ///
+    /// # Errors
+    ///
+    /// A message to show the user; the working scene stays.
+    pub fn make_working_scene(&mut self, relative: &Path) -> Result<(), String> {
+        let Some(previous) = self.current_scene() else {
+            return Err("Save this scene in the project first.".to_owned());
+        };
+        if previous == relative {
+            return Ok(());
+        }
+        let absolute = self.project.resolve(relative).map_err(|e| e.to_string())?;
+        let key = relative.to_string_lossy().replace('\\', "/");
+        if !self.extra_scenes.iter().any(|extra| extra.path == key) {
+            self.open_scene_beside(relative)?;
+        }
+        let Some(at) = self.extra_scenes.iter().position(|e| e.path == key) else {
+            return Ok(());
+        };
+        self.sync_scene_dirty();
+        // A selection in the scene being left would pull straight back to it.
+        let selected = self
+            .selected_entity
+            .filter(|&entity| self.other_scene_of(entity).as_deref() == Some(key.as_str()))
+            .and_then(|entity| self.world.get::<engine_scene::SceneObjectId>(entity))
+            .map(|id| id.0.clone());
+        let previous = previous.to_string_lossy().replace('\\', "/");
+
+        let mut settings = Scene::from_world(&mut self.world);
+        // The Scene View tells scenes' objects apart by these.
+        settings.assign_missing_object_ids();
+        let mut entities = std::mem::take(&mut settings.entities);
+        for entity in &mut entities {
+            entity.open_from = match entity.open_from.take() {
+                Some(file) if file == key => None,
+                None => Some(previous.clone()),
+                other => other,
+            };
+        }
+        let mut next = std::mem::replace(&mut self.extra_scenes[at].settings, settings);
+        self.extra_scenes[at].path = previous;
+        next.entities = entities;
+        self.scene_path = absolute;
+        self.rebuild_world(&next, selected);
+        self.relist_scene_files();
+        Ok(())
+    }
+
+    /// Replaces the world with `scene`, selecting the object with ID `selected`.
+    fn rebuild_world(&mut self, scene: &Scene, selected: Option<String>) {
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        self.world = world;
         self.terrain_stroke = None;
         self.terrain_sculpt_request = None;
         self.tile_paint_active = false;
+        self.clear_selection();
+        self.selected_entity = selected.and_then(|wanted| {
+            let mut query = self.world.query::<(Entity, &engine_scene::SceneObjectId)>();
+            query
+                .iter(&self.world)
+                .find(|(_, id)| id.0 == wanted)
+                .map(|(entity, _)| entity)
+        });
+        self.after_scene_set_changed();
+    }
+
+    /// Writes a new empty scene file and makes it the working scene, leaving
+    /// the other open scenes open.
+    ///
+    /// # Errors
+    ///
+    /// A message to show the user.
+    pub fn create_working_scene(&mut self, name: &str) -> Result<(), String> {
+        let absolute = self.new_scene_path(name)?;
+        if let Some(dir) = absolute.parent() {
+            std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
+        }
+        Scene::default()
+            .save_to_file(&absolute)
+            .map_err(|err| err.to_string())?;
+        let relative = absolute
+            .strip_prefix(self.project.root())
+            .map_err(|err| err.to_string())?
+            .to_path_buf();
+        self.relist_scene_files();
+        self.make_working_scene(&relative)
+    }
+
+    /// Moves a scene's file inside the `scenes` folder and points everything in
+    /// the project at the new path: the project file, every scene's and prefab's
+    /// rules, and what is open. Scripts are the author's to change, so they stay
+    /// as they are. Returns those that name the old path.
+    ///
+    /// # Errors
+    ///
+    /// A message to show the user. The file stays where it was.
+    pub fn move_scene_file(&mut self, from: &Path, to: &Path) -> Result<Vec<String>, String> {
+        if from == to {
+            return Ok(Vec::new());
+        }
+        let from_key = from.to_string_lossy().replace('\\', "/");
+        let to_key = to.to_string_lossy().replace('\\', "/");
+        if from_key == engine_project::LOADING_SCENE {
+            return Err("The loading screen has to keep its name and place.".to_owned());
+        }
+        if !engine_scene::valid_scene_path(&to_key) {
+            return Err(format!("{to_key} can't be used for a scene."));
+        }
+        let from_absolute = self.project.resolve(from).map_err(|e| e.to_string())?;
+        let to_absolute = self.project.resolve(to).map_err(|e| e.to_string())?;
+        if to_absolute.exists() {
+            return Err(format!(
+                "There is already a scene called {}.",
+                scene_display_name(to)
+            ));
+        }
+        self.sync_scene_dirty();
+        if let Some(dir) = to_absolute.parent() {
+            std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
+        }
+        std::fs::rename(&from_absolute, &to_absolute).map_err(|err| err.to_string())?;
+
+        let saved_manifest = self.project.manifest().clone();
+        let manifest = self.project.manifest_mut();
+        if manifest.main_scene == from {
+            manifest.main_scene = to.to_path_buf();
+        }
+        for scene in &mut manifest.scene_order {
+            if scene == from {
+                *scene = to.to_path_buf();
+            }
+        }
+        for configuration in &mut manifest.configurations {
+            if configuration.scene.as_deref() == Some(from) {
+                configuration.scene = Some(to.to_path_buf());
+            }
+        }
+        if let Err(err) = self.project.save_manifest() {
+            *self.project.manifest_mut() = saved_manifest;
+            let _ = std::fs::rename(&to_absolute, &from_absolute);
+            return Err(err.to_string());
+        }
+
+        let mut left_behind = self.retarget_scene_files(&from_key, &to_key);
+
+        if self.scene_path == from_absolute {
+            self.scene_path = to_absolute;
+        }
+        for extra in &mut self.extra_scenes {
+            if extra.path == from_key {
+                extra.path.clone_from(&to_key);
+            }
+        }
+        let selected = self
+            .selected_entity
+            .and_then(|entity| self.world.get::<engine_scene::SceneObjectId>(entity))
+            .map(|id| id.0.clone());
+        let mut scene = Scene::from_world(&mut self.world);
+        let mut changed = false;
+        for entity in &mut scene.entities {
+            if entity.open_from.as_deref() == Some(from_key.as_str()) {
+                entity.open_from = Some(to_key.clone());
+                changed = true;
+            }
+            changed |= retarget_scene_rules(&mut entity.rules, &from_key, &to_key);
+        }
+        if changed {
+            self.rebuild_world(&scene, selected);
+        }
+        self.relist_scene_files();
+
+        let mut scripts = Vec::new();
+        files_under(
+            &self.project.root().join("assets"),
+            &["lua", "rs"],
+            &mut scripts,
+        );
+        files_under(&self.project.root().join("src"), &["rs"], &mut scripts);
+        for script in scripts {
+            let names_it =
+                std::fs::read_to_string(&script).is_ok_and(|text| text.contains(&from_key));
+            if names_it && let Ok(relative) = script.strip_prefix(self.project.root()) {
+                left_behind.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        Ok(left_behind)
+    }
+
+    /// Rewrites a moved scene's path in every scene and prefab file. Returns
+    /// those that couldn't be written.
+    fn retarget_scene_files(&self, from: &str, to: &str) -> Vec<String> {
+        let (from, to) = (format!("\"{from}\""), format!("\"{to}\""));
+        let mut files = Vec::new();
+        files_under(&self.project.scenes_dir(), &["ron"], &mut files);
+        files_under(&self.project.root().join("assets"), &["prefab"], &mut files);
+        let mut failed = Vec::new();
+        for file in files {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            if text.contains(&from)
+                && write_atomic(&file, text.replace(&from, &to).as_bytes()).is_err()
+                && let Ok(relative) = file.strip_prefix(self.project.root())
+            {
+                failed.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        failed
+    }
+
+    /// Gives a scene a new name, in the group it is in.
+    ///
+    /// # Errors
+    ///
+    /// A message to show the user.
+    pub fn rename_scene(&mut self, scene: &Path, name: &str) -> Result<Vec<String>, String> {
+        if name.trim().is_empty() {
+            return Err("Type a name for the scene.".to_owned());
+        }
+        let stem = crate::prefab::sanitize_stem(name);
+        let to = scene.with_file_name(format!("{stem}.ron"));
+        self.move_scene_file(scene, &to)
+    }
+
+    /// Moves a scene into `group`, or out of any group with `None`.
+    ///
+    /// # Errors
+    ///
+    /// A message to show the user.
+    pub fn move_scene_to_group(
+        &mut self,
+        scene: &Path,
+        group: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let Some(file) = scene.file_name() else {
+            return Err("That scene has no file name.".to_owned());
+        };
+        let mut to = PathBuf::from(engine_project::SCENES_DIR);
+        if let Some(group) = group {
+            to.push(group);
+        }
+        to.push(file);
+        self.move_scene_file(scene, &to)
+    }
+
+    /// Makes an empty group of scenes, a folder under `scenes`. Returns its name.
+    ///
+    /// # Errors
+    ///
+    /// A message to show the user.
+    pub fn create_scene_group(&mut self, name: &str) -> Result<String, String> {
+        if name.trim().is_empty() {
+            return Err("Type a name for the group.".to_owned());
+        }
+        let group = crate::prefab::sanitize_stem(name);
+        let folder = self.project.scenes_dir().join(&group);
+        if folder.exists() {
+            return Err(format!("There is already a group called {group}."));
+        }
+        std::fs::create_dir_all(&folder).map_err(|err| err.to_string())?;
+        self.relist_scene_files();
+        Ok(group)
+    }
+
+    /// The scenes directly in `group`.
+    fn scenes_in_group(&mut self, group: &str) -> Vec<PathBuf> {
+        self.relist_scene_files();
+        self.scene_files
+            .iter()
+            .filter(|scene| scene_group_of(scene).as_deref() == Some(group))
+            .cloned()
+            .collect()
+    }
+
+    /// Gives a group a new name, moving its scenes with it.
+    ///
+    /// # Errors
+    ///
+    /// A message to show the user. Scenes already moved stay moved.
+    pub fn rename_scene_group(&mut self, group: &str, name: &str) -> Result<Vec<String>, String> {
+        let renamed = self.create_scene_group(name)?;
+        let mut left_behind = Vec::new();
+        for scene in self.scenes_in_group(group) {
+            left_behind.extend(self.move_scene_to_group(&scene, Some(&renamed))?);
+        }
+        let _ = std::fs::remove_dir(self.project.scenes_dir().join(group));
+        self.relist_scene_files();
+        Ok(left_behind)
+    }
+
+    /// Removes a group. Its scenes stay, moved out of it. The folder goes only
+    /// if nothing else is in it.
+    ///
+    /// # Errors
+    ///
+    /// A message to show the user. Scenes already moved stay moved.
+    pub fn delete_scene_group(&mut self, group: &str) -> Result<Vec<String>, String> {
+        let mut left_behind = Vec::new();
+        for scene in self.scenes_in_group(group) {
+            left_behind.extend(self.move_scene_to_group(&scene, None)?);
+        }
+        let _ = std::fs::remove_dir(self.project.scenes_dir().join(group));
+        self.relist_scene_files();
+        Ok(left_behind)
+    }
+
+    /// Locks or unlocks every object of an open scene; `None` is the working one.
+    pub(crate) fn set_scene_locked(&mut self, file: Option<String>, locked: bool) {
+        let tops: Vec<Entity> = hierarchy::roots(&mut self.world)
+            .into_iter()
+            .filter(|&top| self.other_scene_of(top) == file)
+            .collect();
+        let mut pending = tops;
+        while let Some(entity) = pending.pop() {
+            pending.extend(hierarchy::children_of(&self.world, entity));
+            let Ok(mut object) = self.world.get_entity_mut(entity) else {
+                continue;
+            };
+            if locked {
+                object.insert(engine_ecs::components::Lock);
+            } else {
+                object.remove::<engine_ecs::components::Lock>();
+            }
+        }
+        self.mark_dirty();
+    }
+
+    /// The file of the open scene other than the working one that `entity` is in.
+    fn other_scene_of(&self, entity: Entity) -> Option<String> {
+        if self.world.get_entity(entity).is_err() {
+            return None;
+        }
+        let top = hierarchy::ancestors(&self.world, entity)
+            .last()
+            .copied()
+            .unwrap_or(entity);
+        let file = &self.world.get::<engine_scene::SceneFileOwner>(top)?.0;
+        self.extra_scenes
+            .iter()
+            .any(|extra| extra.path == *file)
+            .then(|| file.clone())
+    }
+
+    /// Selecting an object in another open scene makes that scene the working one.
+    pub(crate) fn follow_selection_to_its_scene(&mut self) -> Result<(), String> {
+        let Some(file) = self
+            .selected_entity
+            .and_then(|entity| self.other_scene_of(entity))
+        else {
+            return Ok(());
+        };
+        self.make_working_scene(Path::new(&file))
+    }
+
+    /// The stable IDs of the top-level objects in the open scenes that aren't the
+    /// working one. The Scene View leaves these out.
+    pub(crate) fn objects_in_other_scenes(&mut self) -> Vec<String> {
+        if self.extra_scenes.is_empty() {
+            return Vec::new();
+        }
+        hierarchy::roots(&mut self.world)
+            .into_iter()
+            .filter(|&top| self.other_scene_of(top).is_some())
+            .filter_map(|top| self.world.get::<engine_scene::SceneObjectId>(top))
+            .map(|id| id.0.clone())
+            .collect()
+    }
+
+    /// Closes a scene opened beside the main one. Its file stays as last saved.
+    pub fn close_extra_scene(&mut self, file: &str) {
+        self.sync_scene_dirty();
+        self.extra_scenes.retain(|extra| extra.path != file);
+        let tops = hierarchy::roots(&mut self.world);
+        for top in tops {
+            let owned = self
+                .world
+                .get::<engine_scene::SceneFileOwner>(top)
+                .is_some_and(|owner| owner.0 == file);
+            if owned {
+                hierarchy::despawn_entity(&mut self.world, top);
+            }
+        }
+        self.clear_selection();
+        self.after_scene_set_changed();
+    }
+
+    /// After the open scenes change: the undo history can't cross that. Call
+    /// [`Self::sync_scene_dirty`] before changing them. Unsaved edits stay unsaved
+    /// until the next save, with nothing to compare them against until then.
+    fn after_scene_set_changed(&mut self) {
+        self.dragging_handle = None;
         self.history = History::new();
-        self.saved_scene = None;
-        self.dirty.mark_scene();
+        self.prefab_status_cache = None;
+        self.saved_scene = if self.dirty.scene() {
+            None
+        } else {
+            Some(Scene::from_world(&mut self.world))
+        };
+    }
+
+    /// Moves a top-level object to another open scene's file; `None` is the main
+    /// scene. It is written there on the next save.
+    pub fn move_object_to_scene(&mut self, entity: Entity, file: Option<String>) {
+        let Ok(mut object) = self.world.get_entity_mut(entity) else {
+            return;
+        };
+        match file {
+            Some(file) => {
+                object.insert(engine_scene::SceneFileOwner(file));
+            }
+            None => {
+                object.remove::<engine_scene::SceneFileOwner>();
+            }
+        }
+        self.mark_dirty();
+    }
+
+    /// Makes the loading screen scene, a dark panel with "Loading…" that can
+    /// be changed like any Game UI, and opens it.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError`] if it exists already or can't be written.
+    pub fn create_loading_screen(&mut self) -> Result<(), SceneError> {
+        let relative = Path::new(engine_project::LOADING_SCENE);
+        let absolute = self
+            .project
+            .resolve(relative)
+            .map_err(|err| SceneError::Io(err.to_string()))?;
+        if absolute.exists() {
+            return Err(SceneError::Validation(
+                "The project already has a loading screen.".to_owned(),
+            ));
+        }
+        let object = |name: &str, parent, ui| engine_scene::SceneEntity {
+            name: Some(name.to_owned()),
+            object_id: Some(uuid::Uuid::new_v4().to_string()),
+            parent,
+            ui: Some(ui),
+            ..Default::default()
+        };
+        let backdrop = engine_scene::UiElementData {
+            size: [10_000.0, 10_000.0],
+            anchor: engine_scene::UiAnchor::Center,
+            color: [0.05, 0.05, 0.08, 1.0],
+            ..engine_scene::UiElementData::panel()
+        };
+        let caption = engine_scene::UiElementData {
+            text: "Loading…".to_owned(),
+            anchor: engine_scene::UiAnchor::Center,
+            ..engine_scene::UiElementData::label()
+        };
+        Scene {
+            entities: vec![
+                object("Backdrop", None, backdrop),
+                object("Caption", Some(0), caption),
+            ],
+            ..Default::default()
+        }
+        .save_to_file(&absolute)?;
+        self.open_scene(relative)
+    }
+
+    /// The open scene's project-relative path, if it is inside the project.
+    pub fn current_scene(&self) -> Option<PathBuf> {
+        self.scene_path
+            .strip_prefix(self.project.root())
+            .ok()
+            .map(Path::to_path_buf)
+    }
+
+    /// Where a scene named `name` goes: its name made safe for a file, under
+    /// the scenes folder. Refuses a blank name and one already in use, so a
+    /// scene is never written over.
+    fn new_scene_path(&self, name: &str) -> Result<PathBuf, String> {
+        if name.trim().is_empty() {
+            return Err("Type a name for the scene.".to_owned());
+        }
+        let stem = crate::prefab::sanitize_stem(name);
+        let relative = Path::new(engine_project::SCENES_DIR).join(format!("{stem}.ron"));
+        let absolute = self
+            .project
+            .resolve(&relative)
+            .map_err(|err| err.to_string())?;
+        if absolute.exists() {
+            return Err(format!("There is already a scene called {stem}."));
+        }
+        Ok(absolute)
+    }
+
+    /// Checks `name` can be used for a new scene.
+    ///
+    /// # Errors
+    ///
+    /// A message to show the user.
+    pub fn check_new_scene_name(&self, name: &str) -> Result<(), String> {
+        self.new_scene_path(name).map(|_| ())
+    }
+
+    /// Opens the scene at the project-relative `relative`, with a fresh undo
+    /// history, so undo can't bring another scene's objects into this one. If
+    /// it can't be loaded, the open scene stays as it was.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError`] if the path leaves the project or the file can't be loaded.
+    pub fn open_scene(&mut self, relative: &Path) -> Result<(), SceneError> {
+        let absolute = self
+            .project
+            .resolve(relative)
+            .map_err(|err| SceneError::Io(err.to_string()))?;
+        let previous = std::mem::replace(&mut self.scene_path, absolute);
+        if let Err(err) = self.load_scene() {
+            self.scene_path = previous;
+            return Err(err);
+        }
+        self.dragging_handle = None;
+        self.tile_paint_active = false;
+        self.history = History::new();
+        self.prefab_status_cache = None;
+        self.clear_autosave();
+        self.relist_scene_files();
+        Ok(())
+    }
+
+    /// Whether the project has a loading screen scene.
+    pub fn has_loading_screen(&self) -> bool {
+        self.project
+            .resolve(Path::new(engine_project::LOADING_SCENE))
+            .is_ok_and(|path| path.is_file())
+    }
+
+    /// Writes a new empty scene file and opens it.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError`] if the name can't be used or the file can't be written.
+    pub fn create_scene(&mut self, name: &str) -> Result<(), SceneError> {
+        let absolute = self.new_scene_path(name).map_err(SceneError::Validation)?;
+        let dir = absolute.parent().map(Path::to_path_buf).unwrap_or_default();
+        std::fs::create_dir_all(dir).map_err(|err| SceneError::Io(err.to_string()))?;
+        Scene::default().save_to_file(&absolute)?;
+        let relative = absolute
+            .strip_prefix(self.project.root())
+            .map_err(|err| SceneError::Io(err.to_string()))?
+            .to_path_buf();
+        self.open_scene(&relative)
+    }
+
+    /// Saves the open scene to a new file and carries on in that file. The
+    /// old file stays as last saved.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError`] if the name can't be used or the file can't be written.
+    pub fn save_scene_as(&mut self, name: &str) -> Result<(), SceneError> {
+        let absolute = self.new_scene_path(name).map_err(SceneError::Validation)?;
+        let previous = std::mem::replace(&mut self.scene_path, absolute);
+        if let Err(err) = self.save_scene() {
+            self.scene_path = previous;
+            return Err(err);
+        }
+        self.relist_scene_files();
+        Ok(())
+    }
+
+    /// Makes the game start on the scene at the project-relative `relative`,
+    /// saved in `project.ron`.
+    ///
+    /// # Errors
+    ///
+    /// A message if the file is missing or the project file can't be written;
+    /// the start scene then stays as it was.
+    pub fn set_start_scene(&mut self, relative: &Path) -> Result<(), String> {
+        let absolute = self
+            .project
+            .resolve(relative)
+            .map_err(|err| err.to_string())?;
+        if !absolute.is_file() {
+            return Err(format!("{} does not exist", relative.display()));
+        }
+        let previous = std::mem::replace(
+            &mut self.project.manifest_mut().main_scene,
+            relative.to_path_buf(),
+        );
+        if let Err(err) = self.project.save_manifest() {
+            self.project.manifest_mut().main_scene = previous;
+            return Err(err.to_string());
+        }
+        Ok(())
     }
 
     /// Adopts `project`, discarding everything that belonged to the
@@ -721,8 +1599,19 @@ impl EditorState {
     ///
     /// Returns [`SceneError`] if serialization or the file write fails.
     pub fn save_scene(&mut self) -> Result<(), SceneError> {
+        self.stamp_world_overrides();
         let scene = Scene::from_world(&mut self.world);
-        scene.save_to_file(&self.scene_path)?;
+        let (main, others) = scene.clone().split_by_file(&self.extra_scene_files());
+        main.save_to_file(&self.scene_path)?;
+        for (extra, entities) in self.extra_scenes.iter().zip(others) {
+            let mut file = extra.settings.clone();
+            file.entities = entities;
+            let absolute = self
+                .project
+                .resolve(Path::new(&extra.path))
+                .map_err(|err| SceneError::Io(err.to_string()))?;
+            file.save_to_file(&absolute)?;
+        }
         self.saved_scene = Some(scene);
         self.dirty.clear_scene();
         // The scene on disk now matches the world — drop any crash
@@ -749,8 +1638,10 @@ impl EditorState {
         if !self.dirty.scene() {
             return Ok(());
         }
+        // Only the main scene: recovery reads this file back as one scene.
         let scene = Scene::from_world(&mut self.world);
-        let text = scene.to_ron_string()?;
+        let (main, _) = scene.split_by_file(&self.extra_scene_files());
+        let text = main.to_ron_string()?;
         write_atomic(&self.autosave_path(), text.as_bytes())
             .map_err(|err| SceneError::Io(err.to_string()))
     }
@@ -972,6 +1863,13 @@ impl EditorState {
     /// brush on the same cell is a no-op, so a drag does not spawn duplicates.
     pub fn paint_tile_cell(&mut self, x: i32, y: i32, erase: bool) -> Result<bool, String> {
         let parent = self.selected_entity.ok_or("Select a tilemap first")?;
+        if self
+            .world
+            .get::<engine_ecs::components::Lock>(parent)
+            .is_some()
+        {
+            return Err("This tilemap is locked. Unlock it to paint.".to_owned());
+        }
         let map = self
             .world
             .get::<engine_scene::SceneTilemap>(parent)
@@ -1104,9 +2002,208 @@ impl EditorState {
     pub fn spawn_prefab(&mut self, prefab_path: &Path) -> Result<Entity, EditorError> {
         let absolute = self.project.assets_dir().join(prefab_path);
         let prefab = engine_scene::Prefab::load_from_file(&absolute)?;
-        let entity = prefab.instantiate(&mut self.world);
+        // Only the folder a game can read prefabs from gets a link.
+        let link_path = prefab_path
+            .to_str()
+            .map(|path| format!("assets/{path}"))
+            .filter(|path| engine_scene::valid_prefab_path(path));
+        let copies = prefab.copy_entities(link_path.as_deref());
+        let spawned = Scene::spawn_entities(&copies, &mut self.world);
+        let entity = spawned.first().copied().ok_or(SceneError::Validation(
+            "the prefab has no objects".to_owned(),
+        ))?;
         self.dirty.mark_scene();
         Ok(entity)
+    }
+
+    /// Reads a prefab a copy links to. `None` for a missing or broken file.
+    fn read_linked_prefab(project: &Project, path: &str) -> Option<engine_scene::Prefab> {
+        if !engine_scene::valid_prefab_path(path) {
+            return None;
+        }
+        let absolute = project.resolve(Path::new(path)).ok()?;
+        engine_scene::Prefab::load_from_file(&absolute).ok()
+    }
+
+    /// The world as scene data, with each prefab copy's override list current.
+    fn scene_with_overrides(&mut self) -> Scene {
+        let mut scene = Scene::from_world(&mut self.world);
+        let project = self.project.clone();
+        engine_scene::stamp_overrides(&mut scene, &mut |path| {
+            Self::read_linked_prefab(&project, path)
+        });
+        scene
+    }
+
+    /// Writes each linked object's current override list onto it, so a save
+    /// records them and the scene does not read as changed afterwards.
+    fn stamp_world_overrides(&mut self) {
+        let mut query = self.world.query::<&engine_scene::ScenePrefabLink>();
+        if query.iter(&self.world).next().is_none() {
+            return;
+        }
+        let scene = self.scene_with_overrides();
+        let links: HashMap<&str, &engine_scene::PrefabLink> = scene
+            .entities
+            .iter()
+            .filter_map(|entity| Some((entity.object_id.as_deref()?, entity.prefab.as_ref()?)))
+            .collect();
+        let mut query = self.world.query::<(
+            &engine_scene::SceneObjectId,
+            &mut engine_scene::ScenePrefabLink,
+        )>();
+        for (id, mut link) in query.iter_mut(&mut self.world) {
+            if let Some(current) = links.get(id.0.as_str())
+                && link.0 != **current
+            {
+                link.0 = (*current).clone();
+            }
+        }
+    }
+
+    /// The linked copy `entity` belongs to and what it changes, for the
+    /// Inspector. `None` when it is not part of a copy; a copy whose prefab
+    /// file cannot be read reports `missing`.
+    pub fn prefab_status(&mut self, entity: Entity) -> Option<PrefabStatus> {
+        let id = self
+            .world
+            .get::<engine_scene::SceneObjectId>(entity)?
+            .0
+            .clone();
+        let path = self
+            .world
+            .get::<engine_scene::ScenePrefabLink>(entity)?
+            .0
+            .path
+            .clone();
+        let project = self.project.clone();
+        if Self::read_linked_prefab(&project, &path).is_none() {
+            return Some(PrefabStatus {
+                path,
+                missing: true,
+                changes: Vec::new(),
+            });
+        }
+        let scene = self.scene_with_overrides();
+        let root = engine_scene::copy_root_of(&scene, &id, &mut |path| {
+            Self::read_linked_prefab(&project, path)
+        })?;
+        Some(PrefabStatus {
+            path,
+            missing: false,
+            changes: engine_scene::copy_changes(&scene, root),
+        })
+    }
+
+    /// [`Self::prefab_status`] for the Inspector, worked out at most twice a
+    /// second: it compares against the prefab file and captures the scene.
+    pub(crate) fn cached_prefab_status(&mut self, entity: Entity) -> Option<PrefabStatus> {
+        if self
+            .world
+            .get::<engine_scene::ScenePrefabLink>(entity)
+            .is_none()
+        {
+            self.prefab_status_cache = None;
+            return None;
+        }
+        if let Some((cached, at, status)) = &self.prefab_status_cache
+            && *cached == entity
+            && at.elapsed() < std::time::Duration::from_millis(500)
+        {
+            return status.clone();
+        }
+        let status = self.prefab_status(entity);
+        self.prefab_status_cache = Some((entity, std::time::Instant::now(), status.clone()));
+        status
+    }
+
+    /// Replaces the world with `scene`, keeping the selected objects by ID.
+    fn reload_world(&mut self, scene: &Scene) {
+        let selected = self.selected_entity.and_then(|entity| {
+            self.world
+                .get::<engine_scene::SceneObjectId>(entity)
+                .map(|id| id.0.clone())
+        });
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        self.world = world;
+        self.clear_selection();
+        if let Some(id) = selected {
+            let mut query = self.world.query::<(Entity, &engine_scene::SceneObjectId)>();
+            let found = query
+                .iter(&self.world)
+                .find(|(_, object)| object.0 == id)
+                .map(|(entity, _)| entity);
+            if let Some(entity) = found {
+                self.select_only(entity);
+            }
+        }
+        self.prefab_status_cache = None;
+        self.mark_dirty();
+    }
+
+    /// Makes the copy `entity` belongs to the new version of its prefab, then
+    /// brings the open scene's other copies up to date. The prefab file cannot
+    /// be restored by undo.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError`] if the prefab cannot be read, validated or written.
+    pub fn apply_prefab_copy(&mut self, entity: Entity) -> Result<(), SceneError> {
+        let not_linked = || SceneError::Validation("the object is not a prefab copy".to_owned());
+        let id = self
+            .world
+            .get::<engine_scene::SceneObjectId>(entity)
+            .ok_or_else(not_linked)?
+            .0
+            .clone();
+        // Stamped against the old file, so other copies keep what they changed.
+        let mut scene = self.scene_with_overrides();
+        let project = self.project.clone();
+        let mut load = |path: &str| Self::read_linked_prefab(&project, path);
+        let root = engine_scene::copy_root_of(&scene, &id, &mut load).ok_or_else(not_linked)?;
+        let path = scene
+            .entities
+            .get(root)
+            .and_then(|entity| entity.prefab.as_ref())
+            .ok_or_else(not_linked)?
+            .path
+            .clone();
+        let old = load(&path).ok_or_else(not_linked)?;
+        let applied = engine_scene::apply_copy(&mut scene, root, &old).ok_or_else(not_linked)?;
+        let absolute = self
+            .project
+            .resolve(Path::new(&path))
+            .map_err(|err| SceneError::Io(err.to_string()))?;
+        applied.save_atomic(&absolute)?;
+        engine_scene::refresh_copies(&mut scene, &mut load);
+        self.reload_world(&scene);
+        Ok(())
+    }
+
+    /// Puts the copy `entity` belongs to back to what its prefab says, keeping
+    /// where it is. Undo brings the changes back.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Validation`] if the object is not in a copy whose prefab
+    /// can be read.
+    pub fn revert_prefab_copy(&mut self, entity: Entity) -> Result<(), SceneError> {
+        let not_linked = || SceneError::Validation("the object is not a prefab copy".to_owned());
+        let id = self
+            .world
+            .get::<engine_scene::SceneObjectId>(entity)
+            .ok_or_else(not_linked)?
+            .0
+            .clone();
+        let mut scene = self.scene_with_overrides();
+        let project = self.project.clone();
+        let mut load = |path: &str| Self::read_linked_prefab(&project, path);
+        let root = engine_scene::copy_root_of(&scene, &id, &mut load).ok_or_else(not_linked)?;
+        engine_scene::revert_copy(&mut scene, root);
+        engine_scene::refresh_copies(&mut scene, &mut load);
+        self.reload_world(&scene);
+        Ok(())
     }
 
     /// Adds the file `path` (relative to the assets root) to the scene, as a
@@ -1216,17 +2313,26 @@ impl EditorState {
     /// Returns [`SceneError`] if the file can't be read, isn't valid RON,
     /// or fails [`Scene::validate`].
     pub fn load_scene(&mut self) -> Result<(), SceneError> {
-        let scene = Scene::load_from_file(Path::new(&self.scene_path))?;
+        let mut scene = Scene::load_from_file(Path::new(&self.scene_path))?;
+        scene.validate()?;
+        let project = self.project.clone();
+        let refreshed = engine_scene::refresh_copies(&mut scene, &mut |path| {
+            Self::read_linked_prefab(&project, path)
+        });
         scene.validate()?;
 
         let mut world = World::new();
         scene.instantiate(&mut world);
         self.world = world;
+        self.extra_scenes.clear();
         self.terrain_stroke = None;
         self.terrain_sculpt_request = None;
         self.clear_selection();
         self.saved_scene = Some(Scene::from_world(&mut self.world));
         self.dirty.clear_scene();
+        if refreshed {
+            self.dirty.mark_scene();
+        }
         self.heal_asset_sources();
         Ok(())
     }
@@ -1235,6 +2341,13 @@ impl EditorState {
     /// against the project root. A non-terrain selection is a clean error.
     pub fn begin_terrain_stroke(&self) -> Result<TerrainStroke, String> {
         let entity = self.selected_entity.ok_or("Select a terrain first")?;
+        if self
+            .world
+            .get::<engine_ecs::components::Lock>(entity)
+            .is_some()
+        {
+            return Err("This terrain is locked. Unlock it to sculpt.".to_owned());
+        }
         let source = self
             .world
             .get::<AssetSource>(entity)
@@ -1391,7 +2504,13 @@ impl EditorState {
     /// shell's end-of-frame history settle.
     pub fn delete_selection(&mut self) {
         for entity in self.selection() {
-            hierarchy::despawn_entity(&mut self.world, entity);
+            if self
+                .world
+                .get::<engine_ecs::components::Lock>(entity)
+                .is_none()
+            {
+                hierarchy::despawn_entity(&mut self.world, entity);
+            }
         }
         self.clear_selection();
     }
@@ -2353,23 +3472,545 @@ mod tests {
         assert!(state.problem_selected.is_none());
     }
 
+    fn scene_names(state: &mut EditorState) -> Vec<String> {
+        state
+            .scene_list()
+            .iter()
+            .map(|scene| scene_display_name(scene))
+            .collect()
+    }
+
     #[test]
-    fn new_scene_empties_the_world_and_marks_dirty() {
+    fn a_new_scene_gets_its_own_file_and_leaves_the_old_one_alone() {
         let project = temp_project();
         let mut state = editor_state(&project);
-        let entity = state.world.spawn(Name::new("Gone")).id();
-        state.selected_entity = Some(entity);
-        state.mark_dirty();
-        state.save_scene().expect("save");
-        assert!(!state.dirty.any());
+        spawn_named(&mut state, "Gone");
+        state.save_scene().unwrap();
+        let first = state.scene_path.clone();
+        let saved = std::fs::read_to_string(&first).unwrap();
 
-        state.new_scene();
+        state.create_scene("Level 2").unwrap();
 
         let named = state.world.query::<&Name>().iter(&state.world).count();
-        assert_eq!(named, 0, "no scene entities remain");
-        assert!(state.selected_entity.is_none(), "selection cleared");
+        assert_eq!(named, 0, "the new scene is empty");
         assert!(!state.history.can_undo(), "history reset");
-        assert!(state.dirty.scene(), "empty scene is unsaved");
+        assert!(!state.dirty.scene(), "it is already on disk");
+        assert_eq!(
+            state.current_scene().as_deref(),
+            Some(Path::new("scenes/Level 2.ron"))
+        );
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), saved);
+        assert!(scene_names(&mut state).contains(&"Level 2".to_owned()));
+    }
+
+    #[test]
+    fn a_scene_name_in_use_is_refused_and_nothing_is_overwritten() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.create_scene("Level 2").unwrap();
+        spawn_named(&mut state, "Mine");
+        state.save_scene().unwrap();
+        let path = state.scene_path.clone();
+        let saved = std::fs::read_to_string(&path).unwrap();
+
+        assert!(state.check_new_scene_name("Level 2").is_err());
+        assert!(state.check_new_scene_name("   ").is_err());
+        assert!(state.check_new_scene_name("../evil").is_ok(), "made safe");
+        assert!(state.create_scene("Level 2").is_err());
+        assert!(state.save_scene_as("Level 2").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        assert!(!project.0.root().join("evil.ron").exists());
+    }
+
+    #[test]
+    fn opening_a_scene_swaps_the_world_and_a_broken_one_changes_nothing() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.create_scene("A").unwrap();
+        spawn_named(&mut state, "In A");
+        state.save_scene().unwrap();
+        state.create_scene("B").unwrap();
+
+        state.open_scene(Path::new("scenes/A.ron")).unwrap();
+        let names: Vec<String> = state
+            .world
+            .query::<&Name>()
+            .iter(&state.world)
+            .map(|name| name.0.clone())
+            .collect();
+        assert_eq!(names, ["In A"]);
+        assert!(
+            !state.history.can_undo(),
+            "undo can't reach the other scene"
+        );
+
+        std::fs::write(project.0.root().join("scenes/Bad.ron"), "not a scene").unwrap();
+        assert!(state.open_scene(Path::new("scenes/Bad.ron")).is_err());
+        assert_eq!(
+            state.current_scene().as_deref(),
+            Some(Path::new("scenes/A.ron"))
+        );
+        assert!(state.open_scene(Path::new("../outside.ron")).is_err());
+    }
+
+    fn scene_with(state: &mut EditorState, name: &str, object: &str) {
+        state.create_scene(name).unwrap();
+        spawn_named(state, object);
+        state.save_scene().unwrap();
+    }
+
+    fn names_in(path: &Path) -> Vec<String> {
+        Scene::load_from_file(path)
+            .unwrap()
+            .entities
+            .iter()
+            .filter_map(|entity| entity.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn scenes_open_beside_each_other_save_to_their_own_files() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        scene_with(&mut state, "B", "In B");
+        scene_with(&mut state, "A", "In A");
+        let (a, b) = (
+            state.scene_path.clone(),
+            project.0.root().join("scenes/B.ron"),
+        );
+
+        state.open_scene_beside(Path::new("scenes/B.ron")).unwrap();
+        let in_b = named(&mut state, "In B");
+        assert!(!state.dirty.scene(), "opening beside changes no file");
+
+        spawn_named(&mut state, "New in A");
+        let kid = spawn_named(&mut state, "Kid in B");
+        state.world.entity_mut(kid).insert(ChildOf(in_b));
+        state.save_scene().unwrap();
+        state.sync_scene_dirty();
+        assert!(!state.dirty.scene());
+
+        let mut in_file_a = names_in(&a);
+        in_file_a.sort();
+        assert_eq!(in_file_a, ["In A", "New in A"]);
+        let mut in_file_b = names_in(&b);
+        in_file_b.sort();
+        assert_eq!(in_file_b, ["In B", "Kid in B"]);
+    }
+
+    #[test]
+    fn moving_an_object_saves_it_to_the_other_scene() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        scene_with(&mut state, "B", "In B");
+        scene_with(&mut state, "A", "In A");
+        let (a, b) = (
+            state.scene_path.clone(),
+            project.0.root().join("scenes/B.ron"),
+        );
+        state.open_scene_beside(Path::new("scenes/B.ron")).unwrap();
+        let in_a = named(&mut state, "In A");
+
+        state.move_object_to_scene(in_a, Some("scenes/B.ron".to_owned()));
+        state.save_scene().unwrap();
+
+        assert!(names_in(&a).is_empty());
+        assert_eq!(names_in(&b).len(), 2);
+    }
+
+    #[test]
+    fn closing_a_scene_takes_its_objects_and_leaves_its_file() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        scene_with(&mut state, "B", "In B");
+        scene_with(&mut state, "A", "In A");
+        state.open_scene_beside(Path::new("scenes/B.ron")).unwrap();
+        state.close_extra_scene("scenes/B.ron");
+
+        let left: Vec<String> = state
+            .world
+            .query::<&Name>()
+            .iter(&state.world)
+            .map(|name| name.0.clone())
+            .collect();
+        assert_eq!(left, ["In A"]);
+        assert!(!state.dirty.scene());
+        state.save_scene().unwrap();
+        assert_eq!(names_in(&project.0.root().join("scenes/B.ron")), ["In B"]);
+    }
+
+    #[test]
+    fn a_scene_already_open_or_sharing_objects_cant_open_beside() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        scene_with(&mut state, "A", "In A");
+        state.save_scene_as("Copy of A").unwrap();
+        state.open_scene(Path::new("scenes/A.ron")).unwrap();
+
+        assert!(state.open_scene_beside(Path::new("scenes/A.ron")).is_err());
+        let shared = state
+            .open_scene_beside(Path::new("scenes/Copy of A.ron"))
+            .unwrap_err();
+        assert!(shared.contains("same objects"));
+        assert_eq!(state.extra_scenes().count(), 0);
+    }
+
+    /// Two scenes on disk, A with "In A" and B with "In B", with A open alone.
+    fn two_scenes(state: &mut EditorState) {
+        scene_with(state, "B", "In B");
+        scene_with(state, "A", "In A");
+    }
+
+    fn scene_file_names(project: &TempProject, file: &str) -> Vec<String> {
+        let scene = Scene::load_from_file(&project.0.root().join(file)).unwrap();
+        scene
+            .entities
+            .iter()
+            .filter_map(|e| e.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn changing_the_working_scene_keeps_each_object_in_its_own_file() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        two_scenes(&mut state);
+        state.make_working_scene(Path::new("scenes/B.ron")).unwrap();
+        assert_eq!(
+            state.current_scene().as_deref(),
+            Some(Path::new("scenes/B.ron"))
+        );
+        assert_eq!(state.extra_scenes().collect::<Vec<_>>(), ["scenes/A.ron"]);
+        assert!(!state.dirty.scene(), "just switching changes nothing");
+
+        // A new object goes in the working scene.
+        spawn_named(&mut state, "New in B");
+        state.save_scene().unwrap();
+        assert_eq!(scene_file_names(&project, "scenes/A.ron"), ["In A"]);
+        let mut b = scene_file_names(&project, "scenes/B.ron");
+        b.sort();
+        assert_eq!(b, ["In B", "New in B"]);
+    }
+
+    #[test]
+    fn changing_the_working_scene_keeps_unsaved_edits_unsaved_and_writes_nothing() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        two_scenes(&mut state);
+        spawn_named(&mut state, "Unsaved");
+        state.sync_scene_dirty();
+        assert!(state.dirty.scene());
+
+        state.make_working_scene(Path::new("scenes/B.ron")).unwrap();
+        state.sync_scene_dirty();
+        assert!(state.dirty.scene(), "the edit is still unsaved");
+        assert_eq!(scene_file_names(&project, "scenes/A.ron"), ["In A"]);
+        let names: Vec<String> = state
+            .world
+            .query::<&Name>()
+            .iter(&state.world)
+            .map(|n| n.0.clone())
+            .collect();
+        assert!(names.iter().any(|name| name == "Unsaved"));
+
+        // Going back and saving puts it in the file it was made in.
+        state.make_working_scene(Path::new("scenes/A.ron")).unwrap();
+        state.save_scene().unwrap();
+        assert!(!state.dirty.scene());
+        let mut a = scene_file_names(&project, "scenes/A.ron");
+        a.sort();
+        assert_eq!(a, ["In A", "Unsaved"]);
+        assert_eq!(scene_file_names(&project, "scenes/B.ron"), ["In B"]);
+    }
+
+    #[test]
+    fn each_scene_keeps_its_own_environment_when_the_working_scene_changes() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        two_scenes(&mut state);
+        let mut environment = engine_scene::EnvironmentData::default();
+        environment
+            .ambient_sounds
+            .push(engine_scene::AmbientSoundData {
+                sound: engine_scene::AssetRef {
+                    id: uuid::Uuid::new_v4().to_string(),
+                },
+                gain: 1.0,
+            });
+        state.set_environment(environment);
+        assert_eq!(state.environment().ambient_sounds.len(), 1);
+        state.make_working_scene(Path::new("scenes/B.ron")).unwrap();
+        assert_eq!(state.environment().ambient_sounds.len(), 0);
+        state.make_working_scene(Path::new("scenes/A.ron")).unwrap();
+        assert_eq!(state.environment().ambient_sounds.len(), 1);
+    }
+
+    #[test]
+    fn a_selection_in_the_scene_being_left_does_not_pull_back_to_it() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        two_scenes(&mut state);
+        state.selected_entity = Some(named(&mut state, "In A"));
+        state.make_working_scene(Path::new("scenes/B.ron")).unwrap();
+        state.follow_selection_to_its_scene().unwrap();
+        assert_eq!(
+            state.current_scene().as_deref(),
+            Some(Path::new("scenes/B.ron"))
+        );
+        assert_eq!(state.selected_entity, None);
+    }
+
+    #[test]
+    fn renaming_a_scene_moves_its_file_and_everything_that_names_it() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        two_scenes(&mut state);
+        state.set_start_scene(Path::new("scenes/B.ron")).unwrap();
+        state.open_scene_beside(Path::new("scenes/B.ron")).unwrap();
+        let in_a = named(&mut state, "In A");
+        state
+            .world
+            .entity_mut(in_a)
+            .insert(engine_scene::SceneRules(vec![engine_scene::RuleData::new(
+                engine_scene::RuleTrigger::SceneStart,
+                engine_scene::RuleAction::ChangeScene {
+                    path: "scenes/B.ron".into(),
+                },
+            )]));
+        let scripts = project.0.root().join("assets/scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("go.lua"),
+            "engine.change_scene(\"scenes/B.ron\")",
+        )
+        .unwrap();
+
+        let left = state
+            .rename_scene(Path::new("scenes/B.ron"), "Shop")
+            .unwrap();
+        assert_eq!(left, ["assets/scripts/go.lua"]);
+        assert!(project.0.root().join("scenes/Shop.ron").is_file());
+        assert!(!project.0.root().join("scenes/B.ron").exists());
+        assert_eq!(
+            state.extra_scenes().collect::<Vec<_>>(),
+            ["scenes/Shop.ron"]
+        );
+        assert_eq!(
+            state.project.manifest().main_scene,
+            Path::new("scenes/Shop.ron")
+        );
+        let in_a = named(&mut state, "In A");
+        let rules = state.world.get::<engine_scene::SceneRules>(in_a).unwrap();
+        assert_eq!(
+            rules.0[0].action,
+            engine_scene::RuleAction::ChangeScene {
+                path: "scenes/Shop.ron".into()
+            }
+        );
+        state.save_scene().unwrap();
+        assert_eq!(scene_file_names(&project, "scenes/Shop.ron"), ["In B"]);
+        assert!(
+            state
+                .rename_scene(Path::new("scenes/Shop.ron"), "A")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn renaming_the_working_scene_with_unsaved_edits_keeps_them() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        two_scenes(&mut state);
+        spawn_named(&mut state, "Unsaved");
+        state.sync_scene_dirty();
+        state
+            .rename_scene(Path::new("scenes/A.ron"), "Forest")
+            .unwrap();
+        assert_eq!(
+            state.current_scene().as_deref(),
+            Some(Path::new("scenes/Forest.ron"))
+        );
+        state.sync_scene_dirty();
+        assert!(state.dirty.scene());
+        state.save_scene().unwrap();
+        let mut names = scene_file_names(&project, "scenes/Forest.ron");
+        names.sort();
+        assert_eq!(names, ["In A", "Unsaved"]);
+    }
+
+    #[test]
+    fn scene_groups_are_folders_that_scenes_move_in_and_out_of() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        two_scenes(&mut state);
+        assert_eq!(state.create_scene_group("Levels").unwrap(), "Levels");
+        assert!(state.create_scene_group("Levels").is_err());
+        assert_eq!(state.scene_folders(), ["Levels"]);
+
+        state
+            .move_scene_to_group(Path::new("scenes/B.ron"), Some("Levels"))
+            .unwrap();
+        assert!(project.0.root().join("scenes/Levels/B.ron").is_file());
+
+        state.rename_scene_group("Levels", "Worlds").unwrap();
+        assert!(project.0.root().join("scenes/Worlds/B.ron").is_file());
+        assert_eq!(state.scene_folders(), ["Worlds"]);
+
+        state.delete_scene_group("Worlds").unwrap();
+        assert!(project.0.root().join("scenes/B.ron").is_file());
+        assert!(state.scene_folders().is_empty());
+    }
+
+    #[test]
+    fn the_loading_screen_keeps_its_name() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.create_loading_screen().unwrap();
+        assert!(
+            state
+                .rename_scene(Path::new(engine_project::LOADING_SCENE), "Wait")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn locking_a_scene_locks_all_its_objects_and_no_others() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        two_scenes(&mut state);
+        state.open_scene_beside(Path::new("scenes/B.ron")).unwrap();
+        let in_b = named(&mut state, "In B");
+        let kid = spawn_named(&mut state, "Kid");
+        state.world.entity_mut(kid).insert(ChildOf(in_b));
+        let lock = |state: &EditorState, entity| {
+            state
+                .world
+                .get::<engine_ecs::components::Lock>(entity)
+                .is_some()
+        };
+        state.set_scene_locked(Some("scenes/B.ron".into()), true);
+        assert!(lock(&state, in_b) && lock(&state, kid));
+        let in_a = named(&mut state, "In A");
+        assert!(!lock(&state, in_a));
+        state.set_scene_locked(Some("scenes/B.ron".into()), false);
+        assert!(!lock(&state, in_b) && !lock(&state, kid));
+    }
+
+    #[test]
+    fn a_new_scene_leaves_the_others_open_and_their_edits_unsaved() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        two_scenes(&mut state);
+        spawn_named(&mut state, "Unsaved");
+        state.create_working_scene("Shop").unwrap();
+        assert_eq!(
+            state.current_scene().as_deref(),
+            Some(Path::new("scenes/Shop.ron"))
+        );
+        assert_eq!(state.extra_scenes().collect::<Vec<_>>(), ["scenes/A.ron"]);
+        state.sync_scene_dirty();
+        assert!(state.dirty.scene());
+    }
+
+    #[test]
+    fn only_the_working_scene_shows_and_selecting_elsewhere_follows() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        two_scenes(&mut state);
+        state.open_scene_beside(Path::new("scenes/B.ron")).unwrap();
+        assert_eq!(state.objects_in_other_scenes().len(), 1);
+        let in_b = state
+            .world
+            .query::<(Entity, &Name)>()
+            .iter(&state.world)
+            .find(|(_, name)| name.0 == "In B")
+            .map(|(entity, _)| entity)
+            .unwrap();
+        state.selected_entity = Some(in_b);
+        state.follow_selection_to_its_scene().unwrap();
+        assert_eq!(
+            state.current_scene().as_deref(),
+            Some(Path::new("scenes/B.ron"))
+        );
+        let selected = state.selected_entity.unwrap();
+        assert_eq!(state.world.get::<Name>(selected).unwrap().0, "In B");
+    }
+
+    #[test]
+    fn opening_a_main_scene_closes_the_others() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        scene_with(&mut state, "B", "In B");
+        scene_with(&mut state, "A", "In A");
+        state.open_scene_beside(Path::new("scenes/B.ron")).unwrap();
+        state.open_scene(Path::new("scenes/A.ron")).unwrap();
+        assert_eq!(state.extra_scenes().count(), 0);
+        let count = state.world.query::<&Name>().iter(&state.world).count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn the_scene_order_is_saved_and_a_loading_screen_is_made_once() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.create_scene("A").unwrap();
+        state.create_scene("B").unwrap();
+        let before = state.scene_list().to_vec();
+        let last = before.last().unwrap().clone();
+        state.move_scene_in_order(&last, -1).unwrap();
+        let after = state.scene_list().to_vec();
+        assert_eq!(after[after.len() - 2], last);
+        let reopened = Project::open(project.0.root()).unwrap();
+        assert_eq!(
+            reopened.ordered_scenes()[after.len() - 2],
+            last.to_string_lossy()
+        );
+
+        assert!(!state.has_loading_screen());
+        state.create_loading_screen().unwrap();
+        assert!(state.has_loading_screen());
+        assert_eq!(
+            state.current_scene().as_deref(),
+            Some(Path::new(engine_project::LOADING_SCENE))
+        );
+        let saved = Scene::load_from_file(&state.scene_path).unwrap();
+        saved.validate().unwrap();
+        assert_eq!(saved.entities.len(), 2);
+        assert!(state.create_loading_screen().is_err());
+    }
+
+    #[test]
+    fn save_as_keeps_the_objects_and_moves_to_the_new_file() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.create_scene("A").unwrap();
+        let a = state.scene_path.clone();
+        let before = std::fs::read_to_string(&a).unwrap();
+        spawn_named(&mut state, "Thing");
+
+        state.save_scene_as("B").unwrap();
+
+        assert_eq!(
+            state.current_scene().as_deref(),
+            Some(Path::new("scenes/B.ron"))
+        );
+        assert!(!state.dirty.scene());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), before);
+        let saved = Scene::load_from_file(&state.scene_path).unwrap();
+        assert_eq!(saved.entities[0].name.as_deref(), Some("Thing"));
+    }
+
+    #[test]
+    fn the_start_scene_is_saved_in_the_project_file() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state.create_scene("Menu").unwrap();
+
+        state.set_start_scene(Path::new("scenes/Menu.ron")).unwrap();
+
+        let reopened = Project::open(project.0.root()).unwrap();
+        assert_eq!(reopened.manifest().main_scene, Path::new("scenes/Menu.ron"));
+        assert!(state.set_start_scene(Path::new("scenes/None.ron")).is_err());
     }
 
     #[test]
@@ -2654,6 +4295,20 @@ mod tests {
     }
 
     #[test]
+    fn a_locked_object_is_not_deleted() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let locked = spawn_named(&mut state, "Locked");
+        state
+            .world
+            .entity_mut(locked)
+            .insert(engine_ecs::components::Lock);
+        state.select_only(locked);
+        state.delete_selection();
+        assert!(state.world.get_entity(locked).is_ok());
+    }
+
+    #[test]
     fn delete_selection_despawns_every_selected_entity() {
         let project = temp_project();
         let mut state = editor_state(&project);
@@ -2712,6 +4367,182 @@ mod tests {
             at
         );
         assert_eq!(state.selected_entity, Some(entity));
+    }
+
+    /// Writes a prefab with a child, and places a linked copy.
+    fn place_linked_copy(state: &mut EditorState) -> Entity {
+        let dir = state.project.assets_dir().join("prefabs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let object = |name: &str, parent| engine_scene::SceneEntity {
+            name: Some(name.into()),
+            object_id: Some(uuid::Uuid::new_v4().to_string()),
+            parent,
+            ..Default::default()
+        };
+        engine_scene::Prefab::from_entities(vec![object("Top", None), object("Kid", Some(0))])
+            .unwrap()
+            .save_to_file(&dir.join("Pair.prefab"))
+            .unwrap();
+        state
+            .drop_asset(Path::new("prefabs/Pair.prefab"), Some(Vec3::X), None)
+            .unwrap()
+    }
+
+    fn named(state: &mut EditorState, name: &str) -> Entity {
+        named_entity(state, name)
+    }
+
+    fn named_entity(state: &mut EditorState, name: &str) -> Entity {
+        let mut query = state
+            .world
+            .query::<(Entity, &engine_ecs::components::Name)>();
+        query
+            .iter(&state.world)
+            .find(|(_, candidate)| candidate.0 == name)
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn a_dropped_prefab_brings_its_children_and_is_linked() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let top = place_linked_copy(&mut state);
+        let kid = named_entity(&mut state, "Kid");
+        assert_eq!(state.world.get::<ChildOf>(kid).unwrap().parent(), top);
+        let status = state.prefab_status(kid).unwrap();
+        assert_eq!(status.path, "assets/prefabs/Pair.prefab");
+        assert!(status.changes.is_empty() && !status.missing);
+    }
+
+    #[test]
+    fn apply_writes_the_prefab_and_updates_other_copies() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let first = place_linked_copy(&mut state);
+        let second = state
+            .drop_asset(Path::new("prefabs/Pair.prefab"), Some(Vec3::Y), None)
+            .unwrap();
+        state
+            .world
+            .entity_mut(first)
+            .insert(engine_ecs::components::Disabled);
+        assert_eq!(state.prefab_status(first).unwrap().changes, ["disabled"]);
+        let second_id = state
+            .world
+            .get::<engine_scene::SceneObjectId>(second)
+            .unwrap()
+            .0
+            .clone();
+
+        state.apply_prefab_copy(first).unwrap();
+
+        let path = state.project.assets_dir().join("prefabs/Pair.prefab");
+        let written = engine_scene::Prefab::load_from_file(&path).unwrap();
+        assert!(written.entity().disabled);
+        let mut query = state.world.query::<(
+            &engine_scene::SceneObjectId,
+            Option<&engine_ecs::components::Disabled>,
+            &TransformComponent,
+        )>();
+        let (_, disabled, transform) = query
+            .iter(&state.world)
+            .find(|(id, ..)| id.0 == second_id)
+            .unwrap();
+        assert!(disabled.is_some(), "the other copy follows");
+        assert_eq!(transform.0.translation, Vec3::Y, "and stays where it is");
+    }
+
+    #[test]
+    fn revert_drops_changes_keeps_position_and_can_be_saved_clean() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let top = place_linked_copy(&mut state);
+        state
+            .world
+            .entity_mut(top)
+            .insert(engine_ecs::components::Disabled);
+        state.selected_entity = Some(top);
+
+        state.revert_prefab_copy(top).unwrap();
+
+        let top = state.selected_entity.expect("selection survives");
+        assert!(
+            state
+                .world
+                .get::<engine_ecs::components::Disabled>(top)
+                .is_none()
+        );
+        assert_eq!(
+            state
+                .world
+                .get::<TransformComponent>(top)
+                .unwrap()
+                .0
+                .translation,
+            Vec3::X
+        );
+    }
+
+    #[test]
+    fn a_saved_override_survives_a_prefab_change_on_reload() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let top = place_linked_copy(&mut state);
+        let kid = named_entity(&mut state, "Kid");
+        state
+            .world
+            .entity_mut(kid)
+            .insert(engine_ecs::components::Disabled);
+        state.save_scene().unwrap();
+        assert!(!state.dirty.scene());
+        state.sync_scene_dirty();
+        assert!(!state.dirty.scene(), "stamping does not read as an edit");
+        assert_eq!(
+            state
+                .world
+                .get::<engine_scene::ScenePrefabLink>(kid)
+                .unwrap()
+                .0
+                .overrides,
+            ["disabled"]
+        );
+        let _ = top;
+
+        // The prefab gains a tag while the scene is closed.
+        let path = state.project.assets_dir().join("prefabs/Pair.prefab");
+        let prefab = engine_scene::Prefab::load_from_file(&path).unwrap();
+        let mut entities: Vec<_> = prefab.entities().cloned().collect();
+        entities[1].tags = vec!["arm".into()];
+        engine_scene::Prefab::from_entities(entities)
+            .unwrap()
+            .save_atomic(&path)
+            .unwrap();
+
+        state.load_scene().unwrap();
+        let kid = named_entity(&mut state, "Kid");
+        assert!(
+            state
+                .world
+                .get::<engine_ecs::components::Disabled>(kid)
+                .is_some()
+        );
+        assert_eq!(
+            state.world.get::<engine_scene::SceneTags>(kid).unwrap().0,
+            ["arm"]
+        );
+    }
+
+    #[test]
+    fn a_deleted_prefab_file_shows_as_missing_and_the_copy_stays() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let top = place_linked_copy(&mut state);
+        let path = state.project.assets_dir().join("prefabs/Pair.prefab");
+        std::fs::remove_file(path).unwrap();
+        assert!(state.prefab_status(top).unwrap().missing);
+        assert!(state.apply_prefab_copy(top).is_err());
+        assert!(state.world.get_entity(top).is_ok());
     }
 
     #[test]

@@ -79,7 +79,7 @@ pub mod prelude {
     pub use crate::components::{
         ActiveCamera, AssetSource, Camera, Collider, Disabled, GlobalTransform, Hidden,
         InstancedMeshRenderer, Lock, MeshRenderer, Name, RigidBody, Script, SkinnedMeshRenderer,
-        Sprite, Static, Transform, VegetationRenderer, WaterVolume,
+        Sprite, Transform, VegetationRenderer, WaterVolume,
     };
     pub use crate::despawn_instanced_mesh_renderer;
     pub use crate::despawn_mesh_renderer;

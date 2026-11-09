@@ -618,6 +618,7 @@ impl EditorShell {
             new_project_modal(ui, state, &mut self.new_project);
             sdk_upgrade_message_modal(ui, state);
             crate::settings_window::show(ui.ctx(), state);
+            crate::scenes_window::show(ui.ctx(), state);
         });
 
         // Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redo.
@@ -711,7 +712,18 @@ impl EditorShell {
         }
 
         // After undo and redo, which rebuild the world and drop the markers.
-        hierarchy::sync_editor_hidden(&mut state.world, &state.hierarchy.hidden);
+        let other_scenes = state.objects_in_other_scenes();
+        if other_scenes.is_empty() {
+            hierarchy::sync_editor_hidden(
+                &mut state.world,
+                &state.hierarchy.hidden,
+                state.selected_entity,
+            );
+        } else {
+            let mut hidden = state.hierarchy.hidden.clone();
+            hidden.extend(other_scenes);
+            hierarchy::sync_editor_hidden(&mut state.world, &hidden, state.selected_entity);
+        }
 
         self.winit_state
             .handle_platform_output(window, output.platform_output.clone());
@@ -1059,9 +1071,92 @@ fn lock_while_previewing(ui: &mut egui::Ui, state: &EditorState) {
     }
 }
 
+/// Gives the Hierarchy every scene of the project: each group with its scenes,
+/// then the scenes in no group, each in the project's order. The open ones list
+/// their objects. `main` names the main scene if its file isn't listed.
+fn list_scenes_in_hierarchy(state: &mut EditorState, main: String) {
+    use crate::state::{scene_group_of, scene_leaf_name};
+    use hierarchy::{ClosedScene, SceneListRow};
+    let listed = state.scene_list().to_vec();
+    let groups = state.scene_folders().to_vec();
+    let current = state.current_scene();
+    let mut beside: Vec<String> = state.extra_scenes().map(str::to_owned).collect();
+    let mut open = Vec::new();
+    let mut rows = Vec::new();
+    let mut add = |scene: &std::path::PathBuf,
+                   open: &mut Vec<(Option<String>, String)>,
+                   rows: &mut Vec<SceneListRow>| {
+        let name = scene_leaf_name(scene);
+        let group = scene_group_of(scene);
+        let file = scene.to_string_lossy().replace('\\', "/");
+        let in_extra = beside.iter().position(|extra| *extra == file);
+        if current.as_ref() == Some(scene) {
+            rows.push(SceneListRow::Open {
+                index: open.len(),
+                group,
+            });
+            open.push((None, name));
+        } else if let Some(at) = in_extra {
+            beside.remove(at);
+            rows.push(SceneListRow::Open {
+                index: open.len(),
+                group,
+            });
+            open.push((Some(file), name));
+        } else {
+            rows.push(SceneListRow::Closed(ClosedScene {
+                path: scene.clone(),
+                name,
+                group,
+            }));
+        }
+    };
+    for group in &groups {
+        rows.push(SceneListRow::Group(group.clone()));
+        for scene in listed
+            .iter()
+            .filter(|scene| scene_group_of(scene).as_deref() == Some(group))
+        {
+            add(scene, &mut open, &mut rows);
+        }
+    }
+    if !current.as_ref().is_some_and(|scene| listed.contains(scene)) {
+        rows.push(SceneListRow::Open {
+            index: open.len(),
+            group: None,
+        });
+        open.push((None, main));
+    }
+    for scene in listed
+        .iter()
+        .filter(|scene| scene_group_of(scene).is_none_or(|group| !groups.contains(&group)))
+    {
+        add(scene, &mut open, &mut rows);
+    }
+    // A scene open beside the others whose file has gone stays listed.
+    for file in std::mem::take(&mut beside) {
+        let name = crate::state::scene_display_name(std::path::Path::new(&file));
+        rows.push(SceneListRow::Open {
+            index: open.len(),
+            group: None,
+        });
+        open.push((Some(file), name));
+    }
+    state.hierarchy.open_scenes = open;
+    state.hierarchy.scene_list = rows;
+    state.hierarchy.scene_group_names = groups;
+    state.hierarchy.working_scene = current;
+    state.hierarchy.start_scene = Some(state.project.manifest().main_scene.clone());
+}
+
 fn show_hierarchy(ui: &mut egui::Ui, state: &mut EditorState) {
     lock_while_previewing(ui, state);
     state.hierarchy.image_selected = state.selected_texture_asset().is_some();
+    let main = state.current_scene().map_or_else(
+        || "Scene".to_owned(),
+        |scene| crate::state::scene_display_name(&scene),
+    );
+    list_scenes_in_hierarchy(state, main);
     hierarchy::show(
         ui,
         &mut state.world,
@@ -1071,6 +1166,27 @@ fn show_hierarchy(ui: &mut egui::Ui, state: &mut EditorState) {
     );
     if let Some(entity) = state.hierarchy.prefab_request.take() {
         state.create_prefab_request = Some(entity);
+    }
+    if let Some(request) = state.hierarchy.scene_request.take() {
+        state.asset_browser.scene_request = Some(request);
+    }
+    if let Some((file, locked)) = state.hierarchy.lock_scene.take() {
+        state.set_scene_locked(file, locked);
+    }
+    if !state.play.is_playing() {
+        let result = state.follow_selection_to_its_scene();
+        if result.is_err() {
+            show_scene_error(state, result);
+        }
+    }
+    for (entity, file) in std::mem::take(&mut state.hierarchy.move_to_scene) {
+        state.move_object_to_scene(entity, file);
+    }
+    if let Some(file) = state.hierarchy.close_scene.take() {
+        request_guarded(state, PendingAction::CloseScene(file));
+    }
+    if let Some(command) = state.hierarchy.scene_command.take() {
+        command.apply(state);
     }
     if let Some((command, parent)) = state.hierarchy.create_request.take() {
         let before = state.selected_entity;
@@ -1165,6 +1281,7 @@ fn show_asset_browser(ui: &mut egui::Ui, state: &mut EditorState) {
                 .show_studio_collapsible(ui, &mut state.asset_browser.preview_open, preview_body);
         }
     }
+    sync_scene_rows(state);
     egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(7, 4))
         .show(ui, |ui| {
@@ -1226,6 +1343,106 @@ fn show_scene_viewport(ui: &mut egui::Ui, viewport: &Viewport, state: &mut Edito
     if let Some(message) = &state.game_view.error {
         crate::game_view::paint_error(ui, image_response.rect, message);
     }
+}
+
+/// Shows why a scene didn't open, in the Scenes window.
+fn show_scene_error(state: &mut EditorState, result: Result<(), String>) {
+    state.scenes_error = result.err();
+    state.scenes_window_open |= state.scenes_error.is_some();
+}
+
+/// After a scene moved: says which scripts still name its old path, in the
+/// Scenes window.
+pub(crate) fn show_scripts_left_behind(state: &mut EditorState, scripts: &[String]) {
+    if scripts.is_empty() {
+        return;
+    }
+    state.scenes_error = Some(format!(
+        "These files still use the scene's old name. Change them by hand: {}",
+        scripts.join(", ")
+    ));
+    state.scenes_window_open = true;
+}
+
+/// Gives Project Assets the scene list, and carries out what it last asked for.
+fn sync_scene_rows(state: &mut EditorState) {
+    use crate::assets::{SceneRow, SceneRowRequest};
+    use crate::state::{SceneNameDialog, SceneNameKind};
+    if let Some(request) = state.asset_browser.scene_request.take()
+        && !state.play.is_playing()
+    {
+        match request {
+            SceneRowRequest::Open(scene) => {
+                request_guarded(state, PendingAction::OpenScene(scene));
+            }
+            SceneRowRequest::Work(scene) => {
+                let result = state.make_working_scene(&scene);
+                show_scene_error(state, result);
+            }
+            SceneRowRequest::OpenBeside(scene) => {
+                let result = state.open_scene_beside(&scene);
+                show_scene_error(state, result);
+            }
+            SceneRowRequest::Close(scene) => {
+                let file = scene.to_string_lossy().replace('\\', "/");
+                request_guarded(state, PendingAction::CloseScene(file));
+            }
+            SceneRowRequest::Rename(scene) => {
+                let name = crate::state::scene_leaf_name(&scene);
+                state.scene_name_dialog =
+                    Some(SceneNameDialog::named(SceneNameKind::Rename(scene), name));
+            }
+            SceneRowRequest::MoveToGroup(scene, group) => {
+                match state.move_scene_to_group(&scene, group.as_deref()) {
+                    Ok(scripts) => show_scripts_left_behind(state, &scripts),
+                    Err(message) => show_scene_error(state, Err(message)),
+                }
+            }
+            SceneRowRequest::NewGroup(scene) => {
+                state.scene_name_dialog =
+                    Some(SceneNameDialog::new(SceneNameKind::NewGroup(scene)));
+            }
+            SceneRowRequest::RenameGroup(group) => {
+                state.scene_name_dialog = Some(SceneNameDialog::named(
+                    SceneNameKind::RenameGroup(group.clone()),
+                    group,
+                ));
+            }
+            SceneRowRequest::DeleteGroup(group) => match state.delete_scene_group(&group) {
+                Ok(scripts) => show_scripts_left_behind(state, &scripts),
+                Err(message) => show_scene_error(state, Err(message)),
+            },
+            SceneRowRequest::SetStart(scene) => {
+                if let Err(message) = state.set_start_scene(&scene) {
+                    tracing::warn!(error = %message, "could not set the start scene");
+                }
+            }
+            SceneRowRequest::New => {
+                MenuCommand::NewScene.apply(state);
+            }
+            SceneRowRequest::Manage => {
+                MenuCommand::OpenScenes.apply(state);
+            }
+        }
+    }
+    let current = state.current_scene();
+    let start = state.project.manifest().main_scene.clone();
+    let beside: Vec<String> = state.extra_scenes().map(str::to_owned).collect();
+    state.asset_browser.scenes = state
+        .scene_list()
+        .iter()
+        .map(|scene| SceneRow {
+            name: crate::state::scene_leaf_name(scene),
+            group: crate::state::scene_group_of(scene),
+            is_main: current.as_deref() == Some(scene),
+            is_beside: beside
+                .iter()
+                .any(|file| std::path::Path::new(file) == scene),
+            is_start: *scene == start,
+            path: scene.clone(),
+        })
+        .collect();
+    state.asset_browser.scene_groups = state.scene_folders().to_vec();
 }
 
 /// A file from Project Assets over the Scene View: shows where it would land,
@@ -1628,73 +1845,197 @@ fn scene_cursor_icon(
     }
 }
 
-fn ui_preview_rect(screen: egui::Rect, data: &engine_scene::UiElementData) -> egui::Rect {
-    use engine_scene::UiAnchor;
-    let (x, y) = match data.anchor {
-        UiAnchor::TopLeft => (0.0, 0.0),
-        UiAnchor::Top => (0.5, 0.0),
-        UiAnchor::TopRight => (1.0, 0.0),
-        UiAnchor::Left => (0.0, 0.5),
-        UiAnchor::Center => (0.5, 0.5),
-        UiAnchor::Right => (1.0, 0.5),
-        UiAnchor::BottomLeft => (0.0, 1.0),
-        UiAnchor::Bottom => (0.5, 1.0),
-        UiAnchor::BottomRight => (1.0, 1.0),
+/// Lays out the scene's game UI as the game would, for a `size` screen, and
+/// returns the tree with the entity behind each node. Hidden and disabled
+/// objects are left out along with everything under them.
+///
+/// A disabled branch is left out, as in the game, unless the selection is
+/// inside it: that is how a menu that starts off can be seen and edited.
+fn scene_ui_preview_tree(
+    world: &mut engine_ecs::prelude::World,
+    size: egui::Vec2,
+    selected: Option<engine_ecs::prelude::Entity>,
+) -> (
+    engine_ui::Ui,
+    Vec<(engine_ecs::prelude::Entity, engine_ui::NodeId)>,
+) {
+    use engine_ecs::components::{Disabled, Hidden};
+    use engine_ecs::prelude::{Entity, World};
+    use engine_scene::{SceneUi, UiElementData, UiMountItem};
+
+    /// Lists what `entity` adds in sibling order. `parent` is its nearest UI ancestor.
+    fn visit(
+        world: &World,
+        entity: Entity,
+        parent: Option<usize>,
+        selection_path: &[Entity],
+        found: &mut Vec<(Entity, UiElementData, Option<usize>)>,
+    ) {
+        let disabled = world.get::<Disabled>(entity).is_some() && !selection_path.contains(&entity);
+        if world.get::<Hidden>(entity).is_some() || disabled {
+            return;
+        }
+        let mut nearest = parent;
+        if let Some(element) = world.get::<SceneUi>(entity) {
+            nearest = Some(found.len());
+            found.push((entity, element.0.clone(), parent));
+        }
+        for child in crate::hierarchy::children_of(world, entity) {
+            visit(world, child, nearest, selection_path, found);
+        }
+    }
+
+    let mut ui = engine_ui::Ui::new(size.x, size.y);
+    let mut found = Vec::new();
+    // Most scenes have no game UI; they should not pay for the walk below.
+    if world.query::<&SceneUi>().iter(world).next().is_some() {
+        let mut selection_path = Vec::new();
+        if let Some(entity) = selected {
+            selection_path.push(entity);
+            selection_path.extend(crate::hierarchy::ancestors(world, entity));
+        }
+        for root in crate::hierarchy::roots(world) {
+            visit(world, root, None, &selection_path, &mut found);
+        }
+    }
+    let items: Vec<UiMountItem<'_>> = found
+        .iter()
+        .map(|(_, data, parent)| UiMountItem {
+            data,
+            parent: *parent,
+            hidden: false,
+        })
+        .collect();
+    let nodes = engine_scene::mount_ui_elements(&mut ui, &items);
+    // No game is running to fill these, and an empty bar shows little.
+    for (node, (_, data, _)) in nodes.iter().zip(&found) {
+        ui.set_value(*node, data.min + (data.max - data.min) * 0.6);
+    }
+    ui.layout();
+    let entities = found.iter().map(|(entity, ..)| *entity);
+    (ui, entities.zip(nodes).collect())
+}
+
+fn ui_color(color: engine_ui::Color) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(
+        (color.r * 255.0) as u8,
+        (color.g * 255.0) as u8,
+        (color.b * 255.0) as u8,
+        (color.a * 255.0) as u8,
+    )
+}
+
+/// The preview texture for a UI image, once the importer has decoded it.
+fn ui_preview_image(
+    ctx: &egui::Context,
+    state: &mut EditorState,
+    id: engine_utils::AssetId,
+) -> Option<egui::TextureId> {
+    let pass = state.importer.pass_id();
+    if let Some((built, texture)) = state.ui_preview_images.get(&id)
+        && *built == pass
+    {
+        return Some(texture.id());
+    }
+    let crate::ImportedAsset::Texture(image) = state.importer.get(id)? else {
+        return None;
     };
-    let size = egui::vec2(data.size[0], data.size[1]);
-    let point = screen.min
-        + egui::vec2(screen.width() * x, screen.height() * y)
-        + egui::vec2(data.offset[0], data.offset[1]);
-    egui::Rect::from_min_size(point - egui::vec2(size.x * x, size.y * y), size)
+    let base = image.mip_levels.first()?;
+    let (small, width, height) =
+        crate::preview::downscale_rgba(base, image.width, image.height, 512);
+    let picture =
+        egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &small);
+    let texture = ctx.load_texture(
+        format!("vge_ui_preview::{id}"),
+        picture,
+        egui::TextureOptions::LINEAR,
+    );
+    let texture_id = texture.id();
+    state.ui_preview_images.insert(id, (pass, texture));
+    Some(texture_id)
 }
 
 fn paint_scene_ui_preview(ui: &egui::Ui, state: &mut EditorState, screen: egui::Rect) {
-    use engine_ecs::components::{Disabled, Hidden};
-    use engine_ecs::prelude::{Entity, Without};
-    use engine_scene::{SceneUi, UiKind};
-
-    let mut query = state
-        .world
-        .query_filtered::<(Entity, &SceneUi, Option<&Disabled>), Without<Hidden>>();
-    let elements: Vec<_> = query
-        .iter(&state.world)
-        .filter(|(_, _, disabled)| disabled.is_none())
-        .map(|(entity, data, _)| (entity, data.0.clone()))
-        .collect();
+    let selected = state.selected_entity;
+    let (tree, entities) = scene_ui_preview_tree(&mut state.world, screen.size(), selected);
+    if entities.is_empty() {
+        return;
+    }
     let painter = ui.painter().with_clip_rect(screen);
-    for (entity, data) in elements {
-        let rect = ui_preview_rect(screen, &data);
-        if !rect.intersects(screen) {
-            continue;
-        }
-        let color = egui::Color32::from_rgba_unmultiplied(
-            (data.color[0] * 255.0) as u8,
-            (data.color[1] * 255.0) as u8,
-            (data.color[2] * 255.0) as u8,
-            (data.color[3] * 255.0) as u8,
-        );
-        if data.kind == UiKind::Button {
-            painter.rect_filled(rect, 5.0, color);
-        }
-        painter.text(
-            rect.left_center() + egui::vec2(7.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            &data.text,
-            egui::FontId::proportional(14.0),
-            if data.kind == UiKind::Label {
-                color
-            } else {
-                egui::Color32::WHITE
+    let to_screen = |rect: engine_ui::Rect| {
+        egui::Rect::from_min_size(
+            screen.min + egui::vec2(rect.x, rect.y),
+            egui::vec2(rect.w, rect.h),
+        )
+    };
+    for command in tree.draw_list([f32::MIN, f32::MIN]) {
+        let rect = to_screen(command.rect);
+        match &command.kind {
+            engine_ui::DrawKind::Fill(color) => {
+                painter.rect_filled(rect, 0.0, ui_color(*color));
+            }
+            engine_ui::DrawKind::RoundedFill { color, radius } => {
+                painter.rect_filled(rect, *radius, ui_color(*color));
+            }
+            engine_ui::DrawKind::Outline {
+                color,
+                radius,
+                width,
+            } => {
+                painter.rect_stroke(
+                    rect,
+                    *radius,
+                    egui::Stroke::new(*width, ui_color(*color)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            engine_ui::DrawKind::Image {
+                texture,
+                tint,
+                radius,
+            } => match ui_preview_image(ui.ctx(), state, *texture) {
+                Some(picture) => {
+                    egui::Image::new((picture, rect.size()))
+                        .tint(ui_color(*tint))
+                        .corner_radius(*radius)
+                        .paint_at(ui, rect);
+                }
+                None => {
+                    painter.rect_filled(rect, *radius, ui_color(*tint));
+                }
             },
-        );
-        if state.selected_entity == Some(entity) {
-            painter.rect_stroke(
-                rect,
-                5.0,
-                egui::Stroke::new(1.0, crate::theme::NIGHT.accent),
-                egui::StrokeKind::Inside,
-            );
+            engine_ui::DrawKind::Text {
+                text,
+                color,
+                size,
+                align,
+                ..
+            } => {
+                let (at, placement) = match align {
+                    engine_ui::TextAlign::Center => (rect.center(), egui::Align2::CENTER_CENTER),
+                    _ => (rect.left_center(), egui::Align2::LEFT_CENTER),
+                };
+                painter.with_clip_rect(rect.intersect(screen)).text(
+                    at,
+                    placement,
+                    text,
+                    egui::FontId::proportional(*size),
+                    ui_color(*color),
+                );
+            }
         }
+    }
+    let selected = entities
+        .iter()
+        .find(|(entity, _)| state.selected_entity == Some(*entity))
+        .and_then(|(_, node)| tree.rect_of(*node));
+    if let Some(rect) = selected {
+        painter.rect_stroke(
+            to_screen(rect),
+            0.0,
+            egui::Stroke::new(1.0, crate::theme::NIGHT.accent),
+            egui::StrokeKind::Inside,
+        );
     }
 }
 
@@ -2353,7 +2694,11 @@ fn menu_file(
             }
         });
         ui.separator();
-        if ui.button("New Scene").clicked() {
+        if ui.button("Scenes…").clicked() {
+            dispatch_menu_command(state, new_project, MenuCommand::OpenScenes);
+            ui.close();
+        }
+        if ui.button("New Scene…").clicked() {
             dispatch_menu_command(state, new_project, MenuCommand::NewScene);
             ui.close();
         }
@@ -2379,7 +2724,10 @@ fn menu_file(
             dispatch_menu_command(state, new_project, MenuCommand::UpgradeRustSdk);
             ui.close();
         }
-        ui.add_enabled(false, egui::Button::new("Save Scene As…"));
+        if ui.button("Save Scene As…").clicked() {
+            dispatch_menu_command(state, new_project, MenuCommand::SaveSceneAs);
+            ui.close();
+        }
         ui.separator();
         let configuration = state
             .selected_configuration()
@@ -2681,9 +3029,15 @@ pub(crate) fn request_guarded(state: &mut EditorState, action: PendingAction) {
 fn apply_pending(state: &mut EditorState, action: PendingAction) {
     match action {
         PendingAction::Quit => state.exit_requested = true,
-        PendingAction::NewScene => {
-            state.new_scene();
-            tracing::info!("new scene");
+        PendingAction::OpenScene(scene) => match state.open_scene(&scene) {
+            Ok(()) => tracing::info!(path = %state.scene_path.display(), "scene opened"),
+            Err(err) => tracing::warn!(error = %err, "could not open the scene"),
+        },
+        PendingAction::CloseScene(file) => state.close_extra_scene(&file),
+        PendingAction::CreateLoadingScreen => {
+            if let Err(err) = state.create_loading_screen() {
+                tracing::warn!(error = %err, "could not make the loading screen");
+            }
         }
         PendingAction::RevertScene => match state.load_scene() {
             Ok(()) => tracing::info!(path = %state.scene_path.display(), "scene reverted"),
@@ -2858,14 +3212,14 @@ fn menu_gameobject(ui: &mut egui::Ui, state: &mut EditorState) {
             MenuCommand::CreatePointLight.apply(state);
             ui.close();
         }
-        if ui.button("Create UI Label").clicked() {
-            MenuCommand::CreateUiLabel.apply(state);
-            ui.close();
-        }
-        if ui.button("Create UI Button").clicked() {
-            MenuCommand::CreateUiButton.apply(state);
-            ui.close();
-        }
+        ui.menu_button("Create Game UI", |ui| {
+            for kind in crate::menu::UI_KINDS {
+                if ui.button(crate::menu::ui_kind_name(kind)).clicked() {
+                    MenuCommand::CreateUiElement(kind).apply(state);
+                    ui.close();
+                }
+            }
+        });
         if ui.button("Create Camera").clicked() {
             MenuCommand::CreateCamera.apply(state);
             ui.close();
@@ -3613,6 +3967,16 @@ fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(&mut content, |ui| {
+                    prefab_copy_row(ui, state);
+                    // The world's resources are how the rule fields reach the list.
+                    let scenes = inspector::ProjectScenes(
+                        state
+                            .scene_list()
+                            .iter()
+                            .map(|scene| scene.to_string_lossy().replace('\\', "/"))
+                            .collect(),
+                    );
+                    state.world.insert_resource(scenes);
                     inspector::show(
                         ui,
                         &mut state.world,
@@ -3625,6 +3989,79 @@ fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
                 });
             ui.advance_cursor_after_rect(rect);
         });
+}
+
+/// The selected object's prefab: its file, what this copy changes, and the
+/// buttons to send those changes to the prefab or drop them.
+fn prefab_copy_row(ui: &mut egui::Ui, state: &mut EditorState) {
+    let Some(entity) = state.selected_entity.filter(|_| !state.play.is_playing()) else {
+        return;
+    };
+    let Some(status) = state.cached_prefab_status(entity) else {
+        return;
+    };
+    let palette = crate::theme::NIGHT;
+    let mut apply = false;
+    let mut revert = false;
+    egui::Frame::NONE
+        .fill(palette.raised)
+        .corner_radius(9)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let file = status.path.rsplit('/').next().unwrap_or(&status.path);
+            ui.label(crate::theme::semibold(format!("Prefab: {file}")));
+            if status.missing {
+                ui.label(
+                    egui::RichText::new("Prefab missing. This copy keeps working as it is.")
+                        .size(11.5)
+                        .color(palette.subtle),
+                );
+                return;
+            }
+            let summary = if status.changes.is_empty() {
+                "Same as the prefab.".to_owned()
+            } else {
+                let words: Vec<String> = status
+                    .changes
+                    .iter()
+                    .map(|change| change.replace('_', " "))
+                    .collect();
+                format!("Changed: {}", words.join(", "))
+            };
+            ui.label(
+                egui::RichText::new(summary)
+                    .size(11.5)
+                    .color(palette.subtle),
+            );
+            let locked = state
+                .world
+                .get::<engine_ecs::components::Lock>(entity)
+                .is_some();
+            ui.add_enabled_ui(!status.changes.is_empty() && !locked, |ui| {
+                ui.horizontal(|ui| {
+                    apply = ui
+                        .button("Apply to prefab")
+                        .on_hover_text("Make the prefab and its other copies match this copy.")
+                        .clicked();
+                    revert = ui
+                        .button("Revert")
+                        .on_hover_text("Put this copy back to what the prefab says.")
+                        .clicked();
+                });
+            });
+        });
+    ui.add_space(6.0);
+    let result = if apply {
+        state.apply_prefab_copy(entity)
+    } else if revert {
+        state.revert_prefab_copy(entity)
+    } else {
+        return;
+    };
+    if let Err(err) = result {
+        tracing::warn!(error = %err, "could not update the prefab copy");
+    }
 }
 
 fn panel_title(ui: &mut egui::Ui, icon: ShellIcon, title: &str) {
@@ -3840,7 +4277,12 @@ fn scene_view_toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
         let (icon, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
         paint_shell_icon_at_color(ui, icon, ShellIcon::Viewport, palette.muted);
         ui.label(crate::theme::semibold("Viewport").color(palette.text));
-        ui.label(egui::RichText::new("/ World").color(palette.subtle));
+        ui.label(egui::RichText::new("/").color(palette.subtle));
+        let scene_name = state.current_scene().map_or_else(
+            || "Scene".to_owned(),
+            |scene| crate::state::scene_display_name(&scene),
+        );
+        ui.label(egui::RichText::new(scene_name).color(palette.muted));
         let centre = egui::Rect::from_center_size(header.center(), egui::vec2(112.0, 30.0));
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -4368,24 +4810,72 @@ mod ui_tests {
     use super::{
         CameraGesture, DragButtons, ScrollIntent, ShellIcon, ShellLayout, ViewTool, camera_gesture,
         code_panel_is_resizing, code_webview_visible, paint_shell_icon, scene_cursor_icon,
-        scroll_intent, shell_layout, ui_preview_rect, viewport_render_size,
+        scene_ui_preview_tree, scroll_intent, shell_layout, viewport_render_size,
     };
     use crate::chrome::Workspace;
 
     #[test]
-    fn ui_preview_uses_the_same_screen_anchor_as_play() {
-        let screen = egui::Rect::from_min_size(egui::pos2(50.0, 100.0), egui::vec2(400.0, 200.0));
-        let mut data = engine_scene::UiElementData::button();
-        assert_eq!(
-            ui_preview_rect(screen, &data),
-            egui::Rect::from_min_size(egui::pos2(160.0, 178.0), egui::vec2(180.0, 44.0))
-        );
-        data.anchor = engine_scene::UiAnchor::TopRight;
-        data.offset = [-20.0, 10.0];
-        assert_eq!(
-            ui_preview_rect(screen, &data),
-            egui::Rect::from_min_size(egui::pos2(250.0, 110.0), egui::vec2(180.0, 44.0))
-        );
+    fn ui_preview_places_elements_as_the_game_does() {
+        use engine_ecs::prelude::{ChildOf, World};
+        use engine_scene::{SceneUi, UiAnchor, UiElementData};
+
+        let mut world = World::new();
+        let button = world
+            .spawn((
+                engine_ecs::components::Name::new("Button"),
+                SceneUi(UiElementData::button()),
+            ))
+            .id();
+        let panel = world
+            .spawn((
+                engine_ecs::components::Name::new("Panel"),
+                SceneUi(UiElementData {
+                    anchor: UiAnchor::TopRight,
+                    offset: [-20.0, 10.0],
+                    size: [100.0, 100.0],
+                    ..UiElementData::panel()
+                }),
+            ))
+            .id();
+        let inside = world
+            .spawn((
+                engine_ecs::components::Name::new("Inside"),
+                ChildOf(panel),
+                SceneUi(UiElementData {
+                    anchor: UiAnchor::TopLeft,
+                    offset: [5.0, 5.0],
+                    size: [10.0, 10.0],
+                    ..UiElementData::label()
+                }),
+            ))
+            .id();
+        let (tree, nodes) = scene_ui_preview_tree(&mut world, egui::vec2(400.0, 200.0), None);
+        let rect = |entity| {
+            let (_, node) = nodes.iter().find(|(found, _)| *found == entity).unwrap();
+            tree.rect_of(*node).unwrap()
+        };
+        assert_eq!((rect(button).x, rect(button).y), (110.0, 78.0));
+        assert_eq!((rect(panel).x, rect(panel).y), (280.0, 10.0));
+        assert_eq!((rect(inside).x, rect(inside).y), (285.0, 15.0));
+
+        world
+            .entity_mut(panel)
+            .insert(engine_ecs::components::Hidden);
+        let (_, nodes) = scene_ui_preview_tree(&mut world, egui::vec2(400.0, 200.0), None);
+        assert_eq!(nodes.len(), 1, "a hidden panel takes its child with it");
+        world
+            .entity_mut(panel)
+            .remove::<engine_ecs::components::Hidden>()
+            .insert(engine_ecs::components::Disabled);
+        let size = egui::vec2(400.0, 200.0);
+        let (_, nodes) = scene_ui_preview_tree(&mut world, size, None);
+        assert_eq!(nodes.len(), 1, "a disabled panel is off, as in the game");
+        let (_, nodes) = scene_ui_preview_tree(&mut world, size, Some(button));
+        assert_eq!(nodes.len(), 1, "selecting something else changes nothing");
+        let (_, nodes) = scene_ui_preview_tree(&mut world, size, Some(panel));
+        assert_eq!(nodes.len(), 3, "selecting the panel shows it");
+        let (_, nodes) = scene_ui_preview_tree(&mut world, size, Some(inside));
+        assert_eq!(nodes.len(), 3, "so does selecting something inside it");
     }
 
     #[test]
@@ -4481,7 +4971,8 @@ mod ui_tests {
                         if let egui::epaint::Shape::Text(text) = &shape.shape {
                             let rect = text.visual_bounding_rect();
                             match text.galley.text().trim() {
-                                "assets" => tree = Some(rect),
+                                // The first row of the tree.
+                                "scenes" => tree = Some(rect),
                                 "Preview" => preview = Some(rect),
                                 _ => {}
                             }
@@ -4652,8 +5143,18 @@ mod ui_tests {
         let (root, mut state) = menu_test_state();
         state.mark_dirty();
 
+        // New Scene asks for a name first; the guard comes when it is given.
         crate::MenuCommand::NewScene.apply(&mut state);
-        assert_eq!(state.pending_action, Some(crate::PendingAction::NewScene));
+        assert!(state.scene_name_dialog.is_some());
+        state.scene_name_dialog = None;
+        super::request_guarded(
+            &mut state,
+            crate::PendingAction::OpenScene("scenes/Level 2.ron".into()),
+        );
+        assert_eq!(
+            state.pending_action,
+            Some(crate::PendingAction::OpenScene("scenes/Level 2.ron".into()))
+        );
         state.pending_action = None;
 
         crate::MenuCommand::RevertScene.apply(&mut state);
@@ -5184,7 +5685,7 @@ mod ui_tests {
     /// A tree trunk with the sections the Inspector shows most: transform,
     /// collider, visual rules and a material override.
     fn inspector_test_state() -> (std::path::PathBuf, crate::EditorState) {
-        use engine_ecs::components::{MeshSource, Name, Static, Transform};
+        use engine_ecs::components::{MeshSource, Name, Transform};
         let (root, mut state) = menu_test_state();
         let mut transform =
             engine_utils::Transform::from_translation(glam::Vec3::new(0.0, 0.681, 0.0));
@@ -5200,7 +5701,6 @@ mod ui_tests {
             .spawn((
                 Name::new("Tree 110 Trunk"),
                 Transform::from(transform),
-                Static,
                 MeshSource::new("mesh-id", "material-id"),
                 engine_scene::SceneCollider(engine_scene::ColliderData::new(
                     engine_scene::ColliderShape::Cylinder {
@@ -5227,6 +5727,149 @@ mod ui_tests {
             .id();
         state.select_only(trunk);
         (root, state)
+    }
+
+    /// Writes `scene-navigation.png`: scenes in the Hierarchy and in Project
+    /// Assets, with one open beside the main scene, for a visual check. Needs a
+    /// GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_scene_navigation() {
+        let (root, mut state) = menu_test_state();
+        state.save_scene().expect("first scene");
+        state.create_scene("Level 2").expect("scene");
+        state.world.spawn(engine_ecs::components::Name::new("Cube"));
+        state.save_scene().expect("save");
+        state.create_scene("Shop").expect("scene");
+        state.world.spawn(engine_ecs::components::Name::new("Till"));
+        state.save_scene().expect("save");
+        state
+            .open_scene_beside(std::path::Path::new("scenes/Level 2.ron"))
+            .expect("beside");
+        state.create_scene_group("Town").expect("group");
+        state
+            .move_scene_to_group(std::path::Path::new("scenes/Shop.ron"), Some("Town"))
+            .expect("moved");
+        state.set_scene_locked(Some("scenes/Level 2.ron".to_owned()), true);
+        super::sync_scene_rows(&mut state);
+        let path = crate::ui_snapshot::snapshot_dir().join("scene-navigation.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(640.0, 340.0), 2.0, |ui| {
+            egui::Panel::left("snapshot_hierarchy")
+                .exact_size(300.0)
+                .frame(super::studio_panel_frame())
+                .show(ui, |ui| super::show_hierarchy(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(super::studio_panel_frame())
+                .show(ui, |ui| {
+                    crate::assets::show_scene(
+                        ui,
+                        &[],
+                        &mut state.asset_browser,
+                        &mut None,
+                        &mut None,
+                    );
+                });
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_hierarchy_lists_every_scene_and_keeps_their_order_when_one_opens() {
+        let (root, mut state) = menu_test_state();
+        state.save_scene().expect("first scene");
+        let first = state.current_scene().expect("first scene");
+        state.create_scene("Level 2").expect("scene");
+        state.create_scene("Shop").expect("scene");
+        state.open_scene(&first).expect("back to the first");
+        super::list_scenes_in_hierarchy(&mut state, "main".to_owned());
+        assert_eq!(state.hierarchy.open_scenes.len(), 1);
+        let order = |state: &crate::EditorState| -> Vec<String> {
+            state
+                .hierarchy
+                .scene_list
+                .iter()
+                .map(|row| match row {
+                    crate::hierarchy::SceneListRow::Group(name) => name.clone(),
+                    crate::hierarchy::SceneListRow::Open { index, .. } => {
+                        state.hierarchy.open_scenes[*index].1.clone()
+                    }
+                    crate::hierarchy::SceneListRow::Closed(scene) => scene.name.clone(),
+                })
+                .collect()
+        };
+        let before = order(&state);
+        assert_eq!(before.len(), 3);
+
+        state
+            .open_scene_beside(std::path::Path::new("scenes/Shop.ron"))
+            .expect("beside");
+        super::list_scenes_in_hierarchy(&mut state, "main".to_owned());
+        assert_eq!(state.hierarchy.open_scenes.len(), 2);
+        assert_eq!(order(&state), before);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `scenes-window.png`: the Scenes window with a few scenes, for a
+    /// visual check. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_scenes_window() {
+        let (root, mut state) = menu_test_state();
+        state.save_scene().expect("first scene");
+        state.create_scene("Menu").expect("scene");
+        state.create_loading_screen().expect("loading screen");
+        state.create_scene("Level 2").expect("scene");
+        state
+            .open_scene_beside(std::path::Path::new("scenes/Menu.ron"))
+            .expect("beside");
+        state.scenes_window_open = true;
+        let path = crate::ui_snapshot::snapshot_dir().join("scenes-window.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(720.0, 420.0), 2.0, |ui| {
+            ui.painter()
+                .rect_filled(ui.max_rect(), 0.0, crate::theme::NIGHT.shell);
+            crate::scenes_window::show(ui.ctx(), &mut state);
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `inspector-prefab.png`: a changed prefab copy with tags, for a
+    /// visual check. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_prefab() {
+        let (root, mut state) = menu_test_state();
+        let dir = state.project.assets_dir().join("prefabs");
+        std::fs::create_dir_all(&dir).expect("prefab folder");
+        engine_scene::Prefab::new(engine_scene::SceneEntity {
+            name: Some("Crate".into()),
+            transform: Some(engine_utils::Transform::IDENTITY.into()),
+            ..Default::default()
+        })
+        .save_to_file(&dir.join("Crate.prefab"))
+        .expect("prefab");
+        let copy = state.spawn_prefab(std::path::Path::new("prefabs/Crate.prefab"));
+        let copy = copy.expect("copy");
+        state.world.entity_mut(copy).insert((
+            engine_ecs::components::Disabled,
+            engine_scene::KeepBetweenScenes,
+            engine_scene::SceneTags(vec!["pickup".into(), "wood".into()]),
+        ));
+        state.select_only(copy);
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-prefab.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 420.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Writes `inspector.png` (a wide panel) and `inspector-narrow.png`, for
@@ -5605,6 +6248,119 @@ mod ui_tests {
                 .rect_filled(rect, 0.0, crate::theme::NIGHT.panel);
             super::paint_drop_marker(ui, rect, egui::pos2(60.0, 60.0), "barrel.gltf");
         })
+        .expect("snapshot");
+    }
+
+    /// Writes `game-ui.png`: every game UI element as the Scene View shows
+    /// it, and `inspector-game-ui.png`: the Inspector for a slider. Needs a
+    /// GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_game_ui() {
+        use engine_ecs::components::Name;
+        use engine_ecs::prelude::ChildOf;
+        use engine_scene::{SceneUi, UiAnchor, UiElementData, UiKind};
+
+        let (_root, mut state) = menu_test_state();
+        let panel = state
+            .world
+            .spawn((
+                Name::new("Panel"),
+                SceneUi(UiElementData {
+                    anchor: UiAnchor::Left,
+                    offset: [24.0, 0.0],
+                    size: [300.0, 320.0],
+                    ..UiElementData::panel()
+                }),
+            ))
+            .id();
+        let list = state
+            .world
+            .spawn((
+                Name::new("List"),
+                ChildOf(panel),
+                SceneUi(UiElementData {
+                    anchor: UiAnchor::TopLeft,
+                    size: [300.0, 320.0],
+                    padding: 16.0,
+                    gap: 12.0,
+                    ..UiElementData::layout()
+                }),
+            ))
+            .id();
+        let mut slider_entity = None;
+        for (order, kind) in [
+            UiKind::Label,
+            UiKind::ProgressBar,
+            UiKind::Slider,
+            UiKind::Toggle,
+            UiKind::TextInput,
+            UiKind::Button,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut data = UiElementData::for_kind(kind);
+            if kind == UiKind::Label {
+                data.text = "Settings".into();
+                data.font_size = 24.0;
+            }
+            let entity = state
+                .world
+                .spawn((
+                    Name::new(format!("{kind:?}")),
+                    ChildOf(list),
+                    engine_scene::SiblingOrder(order as u64),
+                    SceneUi(data),
+                ))
+                .id();
+            if kind == UiKind::Slider {
+                slider_entity = Some(entity);
+            }
+        }
+        state.world.spawn((
+            Name::new("Picture"),
+            SceneUi(UiElementData {
+                anchor: UiAnchor::Right,
+                offset: [-24.0, 0.0],
+                color: [0.5, 0.6, 0.9, 1.0],
+                ..UiElementData::image()
+            }),
+        ));
+        state.selected_entity = slider_entity;
+        let dir = crate::ui_snapshot::snapshot_dir();
+        crate::ui_snapshot::render_png(
+            &dir.join("game-ui.png"),
+            egui::vec2(720.0, 400.0),
+            2.0,
+            |ui| {
+                let rect = ui.max_rect();
+                ui.painter()
+                    .rect_filled(rect, 0.0, crate::theme::NIGHT.panel);
+                super::paint_scene_ui_preview(ui, &mut state, rect);
+            },
+        )
+        .expect("snapshot");
+        crate::ui_snapshot::render_png(
+            &dir.join("inspector-game-ui.png"),
+            egui::vec2(340.0, 560.0),
+            2.0,
+            |ui| {
+                ui.painter()
+                    .rect_filled(ui.max_rect(), 0.0, crate::theme::NIGHT.panel);
+                let mut batch = false;
+                let mut open_script = None;
+                crate::inspector::show(
+                    ui,
+                    &mut state.world,
+                    slider_entity,
+                    &[],
+                    &mut batch,
+                    &crate::AssetIndex::new(),
+                    &mut open_script,
+                );
+            },
+        )
         .expect("snapshot");
     }
 
@@ -6410,7 +7166,7 @@ mod ui_tests {
             super::show_hierarchy(ui, &mut state);
         });
         let label_x = output.shapes.iter().find_map(|shape| match &shape.shape {
-            egui::epaint::Shape::Text(text) if text.galley.text().contains("Scene root") => {
+            egui::epaint::Shape::Text(text) if text.galley.text().contains("main") => {
                 Some(text.pos.x)
             }
             _ => None,

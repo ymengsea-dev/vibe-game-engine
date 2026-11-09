@@ -26,6 +26,8 @@ pub struct InputState {
     cursor_position: Option<(f64, f64)>,
     scroll_delta: (f32, f32),
     mouse_delta: (f32, f32),
+    typed_text: String,
+    keyboard_captured: bool,
 
     held_gamepad: HashSet<GamepadButton>,
     pressed_gamepad: HashSet<GamepadButton>,
@@ -178,6 +180,7 @@ impl InputState {
                 self.mouse_delta.0 += delta_x;
                 self.mouse_delta.1 += delta_y;
             }
+            PlatformEvent::TextInput { character } => self.typed_text.push(character),
             PlatformEvent::FocusChanged { focused: false } => {
                 self.released_keys.extend(self.held_keys.drain());
                 self.released_buttons.extend(self.held_buttons.drain());
@@ -206,22 +209,35 @@ impl InputState {
         self.released_gamepad.clear();
         self.scroll_delta = (0.0, 0.0);
         self.mouse_delta = (0.0, 0.0);
+        self.typed_text.clear();
+    }
+
+    /// The characters typed this tick, in order.
+    pub fn typed_text(&self) -> &str {
+        &self.typed_text
+    }
+
+    /// While captured, keys read as not held, pressed or released, because the
+    /// player is typing into a text field rather than playing. Their real
+    /// state is still tracked.
+    pub fn set_keyboard_captured(&mut self, captured: bool) {
+        self.keyboard_captured = captured;
     }
 
     /// `true` while `key` is held down.
     pub fn is_key_held(&self, key: KeyCode) -> bool {
-        self.held_keys.contains(&key)
+        !self.keyboard_captured && self.held_keys.contains(&key)
     }
 
     /// `true` on the tick `key` transitioned from released to pressed
     /// (excludes OS auto-repeat).
     pub fn is_key_pressed(&self, key: KeyCode) -> bool {
-        self.pressed_keys.contains(&key)
+        !self.keyboard_captured && self.pressed_keys.contains(&key)
     }
 
     /// `true` on the tick `key` transitioned from pressed to released.
     pub fn is_key_released(&self, key: KeyCode) -> bool {
-        self.released_keys.contains(&key)
+        !self.keyboard_captured && self.released_keys.contains(&key)
     }
 
     /// `true` while `button` is held down.
@@ -307,6 +323,25 @@ mod tests {
         });
         assert!(!input.is_key_held(KeyCode::KeyW));
         assert!(input.is_key_released(KeyCode::KeyW));
+    }
+
+    #[test]
+    fn a_captured_keyboard_reads_as_idle_but_keeps_its_real_state() {
+        let mut input = InputState::new();
+        input.set_keyboard_captured(true);
+        input.apply_event(&PlatformEvent::KeyboardInput {
+            key: KeyCode::KeyW,
+            pressed: true,
+            repeat: false,
+        });
+        input.apply_event(&PlatformEvent::TextInput { character: 'w' });
+        assert!(!input.is_key_held(KeyCode::KeyW));
+        assert!(!input.is_key_pressed(KeyCode::KeyW));
+        assert_eq!(input.typed_text(), "w");
+        input.end_frame();
+        assert_eq!(input.typed_text(), "");
+        input.set_keyboard_captured(false);
+        assert!(input.is_key_held(KeyCode::KeyW));
     }
 
     #[test]

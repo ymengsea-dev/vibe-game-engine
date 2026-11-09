@@ -596,21 +596,110 @@ pub enum UiAnchor {
     BottomRight,
 }
 
-/// The two authorable game UI widgets in this scene format.
+/// The authorable game UI widgets in this scene format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiKind {
     /// Read-only text.
     Label,
     /// Clickable text on a colored rectangle.
     Button,
+    /// A colored rectangle, usually behind other elements.
+    Panel,
+    /// A picture from Project Assets.
+    Image,
+    /// A bar that shows how far a variable lies between `min` and `max`.
+    ProgressBar,
+    /// A value the player drags, stored in a variable.
+    Slider,
+    /// An on/off box with a caption, stored in a variable as 1 or 0.
+    Toggle,
+    /// A field the player types into.
+    TextInput,
+    /// Lists its child elements one after another.
+    Layout,
 }
 
-/// One label or button, positioned in pixels relative to the game window.
+impl UiKind {
+    /// Whether this element shows text a rule or script can change.
+    pub fn has_text(self) -> bool {
+        matches!(
+            self,
+            Self::Label | Self::Button | Self::Toggle | Self::TextInput
+        )
+    }
+
+    /// Whether this element raises `UiClicked`: a button when clicked, a text
+    /// field when the player presses Enter in it.
+    pub fn raises_clicks(self) -> bool {
+        matches!(self, Self::Button | Self::TextInput)
+    }
+
+    /// Whether this element shows or changes a variable.
+    pub fn uses_variable(self) -> bool {
+        matches!(self, Self::ProgressBar | Self::Slider | Self::Toggle)
+    }
+}
+
+/// Which way a [`UiKind::Layout`] lists its children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum UiLayoutDirection {
+    /// Top to bottom.
+    #[default]
+    Vertical,
+    /// Left to right.
+    Horizontal,
+}
+
+fn default_ui_font_size() -> f32 {
+    engine_ui::DEFAULT_FONT_SIZE
+}
+
+fn is_default_ui_font_size(size: &f32) -> bool {
+    *size == default_ui_font_size()
+}
+
+fn default_ui_text_color() -> [f32; 4] {
+    [1.0; 4]
+}
+
+fn is_default_ui_text_color(color: &[f32; 4]) -> bool {
+    *color == default_ui_text_color()
+}
+
+fn default_ui_fill_color() -> [f32; 4] {
+    [0.35, 0.75, 0.45, 1.0]
+}
+
+fn is_default_ui_fill_color(color: &[f32; 4]) -> bool {
+    *color == default_ui_fill_color()
+}
+
+fn default_ui_max() -> f32 {
+    1.0
+}
+
+fn is_default_ui_max(max: &f32) -> bool {
+    *max == default_ui_max()
+}
+
+fn is_zero(value: &f32) -> bool {
+    *value == 0.0
+}
+
+fn is_vertical(direction: &UiLayoutDirection) -> bool {
+    *direction == UiLayoutDirection::Vertical
+}
+
+/// One game UI element, positioned in pixels relative to the game window, or
+/// to its parent when its parent is also a UI element.
+///
+/// Every field after `color` is optional in a scene file and only written when
+/// it differs from its default, so older scenes read and save unchanged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiElementData {
-    /// Label or button.
+    /// Which widget this is.
     pub kind: UiKind,
-    /// Visible caption.
+    /// Visible caption, or a text field's starting text.
     pub text: String,
     /// Screen edge or point used for placement.
     pub anchor: UiAnchor,
@@ -618,8 +707,60 @@ pub struct UiElementData {
     pub offset: [f32; 2],
     /// Width and height in screen pixels.
     pub size: [f32; 2],
-    /// Linear RGBA text color for labels, background color for buttons.
+    /// RGBA as seen on screen. Text color for labels, image tint for images, and the
+    /// background for everything else.
     pub color: [f32; 4],
+    /// Text height in pixels.
+    #[serde(
+        default = "default_ui_font_size",
+        skip_serializing_if = "is_default_ui_font_size"
+    )]
+    pub font_size: f32,
+    /// Text color for buttons, toggles and text fields.
+    #[serde(
+        default = "default_ui_text_color",
+        skip_serializing_if = "is_default_ui_text_color"
+    )]
+    pub text_color: [f32; 4],
+    /// Roundness of the corners in pixels.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub corner_radius: f32,
+    /// Whether the text uses the heavier font.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bold: bool,
+    /// Filled part of a bar or slider, and the mark of a toggle.
+    #[serde(
+        default = "default_ui_fill_color",
+        skip_serializing_if = "is_default_ui_fill_color"
+    )]
+    pub fill_color: [f32; 4],
+    /// The picture of a [`UiKind::Image`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<AssetRef>,
+    /// The gameplay variable a bar shows, or a slider or toggle changes.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub variable: String,
+    /// Value at the empty end of a bar or slider.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub min: f32,
+    /// Value at the full end of a bar or slider.
+    #[serde(default = "default_ui_max", skip_serializing_if = "is_default_ui_max")]
+    pub max: f32,
+    /// A slider's values snap to multiples of this from `min`; `0` means no snapping.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub step: f32,
+    /// Shown in an empty text field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub placeholder: String,
+    /// Which way a layout lists its children.
+    #[serde(default, skip_serializing_if = "is_vertical")]
+    pub direction: UiLayoutDirection,
+    /// Pixels between a layout's children.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub gap: f32,
+    /// Pixels between a layout's edge and its children.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub padding: f32,
 }
 
 /// Carries authored UI data on a named scene entity in the editor world.
@@ -911,6 +1052,18 @@ pub enum RuleAction {
         /// Project-relative `scenes/*.ron` path.
         path: String,
     },
+    /// Load a scene on top of this one.
+    LoadScene {
+        /// Project-relative `scenes/*.ron` path.
+        path: String,
+    },
+    /// Remove a scene that was loaded on top.
+    UnloadScene {
+        /// Project-relative `scenes/*.ron` path.
+        path: String,
+    },
+    /// Go to the next scene in the project's scene order.
+    NextScene,
     /// Show or hide an object.
     SetVisible {
         /// Stable ID of the object.
@@ -1190,6 +1343,35 @@ pub struct SiblingOrder(pub u64);
 #[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq, Eq)]
 pub struct SceneObjectId(pub String);
 
+/// The tags an object carries, as authored.
+#[derive(bevy_ecs::component::Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SceneTags(pub Vec<String>);
+
+/// Marks a top-level object that survives scene changes.
+#[derive(bevy_ecs::component::Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeepBetweenScenes;
+
+/// The extra scene file a live object belongs to, with several open in Studio.
+/// See [`SceneEntity::open_from`].
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq, Eq)]
+pub struct SceneFileOwner(pub String);
+
+/// Where a placed prefab copy came from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefabLink {
+    /// Project-relative `assets/prefabs/*.prefab` path.
+    pub path: String,
+    /// This object's ID inside the prefab file.
+    pub member: String,
+    /// The fields this copy changed, by name; everything else follows the prefab.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<String>,
+}
+
+/// The [`PrefabLink`] of a live object.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq, Eq)]
+pub struct ScenePrefabLink(pub PrefabLink);
+
 /// Authored scene-wide daylight. Absent in older scenes, which retain the
 /// host application's existing lighting defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1449,10 +1631,6 @@ pub struct SceneEntity {
     /// pre-existing scene files parse unchanged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: bool,
-    /// Whether the editor has marked this entity static. Additive and
-    /// optional, like `disabled`.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub is_static: bool,
     /// Whether the editor has locked this entity (gizmo / batch move /
     /// reparent-drag skip it). Additive and optional, like `disabled`.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1475,6 +1653,21 @@ pub struct SceneEntity {
     /// Event/action rules owned by this object; absent in older scenes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<RuleData>,
+    /// Labels scripts use to find groups of objects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Whether this object survives scene changes. Only honoured on a
+    /// top-level object; children go with their parent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub keep_between_scenes: bool,
+    /// The prefab this object is a linked copy of, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefab: Option<PrefabLink>,
+    /// In Studio with several scenes open, the scene file this object is
+    /// saved to, when it isn't the main one. Never written to a file: the file
+    /// an object is in says this already.
+    #[serde(skip)]
+    pub open_from: Option<String>,
 }
 
 /// `#[serde(skip_serializing_if)]` predicate for a `bool` that defaults

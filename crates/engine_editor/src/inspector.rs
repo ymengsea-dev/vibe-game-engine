@@ -4,7 +4,7 @@
 //! Component types the panel knows how to show, add, and remove live in
 //! a `const` table of function pointers (`REGISTRY`), so a new type is
 //! one entry. The identity header shows the entity id, an editable
-//! [`Name`], and the [`Static`]/[`Disabled`] markers. Get/set helpers
+//! [`Name`], and the [`Disabled`] marker. Get/set helpers
 //! ([`name_of`], [`set_name`], [`transform_of`], [`set_transform`]) stay
 //! split out from the egui drawing so they're unit-testable without a
 //! live UI — the same separation [`crate::hierarchy`] uses; the Scene
@@ -12,7 +12,7 @@
 
 use engine_ecs::components::{
     ActiveCamera, AssetSource, Camera, CameraFollow, Disabled, Lock, MeshSource, Name, Script,
-    Sprite, SpriteSource, Static, Transform, WaterVolume,
+    Sprite, SpriteSource, Transform, WaterVolume,
 };
 use engine_ecs::prelude::{Component, Entity, With, World};
 use engine_utils::Transform as MathTransform;
@@ -338,6 +338,9 @@ enum RuleActionKind {
     Event,
     Variable,
     ChangeScene,
+    LoadScene,
+    UnloadScene,
+    NextScene,
     Visible,
     Enabled,
     Spawn,
@@ -358,7 +361,10 @@ fn rule_target_matches(world: &World, entity: Entity, kind: RuleActionKind) -> b
     world.get::<Name>(entity).is_some()
         && match kind {
             RuleActionKind::Text => {
-                world.get::<Disabled>(entity).is_none() && world.get::<SceneUi>(entity).is_some()
+                world.get::<Disabled>(entity).is_none()
+                    && world
+                        .get::<SceneUi>(entity)
+                        .is_some_and(|element| element.0.kind.has_text())
             }
             RuleActionKind::Audio => {
                 world.get::<Disabled>(entity).is_none()
@@ -371,6 +377,9 @@ fn rule_target_matches(world: &World, entity: Entity, kind: RuleActionKind) -> b
             RuleActionKind::Event
             | RuleActionKind::Variable
             | RuleActionKind::ChangeScene
+            | RuleActionKind::LoadScene
+            | RuleActionKind::UnloadScene
+            | RuleActionKind::NextScene
             | RuleActionKind::State => false,
         }
 }
@@ -506,7 +515,7 @@ fn add_visual_rule(
     }
     let owner_is_button = world
         .get::<SceneUi>(owner)
-        .is_some_and(|ui| ui.0.kind == UiKind::Button);
+        .is_some_and(|ui| ui.0.kind.raises_clicks());
     let trigger = preferred_trigger.unwrap_or_else(|| {
         if owner_is_button {
             RuleTrigger::UiClicked
@@ -552,6 +561,13 @@ fn add_visual_rule(
         RuleActionKind::ChangeScene => RuleAction::ChangeScene {
             path: "scenes/level2.ron".into(),
         },
+        RuleActionKind::LoadScene => RuleAction::LoadScene {
+            path: "scenes/level2.ron".into(),
+        },
+        RuleActionKind::UnloadScene => RuleAction::UnloadScene {
+            path: "scenes/level2.ron".into(),
+        },
+        RuleActionKind::NextScene => RuleAction::NextScene,
         RuleActionKind::Visible => {
             let Some(target) = target else { return false };
             RuleAction::SetVisible {
@@ -626,6 +642,31 @@ fn rule_target_picker(
                 ui.selectable_value(target, id.clone(), name);
             }
         });
+}
+
+/// Picks one of the project's scenes, or takes a typed path when the list isn't
+/// known. A path that isn't a scene is shown as missing.
+fn scene_picker(ui: &mut egui::Ui, salt: (Entity, usize), path: &mut String, scenes: &[String]) {
+    if scenes.is_empty() {
+        crate::widgets::text_field(ui, path, "scenes/level2.ron");
+        return;
+    }
+    let shown = if scenes.contains(path) {
+        scene_label(path)
+    } else {
+        format!("Missing: {}", scene_label(path))
+    };
+    choice(("visual_rule_scene", salt), ui)
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            for scene in scenes {
+                ui.selectable_value(path, scene.clone(), scene_label(scene));
+            }
+        });
+}
+
+fn scene_label(path: &str) -> String {
+    crate::state::scene_display_name(std::path::Path::new(path))
 }
 
 /// Picks one of `options`, or "Any object" for `None`.
@@ -742,7 +783,13 @@ struct RuleTargets<'a> {
     text: &'a [(String, String)],
     audio: &'a [(String, String)],
     objects: &'a [(String, String)],
+    scenes: &'a [String],
 }
+
+/// The project's scene files, for the "Go to scene" picker. The shell keeps
+/// this resource up to date; it is not saved with the scene.
+#[derive(bevy_ecs::resource::Resource, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectScenes(pub Vec<String>);
 
 fn rule_fields(
     ui: &mut egui::Ui,
@@ -756,6 +803,7 @@ fn rule_fields(
         text: text_targets,
         audio: audio_targets,
         objects: object_targets,
+        scenes,
     } = *targets;
     property_row(ui, "When", |ui| {
         choice(("visual_rule_trigger", entity, index), ui)
@@ -804,8 +852,21 @@ fn rule_fields(
         }
         RuleAction::ChangeScene { path } => {
             property_row(ui, "Go to scene", |ui| {
-                crate::widgets::text_field(ui, path, "scenes/level2.ron");
+                scene_picker(ui, salt, path, scenes);
             });
+        }
+        RuleAction::LoadScene { path } => {
+            property_row(ui, "Load on top", |ui| {
+                scene_picker(ui, salt, path, scenes);
+            });
+        }
+        RuleAction::UnloadScene { path } => {
+            property_row(ui, "Unload", |ui| {
+                scene_picker(ui, salt, path, scenes);
+            });
+        }
+        RuleAction::NextScene => {
+            note(ui, "Goes to the scene after this one in the Scenes window.");
         }
         RuleAction::SetVisible { target, visible } => {
             property_row(ui, "Object", |ui| {
@@ -2188,101 +2249,26 @@ const REGISTRY: &[ComponentUi] = &[
             }
         },
         remove: strip::<SceneUi>,
-        inspect: |world, entity, ui, _assets| {
+        inspect: |world, entity, ui, assets| {
             let Some(mut data) = world.get::<SceneUi>(entity).map(|value| value.0.clone()) else {
                 return false;
             };
-            let mut changed = false;
-            property_row(ui, "Widget", |ui| {
-                choice(("game_ui_widget", entity), ui)
-                    .selected_text(match data.kind {
-                        UiKind::Label => "Label",
-                        UiKind::Button => "Button",
-                    })
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_value(&mut data.kind, UiKind::Label, "Label")
-                            .changed()
-                        {
-                            data.color = UiElementData::label().color;
-                            changed = true;
-                        }
-                        if ui
-                            .selectable_value(&mut data.kind, UiKind::Button, "Button")
-                            .changed()
-                        {
-                            data.color = UiElementData::button().color;
-                            changed = true;
-                        }
-                    });
-            });
-            property_row(ui, "Text", |ui| {
-                changed |= crate::widgets::text_field(ui, &mut data.text, "").changed();
-            });
-            property_row(ui, "Anchor", |ui| {
-                choice(("game_ui_anchor", entity), ui)
-                    .selected_text(format!("{:?}", data.anchor))
-                    .show_ui(ui, |ui| {
-                        for anchor in [
-                            UiAnchor::TopLeft,
-                            UiAnchor::Top,
-                            UiAnchor::TopRight,
-                            UiAnchor::Left,
-                            UiAnchor::Center,
-                            UiAnchor::Right,
-                            UiAnchor::BottomLeft,
-                            UiAnchor::Bottom,
-                            UiAnchor::BottomRight,
-                        ] {
-                            changed |= ui
-                                .selectable_value(&mut data.anchor, anchor, format!("{anchor:?}"))
-                                .changed();
-                        }
-                    });
-            });
-            for (label, values) in [("Offset", &mut data.offset), ("Size", &mut data.size)] {
-                property_row(ui, label, |ui| {
-                    for value in values {
-                        let mut control = egui::DragValue::new(value).speed(1.0);
-                        if label == "Size" {
-                            control = control.range(1.0..=10000.0);
-                        }
-                        changed |= number(ui, control).changed();
-                    }
-                });
-            }
-            property_row(
-                ui,
-                if data.kind == UiKind::Label {
-                    "Text color"
-                } else {
-                    "Background"
-                },
-                |ui| {
-                    changed |= ui
-                        .color_edit_button_rgba_unmultiplied(&mut data.color)
-                        .changed();
-                },
-            );
-            if data.kind == UiKind::Button
-                && let Some(id) = world.get::<engine_scene::SceneObjectId>(entity)
-            {
-                property_row(ui, "Click ID", |ui| {
-                    if ui.button("Copy").clicked() {
-                        ui.ctx().copy_text(id.0.clone());
-                    }
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(id.0.as_str()).color(crate::theme::NIGHT.subtle),
-                        )
-                        .truncate(),
-                    );
-                });
-            }
-            if data.text.len() > 1024 {
+            let in_layout = in_ui_layout(world, entity);
+            let object_id = world
+                .get::<engine_scene::SceneObjectId>(entity)
+                .map(|id| id.0.clone());
+            let changed = game_ui_rows(ui, entity, &mut data, in_layout, object_id, assets);
+            if data.text.len() > 1024 || data.placeholder.len() > 1024 {
                 ui.colored_label(
                     crate::theme::NIGHT.danger,
                     "Text is too long for a scene UI element",
+                );
+                return false;
+            }
+            if !data.variable.is_empty() && !engine_scene::valid_variable_name(&data.variable) {
+                ui.colored_label(
+                    crate::theme::NIGHT.danger,
+                    "A variable name is at most 64 characters",
                 );
                 return false;
             }
@@ -2358,6 +2344,256 @@ fn released_asset(ui: &mut egui::Ui, expected: AssetKind) -> Option<std::path::P
         ui.weak(format!("Drop {} asset here", expected.label()));
     }
     None
+}
+
+/// Whether `entity`'s nearest UI ancestor is a Layout, which then places it.
+fn in_ui_layout(world: &World, entity: Entity) -> bool {
+    let mut current = world
+        .get::<bevy_ecs::hierarchy::ChildOf>(entity)
+        .map(bevy_ecs::hierarchy::ChildOf::parent);
+    while let Some(ancestor) = current {
+        if let Some(element) = world.get::<SceneUi>(ancestor) {
+            return element.0.kind == UiKind::Layout;
+        }
+        current = world
+            .get::<bevy_ecs::hierarchy::ChildOf>(ancestor)
+            .map(bevy_ecs::hierarchy::ChildOf::parent);
+    }
+    false
+}
+
+/// The Game UI section's rows for one element. Returns whether anything changed.
+fn game_ui_rows(
+    ui: &mut egui::Ui,
+    entity: Entity,
+    data: &mut UiElementData,
+    in_layout: bool,
+    object_id: Option<String>,
+    assets: &AssetIndex,
+) -> bool {
+    let mut changed = false;
+    property_row(ui, "Widget", |ui| {
+        choice(("game_ui_widget", entity), ui)
+            .selected_text(crate::menu::ui_kind_name(data.kind))
+            .show_ui(ui, |ui| {
+                for kind in crate::menu::UI_KINDS {
+                    if ui
+                        .selectable_label(data.kind == kind, crate::menu::ui_kind_name(kind))
+                        .clicked()
+                        && data.kind != kind
+                    {
+                        // A new look and range, but it stays where it was
+                        // and keeps its words.
+                        let fresh = UiElementData::for_kind(kind);
+                        *data = UiElementData {
+                            text: std::mem::take(&mut data.text),
+                            anchor: data.anchor,
+                            offset: data.offset,
+                            ..fresh
+                        };
+                        changed = true;
+                    }
+                }
+            });
+    });
+    if data.kind.has_text() {
+        let label = if data.kind == UiKind::TextInput {
+            "Starting text"
+        } else {
+            "Text"
+        };
+        property_row(ui, label, |ui| {
+            changed |= crate::widgets::text_field(ui, &mut data.text, "").changed();
+        });
+        if data.kind == UiKind::TextInput {
+            property_row(ui, "Hint", |ui| {
+                changed |= crate::widgets::text_field(ui, &mut data.placeholder, "").changed();
+            });
+        }
+        property_row(ui, "Font size", |ui| {
+            changed |= number(
+                ui,
+                egui::DragValue::new(&mut data.font_size)
+                    .speed(0.5)
+                    .range(4.0..=256.0),
+            )
+            .changed();
+        });
+    }
+    if data.kind.has_text() {
+        property_row(ui, "Bold", |ui| {
+            changed |= ui.checkbox(&mut data.bold, "").changed();
+        });
+    }
+    if data.kind == UiKind::Image {
+        let name = data
+            .image
+            .as_ref()
+            .and_then(|image| crate::assets::parse_asset_id(&image.id))
+            .and_then(|id| assets.path_for(id))
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("No image — drop a PNG or JPEG");
+        if let Some(path) = sprite_image_slot(ui, name)
+            && let Some(id) = assets.id_for(&path)
+        {
+            data.image = Some(engine_scene::AssetRef { id: id.to_string() });
+            changed = true;
+        }
+    }
+    if in_layout {
+        property_row(ui, "Position", |ui| {
+            ui.label(egui::RichText::new("Set by the Layout").color(crate::theme::NIGHT.subtle));
+        });
+    } else {
+        property_row(ui, "Anchor", |ui| {
+            choice(("game_ui_anchor", entity), ui)
+                .selected_text(format!("{:?}", data.anchor))
+                .show_ui(ui, |ui| {
+                    for anchor in [
+                        UiAnchor::TopLeft,
+                        UiAnchor::Top,
+                        UiAnchor::TopRight,
+                        UiAnchor::Left,
+                        UiAnchor::Center,
+                        UiAnchor::Right,
+                        UiAnchor::BottomLeft,
+                        UiAnchor::Bottom,
+                        UiAnchor::BottomRight,
+                    ] {
+                        changed |= ui
+                            .selectable_value(&mut data.anchor, anchor, format!("{anchor:?}"))
+                            .changed();
+                    }
+                });
+        });
+        property_row(ui, "Offset", |ui| {
+            for value in &mut data.offset {
+                changed |= number(ui, egui::DragValue::new(value).speed(1.0)).changed();
+            }
+        });
+    }
+    property_row(ui, "Size", |ui| {
+        for value in &mut data.size {
+            changed |= number(
+                ui,
+                egui::DragValue::new(value).speed(1.0).range(1.0..=10000.0),
+            )
+            .changed();
+        }
+    });
+    if !matches!(data.kind, UiKind::Label | UiKind::Slider) {
+        property_row(ui, "Corner radius", |ui| {
+            changed |= number(
+                ui,
+                egui::DragValue::new(&mut data.corner_radius)
+                    .speed(0.5)
+                    .range(0.0..=10000.0),
+            )
+            .changed();
+        });
+    }
+    let main_color = match data.kind {
+        UiKind::Label => "Text color",
+        UiKind::Image => "Tint",
+        _ => "Background",
+    };
+    property_row(ui, main_color, |ui| {
+        changed |= ui
+            .color_edit_button_rgba_unmultiplied(&mut data.color)
+            .changed();
+    });
+    if matches!(
+        data.kind,
+        UiKind::Button | UiKind::Toggle | UiKind::TextInput
+    ) {
+        property_row(ui, "Text color", |ui| {
+            changed |= ui
+                .color_edit_button_rgba_unmultiplied(&mut data.text_color)
+                .changed();
+        });
+    }
+    if data.kind.uses_variable() {
+        property_row(ui, "Fill", |ui| {
+            changed |= ui
+                .color_edit_button_rgba_unmultiplied(&mut data.fill_color)
+                .changed();
+        });
+        property_row(ui, "Variable", |ui| {
+            changed |= crate::widgets::text_field(ui, &mut data.variable, "health").changed();
+        });
+    }
+    if matches!(data.kind, UiKind::ProgressBar | UiKind::Slider) {
+        property_row(ui, "Range", |ui| {
+            changed |= number(ui, egui::DragValue::new(&mut data.min).speed(0.1)).changed();
+            changed |= number(ui, egui::DragValue::new(&mut data.max).speed(0.1)).changed();
+        });
+        // The scene format needs max above min.
+        if data.max <= data.min {
+            data.max = data.min + 1.0;
+        }
+    }
+    if data.kind == UiKind::Slider {
+        property_row(ui, "Step", |ui| {
+            changed |= number(
+                ui,
+                egui::DragValue::new(&mut data.step)
+                    .speed(0.01)
+                    .range(0.0..=f32::MAX),
+            )
+            .changed();
+        });
+    }
+    if data.kind == UiKind::Layout {
+        property_row(ui, "Direction", |ui| {
+            choice(("game_ui_direction", entity), ui)
+                .selected_text(format!("{:?}", data.direction))
+                .show_ui(ui, |ui| {
+                    for direction in [
+                        engine_scene::UiLayoutDirection::Vertical,
+                        engine_scene::UiLayoutDirection::Horizontal,
+                    ] {
+                        changed |= ui
+                            .selectable_value(
+                                &mut data.direction,
+                                direction,
+                                format!("{direction:?}"),
+                            )
+                            .changed();
+                    }
+                });
+        });
+        for (label, value) in [("Gap", &mut data.gap), ("Padding", &mut data.padding)] {
+            property_row(ui, label, |ui| {
+                changed |= number(
+                    ui,
+                    egui::DragValue::new(value).speed(0.5).range(0.0..=10000.0),
+                )
+                .changed();
+            });
+        }
+    }
+    if (data.kind.raises_clicks())
+        && let Some(id) = object_id
+    {
+        let label = if data.kind == UiKind::Button {
+            "Click ID"
+        } else {
+            "Field ID"
+        };
+        property_row(ui, label, |ui| {
+            if ui.button("Copy").clicked() {
+                ui.ctx().copy_text(id.clone());
+            }
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(id.as_str()).color(crate::theme::NIGHT.subtle),
+                )
+                .truncate(),
+            );
+        });
+    }
+    changed
 }
 
 fn sprite_image_slot(ui: &mut egui::Ui, name: &str) -> Option<std::path::PathBuf> {
@@ -2445,6 +2681,27 @@ pub fn show(
     inspector_style(ui.style_mut());
 
     identity_header(ui, world, entity);
+    // A locked object is shown but can't be changed; only its Locked tick works.
+    let locked = has::<Lock>(world, entity);
+    if locked {
+        note(ui, "Locked. Untick Locked to change this object.");
+    }
+    ui.add_enabled_ui(!locked, |ui| {
+        show_body(ui, world, entity, others, batch_edit, assets, open_script);
+    });
+}
+
+/// Everything under the identity header.
+fn show_body(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    entity: Entity,
+    others: &[Entity],
+    batch_edit: &mut bool,
+    assets: &AssetIndex,
+    open_script: &mut Option<String>,
+) {
+    let palette = crate::theme::NIGHT;
     let multi = !others.is_empty();
     if multi {
         ui.horizontal_wrapped(|ui| {
@@ -2493,7 +2750,9 @@ pub fn show(
             (component.remove)(world, entity);
         } else if changed && apply_to_all {
             for &other in others {
-                (component.copy_to)(world, entity, other);
+                if !has::<Lock>(world, other) {
+                    (component.copy_to)(world, entity, other);
+                }
             }
         }
     }
@@ -2566,10 +2825,13 @@ pub fn show(
     let before = rules.clone();
     let owner_is_button = world
         .get::<SceneUi>(entity)
-        .is_some_and(|value| value.0.kind == UiKind::Button);
+        .is_some_and(|value| value.0.kind.raises_clicks());
     let text_targets = rule_targets(world, RuleActionKind::Text);
     let audio_targets = rule_targets(world, RuleActionKind::Audio);
     let object_targets = rule_targets(world, RuleActionKind::Destroy);
+    let scenes = world
+        .get_resource::<ProjectScenes>()
+        .map_or_else(Vec::new, |list| list.0.clone());
     let has_text_target = world
         .iter_entities()
         .any(|candidate| rule_target_matches(world, candidate.id(), RuleActionKind::Text));
@@ -2603,6 +2865,9 @@ pub fn show(
                         ("Emit an event", RuleActionKind::Event, true),
                         ("Change a variable", RuleActionKind::Variable, true),
                         ("Change scene", RuleActionKind::ChangeScene, true),
+                        ("Load a scene on top", RuleActionKind::LoadScene, true),
+                        ("Unload a scene", RuleActionKind::UnloadScene, true),
+                        ("Go to the next scene", RuleActionKind::NextScene, true),
                         (
                             "Show or hide object",
                             RuleActionKind::Visible,
@@ -2668,6 +2933,7 @@ pub fn show(
                             text: &text_targets,
                             audio: &audio_targets,
                             objects: &object_targets,
+                            scenes: &scenes,
                         },
                     );
                 });
@@ -2681,6 +2947,7 @@ pub fn show(
             text_targets: &text_targets,
             audio_targets: &audio_targets,
             object_targets: &object_targets,
+            scenes: &scenes,
             owner_is_button,
             can_add_rule,
             add_rule: &mut add_rule,
@@ -2932,14 +3199,15 @@ fn component_frame() -> egui::Frame {
 }
 
 /// The object's identity, above its sections: its name as a larger field,
-/// its id, and the Static / Disabled / Locked markers.
+/// its id, and the Disabled / Locked markers.
 fn identity_header(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
     let palette = crate::theme::NIGHT;
+    let locked = has::<Lock>(world, entity);
     let mut name = name_of(world, entity).unwrap_or_default();
     let field = crate::widgets::field(ui, &mut name, 14.0, 30.0)
         .hint_text("Name")
         .desired_width(ui.available_width());
-    let field = ui.add(field);
+    let field = ui.add_enabled(!locked, field);
     if field.changed() {
         set_name(world, entity, name);
     }
@@ -2950,19 +3218,97 @@ fn identity_header(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
     );
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 14.0;
-        let mut is_static = has::<Static>(world, entity);
-        if crate::widgets::checkbox(ui, &palette, &mut is_static, "Static").changed() {
-            toggle_marker::<Static>(world, entity, is_static);
-        }
         let mut disabled = has::<Disabled>(world, entity);
-        if crate::widgets::checkbox(ui, &palette, &mut disabled, "Disabled").changed() {
+        let disable = ui
+            .add_enabled_ui(!locked, |ui| {
+                crate::widgets::checkbox(ui, &palette, &mut disabled, "Disabled")
+            })
+            .inner;
+        if disable.changed() {
             toggle_marker::<Disabled>(world, entity, disabled);
         }
-        let mut locked = has::<Lock>(world, entity);
-        if crate::widgets::checkbox(ui, &palette, &mut locked, "Locked").changed() {
-            toggle_marker::<Lock>(world, entity, locked);
+        let mut lock_tick = locked;
+        if crate::widgets::checkbox(ui, &palette, &mut lock_tick, "Locked").changed() {
+            toggle_marker::<Lock>(world, entity, lock_tick);
+        }
+        // Only a top-level object can be kept; children go with their parent.
+        let top_level = world.get::<engine_ecs::prelude::ChildOf>(entity).is_none();
+        let mut kept = top_level && has::<engine_scene::KeepBetweenScenes>(world, entity);
+        let keep = ui
+            .add_enabled_ui(top_level && !locked, |ui| {
+                crate::widgets::checkbox(ui, &palette, &mut kept, "Keep between scenes")
+            })
+            .inner
+            .on_hover_text("This object stays when the game changes scene.")
+            .on_disabled_hover_text("A child object goes with its parent.");
+        if keep.changed() {
+            toggle_marker::<engine_scene::KeepBetweenScenes>(world, entity, kept);
         }
     });
+    ui.add_enabled_ui(!locked, |ui| tags_row(ui, world, entity));
+}
+
+/// The object's tags as removable chips, with a field to add one.
+fn tags_row(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
+    let palette = crate::theme::NIGHT;
+    let mut tags = world
+        .get::<engine_scene::SceneTags>(entity)
+        .map_or_else(Vec::new, |tags| tags.0.clone());
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        let mut removed = None;
+        for (index, tag) in tags.iter().enumerate() {
+            let chip = egui::Button::new(
+                egui::RichText::new(format!("{tag}  ×"))
+                    .size(11.5)
+                    .color(palette.text),
+            )
+            .fill(palette.accent_fill)
+            .corner_radius(9);
+            if ui.add(chip).on_hover_text("Remove this tag").clicked() {
+                removed = Some(index);
+            }
+        }
+        if let Some(index) = removed {
+            tags.remove(index);
+            changed = true;
+        }
+        let draft_id = ui.id().with(("new-tag", entity));
+        let mut draft: String = ui.data_mut(|data| data.get_temp(draft_id).unwrap_or_default());
+        let field = ui.add(
+            crate::widgets::field(ui, &mut draft, 11.5, 22.0)
+                .hint_text("Add tag")
+                .desired_width(84.0),
+        );
+        let submitted = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if submitted && add_tag(&mut tags, &draft) {
+            changed = true;
+            draft.clear();
+        }
+        ui.data_mut(|data| data.insert_temp(draft_id, draft));
+    });
+    if changed {
+        if tags.is_empty() {
+            toggle_marker::<engine_scene::SceneTags>(world, entity, false);
+        } else if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+            entity_mut.insert(engine_scene::SceneTags(tags));
+        }
+    }
+}
+
+/// Adds `text` to `tags` unless it is blank, too long, a repeat, or there are
+/// already as many as an object may have. Returns whether it was added.
+fn add_tag(tags: &mut Vec<String>, text: &str) -> bool {
+    let tag = text.trim();
+    let usable = !tag.is_empty()
+        && tag.len() <= engine_scene::MAX_TAG_BYTES
+        && tags.len() < engine_scene::MAX_TAGS
+        && !tags.iter().any(|existing| existing == tag);
+    if usable {
+        tags.push(tag.to_owned());
+    }
+    usable
 }
 
 /// Adds `T` when `present`, removes it otherwise. Despawn-safe.
@@ -4076,17 +4422,84 @@ mod tests {
         }
     }
 
+    /// Drags across the whole panel, row by row, and returns the object's position.
+    fn drag_over_inspector(world: &mut World, entity: Entity) -> Vec3 {
+        let ctx = egui::Context::default();
+        let (mut batch, mut script) = (false, None);
+        let assets = AssetIndex::new();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 400.0));
+        let mut frame = |world: &mut World, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    show(
+                        ui,
+                        world,
+                        Some(entity),
+                        &[],
+                        &mut batch,
+                        &assets,
+                        &mut script,
+                    )
+                },
+            );
+            output.textures_delta.clear();
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(world, Vec::new());
+        for y in (0..400).step_by(10) {
+            for x in (40..400).step_by(60) {
+                let start = egui::pos2(x as f32, y as f32);
+                let end = start + egui::vec2(40.0, 0.0);
+                frame(world, vec![egui::Event::PointerMoved(start)]);
+                frame(world, vec![button(start, true)]);
+                frame(world, vec![egui::Event::PointerMoved(end)]);
+                frame(world, vec![button(end, false)]);
+            }
+        }
+        world.get::<Transform>(entity).unwrap().0.translation
+    }
+
+    #[test]
+    fn dragging_changes_an_object_only_when_it_is_not_locked() {
+        let spawn = |world: &mut World| {
+            world
+                .spawn((
+                    Name::new("Rock"),
+                    Transform::from(MathTransform::from_translation(Vec3::ONE)),
+                ))
+                .id()
+        };
+        let mut world = World::new();
+        let open = spawn(&mut world);
+        assert_ne!(drag_over_inspector(&mut world, open), Vec3::ONE);
+
+        let mut world = World::new();
+        let locked = spawn(&mut world);
+        world.entity_mut(locked).insert(Lock);
+        assert_eq!(drag_over_inspector(&mut world, locked), Vec3::ONE);
+    }
+
     #[test]
     fn toggle_marker_adds_and_removes() {
         let mut world = World::new();
         let entity = world.spawn_empty().id();
-        assert!(!has::<Static>(&world, entity));
+        assert!(!has::<Disabled>(&world, entity));
 
-        toggle_marker::<Static>(&mut world, entity, true);
-        assert!(has::<Static>(&world, entity));
+        toggle_marker::<Disabled>(&mut world, entity, true);
+        assert!(has::<Disabled>(&world, entity));
 
-        toggle_marker::<Static>(&mut world, entity, false);
-        assert!(!has::<Static>(&world, entity));
+        toggle_marker::<Disabled>(&mut world, entity, false);
+        assert!(!has::<Disabled>(&world, entity));
     }
 
     #[test]
@@ -4094,7 +4507,7 @@ mod tests {
         let mut world = World::new();
         let entity = world.spawn_empty().id();
         world.despawn(entity);
-        toggle_marker::<Static>(&mut world, entity, true); // must not panic
+        toggle_marker::<Disabled>(&mut world, entity, true); // must not panic
     }
 
     #[test]

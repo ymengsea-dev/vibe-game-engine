@@ -23,7 +23,7 @@ pub use actions::{ActionMap, AxisBinding, Binding};
 pub use app::{PlatformHandler, RedrawPolicy, WakeHandle, Window, apply_cursor_lock, run_windowed};
 pub use config::WindowConfig;
 pub use error::PlatformError;
-pub use event::{KeyCode, MouseButton, PlatformEvent, map_window_event};
+pub use event::{KeyCode, MouseButton, PlatformEvent, map_window_event, typed_characters};
 pub use gamepad::{
     DEFAULT_DEADZONE, GamepadAxes, GamepadAxis, GamepadButton, GamepadUpdate, Gamepads, Stick,
     apply_axis_deadzone, apply_radial_deadzone,

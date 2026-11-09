@@ -93,6 +93,8 @@ impl Game for MyGame {
 /// Loads the exported game beside the executable, or the project when run from Studio.
 fn load_game() -> Result<MyGame, Box<dyn std::error::Error>> {
     let executable = executable_dir().ok_or("could not locate the game executable")?;
+    // The scene Studio's Play asked for, so "next scene" counts from it.
+    let requested = std::env::var("VGE_SCENE").ok();
     let (scene_path, assets, source) = if executable.join(EXPORT_SCENE_FILE).is_file() {
         let assets = open_export(&executable)
             .transpose()?
@@ -115,9 +117,11 @@ fn load_game() -> Result<MyGame, Box<dyn std::error::Error>> {
     let mut scene = Scene::load_from_file(Path::new(&scene_path))?;
     scene.validate()?;
     scene.assign_missing_object_ids();
-    Ok(MyGame {
-        gameplay: GameplayRuntime::new(scene, assets).with_scene_source(source),
-    })
+    let mut gameplay = GameplayRuntime::new(scene, assets).with_scene_source(source);
+    if let Some(path) = requested {
+        gameplay = gameplay.with_scene_path(path);
+    }
+    Ok(MyGame { gameplay })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

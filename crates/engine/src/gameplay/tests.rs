@@ -57,6 +57,81 @@ fn rust_code_can_spawn_move_and_set_variables_with_commands() {
 }
 
 #[test]
+fn sliders_and_toggles_write_variables_and_bars_read_them() {
+    use engine_scene::{SceneEntity, UiElementData};
+    use engine_ui::{PointerInput, Ui, Widget};
+
+    let element = |id: &str, data: UiElementData| SceneEntity {
+        object_id: Some(id.into()),
+        ui: Some(data),
+        ..Default::default()
+    };
+    let scene = Scene {
+        entities: vec![
+            element(
+                "slider",
+                UiElementData {
+                    anchor: engine_scene::UiAnchor::TopLeft,
+                    size: [100.0, 20.0],
+                    step: 0.1,
+                    variable: "volume".into(),
+                    ..UiElementData::slider()
+                },
+            ),
+            element(
+                "bar",
+                UiElementData {
+                    anchor: engine_scene::UiAnchor::BottomLeft,
+                    variable: "volume".into(),
+                    max: 1.0,
+                    ..UiElementData::progress_bar()
+                },
+            ),
+        ],
+        ..Default::default()
+    };
+    let mut ui = Ui::new(400.0, 300.0);
+    let nodes = scene.mount_ui(&mut ui);
+    let node = |id: &str| {
+        nodes
+            .iter()
+            .find_map(|(node, owner)| (owner == id).then_some(*node))
+            .expect("mounted")
+    };
+    let mut world = crate::prelude::World::new();
+    ui.layout();
+    ui.interact(PointerInput {
+        position: [30.0, 10.0],
+        pressed: true,
+        released: true,
+    });
+    store_ui_changes(&mut world, &mut ui);
+    assert_eq!(
+        world.resource::<RuleVariables>().get("volume"),
+        0.3,
+        "a tidy decimal, not a widened f32"
+    );
+    let bar_value = |ui: &Ui| match ui.node(node("bar")).expect("bar").widget {
+        Widget::ProgressBar { value, .. } => value,
+        _ => unreachable!(),
+    };
+    assert!((bar_value(&ui) - 0.3).abs() < 1e-6);
+
+    // A script's change reaches both, and is not taken for the player's.
+    world
+        .resource_mut::<RuleVariables>()
+        .set("volume", 0.9)
+        .expect("set");
+    store_ui_changes(&mut world, &mut ui);
+    assert!((bar_value(&ui) - 0.9).abs() < 1e-6);
+    assert!(matches!(
+        ui.node(node("slider")).expect("slider").widget,
+        Widget::Slider { value, .. } if (value - 0.9).abs() < 1e-6
+    ));
+    assert_eq!(world.resource::<RuleVariables>().get("volume"), 0.9);
+}
+
+#[test]
 fn invalid_requests_are_skipped_without_stopping_the_batch() {
     let mut world = crate::prelude::World::new();
     world.spawn((SceneObjectId("actor".into()), Transform::default()));
@@ -1218,4 +1293,138 @@ fn changes_merge_across_batches_until_taken() {
     runtime.record_state_changes(&mut world, &[set_state("paused")]);
     runtime.record_state_changes(&mut world, &[set_state("game_over")]);
     assert_eq!(runtime.take_state_change(), None);
+}
+
+/// The parts of `replace_scene` that need no window, in the same order.
+fn leave_scene(
+    world: &mut crate::prelude::World,
+    physics: &mut crate::physics::PhysicsWorld,
+) -> (
+    std::collections::HashSet<crate::prelude::Entity>,
+    Vec<engine_scene::SceneEntity>,
+) {
+    let keep = kept_objects(world);
+    let carried = Scene::capture_entities(world, &keep);
+    scenes::clear_physics_except(world, physics, &keep);
+    scenes::clear_world_except(world, &mut crate::prelude::RenderAssets::new(), &keep);
+    (keep, carried)
+}
+
+#[test]
+fn a_kept_object_survives_with_its_children_and_body() {
+    let mut world = crate::prelude::World::new();
+    let mut physics = crate::physics::PhysicsWorld::default();
+    let kept_body = spawn_body(
+        &mut world,
+        &mut physics,
+        "kept",
+        crate::physics::RigidBodyBuilder::dynamic(),
+    );
+    let gone_body = spawn_body(
+        &mut world,
+        &mut physics,
+        "gone",
+        crate::physics::RigidBodyBuilder::dynamic(),
+    );
+    let kept = find_object(&world, "kept").unwrap();
+    world
+        .entity_mut(kept)
+        .insert((engine_scene::KeepBetweenScenes, Name::new("Kept")));
+    let child = world
+        .spawn((
+            SceneObjectId("child".into()),
+            Name::new("Child"),
+            engine_ecs::prelude::ChildOf(kept),
+        ))
+        .id();
+
+    let (keep, carried) = leave_scene(&mut world, &mut physics);
+
+    assert_eq!(keep.len(), 2);
+    assert!(world.get_entity(kept).is_ok() && world.get_entity(child).is_ok());
+    assert!(find_object(&world, "gone").is_none());
+    assert!(physics.rapier.bodies.get(kept_body).is_some());
+    assert!(physics.rapier.bodies.get(gone_body).is_none());
+    // The child's parent index points into the carried list.
+    let child_data = carried
+        .iter()
+        .find(|entity| entity.object_id.as_deref() == Some("child"))
+        .unwrap();
+    let parent = child_data.parent.unwrap();
+    assert_eq!(carried[parent].object_id.as_deref(), Some("kept"));
+}
+
+#[test]
+fn only_a_top_level_object_is_kept_and_nothing_kept_resets_physics() {
+    let mut world = crate::prelude::World::new();
+    let mut physics = crate::physics::PhysicsWorld::default();
+    let body = spawn_body(
+        &mut world,
+        &mut physics,
+        "a",
+        crate::physics::RigidBodyBuilder::dynamic(),
+    );
+    let parent = world.spawn(SceneObjectId("parent".into())).id();
+    world.spawn((
+        SceneObjectId("child".into()),
+        engine_scene::KeepBetweenScenes,
+        engine_ecs::prelude::ChildOf(parent),
+    ));
+    let (keep, carried) = leave_scene(&mut world, &mut physics);
+    assert!(keep.is_empty() && carried.is_empty());
+    assert!(physics.rapier.bodies.get(body).is_none());
+    assert!(find_object(&world, "child").is_none());
+}
+
+#[test]
+fn tags_find_every_object_carrying_them() {
+    let mut world = crate::prelude::World::new();
+    world.spawn((
+        SceneObjectId("a".into()),
+        engine_scene::SceneTags(vec!["enemy".into(), "boss".into()]),
+    ));
+    world.spawn((
+        SceneObjectId("b".into()),
+        engine_scene::SceneTags(vec!["enemy".into()]),
+    ));
+    world.spawn(SceneObjectId("c".into()));
+    let mut enemies = find_objects_by_tag(&world, "enemy");
+    enemies.sort();
+    assert_eq!(enemies, ["a", "b"]);
+    assert!(find_objects_by_tag(&world, "nothing").is_empty());
+}
+
+#[test]
+fn the_next_scene_follows_the_order_and_skips_the_loading_screen() {
+    let order: Vec<String> = ["scenes/a.ron", "scenes/loading.ron", "scenes/b.ron"]
+        .map(str::to_owned)
+        .to_vec();
+    assert_eq!(
+        scenes::scene_after(&order, "scenes/a.ron").as_deref(),
+        Some("scenes/b.ron")
+    );
+    assert_eq!(scenes::scene_after(&order, "scenes/b.ron"), None);
+    assert_eq!(scenes::scene_after(&order, "scenes/other.ron"), None);
+}
+
+#[test]
+fn an_exported_game_reads_its_scene_order_back() {
+    let root = std::env::temp_dir().join(format!("vge-order-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let source = SceneSource::Export(root.clone());
+    assert!(
+        source.scene_order().order.is_empty(),
+        "a missing file is no order"
+    );
+    let saved = engine_project::build::ExportedSceneOrder {
+        start: "scenes/a.ron".into(),
+        order: vec!["scenes/a.ron".into(), "scenes/b.ron".into()],
+    };
+    std::fs::write(
+        root.join(engine_project::build::SCENE_ORDER_FILE),
+        ron::to_string(&saved).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(source.scene_order(), saved);
+    let _ = std::fs::remove_dir_all(root);
 }

@@ -171,6 +171,7 @@ mod sprite;
 mod terrain;
 mod text;
 mod texture;
+mod ui_font;
 mod ui_pass;
 mod vegetation;
 mod water;
@@ -226,7 +227,8 @@ pub use text::{
     TextLayout, covers, glyph_bitmap, layout_text,
 };
 pub use texture::{Texture, decode_rgba8};
-pub use ui_pass::{ScreenUniform, UiPipeline, UiQuad};
+pub use ui_font::{UiFont, UiGlyph, UiTextLayout};
+pub use ui_pass::{ScreenUniform, UiFrame, UiImage, UiPipeline, UiQuad, UiRun};
 pub use vegetation::{VegetationPipeline, Wind, WindBinding, WindUniform};
 pub use water::{
     MAX_WATER_IMPULSES, WaterBinding, WaterDraw, WaterFrame, WaterGpuUniform, WaterImpulse,

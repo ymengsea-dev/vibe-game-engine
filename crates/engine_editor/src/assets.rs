@@ -392,6 +392,58 @@ pub struct AssetBrowser {
     /// the `assets` root itself). Every other folder starts folded. Saved
     /// with the project's editor session.
     pub open_folders: std::collections::BTreeSet<PathBuf>,
+    /// The project's scenes, for the `scenes` folder. The shell fills this.
+    pub scenes: Vec<SceneRow>,
+    /// The groups of scenes, by name. The shell fills this.
+    pub scene_groups: Vec<String>,
+    /// What the `scenes` folder asked for; the shell carries it out.
+    pub scene_request: Option<SceneRowRequest>,
+}
+
+/// One scene in the `scenes` folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneRow {
+    /// Project-relative path.
+    pub path: PathBuf,
+    /// The name people read.
+    pub name: String,
+    /// It is the main open scene.
+    pub is_main: bool,
+    /// It is open beside the main scene.
+    pub is_beside: bool,
+    /// The game starts on it.
+    pub is_start: bool,
+    /// The group it is in.
+    pub group: Option<String>,
+}
+
+/// What a row or the `scenes` folder asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SceneRowRequest {
+    /// Open this scene and close the others.
+    Open(PathBuf),
+    /// Make this scene the working one, opening it if it's closed.
+    Work(PathBuf),
+    /// Open this scene together with what is open.
+    OpenBeside(PathBuf),
+    /// Close a scene open beside the main one.
+    Close(PathBuf),
+    /// Make the game start on this scene.
+    SetStart(PathBuf),
+    /// Ask for a new name for this scene.
+    Rename(PathBuf),
+    /// Move this scene into a group, or out of its group with `None`.
+    MoveToGroup(PathBuf, Option<String>),
+    /// Ask for a name and make a group, with this scene moved into it.
+    NewGroup(Option<PathBuf>),
+    /// Ask for a new name for this group.
+    RenameGroup(String),
+    /// Remove this group, keeping its scenes.
+    DeleteGroup(String),
+    /// Ask for a name and make a new scene.
+    New,
+    /// Show the Scenes window.
+    Manage,
 }
 
 impl Default for AssetBrowser {
@@ -414,6 +466,9 @@ impl Default for AssetBrowser {
             delete_confirmation: None,
             preview_open: true,
             open_folders: std::collections::BTreeSet::new(),
+            scenes: Vec::new(),
+            scene_groups: Vec::new(),
+            scene_request: None,
         }
     }
 }
@@ -578,6 +633,7 @@ pub fn show_scene(
         .max_height(ui.available_height().max(0.0))
         .min_scrolled_height(0.0)
         .show(ui, |ui| {
+            scenes_section(ui, browser);
             let root_id = ui.make_persistent_id("scene_asset_root");
             let mut state = folder_fold(
                 ui,
@@ -684,6 +740,7 @@ pub fn show(
                 ui.label("No assets found.");
                 return;
             }
+            scenes_section(ui, browser);
             match browser.view {
                 AssetView::Folders => {
                     let mut root = build_tree(entries);
@@ -1211,6 +1268,232 @@ fn folder_label(ui: &mut egui::Ui, name: &str) -> egui::Response {
     response
 }
 
+/// The `scenes` folder: every scene with its own icon. Click one to work on it,
+/// or right-click for more.
+fn scenes_section(ui: &mut egui::Ui, browser: &mut AssetBrowser) {
+    let id = ui.make_persistent_id("project_scenes_folder");
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+    let selection_shape = ui.painter().add(egui::Shape::Noop);
+    let header = ui.horizontal(|ui| {
+        tree_disclosure(ui, &mut state);
+        folder_label(ui, "scenes")
+    });
+    paint_folder_row(ui, selection_shape, header.response.rect, false);
+    let mut request = None;
+    header.inner.context_menu(|ui| {
+        crate::theme::style_context_menu(ui);
+        if ui.button("New Scene…").clicked() {
+            request = Some(SceneRowRequest::New);
+            ui.close();
+        }
+        if ui.button("New Group…").clicked() {
+            request = Some(SceneRowRequest::NewGroup(None));
+            ui.close();
+        }
+        if ui.button("Scene Order…").clicked() {
+            request = Some(SceneRowRequest::Manage);
+            ui.close();
+        }
+    });
+    let rows = browser.scenes.clone();
+    let groups = browser.scene_groups.clone();
+    state.show_body_indented(&header.response, ui, |ui| {
+        for group in &groups {
+            let members: Vec<&SceneRow> = rows
+                .iter()
+                .filter(|row| row.group.as_deref() == Some(group))
+                .collect();
+            if let Some(asked) = scene_group_section(ui, group, &members, &groups) {
+                request = Some(asked);
+            }
+        }
+        for row in rows.iter().filter(|row| row.group.is_none()) {
+            if let Some(asked) = scene_row(ui, row, &groups) {
+                request = Some(asked);
+            }
+        }
+    });
+    if request.is_some() {
+        browser.scene_request = request;
+    }
+}
+
+/// One group in the `scenes` folder, with its scenes under it.
+fn scene_group_section(
+    ui: &mut egui::Ui,
+    group: &str,
+    members: &[&SceneRow],
+    groups: &[String],
+) -> Option<SceneRowRequest> {
+    let id = ui.make_persistent_id(("project_scene_group", group));
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+    let selection_shape = ui.painter().add(egui::Shape::Noop);
+    let header = ui.horizontal(|ui| {
+        tree_disclosure(ui, &mut state);
+        folder_label(ui, group)
+    });
+    paint_folder_row(ui, selection_shape, header.response.rect, false);
+    let mut request = None;
+    header.inner.context_menu(|ui| {
+        crate::theme::style_context_menu(ui);
+        request = scene_group_menu_items(ui, group);
+    });
+    state.show_body_indented(&header.response, ui, |ui| {
+        for row in members {
+            if let Some(asked) = scene_row(ui, row, groups) {
+                request = Some(asked);
+            }
+        }
+    });
+    request
+}
+
+/// The right-click menu of a group of scenes.
+pub(crate) fn scene_group_menu_items(ui: &mut egui::Ui, group: &str) -> Option<SceneRowRequest> {
+    let mut request = None;
+    if ui.button("Rename Group…").clicked() {
+        request = Some(SceneRowRequest::RenameGroup(group.to_owned()));
+        ui.close();
+    }
+    if ui
+        .button("Delete Group")
+        .on_hover_text("The scenes stay, moved out of the group")
+        .clicked()
+    {
+        request = Some(SceneRowRequest::DeleteGroup(group.to_owned()));
+        ui.close();
+    }
+    request
+}
+
+/// The right-click menu items a scene has wherever it is listed.
+pub(crate) fn scene_menu_items(
+    ui: &mut egui::Ui,
+    path: &Path,
+    is_main: bool,
+    is_start: bool,
+    groups: &[String],
+) -> Option<SceneRowRequest> {
+    let mut request = None;
+    if ui
+        .add_enabled(!is_main, egui::Button::new("Open Only This Scene"))
+        .clicked()
+    {
+        request = Some(SceneRowRequest::Open(path.to_path_buf()));
+        ui.close();
+    }
+    let fixed = path == Path::new(engine_project::LOADING_SCENE);
+    if ui
+        .add_enabled(!fixed, egui::Button::new("Rename…"))
+        .clicked()
+    {
+        request = Some(SceneRowRequest::Rename(path.to_path_buf()));
+        ui.close();
+    }
+    ui.add_enabled_ui(!fixed, |ui| {
+        ui.menu_button("Move to Group", |ui| {
+            crate::theme::style_context_menu(ui);
+            let current = crate::state::scene_group_of(path);
+            for group in groups {
+                if ui
+                    .add_enabled(current.as_deref() != Some(group), egui::Button::new(group))
+                    .clicked()
+                {
+                    request = Some(SceneRowRequest::MoveToGroup(
+                        path.to_path_buf(),
+                        Some(group.clone()),
+                    ));
+                    ui.close();
+                }
+            }
+            if ui.button("New Group…").clicked() {
+                request = Some(SceneRowRequest::NewGroup(Some(path.to_path_buf())));
+                ui.close();
+            }
+            if current.is_some() && ui.button("Out of Its Group").clicked() {
+                request = Some(SceneRowRequest::MoveToGroup(path.to_path_buf(), None));
+                ui.close();
+            }
+        });
+    });
+    if ui
+        .add_enabled(!is_start, egui::Button::new("Set as Start Scene"))
+        .clicked()
+    {
+        request = Some(SceneRowRequest::SetStart(path.to_path_buf()));
+        ui.close();
+    }
+    request
+}
+
+fn scene_row(ui: &mut egui::Ui, row: &SceneRow, groups: &[String]) -> Option<SceneRowRequest> {
+    let response = ui
+        .add_sized(
+            [ui.available_width(), ui.spacing().interact_size.y],
+            egui::Button::selectable(
+                row.is_main,
+                (
+                    egui::Atom::default().atom_size(egui::vec2(16.0, 16.0)),
+                    row.name
+                        .clone()
+                        .atom_grow(true)
+                        .atom_align(egui::Align2::LEFT_CENTER),
+                ),
+            )
+            .truncate()
+            .sense(egui::Sense::click()),
+        )
+        .on_hover_text(match (row.is_main, row.is_start) {
+            (true, true) => "You are working on this scene. The game starts on it",
+            (true, false) => "You are working on this scene",
+            (false, true) => "Click to work on this scene. The game starts on it",
+            (false, false) => "Click to work on this scene",
+        });
+    paint_tree_icon(ui, &response, 5.0, TreeIcon::Scene);
+    if row.is_start {
+        paint_start_flag(ui, response.rect.right_center() - egui::vec2(14.0, 0.0));
+    }
+    let mut request = None;
+    if response.clicked() && !row.is_main {
+        request = Some(SceneRowRequest::Work(row.path.clone()));
+    }
+    response.context_menu(|ui| {
+        crate::theme::style_context_menu(ui);
+        if let Some(asked) = scene_menu_items(ui, &row.path, row.is_main, row.is_start, groups) {
+            request = Some(asked);
+        }
+        if row.is_beside && ui.button("Close").clicked() {
+            request = Some(SceneRowRequest::Close(row.path.clone()));
+            ui.close();
+        }
+    });
+    request
+}
+
+/// The small flag on the scene the game starts on, centred on `center`.
+fn paint_start_flag(ui: &egui::Ui, center: egui::Pos2) {
+    let color = crate::theme::NIGHT.accent;
+    let pole = center.x - 4.0;
+    ui.painter().line_segment(
+        [
+            egui::pos2(pole, center.y - 6.0),
+            egui::pos2(pole, center.y + 6.0),
+        ],
+        egui::Stroke::new(1.5, color),
+    );
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(pole, center.y - 6.0),
+            egui::pos2(pole + 9.0, center.y - 2.5),
+            egui::pos2(pole, center.y + 1.0),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
 /// Draws the by-kind grouping: one collapsible section per
 /// [`AssetKind`] present, every file of that kind in it wherever it
 /// lives on disk.
@@ -1250,9 +1533,16 @@ enum RowLabel {
 #[derive(Clone, Copy)]
 enum TreeIcon {
     Folder,
+    Scene,
     File(AssetKind),
     Code,
     Config,
+}
+
+/// A scene's icon, a clapperboard, at the size of the other tree icons.
+pub(crate) fn scene_icon(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 16.0), egui::Sense::hover());
+    paint_icon(ui, rect.min + egui::vec2(0.0, 1.0), TreeIcon::Scene);
 }
 
 pub(crate) fn folder_icon(ui: &mut egui::Ui) {
@@ -1278,6 +1568,12 @@ fn paint_icon(ui: &egui::Ui, origin: egui::Pos2, icon: TreeIcon) {
             point(13.0, 12.0),
             point(1.0, 12.0),
         ],
+        TreeIcon::Scene => vec![
+            point(1.0, 5.0),
+            point(13.0, 5.0),
+            point(13.0, 13.0),
+            point(1.0, 13.0),
+        ],
         _ => vec![
             point(2.0, 1.0),
             point(9.0, 1.0),
@@ -1289,6 +1585,24 @@ fn paint_icon(ui: &egui::Ui, origin: egui::Pos2, icon: TreeIcon) {
     painter.add(egui::Shape::closed_line(outline, stroke));
     match icon {
         TreeIcon::Folder => {}
+        TreeIcon::Scene => {
+            // The clapper, tilted up from the board, with its stripes.
+            painter.add(egui::Shape::closed_line(
+                vec![
+                    point(1.0, 5.0),
+                    point(1.0, 2.5),
+                    point(12.5, 0.5),
+                    point(13.0, 3.0),
+                ],
+                stroke,
+            ));
+            for x in [4.5, 8.0] {
+                painter.add(egui::Shape::line_segment(
+                    [point(x, 2.0), point(x + 1.0, 4.5)],
+                    stroke,
+                ));
+            }
+        }
         TreeIcon::File(AssetKind::Texture) => {
             painter.add(egui::Shape::line(
                 vec![
@@ -1433,6 +1747,85 @@ fn asset_row(
         asset_context_menu(ui, browser, &entry.relative_path);
     });
     response
+}
+
+#[cfg(test)]
+mod scene_folder_tests {
+    use super::*;
+
+    fn browser() -> AssetBrowser {
+        AssetBrowser {
+            scenes: vec![
+                SceneRow {
+                    path: "scenes/main.ron".into(),
+                    name: "main".into(),
+                    is_main: true,
+                    is_beside: false,
+                    is_start: true,
+                    group: None,
+                },
+                SceneRow {
+                    path: "scenes/lvl-2.ron".into(),
+                    name: "lvl-2".into(),
+                    is_main: false,
+                    is_beside: false,
+                    is_start: false,
+                    group: None,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    /// Clicks the row showing `name` and returns what was asked for.
+    fn click(name: &str) -> Option<SceneRowRequest> {
+        let ctx = egui::Context::default();
+        let mut browser = browser();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
+        let mut time = 0.0;
+        let mut frame = |browser: &mut AssetBrowser, events: Vec<egui::Event>| {
+            time += 0.02;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show_scene(ui, &[], browser, &mut None, &mut None),
+            );
+            output.textures_delta.clear();
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == name => {
+                    Some(text.pos + text.galley.size() / 2.0)
+                }
+                _ => None,
+            })
+        };
+        let at = frame(&mut browser, Vec::new());
+        let at = frame(&mut browser, Vec::new())
+            .or(at)
+            .expect("the row shows");
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut browser, vec![egui::Event::PointerMoved(at)]);
+        frame(&mut browser, vec![press(true)]);
+        frame(&mut browser, vec![press(false)]);
+        browser.scene_request
+    }
+
+    #[test]
+    fn clicking_a_scene_makes_it_the_working_one() {
+        assert_eq!(
+            click("lvl-2"),
+            Some(SceneRowRequest::Work("scenes/lvl-2.ron".into()))
+        );
+        assert_eq!(click("main"), None);
+    }
 }
 
 #[cfg(test)]

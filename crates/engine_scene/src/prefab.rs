@@ -5,7 +5,11 @@
 //! describes — no new format, just a different use of the existing one:
 //! a scene is "these entities, once"; a prefab is "this entity template,
 //! stamp out as many copies as needed."
+//!
+//! A prefab holds one top object and any objects under it. A file from before
+//! children existed is simply a prefab with none.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use bevy_ecs::entity::Entity;
@@ -15,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::SceneError;
 use crate::format::{Scene, SceneEntity};
-use crate::resolve::{NullResolver, SceneResolver, insert_components};
+use crate::resolve::{NullResolver, SceneResolver};
 
 /// A reusable entity template.
 ///
@@ -24,12 +28,84 @@ use crate::resolve::{NullResolver, SceneResolver, insert_components};
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Prefab {
     entity: SceneEntity,
+    /// The objects under `entity`. Each `parent` indexes the list made of
+    /// `entity` followed by these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    children: Vec<SceneEntity>,
 }
 
 impl Prefab {
     /// Wraps `entity`'s data as a prefab.
     pub fn new(entity: SceneEntity) -> Self {
-        Self { entity }
+        Self {
+            entity,
+            children: Vec::new(),
+        }
+    }
+
+    /// A prefab from a top object followed by the objects under it; `parent`
+    /// indexes this same list. `None` for an empty list.
+    pub fn from_entities(entities: Vec<SceneEntity>) -> Option<Self> {
+        let mut entities = entities.into_iter();
+        let mut entity = entities.next()?;
+        entity.parent = None;
+        Some(Self {
+            entity,
+            children: entities.collect(),
+        })
+    }
+
+    /// A prefab from captured objects, in any order, with `root_id` as the top
+    /// object. `None` if it is not among them. Links to other prefabs are not
+    /// kept: a prefab inside a prefab becomes plain objects.
+    pub fn from_captured(mut entities: Vec<SceneEntity>, root_id: &str) -> Option<Self> {
+        let root = entities
+            .iter()
+            .position(|entity| entity.object_id.as_deref() == Some(root_id))?;
+        // Moving the root to the front shifts everything before it by one.
+        let moved = |index: usize| match index {
+            index if index == root => 0,
+            index if index < root => index + 1,
+            index => index,
+        };
+        let top = entities.remove(root);
+        entities.insert(0, top);
+        for entity in &mut entities {
+            entity.prefab = None;
+            entity.open_from = None;
+            entity.locked = false;
+            entity.parent = entity.parent.map(moved);
+        }
+        Self::from_entities(entities)
+    }
+
+    /// The top object, then the objects under it.
+    pub fn entities(&self) -> impl Iterator<Item = &SceneEntity> {
+        std::iter::once(&self.entity).chain(&self.children)
+    }
+
+    /// New scene objects from this prefab: each with a new ID, references
+    /// between them pointed at the copies, and the top object first. With
+    /// `link_path` they are linked to the prefab at that path.
+    pub fn copy_entities(&self, link_path: Option<&str>) -> Vec<SceneEntity> {
+        let mut new_ids = HashMap::new();
+        let mut copies: Vec<SceneEntity> = self.entities().cloned().collect();
+        for (index, copy) in copies.iter_mut().enumerate() {
+            let member = crate::prefab_link::member_key(index, copy);
+            let new_id = uuid::Uuid::new_v4().to_string();
+            copy.prefab = link_path.map(|path| crate::PrefabLink {
+                path: path.to_owned(),
+                member,
+                overrides: Vec::new(),
+            });
+            if let Some(old_id) = copy.object_id.replace(new_id.clone()) {
+                new_ids.insert(old_id, new_id);
+            }
+        }
+        for copy in &mut copies {
+            crate::prefab_link::remap_object_references(copy, &new_ids);
+        }
+        copies
     }
 
     /// The template data this prefab instantiates from.
@@ -59,12 +135,13 @@ impl Prefab {
         // Prefabs written before a camera's transform became its pose carry
         // eye/target/up only; fold them into the transform like a scene does.
         let mut holder = Scene {
-            entities: vec![std::mem::take(&mut prefab.entity)],
+            entities: std::iter::once(std::mem::take(&mut prefab.entity))
+                .chain(std::mem::take(&mut prefab.children))
+                .collect(),
             ..Default::default()
         };
         crate::adopt_legacy_camera_poses(&mut holder);
-        prefab.entity = holder.entities.pop().unwrap_or_default();
-        Ok(prefab)
+        Ok(Self::from_entities(holder.entities).unwrap_or_default())
     }
 
     /// Validates the template, then writes it to `path` as RON,
@@ -77,11 +154,40 @@ impl Prefab {
     /// [`SceneError::Serialize`] if RON encoding fails;
     /// [`SceneError::Io`] if the write fails.
     pub fn save_to_file(&self, path: &Path) -> Result<(), SceneError> {
+        self.validate()?;
+        let text = self.to_ron_string()?;
+        std::fs::write(path, text).map_err(|err| SceneError::Io(err.to_string()))
+    }
+
+    /// Checks every object, and that each child's `parent` is in bounds and
+    /// leads back to the top object.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Validation`] naming the first problem.
+    pub fn validate(&self) -> Result<(), SceneError> {
         self.entity
             .validate()
             .map_err(|reason| SceneError::Validation(format!("prefab entity: {reason}")))?;
+        if self.children.is_empty() {
+            return Ok(());
+        }
+        Scene {
+            entities: self.entities().cloned().collect(),
+            ..Default::default()
+        }
+        .validate()
+    }
+
+    /// Validates, then writes atomically, for replacing a prefab in place.
+    ///
+    /// # Errors
+    ///
+    /// As [`Prefab::save_to_file`].
+    pub fn save_atomic(&self, path: &Path) -> Result<(), SceneError> {
+        self.validate()?;
         let text = self.to_ron_string()?;
-        std::fs::write(path, text).map_err(|err| SceneError::Io(err.to_string()))
+        crate::write_atomic(path, text.as_bytes()).map_err(|err| SceneError::Io(err.to_string()))
     }
 
     /// Reads and parses a prefab from `path`. The file is untrusted
@@ -150,9 +256,7 @@ impl Prefab {
     /// same contract as [`crate::Scene::instantiate_with_resolver`], which
     /// shares this method's implementation.
     ///
-    /// `parent` is still not wired up: it indexes into an owning
-    /// [`crate::Scene`]'s entity list, which a lone prefab has no
-    /// equivalent of.
+    /// The objects under the top object spawn with it.
     pub fn instantiate_with_resolver(
         &self,
         world: &mut World,
@@ -160,11 +264,14 @@ impl Prefab {
         configure: impl FnOnce(&mut EntityWorldMut<'_>),
     ) -> (Entity, usize) {
         let mut unresolved = 0;
-        let mut entity_mut = world.spawn_empty();
-        insert_components(&mut entity_mut, &self.entity, resolver, &mut unresolved);
-        entity_mut.insert(crate::SceneObjectId(uuid::Uuid::new_v4().to_string()));
-        configure(&mut entity_mut);
-        (entity_mut.id(), unresolved)
+        let copies = self.copy_entities(None);
+        let spawned = crate::world::spawn_scene_entities(&copies, world, resolver, &mut unresolved);
+        let top = spawned
+            .first()
+            .copied()
+            .unwrap_or_else(|| world.spawn_empty().id());
+        configure(&mut world.entity_mut(top));
+        (top, unresolved)
     }
 
     /// Spawns a new entity in `world` with this prefab's components, but
@@ -190,6 +297,71 @@ impl Prefab {
 impl From<SceneEntity> for Prefab {
     fn from(entity: SceneEntity) -> Self {
         Self::new(entity)
+    }
+}
+
+#[cfg(test)]
+mod child_tests {
+    use super::*;
+
+    const TOP: &str = "00000000-0000-4000-8000-000000000001";
+    const KID: &str = "00000000-0000-4000-8000-000000000002";
+
+    fn object(name: &str, id: &str, parent: Option<usize>) -> SceneEntity {
+        SceneEntity {
+            name: Some(name.into()),
+            object_id: Some(id.into()),
+            parent,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_file_from_before_children_still_loads() {
+        let text = "(entity: (name: Some(\"Old\")))";
+        let prefab = Prefab::from_ron_str(text).unwrap();
+        assert_eq!(prefab.entities().count(), 1);
+    }
+
+    #[test]
+    fn captured_objects_put_the_top_object_first_and_keep_parents_right() {
+        // Sorted by name, as captures are: the child comes first.
+        let mut kid = object("A Kid", KID, Some(1));
+        kid.locked = true;
+        let mut top = object("Top", TOP, None);
+        top.prefab = Some(crate::PrefabLink::default());
+        let prefab = Prefab::from_captured(vec![kid, top], TOP).unwrap();
+        let list: Vec<_> = prefab.entities().collect();
+        assert_eq!(list[0].name.as_deref(), Some("Top"));
+        assert_eq!(list[1].parent, Some(0));
+        assert!(list.iter().all(|e| e.prefab.is_none() && !e.locked));
+        assert!(Prefab::from_captured(vec![object("x", KID, None)], TOP).is_none());
+    }
+
+    #[test]
+    fn children_spawn_under_the_top_object_with_new_ids() {
+        let prefab =
+            Prefab::from_entities(vec![object("Top", TOP, None), object("Kid", KID, Some(0))])
+                .unwrap();
+        let text = prefab.to_ron_string().unwrap();
+        let prefab = Prefab::from_ron_str(&text).unwrap();
+        let mut world = World::new();
+        let top = prefab.instantiate(&mut world);
+        let kids = world
+            .get::<bevy_ecs::hierarchy::Children>(top)
+            .expect("the child came too");
+        assert_eq!(kids.len(), 1);
+        let kid = kids[0];
+        assert_ne!(world.get::<crate::SceneObjectId>(kid).unwrap().0, KID);
+        assert_ne!(world.get::<crate::SceneObjectId>(top).unwrap().0, TOP);
+    }
+
+    #[test]
+    fn a_child_with_a_bad_parent_does_not_validate() {
+        let prefab =
+            Prefab::from_entities(vec![object("Top", TOP, None), object("Kid", KID, Some(9))])
+                .unwrap();
+        assert!(prefab.validate().is_err());
     }
 }
 
@@ -425,7 +597,6 @@ mod tests {
             transform: Some(transform_data_at(2.0)),
             asset_source: Some("props/crate.gltf".to_string()),
             asset_id: Some("3fa00000-0000-0000-0000-000000000000".to_string()),
-            is_static: true,
             ..Default::default()
         });
         let text = prefab.to_ron_string().unwrap();
@@ -479,14 +650,13 @@ mod tests {
 
     #[test]
     fn instantiate_inserts_asset_source_and_markers() {
-        use engine_ecs::components::{AssetSource, Disabled, Static};
+        use engine_ecs::components::{AssetSource, Disabled};
 
         let prefab = Prefab::new(SceneEntity {
             name: Some("Rock".to_string()),
             asset_source: Some("props/rock.gltf".to_string()),
             asset_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
             disabled: true,
-            is_static: true,
             ..Default::default()
         });
         let mut world = World::new();
@@ -499,6 +669,5 @@ mod tests {
             Some("11111111-1111-1111-1111-111111111111")
         );
         assert!(world.get::<Disabled>(entity).is_some());
-        assert!(world.get::<Static>(entity).is_some());
     }
 }

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever a message changes incompatibly; [`ToStudio::Hello`]
 /// carries it so a game built against an older engine is refused with a
 /// readable message instead of misbehaving.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Header kind of a JSON control message.
 pub const KIND_CONTROL: u8 = 1;
@@ -83,6 +83,11 @@ pub enum InputEvent {
         /// Vertical movement.
         delta_y: f32,
     },
+    /// The keyboard produced a character, for text fields.
+    Text {
+        /// The character.
+        character: char,
+    },
     /// The game view gained or lost keyboard focus.
     Focus {
         /// `true` when focused.
@@ -113,6 +118,7 @@ impl InputEvent {
             PlatformEvent::MouseMotion { delta_x, delta_y } => {
                 Self::MouseMotion { delta_x, delta_y }
             }
+            PlatformEvent::TextInput { character } => Self::Text { character },
             PlatformEvent::FocusChanged { focused } => Self::Focus { focused },
             PlatformEvent::Resized { .. }
             | PlatformEvent::RedrawRequested
@@ -142,6 +148,7 @@ impl InputEvent {
             Self::MouseMotion { delta_x, delta_y } => {
                 PlatformEvent::MouseMotion { delta_x, delta_y }
             }
+            Self::Text { character } => PlatformEvent::TextInput { character },
             Self::Focus { focused } => PlatformEvent::FocusChanged { focused },
         }
     }

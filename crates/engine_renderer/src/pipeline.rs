@@ -1312,7 +1312,7 @@ impl GpuContext {
             &[crate::InstancedDrawable<'_>],
         )>,
         water: Option<crate::WaterFrame<'_>>,
-        ui: Option<(&crate::UiPipeline, &[crate::UiQuad])>,
+        ui: Option<crate::UiFrame<'_>>,
     ) -> Result<(), crate::error::RendererError> {
         let Some(frame) = self.acquire_frame() else {
             return Ok(());
@@ -1400,7 +1400,7 @@ impl GpuContext {
             &[crate::InstancedDrawable<'_>],
         )>,
         water: Option<crate::WaterFrame<'_>>,
-        ui: Option<(&crate::UiPipeline, &[crate::UiQuad])>,
+        ui: Option<crate::UiFrame<'_>>,
     ) -> Result<(), crate::error::RendererError> {
         let mut encoder = self
             .device()
@@ -1734,8 +1734,8 @@ impl GpuContext {
         // UI last, straight onto the target after post-processing has
         // written it. Inside this encoder so it lands before the caller
         // presents.
-        if let Some((ui_pipeline, quads)) = ui {
-            self.render_ui(&mut encoder, target.view(), ui_pipeline, quads);
+        if let Some(frame) = ui {
+            self.render_ui(&mut encoder, target.view(), frame);
         }
 
         self.queue().submit(std::iter::once(encoder.finish()));

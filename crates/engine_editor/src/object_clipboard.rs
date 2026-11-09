@@ -98,8 +98,10 @@ pub fn paste_objects(
         }
     }
 
+    for entity in &mut entities {
+        engine_scene::remap_object_references(entity, &new_ids);
+    }
     let spawned = Scene::spawn_entities(&entities, world);
-    remap_object_references(world, &spawned, &new_ids);
 
     let tops: Vec<Entity> = clipboard
         .tops
@@ -136,67 +138,6 @@ pub fn duplicate_objects(world: &mut World, entities: &[Entity]) -> Vec<Entity> 
     copies
 }
 
-/// Points everything in `copies` that names an object by id at its copy,
-/// where `new_ids` has one. Other references are left as they are.
-fn remap_object_references(
-    world: &mut World,
-    copies: &[Entity],
-    new_ids: &HashMap<String, String>,
-) {
-    for &copied in copies {
-        if let Some(mut follow) = world.get_mut::<engine_ecs::components::CameraFollow>(copied)
-            && let Some(new_id) = new_ids.get(&follow.target)
-        {
-            follow.target = new_id.clone();
-        }
-        if let Some(mut rules) = world.get_mut::<engine_scene::SceneRules>(copied) {
-            for rule in &mut rules.0 {
-                let target = match &mut rule.action {
-                    engine_scene::RuleAction::SetUiText { target, .. }
-                    | engine_scene::RuleAction::PlayAudio { target }
-                    | engine_scene::RuleAction::SetVisible { target, .. }
-                    | engine_scene::RuleAction::SetEnabled { target, .. }
-                    | engine_scene::RuleAction::Destroy { target } => Some(target),
-                    engine_scene::RuleAction::EmitEvent { .. }
-                    | engine_scene::RuleAction::SetVariable { .. }
-                    | engine_scene::RuleAction::AddToVariable { .. }
-                    | engine_scene::RuleAction::ChangeScene { .. }
-                    | engine_scene::RuleAction::SpawnPrefab { .. }
-                    | engine_scene::RuleAction::SetGameState { .. } => None,
-                };
-                if let Some(target) = target
-                    && let Some(new_id) = new_ids.get(target)
-                {
-                    *target = new_id.clone();
-                }
-                let extra = match (&mut rule.action, &mut rule.trigger) {
-                    (
-                        engine_scene::RuleAction::SpawnPrefab {
-                            at: engine_scene::SpawnAt::Object(id),
-                            ..
-                        },
-                        _,
-                    ) => Some(id),
-                    _ => None,
-                };
-                if let Some(id) = extra
-                    && let Some(new_id) = new_ids.get(id)
-                {
-                    *id = new_id.clone();
-                }
-                if let engine_scene::RuleTrigger::CollisionEnter { with: Some(id) }
-                | engine_scene::RuleTrigger::CollisionExit { with: Some(id) }
-                | engine_scene::RuleTrigger::TriggerEnter { with: Some(id) }
-                | engine_scene::RuleTrigger::TriggerExit { with: Some(id) } = &mut rule.trigger
-                    && let Some(new_id) = new_ids.get(id)
-                {
-                    *id = new_id.clone();
-                }
-            }
-        }
-    }
-}
-
 /// The id of `entity`, giving it one if it has none yet.
 pub(crate) fn ensure_object_id(world: &mut World, entity: Entity) -> Option<String> {
     if let Some(id) = world.get::<SceneObjectId>(entity) {
@@ -214,7 +155,7 @@ pub(crate) fn ensure_object_id(world: &mut World, entity: Entity) -> Option<Stri
 mod tests {
     use super::*;
     use crate::hierarchy::{reparent, spawn_entity};
-    use engine_ecs::components::{Lock, Name, Static, WaterVolume};
+    use engine_ecs::components::{Lock, Name, WaterVolume};
     use engine_scene::{ColliderData, PointLightData, SceneCollider, ScenePointLight};
     use glam::Vec3;
 
@@ -245,7 +186,6 @@ mod tests {
                 surface: Default::default(),
             },
             engine_ecs::components::Script::new("scripts/rock.lua"),
-            Static,
             Lock,
         ));
 

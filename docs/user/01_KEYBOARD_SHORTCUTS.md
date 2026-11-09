@@ -54,14 +54,24 @@ Shortcuts don't work while you type in a text box.
 | F2 | Rename (Enter to keep, Esc to cancel) |
 | Drag a row onto another row | Put it inside that object |
 | Drag a row between rows | Change the order |
-| Drag a file from Project Assets onto a row | Add it inside that object, at its position. Onto "Scene root" or the space below the rows: add it at the top level, at the world's centre |
+| Drag a file from Project Assets onto a row | Add it inside that object, at its position. Onto the main scene's row or the space below the rows: add it at the top level, at the world's centre |
+| Drag a row onto a scene's row | Take it out of its parent, to the top level of that scene |
+| Click a scene's row | Work on that scene: the Scene View shows it, new objects go in it and Play runs it. Nothing is saved, and unsaved edits stay |
+| Click the arrow on a scene's row | Fold or unfold its objects. On a closed scene, list its objects without leaving the scene you are in. With only one scene in the project there is no arrow |
+| Click an object in another scene | Select it and work on its scene |
+| Right-click a scene's row | Open Only This Scene, Rename, Move to Group, Set as Start Scene, Lock Scene, New Scene, Save Scene As, Scenes, and Close Scene on one opened beside |
+| Click a group's row | Fold or unfold the group |
+| Right-click a group's row | Rename Group, Delete Group. Deleting a group keeps its scenes |
+| Click **+** | New Scene, New Group, new objects, and actions on the selection |
 | ⌘D | Duplicate the selected objects, next to the originals |
 | ⌘C / ⌘V | Copy the selected objects / paste them next to the selected object, or at the scene root if nothing is selected. Works between scenes of a project |
 | Drag a selected row | Move all the selected objects together. Locked ones stay behind |
 | Click the eye at the end of a row | Hide the object and what is under it in the Scene View, or show it again. On a selected row, it does this for the whole selection |
-| Right-click a row → Create | Add an empty object, camera, point light, sound, sprite, UI label or UI button inside that object |
+| Right-click a row → Create | Add an empty object, camera, point light, sound, sprite or Game UI element inside that object. A Game UI element made inside another one sits inside it |
 | Right-click below the rows | Add a new object at the scene root, or paste |
-| Right-click a row | More options (Duplicate, Copy, Paste, Make Prefab, Lock, Disable…) |
+| Right-click a top-level row → Move to Scene | With several scenes open, send the object to another one |
+| F2, Delete or Backspace on a locked object | Nothing. Unlock it first |
+| Right-click a row | More options (Duplicate, Copy, Paste, Make Prefab, Lock, Disable…). Make Prefab saves the object with everything under it, and the object becomes a linked copy of the new file |
 
 The icon at the start of a row shows what the object is:
 
@@ -70,7 +80,7 @@ The icon at the start of a row shows what the object is:
 | Camera | A camera |
 | Sun with rays | A point light |
 | Speaker | A sound |
-| Rounded button | An on-screen label or button |
+| Rounded button | A Game UI element, such as a label, button, bar or text field |
 | Grid | A tilemap |
 | Waves | Water |
 | Picture | A sprite |
@@ -87,6 +97,12 @@ An object that is several things shows the first match in this list. Terrain is 
 | --- | --- |
 | Drag sideways on a number | Change the number |
 | Click a number, type, Enter | Type an exact number |
+| Tick **Locked** | Make the object read-only until you untick it |
+| Type in **Add tag**, Enter | Add a tag to the object |
+| Click a tag | Remove it |
+| Tick **Keep between scenes** | Keep this object when the game changes scene. Only top-level objects have it; children go with their parent |
+| Click **Apply to prefab** | Make the prefab and its other copies in this scene match this copy, except its position. Other scenes catch up when opened or played. This can't be undone |
+| Click **Revert** | Put this copy back to what the prefab says, keeping its position. Objects you added to it are removed. Undo brings them back |
 
 ## Project Assets
 
@@ -127,6 +143,45 @@ An object that is several things shows the first match in this list. Terrain is 
 | Click the game | Give the game the keyboard and mouse |
 | Esc | Free the mouse if the game holds it (the game keeps running); click the game to lock it again (that click does not count as a click in the game) |
 | Esc (game in its own window) | Close the game |
+
+Players use these on the game's own UI:
+
+| Input | What it does |
+| --- | --- |
+| Click a button | Click it |
+| Drag a slider | Change its value. The variable it is set to follows |
+| Click a toggle | Turn it on or off. Its variable becomes 1 or 0 |
+| Click a text field | Start typing. Keys go to the field and not to the game until typing ends |
+| Backspace (typing) | Remove the last character |
+| Enter (typing) | Finish typing; this counts as clicking the field |
+| Esc (typing), or click elsewhere | Finish typing without counting as a click. Esc does not also close the game or reach it |
+| Arrow keys, D-pad or left stick | Move between buttons, sliders, toggles and text fields. Left and right change a selected slider instead |
+| Enter, Space or the gamepad's bottom button | Use the selected button, toggle or text field |
+
+Typed text has no cursor to move. The built-in font (Inter) shows Latin, Greek and Cyrillic letters, numbers and common symbols; other characters, such as Khmer or Chinese, show as a box.
+
+## Project Assets: the scenes folder
+
+| Shortcut | What it does |
+| --- | --- |
+| Click a scene | Work on that scene. Nothing is saved, and unsaved edits stay |
+| Right-click a scene | Open Only This Scene, Rename, Move to Group, Set as Start Scene, and Close on one open beside your working scene |
+| Right-click a group | Rename Group, Delete Group |
+| Right-click the `scenes` folder | New Scene, New Group, Scene Order |
+
+## Scenes window
+
+Open it from **File → Scenes…**, from the right-click menu of a scene's Hierarchy row, or from **Scene Order…** on the `scenes` folder in Project Assets.
+
+| Shortcut | What it does |
+| --- | --- |
+| Click a scene's name | Work on that scene |
+| Click **Set as start** | Make the game start on that scene |
+| Click **↑** or **↓** | Move the scene in the scene order |
+| Click **Open beside** | List the scene's objects in the Hierarchy too, without leaving the scene you are in |
+| Click **Close** | Close a scene opened beside another |
+| Enter in the name box | Create or save the scene you named |
+| Esc | Close |
 
 ## Not available yet
 

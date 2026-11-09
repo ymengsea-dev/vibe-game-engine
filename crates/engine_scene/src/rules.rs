@@ -119,6 +119,7 @@ enum PendingEvent {
     UiClicked(String),
     Named(String),
     SceneStart,
+    SceneStartExcept(std::collections::HashSet<String>),
     KeyPressed(String),
     Contact {
         kind: ContactRuleKind,
@@ -156,6 +157,9 @@ pub enum RuleEvent<'a> {
     Named(&'a str),
     /// The scene finished starting.
     SceneStart,
+    /// The scene finished starting, and these objects came from the previous
+    /// one, so their start rules have already run.
+    SceneStartExcept(&'a std::collections::HashSet<String>),
     /// The named key went down this frame.
     KeyPressed(&'a str),
     /// A contact seen from `owner`'s side; `other` is the object it touched.
@@ -196,6 +200,7 @@ impl PendingEvent {
             RuleEvent::UiClicked(id) => Self::UiClicked(id.to_owned()),
             RuleEvent::Named(name) => Self::Named(name.to_owned()),
             RuleEvent::SceneStart => Self::SceneStart,
+            RuleEvent::SceneStartExcept(kept) => Self::SceneStartExcept(kept.clone()),
             RuleEvent::KeyPressed(key) => Self::KeyPressed(key.to_owned()),
             RuleEvent::Contact { kind, owner, other } => Self::Contact {
                 kind,
@@ -220,6 +225,9 @@ impl PendingEvent {
             (RuleTrigger::UiClicked, Self::UiClicked(id)) => owner_id == Some(id.as_str()),
             (RuleTrigger::Named(name), Self::Named(event_name)) => name == event_name,
             (RuleTrigger::SceneStart, Self::SceneStart) => true,
+            (RuleTrigger::SceneStart, Self::SceneStartExcept(kept)) => {
+                owner_id.is_none_or(|id| !kept.contains(id))
+            }
             (RuleTrigger::KeyPressed { key }, Self::KeyPressed(pressed)) => key == pressed,
             (
                 RuleTrigger::CollisionEnter { with },
@@ -389,6 +397,9 @@ impl Scene {
                         }
                         // The gameplay runtime carries these out.
                         RuleAction::ChangeScene { .. }
+                        | RuleAction::LoadScene { .. }
+                        | RuleAction::UnloadScene { .. }
+                        | RuleAction::NextScene
                         | RuleAction::SetVisible { .. }
                         | RuleAction::SetEnabled { .. }
                         | RuleAction::SpawnPrefab { .. }
@@ -801,6 +812,12 @@ b",
             "/scenes/a.ron",
         ] {
             assert!(
+                act(RuleAction::LoadScene { path: path.into() })
+                    .validate()
+                    .is_err(),
+                "a scene loaded on top is checked the same way: {path}"
+            );
+            assert!(
                 act(RuleAction::ChangeScene { path: path.into() })
                     .validate()
                     .is_err(),
@@ -976,6 +993,19 @@ b",
             1
         );
         assert_eq!(hits(&world), 4.0);
+    }
+
+    #[test]
+    fn scene_start_skips_objects_kept_from_the_last_scene() {
+        let scene = owner_scene(vec![RuleTrigger::SceneStart]);
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        let kept = std::collections::HashSet::from([OWNER.to_owned()]);
+        let event = RuleEvent::SceneStartExcept(&kept);
+        assert_eq!(fire(&scene, &mut world, event).applied, 0);
+        let others = std::collections::HashSet::from(["other".to_owned()]);
+        let event = RuleEvent::SceneStartExcept(&others);
+        assert_eq!(fire(&scene, &mut world, event).applied, 1);
     }
 
     #[test]

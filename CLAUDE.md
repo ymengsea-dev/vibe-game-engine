@@ -20,6 +20,8 @@ Docs are split by audience (index: `docs/README.md`): `docs/user/` is product do
 
 Whenever a change adds or changes a shortcut, mouse action, menu option, overlay or on-screen marker, update the matching doc in the same change. Tell the user about new shortcuts and point to the doc. Verify each documented behaviour against the code; document limitations honestly.
 
+`docs/cookbook/` holds step-by-step recipes for game makers, one folder per recipe named for what it makes (`creating-pause-menu/`): a `README.md` overview, `guide/` for the steps and `assets/` for its art. List each recipe in `docs/README.md`. Update a recipe when a step or label it uses changes.
+
 Implementation plans and design specs are managed by the superpowers skill under `.superpowers/{specs,plans}/` (gitignored, at the repo root). The detailed Lua/Rust design, including the old roadmap text, quick starts and limits, is in `.superpowers/specs/2026-10-25-lua-rust-game-creation-design.md`. `docs/dev/02_ENGINE_FEATURES.md` is the older engine-runtime inventory (2026-10-13).
 
 ## Hard rules
@@ -31,7 +33,7 @@ Implementation plans and design specs are managed by the superpowers skill under
 - Runtime builds (`apps/player`, game projects) must not link editor or AI crates: they use `engine` with `default-features = false`. The `studio` feature pulls in `engine_editor`; `lua` enables `engine_scripting/lua` (mlua 0.12, vendored Lua 5.4).
 - glTF 2.0 is the native 3D format; no hand-written FBX importer.
 - **Building or changing any UI: follow `docs/dev/04_UI_STYLE.md`.** It covers the Tokyo Night palette (`theme::NIGHT`, no hard-coded colours), the soft Apple-like shapes (fills, not outlines), SF Pro and Menlo type with semibold titles only, the shared controls in `engine_editor/src/widgets.rs`, and the writing rules. Update it when a token, control or rule changes.
-- Look at UI changes before handing them over: `crates/engine_editor/src/ui_snapshot.rs` renders egui UI to a PNG on the headless GPU. Run `VGE_SNAPSHOT_DIR=<dir> cargo test -p engine_editor -- --ignored snapshot`, then view the PNGs (`settings.png`, `settings-automatic.png`, `scene-chrome.png`, `inspector.png`, `inspector-narrow.png`, `inspector-empty.png`, `inspector-collider.png`, `inspector-camera.png`, `inspector-rules.png`, `scrub-cursor.png`, `console.png`, `console-narrow.png`, `panel-grips.png`, `hierarchy-icons.png`, `scene-icons.png`, `drop-marker.png`). Add a snapshot test for any new window or panel.
+- Look at UI changes before handing them over: `crates/engine_editor/src/ui_snapshot.rs` renders egui UI to a PNG on the headless GPU. Run `VGE_SNAPSHOT_DIR=<dir> cargo test -p engine_editor -- --ignored snapshot`, then view the PNGs (`settings.png`, `settings-automatic.png`, `scene-chrome.png`, `inspector.png`, `inspector-narrow.png`, `inspector-empty.png`, `inspector-collider.png`, `inspector-camera.png`, `inspector-rules.png`, `scrub-cursor.png`, `console.png`, `console-narrow.png`, `panel-grips.png`, `hierarchy-icons.png`, `scene-icons.png`, `drop-marker.png`, `game-ui.png`, `inspector-game-ui.png`, `inspector-prefab.png`, `scenes-window.png`, `scene-navigation.png`). Add a snapshot test for any new window or panel.
 - A feature counts as done (✅) once it is built and its tests pass. The user then tests it in the editor and reports bugs. 🟡 is only for work that is actually missing. Still say explicitly in each report what was not checked in a running editor/player.
 
 ## Commands (run from `vge/`; cargo in `~/.cargo/bin`)
@@ -58,13 +60,13 @@ Workspace members: `crates/*`, `apps/*`, `games/*`, `editor`.
 
 - `crates/engine` — facade; games use `engine::prelude::*`. Re-export new public API here.
 - `crates/engine_*` — subsystems (core, platform, renderer, ecs, scene, asset, physics, animation, audio, ui, scripting, project, network, ai, utils) plus `engine_editor` (+ `_derive`), `editor_code` (Monaco in a `wry` webview), `editor_lsp` (rust-analyzer / LuaLS bridge), `editor_ai`, `editor_tools`.
-- `crates/engine_scene` — scene format (v5: stable object IDs, script paths), validation, `rules.rs` (visual event/action rules + dispatcher shared by Lua and Rust), `ui.rs` (authored game UI), `sprite_atlas.rs`.
+- `crates/engine_scene` — scene format (v5: stable object IDs, script paths), validation, `rules.rs` (visual event/action rules + dispatcher shared by Lua and Rust), `ui.rs` (authored game UI), `prefab.rs` and `prefab_link.rs` (prefabs and linked copies with overrides), `sprite_atlas.rs`.
 - `crates/engine_scripting/src/lua.rs` — the sandboxed Lua VM:
   - Libraries: `StdLib` table/string/utf8/math only; `load`/`require`/`dofile` removed.
   - Limits: 64 MiB memory, 1M instructions per callback (`pcall`/`xpcall` wrapped so they can't swallow it), 1,024 commands per dispatch.
   - Scripts return a callback table; engine calls go through queued `ScriptCommand`s, never raw ECS access.
   - Adding to the `engine.*` API also means changing the Lua annotations (`STUDIO_API_LUA` in `engine_project`). Never edit that text in place: freeze the old text, bump `STUDIO_API_VERSION`, and extend `generated_annotation_backup`.
-- `crates/engine_project` — `project.ron` manifest (v3: `project_id`, `gameplay_language`), migrations, starters (`starter.rs`), Lua/Rust export (`build.rs`).
+- `crates/engine_project` — `project.ron` manifest (v3: `project_id`, `gameplay_language`, `scene_order`), migrations, starters (`starter.rs`), Lua/Rust export (`build.rs`).
 - `editor/` — Studio binary: winit/egui host, macOS app/menu (`mac_app.rs`, `native_menu.rs`), Play process management (`play_process.rs`), embedded Rust SDK snapshot (`build.rs` → `sdk_files.rs`) and SDK upgrade.
 - `crates/engine/src/gameplay/` — `GameplayRuntime`, the language-neutral game runtime shared by Lua and Rust games: applies `GameCommand`s (from `engine_scripting::command`), dispatches visual rules, samples collisions, switches scenes. New gameplay features go here, not in the player.
 - `apps/player` — standalone player: thin Lua glue (script loading, input/scene snapshots, callbacks, diagnostics, saves) over `GameplayRuntime`; also runs exports.

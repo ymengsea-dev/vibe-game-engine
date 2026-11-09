@@ -306,7 +306,7 @@ struct ShadowMesh<'a> {
 /// (and leaves `RenderStats::vegetation_total` at `0`). Vegetation casts
 /// no shadows yet.
 ///
-/// `ui` (`Some((&UiPipeline, &[UiQuad]))`) is drawn last of all, after
+/// `ui` (a [`engine_renderer::UiFrame`]) is drawn last of all, after
 /// post-processing has composited, straight onto the target with no
 /// depth — a HUD must not be tonemapped or occluded.
 ///
@@ -358,7 +358,7 @@ pub fn extract_and_render(
     particles: Option<ParticleFrame<'_>>,
     vegetation: Option<(&VegetationPipeline, &WindBinding)>,
     water: Option<engine_renderer::WaterFrame<'_>>,
-    ui: Option<(&engine_renderer::UiPipeline, &[engine_renderer::UiQuad])>,
+    ui: Option<engine_renderer::UiFrame<'_>>,
     draw_disabled: bool,
 ) -> Result<RenderStats, RendererError> {
     extract_and_render_to(
@@ -433,7 +433,7 @@ pub fn extract_and_render_to(
     particles: Option<ParticleFrame<'_>>,
     vegetation: Option<(&VegetationPipeline, &WindBinding)>,
     water: Option<engine_renderer::WaterFrame<'_>>,
-    ui: Option<(&engine_renderer::UiPipeline, &[engine_renderer::UiQuad])>,
+    ui: Option<engine_renderer::UiFrame<'_>>,
     draw_disabled: bool,
 ) -> Result<RenderStats, RendererError> {
     propagate_transforms(world);

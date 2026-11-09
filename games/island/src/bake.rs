@@ -384,7 +384,6 @@ fn build_scene(
         name: Some("Terrain".to_string()),
         transform: Some(TransformData::from(Transform::IDENTITY)),
         mesh_renderer: Some(terrain.renderer()),
-        is_static: true,
         // Collide against the terrain model itself, not against a
         // separately generated approximation: whatever the hills look
         // like is what the player walks on.
@@ -425,7 +424,6 @@ fn build_scene(
             parent: Some(tree),
             transform,
             mesh_renderer: Some(trunks[variant].renderer()),
-            is_static: true,
             collider: Some(ColliderData::new(
                 ColliderShape::Cylinder {
                     half_height: TRUNK_COLLIDER.0,
@@ -440,7 +438,6 @@ fn build_scene(
             parent: Some(tree),
             transform,
             mesh_renderer: Some(canopies[variant].renderer()),
-            is_static: true,
             ..Default::default()
         });
     }
@@ -456,7 +453,6 @@ fn build_scene(
             parent: Some(rocks_group),
             transform: Some(TransformData::from(transform_of(placement))),
             mesh_renderer: Some(rocks[index % rocks.len()].renderer()),
-            is_static: true,
             collider: Some(ColliderData::new(
                 ColliderShape::Ball {
                     radius: ROCK_COLLIDER_RADIUS,

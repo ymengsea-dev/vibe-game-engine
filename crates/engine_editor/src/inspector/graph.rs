@@ -10,6 +10,7 @@ pub(super) struct Controls<'a> {
     pub text_targets: &'a [(String, String)],
     pub audio_targets: &'a [(String, String)],
     pub object_targets: &'a [(String, String)],
+    pub scenes: &'a [String],
     pub owner_is_button: bool,
     pub can_add_rule: bool,
     pub add_rule: &'a mut Option<(RuleActionKind, Option<RuleTrigger>)>,
@@ -71,6 +72,9 @@ fn action_label(
             format!("Change variable\n{name} + {}", format_variable(*amount))
         }
         RuleAction::ChangeScene { path } => format!("Change scene\n{path}"),
+        RuleAction::LoadScene { path } => format!("Load scene on top\n{path}"),
+        RuleAction::UnloadScene { path } => format!("Unload scene\n{path}"),
+        RuleAction::NextScene => "Go to the next scene".to_owned(),
         RuleAction::SetVisible { target, visible } => format!(
             "{}\n{}",
             if *visible { "Show" } else { "Hide" },
@@ -297,6 +301,7 @@ pub(super) fn show(
         text_targets,
         audio_targets,
         object_targets,
+        scenes,
         owner_is_button,
         can_add_rule,
         add_rule,
@@ -519,6 +524,7 @@ pub(super) fn show(
                         text: text_targets,
                         audio: audio_targets,
                         objects: object_targets,
+                        scenes,
                     },
                 );
             }
@@ -786,6 +792,7 @@ mod tests {
                             text_targets: &[],
                             audio_targets: &[],
                             object_targets: &[],
+                            scenes: &[],
                             owner_is_button: false,
                             can_add_rule: true,
                             add_rule: &mut add,
@@ -860,6 +867,7 @@ mod tests {
                             text_targets: &[],
                             audio_targets: &[],
                             object_targets: &[],
+                            scenes: &[],
                             owner_is_button: false,
                             can_add_rule: true,
                             add_rule: &mut add,
@@ -932,6 +940,7 @@ mod tests {
                             text_targets: &[],
                             audio_targets: &[],
                             object_targets: &[],
+                            scenes: &[],
                             owner_is_button: false,
                             can_add_rule: true,
                             add_rule: &mut add,

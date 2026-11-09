@@ -382,6 +382,11 @@ impl ColliderData {
     }
 }
 
+/// The most tags one object may carry.
+pub const MAX_TAGS: usize = 32;
+/// The longest tag, in bytes.
+pub const MAX_TAG_BYTES: usize = 64;
+
 impl SceneEntity {
     /// Checks this entity's own components. Doesn't check `parent` — that
     /// needs the owning [`crate::Scene`]'s full entity list to validate
@@ -389,6 +394,18 @@ impl SceneEntity {
     pub(crate) fn validate(&self) -> Result<(), String> {
         if let Some(id) = &self.object_id {
             uuid::Uuid::parse_str(id).map_err(|err| format!("object_id: {err}"))?;
+        }
+        if self.tags.len() > MAX_TAGS {
+            return Err(format!("tags: more than {MAX_TAGS}"));
+        }
+        if let Some(tag) = self
+            .tags
+            .iter()
+            .find(|tag| tag.is_empty() || tag.len() > MAX_TAG_BYTES)
+        {
+            return Err(format!(
+                "tags: {tag:?} must be 1 to {MAX_TAG_BYTES} bytes long"
+            ));
         }
         if let Some(script) = &self.script {
             let path = Path::new(script);
@@ -486,10 +503,8 @@ impl SceneEntity {
 impl crate::RuleData {
     fn validate(&self, owner_ui: Option<&crate::UiElementData>) -> Result<(), String> {
         match &self.trigger {
-            RuleTrigger::UiClicked
-                if !owner_ui.is_some_and(|ui| ui.kind == crate::UiKind::Button) =>
-            {
-                return Err("click trigger requires an owning UI Button".into());
+            RuleTrigger::UiClicked if !owner_ui.is_some_and(|ui| ui.kind.raises_clicks()) => {
+                return Err("click trigger requires an owning UI Button or Text Input".into());
             }
             RuleTrigger::Named(name) => validate_event_name(name)?,
             RuleTrigger::KeyPressed { key } => {
@@ -549,7 +564,10 @@ impl crate::RuleData {
                 }
                 target
             }
-            RuleAction::ChangeScene { path } => {
+            RuleAction::NextScene => return Ok(()),
+            RuleAction::ChangeScene { path }
+            | RuleAction::LoadScene { path }
+            | RuleAction::UnloadScene { path } => {
                 return if valid_scene_path(path) {
                     Ok(())
                 } else {
@@ -634,7 +652,7 @@ fn validate_variable(name: &str, value: f64) -> Result<(), String> {
 
 impl crate::UiElementData {
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.text.len() > 1024 {
+        if self.text.len() > 1024 || self.placeholder.len() > 1024 {
             return Err("text exceeds 1024 bytes".into());
         }
         if !self.offset.iter().all(|value| value.is_finite()) {
@@ -653,6 +671,36 @@ impl crate::UiElementData {
             .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
         {
             return Err("color must be in [0, 1]".into());
+        }
+        if !self
+            .text_color
+            .iter()
+            .chain(&self.fill_color)
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        {
+            return Err("text and fill colors must be in [0, 1]".into());
+        }
+        if !self.font_size.is_finite() || !(4.0..=256.0).contains(&self.font_size) {
+            return Err("font size must be in [4, 256]".into());
+        }
+        if let Some(image) = &self.image {
+            image.parse_id()?;
+        }
+        if !self.variable.is_empty() && !crate::rules::valid_variable_name(&self.variable) {
+            return Err("variable name must be 1–64 printable bytes".into());
+        }
+        if !self.min.is_finite() || !self.max.is_finite() || self.max <= self.min {
+            return Err("max must be finite and above min".into());
+        }
+        for (name, value) in [
+            ("step", self.step),
+            ("corner radius", self.corner_radius),
+            ("gap", self.gap),
+            ("padding", self.padding),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!("{name} must be finite and not negative"));
+            }
         }
         Ok(())
     }

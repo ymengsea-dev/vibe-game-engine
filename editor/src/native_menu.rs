@@ -24,7 +24,9 @@ fn command_for_id(id: &str, recent: &[PathBuf]) -> Option<MenuCommand> {
     Some(match id {
         "new_project" => MenuCommand::NewProject,
         "open_project" => MenuCommand::OpenProject,
+        "scenes" => MenuCommand::OpenScenes,
         "new_scene" => MenuCommand::NewScene,
+        "save_scene_as" => MenuCommand::SaveSceneAs,
         "revert_scene" => MenuCommand::RevertScene,
         "save_scene" => MenuCommand::SaveScene,
         "upgrade_rust_sdk" => MenuCommand::UpgradeRustSdk,
@@ -42,6 +44,15 @@ fn command_for_id(id: &str, recent: &[PathBuf]) -> Option<MenuCommand> {
         "create_point_light" => MenuCommand::CreatePointLight,
         "create_ui_label" => MenuCommand::CreateUiLabel,
         "create_ui_button" => MenuCommand::CreateUiButton,
+        "create_ui_panel" => MenuCommand::CreateUiElement(engine::scene::UiKind::Panel),
+        "create_ui_image" => MenuCommand::CreateUiElement(engine::scene::UiKind::Image),
+        "create_ui_progress_bar" => {
+            MenuCommand::CreateUiElement(engine::scene::UiKind::ProgressBar)
+        }
+        "create_ui_slider" => MenuCommand::CreateUiElement(engine::scene::UiKind::Slider),
+        "create_ui_toggle" => MenuCommand::CreateUiElement(engine::scene::UiKind::Toggle),
+        "create_ui_text_input" => MenuCommand::CreateUiElement(engine::scene::UiKind::TextInput),
+        "create_ui_layout" => MenuCommand::CreateUiElement(engine::scene::UiKind::Layout),
         "create_camera" => MenuCommand::CreateCamera,
         "create_sound" => MenuCommand::CreateSound,
         "duplicate_selection" => MenuCommand::DuplicateSelection,
@@ -151,9 +162,11 @@ impl NativeMenu {
         let recent_menu = Submenu::new("Open Recent", true);
         file.append(&recent_menu)?;
         file.append(&PredefinedMenuItem::separator())?;
-        add_item(&file, &mut items, "new_scene", "New Scene")?;
+        add_item(&file, &mut items, "scenes", "Scenes…")?;
+        add_item(&file, &mut items, "new_scene", "New Scene…")?;
         add_item(&file, &mut items, "revert_scene", "Revert Scene")?;
         add_item(&file, &mut items, "save_scene", "Save Scene (⌘S)")?;
+        add_item(&file, &mut items, "save_scene_as", "Save Scene As…")?;
         add_item(&file, &mut items, "upgrade_rust_sdk", "Upgrade Rust SDK")?;
         file.append(&PredefinedMenuItem::separator())?;
         add_item(&file, &mut items, "export", "Build & Export…")?;
@@ -214,6 +227,17 @@ impl NativeMenu {
             "create_ui_button",
             "Create UI Button",
         )?;
+        for (id, label) in [
+            ("create_ui_panel", "Create UI Panel"),
+            ("create_ui_image", "Create UI Image"),
+            ("create_ui_progress_bar", "Create UI Progress Bar"),
+            ("create_ui_slider", "Create UI Slider"),
+            ("create_ui_toggle", "Create UI Toggle"),
+            ("create_ui_text_input", "Create UI Text Input"),
+            ("create_ui_layout", "Create UI Layout"),
+        ] {
+            add_item(&gameobject, &mut items, id, label)?;
+        }
         add_item(&gameobject, &mut items, "create_camera", "Create Camera")?;
         add_item(&gameobject, &mut items, "create_sound", "Create Sound")?;
         add_item(

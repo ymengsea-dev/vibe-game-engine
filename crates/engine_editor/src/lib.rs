@@ -58,6 +58,7 @@ mod resolve;
 pub mod scene_camera;
 pub mod scene_icons;
 pub mod scene_pick;
+mod scenes_window;
 mod search;
 mod session;
 mod settings_window;

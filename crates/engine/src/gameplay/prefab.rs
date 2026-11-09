@@ -1,4 +1,6 @@
-//! Runtime instances of packaged single-object prefabs.
+//! Runtime instances of packaged prefabs, and bringing placed copies up to date.
+
+use std::collections::HashMap;
 
 use engine_ecs::prelude::{Entity, World};
 use engine_scene::{AssetLibrary, Prefab, Scene, SceneResolver, TransformData};
@@ -13,10 +15,10 @@ pub use engine_scene::valid_prefab_path;
 
 /// Instantiates the prefab at `path` as a runtime object with `object_id` at `position`.
 ///
-/// Returns the spawned entity and the one-entity scene it came from, which the
-/// caller uses to add colliders. A prefab may carry a script path (validated
-/// like any scene script); attaching it is the game host's job, because only
-/// the host knows its gameplay language.
+/// Returns the spawned entities and the scene they came from, in the same order
+/// with the top object first, which the caller uses to add colliders. Objects
+/// may carry script paths (validated like any scene script); attaching them is
+/// the game host's job, because only the host knows its gameplay language.
 pub fn instantiate_prefab(
     world: &mut World,
     assets: &AssetLibrary,
@@ -24,7 +26,7 @@ pub fn instantiate_prefab(
     path: &str,
     object_id: &str,
     position: [f32; 3],
-) -> Result<(Entity, Scene), GameplayError> {
+) -> Result<(Vec<Entity>, Scene), GameplayError> {
     let fail = |reason: &str| GameplayError::Prefab(path.to_owned(), reason.to_owned());
     if !valid_prefab_path(path) || !valid_new_object(world, object_id, position) {
         return Err(fail("invalid request"));
@@ -41,24 +43,34 @@ pub fn instantiate_prefab(
     }
     let source = std::str::from_utf8(&bytes).map_err(|err| fail(&err.to_string()))?;
     let prefab = Prefab::from_ron_str(source).map_err(|err| fail(&err.to_string()))?;
-    let mut data = prefab.entity().clone();
-    data.object_id = Some(object_id.to_owned());
-    let mut transform = data.transform.unwrap_or(TransformData {
+    let mut scene = Scene {
+        entities: prefab.copy_entities(None),
+        ..Default::default()
+    };
+    let top = scene
+        .entities
+        .first_mut()
+        .ok_or_else(|| fail("no entity was spawned"))?;
+    let new_id = top.object_id.replace(object_id.to_owned());
+    let mut transform = top.transform.unwrap_or(TransformData {
         translation: [0.0; 3],
         rotation: [0.0, 0.0, 0.0, 1.0],
         scale: [1.0; 3],
     });
     transform.translation = position;
-    data.transform = Some(transform);
-    let mut scene = Scene::default();
-    scene.entities.push(data);
+    top.transform = Some(transform);
+    // References to the top object follow it to the requested ID.
+    if let Some(new_id) = new_id {
+        let map = HashMap::from([(new_id, object_id.to_owned())]);
+        for entity in &mut scene.entities {
+            engine_scene::remap_object_references(entity, &map);
+        }
+    }
     scene.validate().map_err(|err| fail(&err.to_string()))?;
     let report = scene.instantiate_with_resolver(world, resolver);
-    let entity = report
-        .spawned
-        .first()
-        .copied()
-        .ok_or_else(|| fail("no entity was spawned"))?;
+    if report.spawned.is_empty() {
+        return Err(fail("no entity was spawned"));
+    }
     if report.unresolved > 0 {
         tracing::warn!(
             path,
@@ -66,5 +78,32 @@ pub fn instantiate_prefab(
             "prefab has unresolved assets"
         );
     }
-    Ok((entity, scene))
+    Ok((report.spawned, scene))
+}
+
+/// Brings `scene`'s prefab copies up to date with the packaged prefab files. A
+/// result that does not validate is dropped with a warning, and the copies run
+/// as saved.
+pub fn refresh_prefab_copies(scene: &mut Scene, assets: &AssetLibrary) {
+    if !scene.entities.iter().any(|entity| entity.prefab.is_some()) {
+        return;
+    }
+    let mut load = |path: &str| {
+        let store_path = path
+            .strip_prefix("assets/")
+            .filter(|_| valid_prefab_path(path))?;
+        let bytes = assets.read_path(store_path).ok()??;
+        if bytes.len() > MAX_PREFAB_BYTES {
+            return None;
+        }
+        Prefab::from_ron_str(std::str::from_utf8(&bytes).ok()?).ok()
+    };
+    let mut refreshed = scene.clone();
+    if !engine_scene::refresh_copies(&mut refreshed, &mut load) {
+        return;
+    }
+    match refreshed.validate() {
+        Ok(()) => *scene = refreshed,
+        Err(error) => tracing::warn!(%error, "prefab copies could not be refreshed"),
+    }
 }

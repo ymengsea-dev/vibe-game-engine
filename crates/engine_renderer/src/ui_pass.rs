@@ -12,9 +12,10 @@
 //!
 //! ## One atlas
 //!
-//! The pass binds a single texture. [`crate::GlyphAtlas`]'s glyph sheet
-//! occupies it, with a white texel reserved for solid fills. A game that
-//! wants image widgets supplies its own atlas containing both.
+//! Text and fills share one texture: [`crate::UiFont`]'s glyph atlas with a
+//! white block reserved for solid fills. An image widget has its own
+//! [`UiImage`], so a [`UiFrame`] splits its quads into [`UiRun`]s that each
+//! bind one texture and keep paint order.
 
 use wgpu::util::DeviceExt;
 
@@ -33,6 +34,9 @@ pub struct UiQuad {
     pub uv: [f32; 4],
     /// Linear RGBA tint, multiplied with the sampled texel.
     pub tint: [f32; 4],
+    /// Corner radius and outline width in pixels, then two unused values.
+    /// All zero is a plain quad, which is what glyphs use.
+    pub shape: [f32; 4],
 }
 
 impl UiQuad {
@@ -55,6 +59,11 @@ impl UiQuad {
                 wgpu::VertexAttribute {
                     offset: 32,
                     shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 48,
+                    shader_location: 3,
                     format: wgpu::VertexFormat::Float32x4,
                 },
             ],
@@ -83,11 +92,37 @@ impl ScreenUniform {
     }
 }
 
+/// A texture the UI pass can draw an image widget from.
+pub struct UiImage {
+    bind_group: wgpu::BindGroup,
+}
+
+/// A span of a [`UiFrame`]'s quads drawn from one texture.
+#[derive(Clone)]
+pub struct UiRun<'a> {
+    /// Which quads.
+    pub quads: std::ops::Range<u32>,
+    /// The image they sample, or `None` for the glyph atlas.
+    pub image: Option<&'a UiImage>,
+}
+
+/// One frame of UI: quads in paint order and the runs that cover them.
+#[derive(Clone)]
+pub struct UiFrame<'a> {
+    /// The pass to draw with.
+    pub pipeline: &'a UiPipeline,
+    /// Every quad.
+    pub quads: &'a [UiQuad],
+    /// Runs covering `quads`, in order.
+    pub runs: &'a [UiRun<'a>],
+}
+
 /// The UI pipeline plus its screen uniform and atlas binding.
 pub struct UiPipeline {
     render_pipeline: wgpu::RenderPipeline,
     screen_buffer: wgpu::Buffer,
     screen_bind_group: wgpu::BindGroup,
+    atlas_layout: wgpu::BindGroupLayout,
     atlas_bind_group: wgpu::BindGroup,
     /// Where in the atlas a fully opaque white texel lives, for solid
     /// fills.
@@ -108,6 +143,34 @@ impl UiPipeline {
 }
 
 impl GpuContext {
+    /// Makes `texture` drawable by image widgets in `pipeline`.
+    pub fn create_ui_image(&self, pipeline: &UiPipeline, texture: &Texture) -> UiImage {
+        UiImage {
+            bind_group: self.ui_texture_bind_group(&pipeline.atlas_layout, texture),
+        }
+    }
+
+    fn ui_texture_bind_group(
+        &self,
+        layout: &wgpu::BindGroupLayout,
+        texture: &Texture,
+    ) -> wgpu::BindGroup {
+        self.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ui texture bind group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&texture.sampler),
+                },
+            ],
+        })
+    }
+
     /// Builds the UI pass against `atlas`.
     ///
     /// `white_uv` must name a fully opaque white texel within `atlas`;
@@ -174,20 +237,7 @@ impl GpuContext {
                 resource: screen_buffer.as_entire_binding(),
             }],
         });
-        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ui atlas bind group"),
-            layout: &atlas_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&atlas.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&atlas.sampler),
-                },
-            ],
-        });
+        let atlas_bind_group = self.ui_texture_bind_group(&atlas_layout, atlas);
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ui pipeline layout"),
@@ -232,62 +282,145 @@ impl GpuContext {
             render_pipeline,
             screen_buffer,
             screen_bind_group,
+            atlas_layout,
             atlas_bind_group,
             white_uv,
         }
     }
 
-    /// Draws `quads` over `target`, blending, in list order.
+    /// Draws `frame` over `target`, blending, in list order.
     ///
     /// A no-op for an empty slice — a game with no UI pays nothing.
     pub fn render_ui(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
-        pipeline: &UiPipeline,
-        quads: &[UiQuad],
+        frame: UiFrame<'_>,
     ) {
-        if quads.is_empty() {
-            return;
-        }
+        draw_ui(self.device(), encoder, target, frame);
+    }
+}
 
-        let instances = self
-            .device()
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("ui instances"),
-                contents: bytemuck::cast_slice(quads),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+fn draw_ui(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    frame: UiFrame<'_>,
+) {
+    let UiFrame {
+        pipeline,
+        quads,
+        runs,
+    } = frame;
+    if quads.is_empty() {
+        return;
+    }
 
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("ui pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    // Load, never clear: the scene is already there.
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+    let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("ui instances"),
+        contents: bytemuck::cast_slice(quads),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
 
-        pass.set_pipeline(&pipeline.render_pipeline);
-        pass.set_bind_group(0, &pipeline.screen_bind_group, &[]);
-        pass.set_bind_group(1, &pipeline.atlas_bind_group, &[]);
-        pass.set_vertex_buffer(0, instances.slice(..));
-        pass.draw(0..6, 0..quads.len() as u32);
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("ui pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                // Load, never clear: the scene is already there.
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+
+    pass.set_pipeline(&pipeline.render_pipeline);
+    pass.set_bind_group(0, &pipeline.screen_bind_group, &[]);
+    pass.set_vertex_buffer(0, instances.slice(..));
+    for run in runs {
+        let texture = run
+            .image
+            .map_or(&pipeline.atlas_bind_group, |image| &image.bind_group);
+        pass.set_bind_group(1, texture, &[]);
+        pass.draw(0..6, run.quads.clone());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Draws a fill, an image and another fill, and reads the pixels back.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn image_runs_sample_their_own_texture_and_keep_paint_order() {
+        let gpu = GpuContext::headless(3, 1).expect("headless GPU");
+        let atlas = gpu.create_texture_from_rgba("white", 1, 1, &[255, 255, 255, 255]);
+        let picture = gpu.create_texture_from_rgba("picture", 1, 1, &[0, 255, 0, 255]);
+        let pipeline = gpu.create_ui_pipeline("ui test", &atlas, [0.5, 0.5, 0.5, 0.5]);
+        let image = gpu.create_ui_image(&pipeline, &picture);
+        let quad = |x: f32, uv: [f32; 4], tint: [f32; 4]| UiQuad {
+            rect: [x, 0.0, 1.0, 1.0],
+            uv,
+            tint,
+            shape: [0.0; 4],
+        };
+        let quads = [
+            quad(0.0, [0.5; 4], [1.0, 0.0, 0.0, 1.0]),
+            quad(1.0, [0.0, 0.0, 1.0, 1.0], [1.0; 4]),
+            quad(2.0, [0.5; 4], [0.0, 0.0, 1.0, 1.0]),
+        ];
+        let runs = [
+            UiRun {
+                quads: 0..1,
+                image: None,
+            },
+            UiRun {
+                quads: 1..2,
+                image: Some(&image),
+            },
+            UiRun {
+                quads: 2..3,
+                image: None,
+            },
+        ];
+        let frame = UiFrame {
+            pipeline: &pipeline,
+            quads: &quads,
+            runs: &runs,
+        };
+        gpu.render_with(|device, _, encoder, view| {
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            draw_ui(device, encoder, view, frame.clone());
+        })
+        .expect("render");
+        let read = gpu.wait_for_frame().expect("frame");
+        let pixel = |x: usize| &read.rgba[x * 4..x * 4 + 3];
+        assert!(pixel(0)[0] > 200 && pixel(0)[1] < 50, "{:?}", pixel(0));
+        assert!(pixel(1)[1] > 200 && pixel(1)[0] < 50, "{:?}", pixel(1));
+        assert!(pixel(2)[2] > 200 && pixel(2)[1] < 50, "{:?}", pixel(2));
+    }
 
     #[test]
     fn screen_uniform_inverts_the_size() {

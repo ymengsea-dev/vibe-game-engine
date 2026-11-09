@@ -151,6 +151,24 @@ struct LoadedScript {
     awaiting_start: bool,
 }
 
+/// Which scripts one callback goes to.
+#[derive(Clone, Copy)]
+enum Only<'a> {
+    All,
+    Object(&'a str),
+    Except(&'a HashSet<String>),
+}
+
+impl Only<'_> {
+    fn includes(self, object_id: Option<&str>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Object(only) => object_id == Some(only),
+            Self::Except(skipped) => object_id.is_none_or(|id| !skipped.contains(id)),
+        }
+    }
+}
+
 #[derive(Default)]
 struct SceneSnapshot {
     positions: HashMap<String, [f32; 3]>,
@@ -158,7 +176,11 @@ struct SceneSnapshot {
     scales: HashMap<String, [f32; 3]>,
     velocities: HashMap<String, [f32; 3]>,
     names: HashMap<String, String>,
+    /// Object IDs by tag, in snapshot order.
+    tags: HashMap<String, Vec<String>>,
     variables: BTreeMap<String, f64>,
+    /// Current text of UI elements by object ID.
+    ui_texts: HashMap<String, String>,
     /// Every object by ID with its `Hidden` state inverted.
     visible: HashMap<String, bool>,
     /// Every object by ID with its `Disabled` state inverted.
@@ -312,6 +334,16 @@ impl SceneSnapshot {
             .insert(object_id.to_owned(), glam::Vec3::ONE.to_array());
     }
 
+    /// The objects carrying `tag`, without any this callback destroyed.
+    fn tagged_ids(&self, tag: &str) -> Vec<String> {
+        self.tags.get(tag).map_or_else(Vec::new, |ids| {
+            ids.iter()
+                .filter(|id| !self.destroyed(id))
+                .cloned()
+                .collect()
+        })
+    }
+
     fn named_id(&self, name: &str) -> Option<String> {
         self.names
             .get(name)
@@ -340,6 +372,62 @@ pub struct SnapshotObject {
     pub visible: bool,
     /// False when the object has the `Disabled` marker.
     pub enabled: bool,
+    /// The object's tags.
+    pub tags: Vec<String>,
+}
+
+/// `engine.load_scene`, `engine.unload_scene` and `engine.next_scene`.
+fn scene_commands_api(
+    lua: &Lua,
+    engine: &Table,
+    commands: &Rc<RefCell<Vec<GameCommand>>>,
+    active: &Rc<Cell<bool>>,
+) -> mlua::Result<()> {
+    type Make = fn(String) -> GameCommand;
+    let paths: [(&str, Make); 2] = [
+        ("load_scene", |path| GameCommand::LoadScene { path }),
+        ("unload_scene", |path| GameCommand::UnloadScene { path }),
+    ];
+    let ready = |active: &Cell<bool>, pending: &[GameCommand]| {
+        if !active.get() {
+            return Err(mlua::Error::RuntimeError(
+                "engine commands may only run in callbacks".to_owned(),
+            ));
+        }
+        if pending.len() >= MAX_COMMANDS {
+            return Err(mlua::Error::RuntimeError(
+                "Lua command limit exceeded".to_owned(),
+            ));
+        }
+        Ok(())
+    };
+    for (name, make) in paths {
+        let (queue, on) = (Rc::clone(commands), Rc::clone(active));
+        engine.set(
+            name,
+            lua.create_function(move |_, path: String| {
+                let mut pending = queue.borrow_mut();
+                ready(&on, &pending)?;
+                if !valid_scene_path(Path::new(&path)) {
+                    return Err(mlua::Error::RuntimeError(
+                        "scene path must be under scenes/ and end in .ron".to_owned(),
+                    ));
+                }
+                pending.push(make(path));
+                Ok(())
+            })?,
+        )?;
+    }
+    let (queue, on) = (Rc::clone(commands), Rc::clone(active));
+    engine.set(
+        "next_scene",
+        lua.create_function(move |_, ()| {
+            let mut pending = queue.borrow_mut();
+            ready(&on, &pending)?;
+            pending.push(GameCommand::NextScene);
+            Ok(())
+        })?,
+    )
 }
 
 /// Consumes the leading string argument of a variadic call.
@@ -626,6 +714,8 @@ impl LuaRuntime {
                 .map_err(ScriptError::Initialize)?,
             )
             .map_err(ScriptError::Initialize)?;
+        let scene = Rc::new(RefCell::new(SceneSnapshot::default()));
+        let ui_text_scene = Rc::clone(&scene);
         let ui_active = Rc::clone(&active_callback);
         engine
             .set(
@@ -651,6 +741,10 @@ impl LuaRuntime {
                         return Err(mlua::Error::RuntimeError(
                             "Lua command limit exceeded".to_owned(),
                         ));
+                    }
+                    // Reads back in the same callback, like other setters.
+                    if let Some(known) = ui_text_scene.borrow_mut().ui_texts.get_mut(&object_id) {
+                        known.clone_from(&text);
                     }
                     pending.push(GameCommand::UiSetText { object_id, text });
                     Ok(())
@@ -720,7 +814,8 @@ impl LuaRuntime {
                 .map_err(ScriptError::Initialize)?,
             )
             .map_err(ScriptError::Initialize)?;
-        let scene = Rc::new(RefCell::new(SceneSnapshot::default()));
+        scene_commands_api(&lua, &engine, &commands, &active_callback)
+            .map_err(ScriptError::Initialize)?;
         let spawn_scene = Rc::clone(&scene);
         let spawn_commands = Rc::clone(&commands);
         let spawn_active = Rc::clone(&active_callback);
@@ -888,6 +983,16 @@ impl LuaRuntime {
                 .map_err(ScriptError::Initialize)?,
             )
             .map_err(ScriptError::Initialize)?;
+        let tagged_scene = Rc::clone(&scene);
+        engine
+            .set(
+                "find_objects_by_tag",
+                lua.create_function(move |_, tag: String| {
+                    Ok(tagged_scene.borrow().tagged_ids(&tag))
+                })
+                .map_err(ScriptError::Initialize)?,
+            )
+            .map_err(ScriptError::Initialize)?;
         let positioned_scene = Rc::clone(&scene);
         engine
             .set(
@@ -936,6 +1041,16 @@ impl LuaRuntime {
                         .insert(name.clone(), value);
                     pending.push(GameCommand::SetVariable { name, value });
                     Ok(())
+                })
+                .map_err(ScriptError::Initialize)?,
+            )
+            .map_err(ScriptError::Initialize)?;
+        let read_ui_texts = Rc::clone(&scene);
+        engine
+            .set(
+                "ui_get_text",
+                lua.create_function(move |_, object_id: String| {
+                    Ok(read_ui_texts.borrow().ui_texts.get(&object_id).cloned())
                 })
                 .map_err(ScriptError::Initialize)?,
             )
@@ -1104,6 +1219,7 @@ impl LuaRuntime {
                     velocity: None,
                     visible: true,
                     enabled: true,
+                    tags: Vec::new(),
                 }),
         );
     }
@@ -1117,6 +1233,7 @@ impl LuaRuntime {
         scene.scales.clear();
         scene.velocities.clear();
         scene.names.clear();
+        scene.tags.clear();
         scene.visible.clear();
         scene.enabled.clear();
         scene.clear_pending();
@@ -1124,6 +1241,9 @@ impl LuaRuntime {
             let id = object.id;
             scene.visible.insert(id.clone(), object.visible);
             scene.enabled.insert(id.clone(), object.enabled);
+            for tag in object.tags {
+                scene.tags.entry(tag).or_default().push(id.clone());
+            }
             if let Some(name) = object.name {
                 scene.names.entry(name).or_insert_with(|| id.clone());
             }
@@ -1189,6 +1309,14 @@ impl LuaRuntime {
             .map(|(name, value)| (name.to_owned(), value))
             .collect();
         scene.pending_variables.clear();
+    }
+
+    /// Replaces the UI text Lua reads with `engine.ui_get_text`.
+    pub fn set_ui_texts<'a>(&mut self, texts: impl IntoIterator<Item = (&'a str, &'a str)>) {
+        self.scene.borrow_mut().ui_texts = texts
+            .into_iter()
+            .map(|(id, text)| (id.to_owned(), text.to_owned()))
+            .collect();
     }
 
     /// Loads one instance of a script attached to a scene object.
@@ -1261,7 +1389,43 @@ impl LuaRuntime {
     /// Invokes `start` only for scripts attached to `object_id`, as when a
     /// scripted prefab is spawned during play. Other scripts are not called.
     pub fn start_object(&mut self, object_id: &str) -> Result<Vec<GameCommand>, ScriptError> {
-        self.call_scripts("start", CallbackArgs::None, Some(object_id))
+        self.call_scripts("start", CallbackArgs::None, Only::Object(object_id))
+    }
+
+    /// Invokes `start` for every script except those attached to `object_ids`,
+    /// which already started in an earlier scene.
+    pub fn start_except(
+        &mut self,
+        object_ids: &HashSet<String>,
+    ) -> Result<Vec<GameCommand>, ScriptError> {
+        self.call_scripts("start", CallbackArgs::None, Only::Except(object_ids))
+    }
+
+    /// How many scripts are loaded. Scripts loaded after this count can be
+    /// taken back with [`Self::discard_scripts_from`].
+    pub fn script_count(&self) -> usize {
+        self.scripts.len()
+    }
+
+    /// Removes the scripts loaded after `count`: a scene whose scripts failed
+    /// to load leaves the running game as it was.
+    pub fn discard_scripts_from(&mut self, count: usize) {
+        self.scripts.truncate(count);
+    }
+
+    /// Finishes a scene change in this same VM: of the scripts loaded before
+    /// `count`, only those attached to `kept` stay.
+    pub fn retire_scripts_before(&mut self, count: usize, kept: &HashSet<String>) {
+        let mut index = 0;
+        self.scripts.retain(|script| {
+            let stays = index >= count
+                || script
+                    .object_id
+                    .as_ref()
+                    .is_some_and(|id| kept.contains(id));
+            index += 1;
+            stays
+        });
     }
 
     /// Invokes each script's `update` callback with frame delta seconds.
@@ -1304,7 +1468,7 @@ impl LuaRuntime {
         name: &str,
         args: CallbackArgs<'_>,
     ) -> Result<Vec<GameCommand>, ScriptError> {
-        self.call_scripts(name, args, None)
+        self.call_scripts(name, args, Only::All)
     }
 
     /// Calls one script's callback `name` if it defines it.
@@ -1352,7 +1516,7 @@ impl LuaRuntime {
         &mut self,
         name: &str,
         args: CallbackArgs<'_>,
-        only_object: Option<&str>,
+        only: Only<'_>,
     ) -> Result<Vec<GameCommand>, ScriptError> {
         self.commands.borrow_mut().clear();
         self.scene.borrow_mut().clear_pending();
@@ -1360,7 +1524,7 @@ impl LuaRuntime {
         self.instructions.set(0);
         let original_save = self.save_values.borrow().clone();
         for index in 0..self.scripts.len() {
-            if only_object.is_some() && self.scripts[index].object_id.as_deref() != only_object {
+            if !only.includes(self.scripts[index].object_id.as_deref()) {
                 continue;
             }
             // Scripts on objects disabled when the dispatch began get no

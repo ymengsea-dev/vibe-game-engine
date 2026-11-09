@@ -26,7 +26,7 @@
 //! otherwise-good scene is a warning and a skipped entity, so one bad
 //! file never costs you the rest of the level.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -138,9 +138,19 @@ enum PlayerError {
 }
 
 fn load_lua_scripts(assets: &AssetLibrary, scene: &Scene) -> Result<LuaRuntime, PlayerError> {
-    scene.validate()?;
     let mut runtime = LuaRuntime::new()?;
-    load_lua_script(&mut runtime, assets, "assets/scripts/main.lua", None)?;
+    load_scene_scripts(&mut runtime, assets, scene)?;
+    Ok(runtime)
+}
+
+/// Loads the global script and `scene`'s object scripts into `runtime`.
+fn load_scene_scripts(
+    runtime: &mut LuaRuntime,
+    assets: &AssetLibrary,
+    scene: &Scene,
+) -> Result<(), PlayerError> {
+    scene.validate()?;
+    load_lua_script(runtime, assets, "assets/scripts/main.lua", None)?;
     for entity in &scene.entities {
         if let Some(path) = entity.script.as_deref() {
             if !path.ends_with(".lua") {
@@ -150,10 +160,10 @@ fn load_lua_scripts(assets: &AssetLibrary, scene: &Scene) -> Result<LuaRuntime, 
                 .object_id
                 .as_deref()
                 .ok_or_else(|| PlayerError::MissingObjectId(path.to_owned()))?;
-            load_lua_script(&mut runtime, assets, path, Some(object_id))?;
+            load_lua_script(runtime, assets, path, Some(object_id))?;
         }
     }
-    Ok(runtime)
+    Ok(())
 }
 
 fn load_lua_script(
@@ -201,6 +211,8 @@ struct Player {
     lua: Option<LuaRuntime>,
     /// Scripted prefab instances whose `start` has not run yet.
     pending_starts: VecDeque<String>,
+    /// A scene change waiting until its loading screen has been drawn.
+    change_after_loading: Option<String>,
     save_path: Option<PathBuf>,
     saved_values: Option<String>,
     invalid_save: Option<String>,
@@ -242,6 +254,7 @@ impl Player {
             gameplay,
             lua,
             pending_starts: VecDeque::new(),
+            change_after_loading: None,
             save_path,
             saved_values,
             invalid_save: None,
@@ -250,8 +263,12 @@ impl Player {
 
     /// Loads the target scene and its scripts without touching the running game,
     /// so a broken target leaves the current scene playing.
-    fn prepare_scene_change(&self, path: &str) -> Result<(Scene, LuaRuntime), PlayerError> {
-        let scene = self.gameplay.load_scene(path)?;
+    fn prepare_scene_change(
+        &self,
+        world: &engine::prelude::World,
+        path: &str,
+    ) -> Result<(Scene, LuaRuntime), PlayerError> {
+        let scene = self.target_scene(world, path)?;
         let assets = self
             .gameplay
             .assets()
@@ -265,17 +282,68 @@ impl Player {
         Ok((scene, lua))
     }
 
+    /// The scene at `path` without the kept objects, whose scripts already run.
+    fn target_scene(
+        &self,
+        world: &engine::prelude::World,
+        path: &str,
+    ) -> Result<Scene, PlayerError> {
+        let mut scene = self.gameplay.load_scene(path)?;
+        scene.remove_objects(&engine::gameplay::kept_object_ids(world));
+        Ok(scene)
+    }
+
     fn perform_scene_change(
         &mut self,
         ctx: &mut GameContext<'_>,
         path: &str,
     ) -> Result<(), PlayerError> {
-        let (scene, lua) = self.prepare_scene_change(path)?;
+        let kept = engine::gameplay::kept_script_objects(ctx.world());
+        if !kept.is_empty() && self.lua.is_some() {
+            return self.change_scene_keeping_scripts(ctx, path, &kept);
+        }
+        let (scene, lua) = self.prepare_scene_change(ctx.world(), path)?;
         self.remember_lua_values();
         self.pending_starts.clear();
         self.gameplay.replace_scene(ctx, scene)?;
+        self.gameplay.set_scene_path(path);
         self.lua = Some(lua);
         let started = self.run_callback(ctx, |lua| lua.start());
+        self.gameplay.start_rules(ctx);
+        self.flush_rule_spawns(ctx);
+        started.map_err(|error| GameplayError::SceneRequest(path.into(), error))?;
+        Ok(())
+    }
+
+    /// A scene change while kept objects have scripts: the same VM goes on, so
+    /// those scripts keep their memory. Every other script is replaced. A
+    /// script that cannot load leaves the current scene playing.
+    fn change_scene_keeping_scripts(
+        &mut self,
+        ctx: &mut GameContext<'_>,
+        path: &str,
+        kept: &HashSet<String>,
+    ) -> Result<(), PlayerError> {
+        let scene = self.target_scene(ctx.world(), path)?;
+        let assets = self
+            .gameplay
+            .assets()
+            .ok_or_else(|| PlayerError::MissingLuaScript("assets/scripts/main.lua".into()))?;
+        let lua = self
+            .lua
+            .as_mut()
+            .ok_or_else(|| GameplayError::SceneRequest(path.into(), "Lua stopped".into()))?;
+        let count = lua.script_count();
+        if let Err(error) = load_scene_scripts(lua, assets, &scene) {
+            lua.discard_scripts_from(count);
+            return Err(error);
+        }
+        lua.retire_scripts_before(count, kept);
+        self.remember_lua_values();
+        self.pending_starts.retain(|id| kept.contains(id));
+        self.gameplay.replace_scene(ctx, scene)?;
+        self.gameplay.set_scene_path(path);
+        let started = self.run_callback(ctx, |lua| lua.start_except(kept));
         self.gameplay.start_rules(ctx);
         self.flush_rule_spawns(ctx);
         started.map_err(|error| GameplayError::SceneRequest(path.into(), error))?;
@@ -320,6 +388,7 @@ impl Player {
         lua.set_fixed_step(ctx.fixed_step_seconds());
         update_lua_input(lua, ctx.input(), ctx.mouse_locked());
         sync_lua_scene(lua, ctx.world(), ctx.physics());
+        lua.set_ui_texts(self.gameplay.ui_texts(ctx));
         lua.set_active_camera(self.gameplay.active_camera_id(ctx.world()));
         lua.set_game_state(self.gameplay.game_state(ctx.world()).name());
         // The queries borrow `ctx` only while the callback runs; they are gone
@@ -597,6 +666,9 @@ fn sync_lua_scene(
                 .map(|body| body.linvel().to_array()),
             visible: entity.get::<engine::ecs::components::Hidden>().is_none(),
             enabled: entity.get::<engine::ecs::components::Disabled>().is_none(),
+            tags: entity
+                .get::<engine::scene::SceneTags>()
+                .map_or_else(Vec::new, |tags| tags.0.clone()),
         })
     }));
     if let Some(variables) = world.get_resource::<engine::scene::RuleVariables>() {
@@ -653,10 +725,14 @@ fn load_project(root: &Path, selected_scene: Option<&Path>) -> Result<Player, Pl
         project.resolve(Path::new(script))?;
     }
     let assets = AssetLibrary::index(&project.assets_dir())?;
+    engine::gameplay::refresh_prefab_copies(&mut scene, &assets);
     let lua = load_lua_scripts(&assets, &scene)?;
     let save_path = project.resolve(Path::new(".studio/play-save.ron"))?;
-    let gameplay =
+    let mut gameplay =
         GameplayRuntime::new(scene, Some(assets)).with_scene_source(SceneSource::Project(project));
+    if let Some(path) = selected_scene.and_then(Path::to_str) {
+        gameplay = gameplay.with_scene_path(path.replace('\\', "/"));
+    }
     let mut player = Player::new(gameplay, Some(lua), Some(save_path));
     validate_lua_save(&mut player)?;
     Ok(player)
@@ -721,11 +797,25 @@ impl Game for Player {
     }
 
     fn update(&mut self, ctx: &mut GameContext<'_>, dt: f32) {
-        if let Some(path) = self.gameplay.take_scene_request()
-            && let Err(error) = self.perform_scene_change(ctx, &path)
-        {
-            tracing::error!(scene = %path, error = %error, "scene change failed");
+        if let Some(path) = self.change_after_loading.take() {
+            if let Err(error) = self.perform_scene_change(ctx, &path) {
+                self.gameplay.hide_loading_screen(ctx);
+                tracing::error!(scene = %path, error = %error, "scene change failed");
+            }
+        } else if let Some(path) = self.gameplay.take_scene_request() {
+            // A broken target gets no loading screen: the scene just goes on.
+            let ready = self.target_scene(ctx.world(), &path);
+            if ready.is_ok() && self.gameplay.show_loading_screen(ctx, &path) {
+                // Drawn this frame, with nothing else happening under it.
+                self.change_after_loading = Some(path);
+                return;
+            }
+            if let Err(error) = self.perform_scene_change(ctx, &path) {
+                tracing::error!(scene = %path, error = %error, "scene change failed");
+            }
         }
+        self.gameplay.apply_scene_loads(ctx);
+        self.flush_rule_spawns(ctx);
         if exits_on_escape(ctx.is_embedded())
             && ctx.input().is_key_pressed(engine::prelude::KeyCode::Escape)
         {
@@ -783,7 +873,9 @@ impl Game for Player {
     }
 
     fn on_event(&mut self, ctx: &mut GameContext<'_>, event: &engine::platform::PlatformEvent) {
-        if let Some((kind, key)) = lua_key_event(event)
+        // Keys typed into a text field are not game input.
+        if ctx.ui().editing().is_none()
+            && let Some((kind, key)) = lua_key_event(event)
             && let Err(error) = self.run_callback(ctx, |lua| lua.on_event(kind, key))
         {
             tracing::error!(%error, "Lua event callback stopped");
@@ -810,6 +902,9 @@ fn load_export(export_dir: &Path) -> Result<Player, PlayerError> {
     let mut scene = load_scene(export_dir)?;
     scene.assign_missing_object_ids();
     let marker = export_dir.join(engine::project::build::LUA_EXPORT_MARKER);
+    if let Some(library) = &assets {
+        engine::gameplay::refresh_prefab_copies(&mut scene, library);
+    }
     let (lua, save_path) = if marker.exists() {
         let version =
             std::fs::read(&marker).map_err(|_| PlayerError::InvalidLuaMarker(marker.clone()))?;
@@ -1273,7 +1368,7 @@ mod tests {
             .restore_saved_data("{\"score\":7}")
             .expect("saved values");
         let (loaded, mut lua) = player
-            .prepare_scene_change("scenes/second.ron")
+            .prepare_scene_change(&engine::prelude::World::new(), "scenes/second.ron")
             .expect("prepared scene");
         assert_eq!(loaded.entities[0].name.as_deref(), Some("Second"));
         assert_eq!(
@@ -1289,7 +1384,11 @@ mod tests {
         );
 
         std::fs::remove_file(&script).expect("remove attachment");
-        assert!(player.prepare_scene_change("scenes/second.ron").is_err());
+        assert!(
+            player
+                .prepare_scene_change(&engine::prelude::World::new(), "scenes/second.ron")
+                .is_err()
+        );
         assert!(player.gameplay.scene().entities.is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2011,6 +2110,7 @@ mod tests {
             [1.0, 2.0, 3.0],
         )
         .expect("spawn prefab");
+        let entity = entity[0];
         assert_eq!(
             world
                 .get::<engine::scene::SceneObjectId>(entity)
@@ -2032,6 +2132,73 @@ mod tests {
         assert_eq!(
             instance.entities[0].transform.map(|data| data.translation),
             Some([1.0, 2.0, 3.0])
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_spawned_prefab_brings_its_children_scripts_and_colliders() {
+        let root = temp_dir("lua-prefab-children");
+        let project = Project::create(&root, "Prefab Children").expect("project");
+        let prefab_dir = project.assets_dir().join("prefabs");
+        std::fs::create_dir_all(&prefab_dir).expect("prefab directory");
+        let kid_id = uuid::Uuid::new_v4().to_string();
+        let top = engine::scene::SceneEntity {
+            name: Some("Turret".into()),
+            rules: vec![engine::scene::RuleData::new(
+                engine::scene::RuleTrigger::SceneStart,
+                engine::scene::RuleAction::Destroy {
+                    target: kid_id.clone(),
+                },
+            )],
+            ..Default::default()
+        };
+        let kid = engine::scene::SceneEntity {
+            name: Some("Gun".into()),
+            object_id: Some(kid_id.clone()),
+            parent: Some(0),
+            script: Some("assets/scripts/gun.lua".into()),
+            collider: Some(engine::scene::ColliderData::new(
+                engine::scene::ColliderShape::Ball { radius: 1.0 },
+                engine::scene::BodyKind::Fixed,
+            )),
+            ..Default::default()
+        };
+        engine::scene::Prefab::from_entities(vec![top, kid])
+            .expect("prefab")
+            .save_to_file(&prefab_dir.join("Turret.prefab"))
+            .expect("save prefab");
+        let library = AssetLibrary::index(&project.assets_dir()).expect("library");
+        let mut world = engine::prelude::World::new();
+        let object_id = uuid::Uuid::new_v4().to_string();
+        let (entities, instance) = engine::gameplay::instantiate_prefab(
+            &mut world,
+            &library,
+            &mut engine::scene::NullResolver,
+            "assets/prefabs/Turret.prefab",
+            &object_id,
+            [4.0, 0.0, 0.0],
+        )
+        .expect("spawn prefab");
+        assert_eq!(entities.len(), 2);
+        assert_eq!(
+            instance.entities[0].object_id.as_deref(),
+            Some(object_id.as_str())
+        );
+        let gun = &instance.entities[1];
+        assert_eq!(gun.script.as_deref(), Some("assets/scripts/gun.lua"));
+        assert!(gun.collider.is_some());
+        let gun_id = gun.object_id.as_deref().expect("gun id");
+        assert_ne!(gun_id, kid_id, "each copy gets its own IDs");
+        assert!(matches!(
+            &instance.entities[0].rules[0].action,
+            engine::scene::RuleAction::Destroy { target } if target == gun_id
+        ));
+        assert_eq!(
+            world
+                .get::<engine::ecs::prelude::ChildOf>(entities[1])
+                .map(|parent| parent.parent()),
+            Some(entities[0])
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2429,7 +2596,7 @@ mod tests {
         assert_eq!(spawned.len(), 1);
         assert_eq!(
             world
-                .get::<engine::ecs::components::Name>(spawned[0].0)
+                .get::<engine::ecs::components::Name>(spawned[0].0[0])
                 .map(|name| name.0.as_str()),
             Some("Bundled Crate")
         );
@@ -2571,7 +2738,7 @@ mod tests {
         // in `update`) cannot run without a GPU context; this covers what the
         // player feeds them: every key name a rule can use maps to one
         // distinct platform key, and such rules load.
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for key in ScriptKey::ALL {
             assert!(seen.insert(platform_key(*key)), "{} maps twice", key.name());
         }

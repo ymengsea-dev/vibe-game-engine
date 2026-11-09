@@ -9,6 +9,35 @@ use crate::dirty::PendingAction;
 use crate::{EditorState, OverlayToggles, hierarchy};
 use engine_ecs::components::{Name, WaterVolume};
 
+/// Every game UI element, in the order menus list them.
+pub(crate) const UI_KINDS: [engine_scene::UiKind; 9] = [
+    engine_scene::UiKind::Label,
+    engine_scene::UiKind::Button,
+    engine_scene::UiKind::Panel,
+    engine_scene::UiKind::Image,
+    engine_scene::UiKind::ProgressBar,
+    engine_scene::UiKind::Slider,
+    engine_scene::UiKind::Toggle,
+    engine_scene::UiKind::TextInput,
+    engine_scene::UiKind::Layout,
+];
+
+/// What menus and the Inspector call a game UI element.
+pub(crate) fn ui_kind_name(kind: engine_scene::UiKind) -> &'static str {
+    use engine_scene::UiKind;
+    match kind {
+        UiKind::Label => "Label",
+        UiKind::Button => "Button",
+        UiKind::Panel => "Panel",
+        UiKind::Image => "Image",
+        UiKind::ProgressBar => "Progress Bar",
+        UiKind::Slider => "Slider",
+        UiKind::Toggle => "Toggle",
+        UiKind::TextInput => "Text Input",
+        UiKind::Layout => "Layout",
+    }
+}
+
 /// An implemented menu action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuCommand {
@@ -18,8 +47,12 @@ pub enum MenuCommand {
     OpenProject,
     /// Open a recently used project.
     OpenRecent(PathBuf),
-    /// Create a scene after the unsaved-work guard.
+    /// Ask for a name, then create a scene after the unsaved-work guard.
     NewScene,
+    /// Show the Scenes window.
+    OpenScenes,
+    /// Ask for a name, then save the open scene under it.
+    SaveSceneAs,
     /// Reload the scene after the unsaved-work guard.
     RevertScene,
     /// Save the scene.
@@ -48,6 +81,8 @@ pub enum MenuCommand {
     CreateUiLabel,
     /// Create a screen-space button.
     CreateUiButton,
+    /// Create any other game UI element.
+    CreateUiElement(engine_scene::UiKind),
     /// Create an editable water surface.
     CreateWater,
     /// Create a positionable point light.
@@ -144,7 +179,25 @@ impl MenuCommand {
             Self::OpenRecent(path) => {
                 crate::shell::request_guarded(state, PendingAction::OpenProject(path))
             }
-            Self::NewScene => crate::shell::request_guarded(state, PendingAction::NewScene),
+            Self::NewScene => {
+                if !state.play.is_playing() {
+                    state.scene_name_dialog = Some(crate::state::SceneNameDialog::new(
+                        crate::state::SceneNameKind::New,
+                    ));
+                }
+            }
+            Self::OpenScenes => {
+                if !state.play.is_playing() {
+                    state.scenes_window_open = true;
+                }
+            }
+            Self::SaveSceneAs => {
+                if !state.play.is_playing() {
+                    state.scene_name_dialog = Some(crate::state::SceneNameDialog::new(
+                        crate::state::SceneNameKind::SaveAs,
+                    ));
+                }
+            }
             Self::RevertScene => crate::shell::request_guarded(state, PendingAction::RevertScene),
             Self::Quit => crate::shell::request_guarded(state, PendingAction::Quit),
             Self::SaveScene => match state.save_scene() {
@@ -181,15 +234,18 @@ impl MenuCommand {
                     state.asset_browser.operation_error = Some(error);
                 }
             }
-            Self::CreateUiLabel | Self::CreateUiButton => {
-                let (name, data) = if matches!(self, Self::CreateUiButton) {
-                    ("UI Button", engine_scene::UiElementData::button())
-                } else {
-                    ("UI Label", engine_scene::UiElementData::label())
+            Self::CreateUiLabel | Self::CreateUiButton | Self::CreateUiElement(_) => {
+                let kind = match self {
+                    Self::CreateUiElement(kind) => kind,
+                    Self::CreateUiButton => engine_scene::UiKind::Button,
+                    _ => engine_scene::UiKind::Label,
                 };
                 let entity = state
                     .world
-                    .spawn((Name::new(name), engine_scene::SceneUi(data)))
+                    .spawn((
+                        Name::new(format!("UI {}", ui_kind_name(kind))),
+                        engine_scene::SceneUi(engine_scene::UiElementData::for_kind(kind)),
+                    ))
                     .id();
                 state.select_only(entity);
                 state.mark_dirty();
@@ -341,6 +397,34 @@ impl MenuCommand {
 mod water_tests {
     use super::*;
     use engine_ecs::components::{Name, WaterVolume};
+
+    #[test]
+    fn every_ui_element_can_be_created_and_saved() {
+        for kind in UI_KINDS {
+            let root = std::env::temp_dir().join(format!("vge-ui-kind-{}", uuid::Uuid::new_v4()));
+            let project = engine_project::Project::create(&root, "UI").unwrap();
+            let mut state = EditorState::new(
+                project,
+                engine_ecs::prelude::World::new(),
+                Vec::new(),
+                crate::ConsoleLog::new(),
+            );
+            MenuCommand::CreateUiElement(kind).apply(&mut state);
+            let entity = state.selected_entity.expect("selected");
+            assert_eq!(
+                state
+                    .world
+                    .get::<engine_scene::SceneUi>(entity)
+                    .unwrap()
+                    .0
+                    .kind,
+                kind
+            );
+            let scene = engine_scene::Scene::from_world(&mut state.world);
+            scene.validate().expect("a new element saves");
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
 
     #[test]
     fn create_ui_button_selects_a_saved_clickable_scene_object() {

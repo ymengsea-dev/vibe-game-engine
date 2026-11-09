@@ -46,6 +46,18 @@ pub enum GameCommand {
         /// Printable event name (at most 64 bytes).
         name: String,
     },
+    /// Load a scene on top of the current one; everything already there stays.
+    LoadScene {
+        /// Project-relative `scenes/*.ron` path.
+        path: String,
+    },
+    /// Remove a scene that was loaded on top, and its objects.
+    UnloadScene {
+        /// Project-relative `scenes/*.ron` path.
+        path: String,
+    },
+    /// Change to the scene after this one in the project's scene order.
+    NextScene,
     /// Replace the current authored scene with another packaged scene.
     ChangeScene {
         /// Project-relative path under `scenes/`.

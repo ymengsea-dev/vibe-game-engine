@@ -16,10 +16,18 @@
 //!
 //! ## Not done here
 //!
-//! - No glyph rendering — a [`Widget::Label`]/[`Widget::Button`] emits a
-//!   [`DrawKind::Text`] command carrying the string; wiring that to a
-//!   font atlas in `engine_renderer` is the next slice.
-//! - No scrolling, no flex/grid — anchor + offset + fixed size only.
+//! - No glyph rendering — a text-carrying widget emits a [`DrawKind::Text`]
+//!   command with the string and size; `engine::app` turns it into glyphs.
+//! - No scrolling or grid — anchor + offset + fixed size, plus [`Stack`]
+//!   for simple vertical and horizontal lists.
+//!
+//! ## Values and typing
+//!
+//! A [`Widget::Slider`] or [`Widget::Toggle`] changes itself when the player
+//! uses it and reports the new value through [`Ui::take_changes`]. Whoever
+//! owns the tree decides what the value means; [`Node::variable`] names the
+//! gameplay variable a scene element is bound to. A [`Widget::TextInput`]
+//! being typed in is [`Ui::editing`]; feed it characters with [`Ui::type_text`].
 //!
 //! ## Focus
 //!
@@ -40,7 +48,8 @@ use engine_utils::AssetId;
 /// of the tree; invalidated by [`Ui::clear`].
 pub type NodeId = usize;
 
-/// Linear RGBA colour, components in `0.0..=1.0`.
+/// RGBA colour as seen on screen (sRGB), components in `0.0..=1.0`. Alpha is
+/// straight, not premultiplied.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
     /// Red.
@@ -69,7 +78,7 @@ impl Color {
         a: 1.0,
     };
 
-    /// An opaque colour from linear RGB.
+    /// An opaque colour from RGB.
     pub const fn rgb(r: f32, g: f32, b: f32) -> Color {
         Color { r, g, b, a: 1.0 }
     }
@@ -171,6 +180,53 @@ impl Default for Style {
     }
 }
 
+/// Which way a [`Stack`] lists its children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StackDirection {
+    /// Top to bottom.
+    #[default]
+    Vertical,
+    /// Left to right.
+    Horizontal,
+}
+
+/// Lists a node's visible children one after another instead of placing each
+/// by its own anchor and offset. Children keep their own size.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Stack {
+    /// Direction of the list.
+    pub direction: StackDirection,
+    /// Pixels between neighbouring children.
+    pub gap: f32,
+    /// Pixels between the node's edge and its children.
+    pub padding: f32,
+}
+
+/// A value the player changed by using a widget this frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ValueChange {
+    /// The slider or toggle.
+    pub node: NodeId,
+    /// Its new value; a toggle reports `1.0` for on and `0.0` for off.
+    pub value: f32,
+}
+
+/// Text height in pixels when a node does not set its own.
+pub const DEFAULT_FONT_SIZE: f32 = 16.0;
+
+/// Longest text a [`Widget::TextInput`] accepts while typing, in bytes.
+pub const MAX_TEXT_INPUT_BYTES: usize = 1024;
+
+/// `value`'s position between `min` and `max`, as `0.0..=1.0`. An empty or
+/// reversed range reads as `0.0`.
+fn fraction(value: f32, min: f32, max: f32) -> f32 {
+    if max > min {
+        ((value - min) / (max - min)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 /// What a node draws.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Widget {
@@ -203,6 +259,56 @@ pub enum Widget {
         /// Multiplied into the sampled colour.
         tint: Color,
     },
+    /// A bar filled by how far `value` lies between `min` and `max`.
+    ProgressBar {
+        /// Current value.
+        value: f32,
+        /// Value at which the bar is empty.
+        min: f32,
+        /// Value at which the bar is full.
+        max: f32,
+        /// Colour of the empty part.
+        track: Color,
+        /// Colour of the filled part.
+        fill: Color,
+    },
+    /// A horizontal value the player drags, or nudges with focus and arrows.
+    Slider {
+        /// Current value.
+        value: f32,
+        /// Value at the left end.
+        min: f32,
+        /// Value at the right end.
+        max: f32,
+        /// Values snap to multiples of this from `min`; `0` means no snapping.
+        step: f32,
+        /// Colour of the empty part.
+        track: Color,
+        /// Colour of the filled part.
+        fill: Color,
+    },
+    /// A box with a caption that flips on and off when clicked.
+    Toggle {
+        /// Caption beside the box.
+        text: String,
+        /// Current state.
+        on: bool,
+        /// Colour of the box.
+        off_color: Color,
+        /// Colour of the mark shown while on.
+        on_color: Color,
+    },
+    /// A single-line field the player types into.
+    TextInput {
+        /// What has been typed.
+        text: String,
+        /// Shown while the field is empty and not being typed in.
+        placeholder: String,
+        /// Background colour.
+        bg: Color,
+        /// Text colour.
+        color: Color,
+    },
 }
 
 /// One node in the [`Ui`] tree.
@@ -220,6 +326,19 @@ pub struct Node {
     /// button stops being reachable, and a [`Widget::Panel`] acting as a
     /// list row becomes reachable.
     pub focusable: bool,
+    /// Height of this node's text in pixels.
+    pub font_size: f32,
+    /// Roundness of this node's corners in pixels.
+    pub corner_radius: f32,
+    /// Whether this node's text uses the heavier font.
+    pub bold: bool,
+    /// Caption colour for a [`Widget::Button`] or [`Widget::Toggle`]; white
+    /// when unset. Other widgets carry their own text colour.
+    pub text_color: Option<Color>,
+    /// Lists the children instead of placing them by their anchors.
+    pub stack: Option<Stack>,
+    /// The gameplay variable this node's value follows, if any.
+    pub variable: Option<String>,
     /// Whether this node (and so its children) is shown; see [`Ui::set_visible`].
     visible: bool,
     /// Child node ids, painted after (on top of) this node.
@@ -274,6 +393,15 @@ pub struct Ui {
     focus: Option<NodeId>,
     /// How the focused node is outlined.
     ring: FocusRing,
+    /// The slider being dragged.
+    dragging: Option<NodeId>,
+    /// The text field being typed in.
+    editing: Option<NodeId>,
+    /// Whether focus last moved by keyboard, gamepad or game code. A mouse
+    /// user can see what they clicked, so they get no ring.
+    ring_visible: bool,
+    /// Values the player changed since [`Ui::take_changes`].
+    changes: Vec<ValueChange>,
 }
 
 /// The pointer state for one [`Ui::interact`] call.
@@ -301,21 +429,55 @@ pub struct DrawCommand {
 pub enum DrawKind {
     /// Fill the rect with a solid colour.
     Fill(Color),
+    /// Fill the rect with a solid colour, with rounded corners.
+    RoundedFill {
+        /// Fill colour.
+        color: Color,
+        /// Corner radius in pixels.
+        radius: f32,
+    },
+    /// Draw a line just inside the rect's edge.
+    Outline {
+        /// Line colour.
+        color: Color,
+        /// Corner radius in pixels.
+        radius: f32,
+        /// Line thickness in pixels.
+        width: f32,
+    },
     /// Draw `texture` into the rect, multiplied by `tint`.
     Image {
         /// Texture asset.
         texture: AssetId,
         /// Tint colour.
         tint: Color,
+        /// Corner radius in pixels.
+        radius: f32,
     },
-    /// Draw `text` in `color`, left-aligned within the rect. The
-    /// renderer owns font/size for now.
+    /// Draw `text` in `color`, vertically centred within the rect.
     Text {
         /// The string.
         text: String,
         /// Text colour.
         color: Color,
+        /// Font size in pixels.
+        size: f32,
+        /// Whether to use the heavier font.
+        bold: bool,
+        /// Horizontal placement.
+        align: TextAlign,
     },
+}
+
+/// How a [`DrawKind::Text`] sits in its rect horizontally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlign {
+    /// From the left edge, wrapping at the right edge.
+    Left,
+    /// Centred, wrapping at the rect's width.
+    Center,
+    /// One line that keeps its end in view when too long, for typed text.
+    Tail,
 }
 
 impl Ui {
@@ -329,6 +491,10 @@ impl Ui {
             press_target: None,
             focus: None,
             ring: FocusRing::default(),
+            dragging: None,
+            editing: None,
+            ring_visible: false,
+            changes: Vec::new(),
         }
     }
 
@@ -349,6 +515,9 @@ impl Ui {
         // Ids are about to be reused by the next tree; keeping the old
         // one would focus an unrelated node.
         self.focus = None;
+        self.dragging = None;
+        self.editing = None;
+        self.changes.clear();
     }
 
     /// Adds a node under `parent` (or as the root when `parent` is
@@ -359,11 +528,23 @@ impl Ui {
     /// the root if there isn't one) rather than panicking.
     pub fn add(&mut self, parent: Option<NodeId>, style: Style, widget: Widget) -> NodeId {
         let id = self.nodes.len();
-        let focusable = matches!(widget, Widget::Button { .. });
+        let focusable = matches!(
+            widget,
+            Widget::Button { .. }
+                | Widget::Slider { .. }
+                | Widget::Toggle { .. }
+                | Widget::TextInput { .. }
+        );
         self.nodes.push(Node {
             style,
             widget,
             focusable,
+            font_size: DEFAULT_FONT_SIZE,
+            corner_radius: 0.0,
+            bold: false,
+            text_color: None,
+            stack: None,
+            variable: None,
             visible: true,
             children: Vec::new(),
             computed: Rect {
@@ -416,10 +597,17 @@ impl Ui {
             return false;
         };
         node.visible = visible;
-        if let Some(focus) = self.focus
-            && !self.focusables().contains(&focus)
-        {
+        let reachable = self.focusables();
+        if self.focus.is_some_and(|focus| !reachable.contains(&focus)) {
             self.focus = None;
+        }
+        // The editing check ignores `focusable`: a field stops being typed in
+        // only because it can no longer be seen.
+        if self.editing.is_some_and(|node| !self.is_shown(node)) {
+            self.editing = None;
+        }
+        if self.dragging.is_some_and(|node| !self.is_shown(node)) {
+            self.dragging = None;
         }
         true
     }
@@ -428,6 +616,21 @@ impl Ui {
     /// it). `false` for a missing node.
     pub fn is_visible(&self, id: NodeId) -> bool {
         self.nodes.get(id).is_some_and(|node| node.visible)
+    }
+
+    /// Whether `id` is drawn: it and every ancestor are visible.
+    fn is_shown(&self, id: NodeId) -> bool {
+        fn reaches(ui: &Ui, from: NodeId, id: NodeId) -> bool {
+            let node = &ui.nodes[from];
+            node.visible
+                && (from == id || node.children.iter().any(|&child| reaches(ui, child, id)))
+        }
+        self.root.is_some_and(|root| reaches(self, root, id))
+    }
+
+    /// How many nodes exist; every id below this is valid.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
     }
 
     /// This node's laid-out rectangle (valid after [`Ui::layout`]).
@@ -456,26 +659,51 @@ impl Ui {
             w: self.screen[0],
             h: self.screen[1],
         };
-        let mut pending = vec![(root, screen)];
-        while let Some((id, parent)) = pending.pop() {
-            let style = self.nodes[id].style;
-            let (fx, fy) = style.anchor.factors();
-            let anchor_x = parent.x + parent.w * fx + style.offset[0];
-            let anchor_y = parent.y + parent.h * fy + style.offset[1];
-            let rect = Rect {
-                x: anchor_x - style.size[0] * fx,
-                y: anchor_y - style.size[1] * fy,
-                w: style.size[0],
-                h: style.size[1],
-            };
+        let root_rect = Self::place(self.nodes[root].style, screen);
+        let mut pending = vec![(root, root_rect)];
+        while let Some((id, rect)) = pending.pop() {
             self.nodes[id].computed = rect;
-            pending.extend(
-                self.nodes[id]
-                    .children
-                    .iter()
-                    .rev()
-                    .map(|&child| (child, rect)),
-            );
+            let node = &self.nodes[id];
+            match node.stack {
+                None => {
+                    for &child in node.children.iter().rev() {
+                        pending.push((child, Self::place(self.nodes[child].style, rect)));
+                    }
+                }
+                Some(stack) => {
+                    let mut cursor = stack.padding;
+                    for &child in &node.children {
+                        let child_node = &self.nodes[child];
+                        let [w, h] = child_node.style.size;
+                        let (x, y) = match stack.direction {
+                            StackDirection::Vertical => (rect.x + stack.padding, rect.y + cursor),
+                            StackDirection::Horizontal => (rect.x + cursor, rect.y + stack.padding),
+                        };
+                        pending.push((child, Rect { x, y, w, h }));
+                        // A hidden child takes no room in the list.
+                        if child_node.visible {
+                            cursor += stack.gap
+                                + match stack.direction {
+                                    StackDirection::Vertical => h,
+                                    StackDirection::Horizontal => w,
+                                };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where `style` puts a node inside `parent`.
+    fn place(style: Style, parent: Rect) -> Rect {
+        let (fx, fy) = style.anchor.factors();
+        let anchor_x = parent.x + parent.w * fx + style.offset[0];
+        let anchor_y = parent.y + parent.h * fy + style.offset[1];
+        Rect {
+            x: anchor_x - style.size[0] * fx,
+            y: anchor_y - style.size[1] * fy,
+            w: style.size[0],
+            h: style.size[1],
         }
     }
 
@@ -526,6 +754,7 @@ impl Ui {
             Some(id) => {
                 if self.nodes.get(id).is_some_and(|node| node.focusable) {
                     self.focus = Some(id);
+                    self.ring_visible = true;
                     true
                 } else {
                     false
@@ -618,6 +847,7 @@ impl Ui {
             None => order.len() - 1,
         };
         self.focus = Some(order[next]);
+        self.ring_visible = true;
         self.focus
     }
 
@@ -648,6 +878,7 @@ impl Ui {
         if order.is_empty() {
             return None;
         }
+        self.ring_visible = true;
         let Some(current) = self.focus.filter(|id| order.contains(id)) else {
             self.focus = Some(order[0]);
             return self.focus;
@@ -688,12 +919,152 @@ impl Ui {
     /// hold focus without being clickable). Feed the result into whatever
     /// already handles [`Ui::interact`]'s list — activation is a click,
     /// not a second kind of event.
+    ///
+    /// A focused toggle flips and a focused text field starts typing, as a
+    /// click on them would; neither is reported as a click.
     pub fn activate(&mut self) -> Option<NodeId> {
         let id = self.focus?;
         if !self.focusables().contains(&id) {
             return None;
         }
-        matches!(self.nodes.get(id)?.widget, Widget::Button { .. }).then_some(id)
+        match self.nodes.get(id)?.widget {
+            Widget::Button { .. } => Some(id),
+            Widget::Toggle { .. } => {
+                self.flip_toggle(id);
+                None
+            }
+            Widget::TextInput { .. } => {
+                self.editing = Some(id);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// The text field being typed in. While this is set, keyboard input
+    /// belongs to the field rather than to the game.
+    pub fn editing(&self) -> Option<NodeId> {
+        self.editing
+    }
+
+    /// Feeds typed characters to the field being typed in. Backspace removes
+    /// the last character, Escape stops typing, and Enter stops typing and
+    /// returns the field. Characters arriving with no field being typed in
+    /// are dropped.
+    pub fn type_text(&mut self, typed: &str) -> Option<NodeId> {
+        let id = self.editing?;
+        let Widget::TextInput { text, .. } = &mut self.nodes.get_mut(id)?.widget else {
+            self.editing = None;
+            return None;
+        };
+        for character in typed.chars() {
+            match character {
+                '\u{8}' | '\u{7f}' => {
+                    text.pop();
+                }
+                '\r' | '\n' => {
+                    self.editing = None;
+                    return Some(id);
+                }
+                '\u{1b}' => {
+                    self.editing = None;
+                    return None;
+                }
+                other if other.is_control() => {}
+                other => {
+                    if text.len() + other.len_utf8() <= MAX_TEXT_INPUT_BYTES {
+                        text.push(other);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Moves the focused slider one step: right for a positive `direction`,
+    /// left for a negative one. Returns whether a slider took the press, so
+    /// the caller knows not to move focus instead. A slider with no step moves
+    /// a twentieth of its range.
+    pub fn nudge_focused(&mut self, direction: f32) -> bool {
+        let Some(id) = self.focus else {
+            return false;
+        };
+        let Some(Widget::Slider {
+            value,
+            min,
+            max,
+            step,
+            ..
+        }) = self.nodes.get(id).map(|node| &node.widget)
+        else {
+            return false;
+        };
+        let amount = if *step > 0.0 {
+            *step
+        } else {
+            (*max - *min) / 20.0
+        };
+        self.change_slider(id, *value + amount * direction.signum());
+        true
+    }
+
+    /// Sets a bar's or slider's value, or a toggle's state (on when above
+    /// `0.5`), without reporting it as a player change. A slider being dragged
+    /// keeps the player's value. Returns `false` for any other widget.
+    pub fn set_value(&mut self, id: NodeId, new_value: f32) -> bool {
+        let dragged = self.dragging == Some(id);
+        match self.nodes.get_mut(id).map(|node| &mut node.widget) {
+            Some(Widget::ProgressBar { value, .. }) => *value = new_value,
+            Some(Widget::Slider { value, .. }) => {
+                if !dragged {
+                    *value = new_value;
+                }
+            }
+            Some(Widget::Toggle { on, .. }) => *on = new_value > 0.5,
+            _ => return false,
+        }
+        true
+    }
+
+    /// The values the player changed since the last call, oldest first.
+    pub fn take_changes(&mut self) -> Vec<ValueChange> {
+        std::mem::take(&mut self.changes)
+    }
+
+    fn flip_toggle(&mut self, id: NodeId) {
+        if let Some(Widget::Toggle { on, .. }) = self.nodes.get_mut(id).map(|node| &mut node.widget)
+        {
+            *on = !*on;
+            let value = if *on { 1.0 } else { 0.0 };
+            self.changes.push(ValueChange { node: id, value });
+        }
+    }
+
+    /// Clamps and snaps `requested`, and reports it if the slider moved.
+    fn change_slider(&mut self, id: NodeId, requested: f32) {
+        let Some(Widget::Slider {
+            value,
+            min,
+            max,
+            step,
+            ..
+        }) = self.nodes.get_mut(id).map(|node| &mut node.widget)
+        else {
+            return;
+        };
+        let snapped = if *step > 0.0 {
+            *min + ((requested - *min) / *step).round() * *step
+        } else {
+            requested
+        };
+        let next = snapped.clamp(*min, (*max).max(*min));
+        if next != *value {
+            *value = next;
+            self.changes.push(ValueChange {
+                node: id,
+                value: next,
+            });
+        }
     }
 
     /// Feeds one frame of pointer input and returns the ids of every
@@ -704,23 +1075,48 @@ impl Ui {
 
         if input.pressed {
             self.press_target = over;
+            // Pressing anywhere else stops typing.
+            self.editing =
+                over.filter(|&id| matches!(self.nodes[id].widget, Widget::TextInput { .. }));
+            self.dragging =
+                over.filter(|&id| matches!(self.nodes[id].widget, Widget::Slider { .. }));
+            for id in [self.editing, self.dragging].into_iter().flatten() {
+                if self.nodes[id].focusable {
+                    self.focus = Some(id);
+                    self.ring_visible = false;
+                }
+            }
+        }
+        if let Some(id) = self.dragging {
+            let rect = self.nodes[id].computed;
+            if let Widget::Slider { min, max, .. } = self.nodes[id].widget
+                && rect.w > 0.0
+            {
+                let along = ((input.position[0] - rect.x) / rect.w).clamp(0.0, 1.0);
+                self.change_slider(id, min + along * (max - min));
+            }
         }
 
         let mut clicked = Vec::new();
         if input.released {
             if let (Some(pressed), Some(released)) = (self.press_target, over)
                 && pressed == released
-                && matches!(self.nodes[released].widget, Widget::Button { .. })
             {
-                clicked.push(released);
+                match self.nodes[released].widget {
+                    Widget::Button { .. } => clicked.push(released),
+                    Widget::Toggle { .. } => self.flip_toggle(released),
+                    _ => {}
+                }
                 // A clicked button takes focus, so picking up a gamepad
                 // mid-menu resumes from what the mouse last touched
                 // rather than from wherever focus happened to be.
                 if self.nodes[released].focusable {
                     self.focus = Some(released);
+                    self.ring_visible = false;
                 }
             }
             self.press_target = None;
+            self.dragging = None;
         }
         clicked
     }
@@ -743,14 +1139,15 @@ impl Ui {
         out
     }
 
-    /// Appends the focused node's outline as four thin fills.
+    /// Appends the focused node's outline.
     ///
     /// Last in the list, not next to the node it surrounds: a sibling
     /// painted later would otherwise cover the ring on exactly the
-    /// overlapping menus where it matters most. Four fills rather than a
-    /// new [`DrawKind`] keeps every renderer that can already draw a
-    /// rectangle able to draw a focus ring.
+    /// overlapping menus where it matters most.
     fn collect_focus_ring(&self, out: &mut Vec<DrawCommand>) {
+        if !self.ring_visible {
+            return;
+        }
         let Some(id) = self.focus.filter(|id| self.focusables().contains(id)) else {
             return;
         };
@@ -758,47 +1155,20 @@ impl Ui {
             return;
         };
         let rect = node.computed;
-        let t = self.ring.thickness;
-        if t <= 0.0 || rect.w <= 0.0 || rect.h <= 0.0 {
+        let width = self.ring.thickness;
+        if width <= 0.0 || rect.w <= 0.0 || rect.h <= 0.0 {
             return;
         }
         // Drawn inside the node's box, so a ring never overlaps its
         // neighbour and layout does not shift when focus moves.
-        let t = t.min(rect.w * 0.5).min(rect.h * 0.5);
-        let sides = [
-            Rect {
-                x: rect.x,
-                y: rect.y,
-                w: rect.w,
-                h: t,
+        out.push(DrawCommand {
+            rect,
+            kind: DrawKind::Outline {
+                color: self.ring.color,
+                radius: node.corner_radius,
+                width,
             },
-            Rect {
-                x: rect.x,
-                y: rect.y + rect.h - t,
-                w: rect.w,
-                h: t,
-            },
-            Rect {
-                x: rect.x,
-                y: rect.y + t,
-                w: t,
-                h: (rect.h - 2.0 * t).max(0.0),
-            },
-            Rect {
-                x: rect.x + rect.w - t,
-                y: rect.y + t,
-                w: t,
-                h: (rect.h - 2.0 * t).max(0.0),
-            },
-        ];
-        for side in sides {
-            if side.w > 0.0 && side.h > 0.0 {
-                out.push(DrawCommand {
-                    rect: side,
-                    kind: DrawKind::Fill(self.ring.color),
-                });
-            }
-        }
+        });
     }
 
     fn collect_draw(&self, id: NodeId, hot: Option<NodeId>, out: &mut Vec<DrawCommand>) {
@@ -807,14 +1177,14 @@ impl Ui {
             return;
         }
         let rect = node.computed;
+        let radius = node.corner_radius;
+        let size = node.font_size;
+        let bold = node.bold;
         if rect.w > 0.0 && rect.h > 0.0 {
             match &node.widget {
                 Widget::Panel { color } => {
                     if color.a > 0.0 {
-                        out.push(DrawCommand {
-                            rect,
-                            kind: DrawKind::Fill(*color),
-                        });
+                        out.push(fill(rect, *color, radius));
                     }
                 }
                 Widget::Label { text, color } => out.push(DrawCommand {
@@ -822,19 +1192,22 @@ impl Ui {
                     kind: DrawKind::Text {
                         text: text.clone(),
                         color: *color,
+                        size,
+                        bold,
+                        align: TextAlign::Left,
                     },
                 }),
                 Widget::Button { text, bg, hot_bg } => {
-                    let fill = if hot == Some(id) { *hot_bg } else { *bg };
-                    out.push(DrawCommand {
-                        rect,
-                        kind: DrawKind::Fill(fill),
-                    });
+                    let background = if hot == Some(id) { *hot_bg } else { *bg };
+                    out.push(fill(rect, background, radius));
                     out.push(DrawCommand {
                         rect,
                         kind: DrawKind::Text {
                             text: text.clone(),
-                            color: Color::WHITE,
+                            color: node.text_color.unwrap_or(Color::WHITE),
+                            size,
+                            bold,
+                            align: TextAlign::Center,
                         },
                     });
                 }
@@ -843,13 +1216,162 @@ impl Ui {
                     kind: DrawKind::Image {
                         texture: *texture,
                         tint: *tint,
+                        radius,
                     },
                 }),
+                Widget::ProgressBar {
+                    value,
+                    min,
+                    max,
+                    track,
+                    fill: filled,
+                } => {
+                    let along = fraction(*value, *min, *max);
+                    push_bar(out, rect, along, *track, *filled, radius);
+                }
+                Widget::Slider {
+                    value,
+                    min,
+                    max,
+                    track,
+                    fill: filled,
+                    ..
+                } => {
+                    let along = fraction(*value, *min, *max);
+                    let bar_height = (rect.h / 3.0).clamp(2.0, rect.h);
+                    let bar = Rect {
+                        y: rect.y + (rect.h - bar_height) * 0.5,
+                        h: bar_height,
+                        ..rect
+                    };
+                    push_bar(out, bar, along, *track, *filled, bar_height * 0.5);
+                    let knob = rect.h.min(rect.w);
+                    out.push(fill(
+                        Rect {
+                            x: rect.x + (rect.w - knob) * along,
+                            w: knob,
+                            ..rect
+                        },
+                        Color::WHITE,
+                        knob * 0.5,
+                    ));
+                }
+                Widget::Toggle {
+                    text,
+                    on,
+                    off_color,
+                    on_color,
+                } => {
+                    let side = rect.h.min(rect.w);
+                    let check = Rect {
+                        w: side,
+                        h: side,
+                        y: rect.y + (rect.h - side) * 0.5,
+                        ..rect
+                    };
+                    out.push(fill(check, *off_color, radius));
+                    if *on {
+                        let inset = side * 0.2;
+                        out.push(fill(
+                            Rect {
+                                x: check.x + inset,
+                                y: check.y + inset,
+                                w: side - inset * 2.0,
+                                h: side - inset * 2.0,
+                            },
+                            *on_color,
+                            (radius - inset).max(0.0),
+                        ));
+                    }
+                    let gap = side + 8.0;
+                    out.push(DrawCommand {
+                        rect: Rect {
+                            x: rect.x + gap,
+                            w: (rect.w - gap).max(0.0),
+                            ..rect
+                        },
+                        kind: DrawKind::Text {
+                            text: text.clone(),
+                            color: node.text_color.unwrap_or(Color::WHITE),
+                            size,
+                            bold,
+                            align: TextAlign::Left,
+                        },
+                    });
+                }
+                Widget::TextInput {
+                    text,
+                    placeholder,
+                    bg,
+                    color,
+                } => {
+                    out.push(fill(rect, *bg, radius));
+                    let typing = self.editing == Some(id);
+                    let (shown, shown_color) = if typing {
+                        (format!("{text}_"), *color)
+                    } else if text.is_empty() {
+                        (
+                            placeholder.clone(),
+                            Color {
+                                a: color.a * 0.5,
+                                ..*color
+                            },
+                        )
+                    } else {
+                        (text.clone(), *color)
+                    };
+                    const FIELD_PADDING: f32 = 6.0;
+                    out.push(DrawCommand {
+                        rect: Rect {
+                            x: rect.x + FIELD_PADDING,
+                            w: (rect.w - FIELD_PADDING * 2.0).max(0.0),
+                            ..rect
+                        },
+                        kind: DrawKind::Text {
+                            text: shown,
+                            color: shown_color,
+                            size,
+                            bold,
+                            align: TextAlign::Tail,
+                        },
+                    });
+                }
             }
         }
         for &child in &node.children {
             self.collect_draw(child, hot, out);
         }
+    }
+}
+
+/// A solid rectangle, square unless `radius` says otherwise.
+fn fill(rect: Rect, color: Color, radius: f32) -> DrawCommand {
+    DrawCommand {
+        rect,
+        kind: if radius > 0.0 {
+            DrawKind::RoundedFill { color, radius }
+        } else {
+            DrawKind::Fill(color)
+        },
+    }
+}
+
+/// Draws a bar's empty part, then its filled part over the left `along`. The
+/// filled part never gets narrower than its corners, so a low value still
+/// reads as a rounded end.
+fn push_bar(
+    out: &mut Vec<DrawCommand>,
+    rect: Rect,
+    along: f32,
+    track: Color,
+    filled: Color,
+    radius: f32,
+) {
+    out.push(fill(rect, track, radius));
+    if along > 0.0 {
+        let radius = radius.min(rect.h * 0.5);
+        let width = (rect.w * along).max((radius * 2.0).min(rect.w));
+        out.push(fill(Rect { w: width, ..rect }, filled, radius));
     }
 }
 
@@ -1056,20 +1578,10 @@ mod tests {
         ui.set_focus(Some(up));
         let focused = ui.draw_list([f32::MIN, f32::MIN]);
 
-        assert_eq!(
-            focused.len(),
-            unfocused.len() + 4,
-            "a ring is four edge fills"
-        );
-        let ring = &focused[focused.len() - 4..];
-        let rect = ui.rect_of(up).unwrap();
-        for command in ring {
-            assert!(matches!(command.kind, DrawKind::Fill(_)));
-            assert!(
-                command.rect.x >= rect.x && command.rect.y >= rect.y,
-                "the ring is drawn inside the focused node's box",
-            );
-        }
+        assert_eq!(focused.len(), unfocused.len() + 1);
+        let ring = focused.last().unwrap();
+        assert!(matches!(ring.kind, DrawKind::Outline { .. }));
+        assert_eq!(ring.rect, ui.rect_of(up).unwrap());
     }
 
     #[test]
@@ -1323,6 +1835,317 @@ mod tests {
         assert_eq!(click(&mut ui), vec![child]);
         assert!(!ui.draw_list(centre).is_empty());
         assert!(!ui.set_visible(99, true));
+    }
+
+    fn press(ui: &mut Ui, position: [f32; 2]) {
+        ui.interact(PointerInput {
+            position,
+            pressed: true,
+            released: false,
+        });
+    }
+
+    fn release(ui: &mut Ui, position: [f32; 2]) {
+        ui.interact(PointerInput {
+            position,
+            pressed: false,
+            released: true,
+        });
+    }
+
+    fn box_at(x: f32, y: f32, w: f32, h: f32) -> Style {
+        Style {
+            offset: [x, y],
+            size: [w, h],
+            ..Style::default()
+        }
+    }
+
+    fn slider(step: f32) -> Widget {
+        Widget::Slider {
+            value: 0.0,
+            min: 0.0,
+            max: 10.0,
+            step,
+            track: Color::WHITE,
+            fill: Color::WHITE,
+        }
+    }
+
+    fn field() -> Widget {
+        Widget::TextInput {
+            text: String::new(),
+            placeholder: "Name".into(),
+            bg: Color::WHITE,
+            color: Color::WHITE,
+        }
+    }
+
+    fn toggle() -> Widget {
+        Widget::Toggle {
+            text: "Music".into(),
+            on: false,
+            off_color: Color::WHITE,
+            on_color: Color::WHITE,
+        }
+    }
+
+    #[test]
+    fn stack_lists_visible_children_with_gap_and_padding() {
+        let mut ui = Ui::new(400.0, 400.0);
+        let list = ui.add(None, box_at(10.0, 20.0, 200.0, 200.0), panel(Color::WHITE));
+        ui.node_mut(list).unwrap().stack = Some(Stack {
+            direction: StackDirection::Vertical,
+            gap: 4.0,
+            padding: 8.0,
+        });
+        // Their own offsets must not count inside a list.
+        let first = ui.add(Some(list), box_at(99.0, 99.0, 50.0, 30.0), button());
+        let hidden = ui.add(Some(list), box_at(0.0, 0.0, 50.0, 30.0), button());
+        let last = ui.add(Some(list), box_at(0.0, 0.0, 50.0, 30.0), button());
+        ui.set_visible(hidden, false);
+        ui.layout();
+        let first_rect = ui.rect_of(first).unwrap();
+        assert_eq!((first_rect.x, first_rect.y), (18.0, 28.0));
+        let last_rect = ui.rect_of(last).unwrap();
+        assert_eq!(last_rect.y, 28.0 + 30.0 + 4.0, "hidden child takes no room");
+
+        ui.node_mut(list).unwrap().stack = Some(Stack {
+            direction: StackDirection::Horizontal,
+            gap: 4.0,
+            padding: 0.0,
+        });
+        ui.layout();
+        assert_eq!(ui.rect_of(last).unwrap().x, 10.0 + 50.0 + 4.0);
+    }
+
+    #[test]
+    fn dragging_a_slider_snaps_clamps_and_reports_each_change() {
+        let mut ui = Ui::new(200.0, 100.0);
+        let id = ui.add(None, box_at(0.0, 0.0, 100.0, 20.0), slider(1.0));
+        ui.layout();
+        press(&mut ui, [42.0, 10.0]);
+        assert_eq!(
+            ui.take_changes(),
+            vec![ValueChange {
+                node: id,
+                value: 4.0
+            }]
+        );
+        // Still held, now past the end, and off the widget altogether.
+        ui.interact(PointerInput {
+            position: [500.0, 90.0],
+            pressed: false,
+            released: false,
+        });
+        assert_eq!(ui.take_changes()[0].value, 10.0);
+        release(&mut ui, [500.0, 90.0]);
+        assert!(ui.take_changes().is_empty());
+        // Released: moving no longer changes it.
+        ui.interact(PointerInput {
+            position: [10.0, 10.0],
+            pressed: false,
+            released: false,
+        });
+        assert!(ui.take_changes().is_empty());
+    }
+
+    #[test]
+    fn a_dragged_slider_ignores_outside_values_until_released() {
+        let mut ui = Ui::new(200.0, 100.0);
+        let id = ui.add(None, box_at(0.0, 0.0, 100.0, 20.0), slider(0.0));
+        ui.layout();
+        press(&mut ui, [50.0, 10.0]);
+        ui.set_value(id, 1.0);
+        let value = |ui: &Ui| match ui.node(id).unwrap().widget {
+            Widget::Slider { value, .. } => value,
+            _ => unreachable!(),
+        };
+        assert_eq!(value(&ui), 5.0);
+        release(&mut ui, [50.0, 10.0]);
+        ui.set_value(id, 1.0);
+        assert_eq!(value(&ui), 1.0);
+        assert!(ui.take_changes().iter().all(|change| change.value == 5.0));
+    }
+
+    #[test]
+    fn focus_and_arrows_nudge_a_slider() {
+        let mut ui = Ui::new(200.0, 100.0);
+        let id = ui.add(None, box_at(0.0, 0.0, 100.0, 20.0), slider(0.0));
+        assert!(!ui.nudge_focused(1.0), "nothing focused");
+        ui.set_focus(Some(id));
+        assert!(ui.nudge_focused(1.0));
+        assert_eq!(ui.take_changes()[0].value, 0.5, "a twentieth of the range");
+        assert!(ui.nudge_focused(-1.0));
+        assert!(ui.nudge_focused(-1.0));
+        assert_eq!(ui.take_changes().len(), 1, "stopped at the low end");
+    }
+
+    #[test]
+    fn a_toggle_flips_on_click_and_on_activate_without_counting_as_a_click() {
+        let mut ui = Ui::new(200.0, 100.0);
+        let id = ui.add(None, box_at(0.0, 0.0, 100.0, 20.0), toggle());
+        ui.layout();
+        press(&mut ui, [5.0, 5.0]);
+        let clicked = ui.interact(PointerInput {
+            position: [5.0, 5.0],
+            pressed: false,
+            released: true,
+        });
+        assert!(clicked.is_empty());
+        assert_eq!(ui.take_changes()[0].value, 1.0);
+        assert_eq!(ui.focus(), Some(id));
+        assert_eq!(ui.activate(), None);
+        assert_eq!(ui.take_changes()[0].value, 0.0);
+    }
+
+    #[test]
+    fn typing_goes_to_the_clicked_field_until_enter_escape_or_a_click_elsewhere() {
+        let mut ui = Ui::new(200.0, 100.0);
+        let id = ui.add(None, box_at(0.0, 0.0, 100.0, 20.0), field());
+        ui.layout();
+        assert_eq!(ui.type_text("ignored"), None);
+        press(&mut ui, [5.0, 5.0]);
+        assert_eq!(ui.editing(), Some(id));
+        assert_eq!(ui.type_text("Abc\u{8}d"), None);
+        let text = |ui: &Ui| match &ui.node(id).unwrap().widget {
+            Widget::TextInput { text, .. } => text.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(text(&ui), "Abd");
+
+        assert_eq!(ui.type_text("!\rlost"), Some(id));
+        assert_eq!(text(&ui), "Abd!", "Enter ends the typing");
+        assert_eq!(ui.editing(), None);
+
+        press(&mut ui, [5.0, 5.0]);
+        assert_eq!(ui.type_text("\u{1b}"), None);
+        assert_eq!(ui.editing(), None);
+
+        press(&mut ui, [5.0, 5.0]);
+        press(&mut ui, [150.0, 90.0]);
+        assert_eq!(ui.editing(), None);
+
+        ui.set_focus(Some(id));
+        assert_eq!(ui.activate(), None, "not a click");
+        assert_eq!(ui.editing(), Some(id));
+        ui.set_visible(id, false);
+        assert_eq!(ui.editing(), None, "a hidden field stops typing");
+    }
+
+    #[test]
+    fn typed_text_stops_at_the_size_limit() {
+        let mut ui = Ui::new(200.0, 100.0);
+        let id = ui.add(None, box_at(0.0, 0.0, 100.0, 20.0), field());
+        ui.set_focus(Some(id));
+        ui.activate();
+        ui.type_text(&"x".repeat(MAX_TEXT_INPUT_BYTES + 10));
+        assert!(matches!(
+            &ui.node(id).unwrap().widget,
+            Widget::TextInput { text, .. } if text.len() == MAX_TEXT_INPUT_BYTES
+        ));
+    }
+
+    #[test]
+    fn bars_fill_by_value_and_text_keeps_its_size_and_colour() {
+        let mut ui = Ui::new(200.0, 100.0);
+        let root = ui.add(
+            None,
+            box_at(0.0, 0.0, 200.0, 100.0),
+            panel(Color::TRANSPARENT),
+        );
+        let bar = ui.add(
+            Some(root),
+            box_at(0.0, 0.0, 100.0, 10.0),
+            Widget::ProgressBar {
+                value: 15.0,
+                min: 10.0,
+                max: 20.0,
+                track: Color::rgb(0.1, 0.1, 0.1),
+                fill: Color::rgb(0.9, 0.1, 0.1),
+            },
+        );
+        let caption = ui.add(Some(root), box_at(0.0, 20.0, 100.0, 20.0), button());
+        ui.node_mut(caption).unwrap().font_size = 32.0;
+        ui.node_mut(caption).unwrap().text_color = Some(Color::rgb(1.0, 0.0, 0.0));
+        ui.layout();
+        let list = ui.draw_list([f32::MIN, f32::MIN]);
+        assert_eq!(list[1].rect.w, 50.0, "half way between min and max");
+        assert!(matches!(
+            &list[3].kind,
+            DrawKind::Text { size, color, .. } if *size == 32.0 && color.r == 1.0 && color.g == 0.0
+        ));
+        ui.set_value(bar, 99.0);
+        assert_eq!(
+            ui.draw_list([f32::MIN, f32::MIN])[1].rect.w,
+            100.0,
+            "clamped"
+        );
+        ui.set_value(bar, 0.0);
+        assert!(
+            !matches!(ui.draw_list([f32::MIN, f32::MIN])[1].kind, DrawKind::Fill(c) if c.r == 0.9),
+            "an empty bar draws no fill"
+        );
+    }
+
+    #[test]
+    fn a_field_shows_its_hint_when_empty_and_a_cursor_while_typing() {
+        let mut ui = Ui::new(200.0, 100.0);
+        let id = ui.add(None, box_at(0.0, 0.0, 100.0, 20.0), field());
+        ui.layout();
+        let shown = |ui: &Ui| {
+            ui.draw_list([f32::MIN, f32::MIN])
+                .iter()
+                .find_map(|command| match &command.kind {
+                    DrawKind::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+        };
+        assert_eq!(shown(&ui).as_deref(), Some("Name"));
+        ui.set_focus(Some(id));
+        ui.activate();
+        ui.type_text("Al");
+        assert_eq!(shown(&ui).as_deref(), Some("Al_"));
+    }
+
+    #[test]
+    fn a_mouse_click_shows_no_focus_ring_but_the_keyboard_does() {
+        let (mut ui, [_, down, _, _]) = cross_menu();
+        let plain = ui.draw_list([f32::MIN, f32::MIN]).len();
+        press(&mut ui, [100.0, 150.0]);
+        release(&mut ui, [100.0, 150.0]);
+        assert_eq!(ui.focus(), Some(down));
+        assert_eq!(ui.draw_list([f32::MIN, f32::MIN]).len(), plain);
+        ui.focus_direction(FocusDirection::Up);
+        assert_eq!(ui.draw_list([f32::MIN, f32::MIN]).len(), plain + 1);
+    }
+
+    #[test]
+    fn corner_radius_reaches_every_fill_and_clamps_a_thin_bar() {
+        let mut ui = Ui::new(200.0, 100.0);
+        let bar = ui.add(
+            None,
+            box_at(0.0, 0.0, 100.0, 10.0),
+            Widget::ProgressBar {
+                value: 1.0,
+                min: 0.0,
+                max: 100.0,
+                track: Color::WHITE,
+                fill: Color::WHITE,
+            },
+        );
+        ui.node_mut(bar).unwrap().corner_radius = 20.0;
+        ui.layout();
+        let list = ui.draw_list([f32::MIN, f32::MIN]);
+        assert!(matches!(
+            list[0].kind,
+            DrawKind::RoundedFill { radius: 20.0, .. }
+        ));
+        assert!(matches!(
+            list[1].kind,
+            DrawKind::RoundedFill { radius: 5.0, .. }
+        ));
+        assert_eq!(list[1].rect.w, 10.0, "never narrower than its round ends");
     }
 
     #[test]

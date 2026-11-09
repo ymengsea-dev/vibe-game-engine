@@ -136,6 +136,7 @@ mod tests {
             velocity: None,
             visible,
             enabled,
+            tags: Vec::new(),
         }
     }
 
@@ -257,6 +258,105 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn scene_commands_are_queued_and_a_bad_path_is_refused() {
+        let mut rt = runtime(
+            "engine.load_scene('scenes/extra.ron')
+             engine.unload_scene('scenes/extra.ron')
+             engine.next_scene()",
+        );
+        assert_eq!(
+            rt.start().unwrap(),
+            [
+                GameCommand::LoadScene {
+                    path: "scenes/extra.ron".into()
+                },
+                GameCommand::UnloadScene {
+                    path: "scenes/extra.ron".into()
+                },
+                GameCommand::NextScene,
+            ]
+        );
+        let mut rt = runtime("engine.load_scene('../secret.ron')");
+        assert!(rt.start().is_err());
+    }
+
+    #[test]
+    fn tags_find_objects_and_skip_ones_destroyed_in_this_callback() {
+        let mut rt = runtime(
+            "local n = engine.find_objects_by_tag('enemy')
+             engine.log(tostring(#n))
+             engine.destroy(n[1])
+             engine.log(tostring(#engine.find_objects_by_tag('enemy')))
+             engine.log(tostring(#engine.find_objects_by_tag('none')))",
+        );
+        let mut tagged = object("a", true, true);
+        tagged.tags = vec!["enemy".into()];
+        let mut other = object("b", true, true);
+        other.tags = vec!["enemy".into()];
+        rt.set_scene_objects([tagged, other]);
+        let logs: Vec<String> = rt
+            .start()
+            .unwrap()
+            .into_iter()
+            .filter_map(|command| match command {
+                GameCommand::Log(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(logs, ["2", "1", "0"]);
+    }
+
+    #[test]
+    fn retired_scripts_stop_and_kept_ones_keep_their_memory() {
+        let mut rt = LuaRuntime::new().unwrap();
+        let counter = "local n = 0
+             return { update = function() n = n + 1; engine.log('kept=' .. n) end }";
+        rt.load_attached_script("assets/scripts/k.lua", counter, "k")
+            .unwrap();
+        rt.load_attached_script(
+            "assets/scripts/o.lua",
+            "return { update = function() engine.log('old') end }",
+            "o",
+        )
+        .unwrap();
+        rt.set_scene_objects([object("k", true, true), object("o", true, true)]);
+        rt.update(0.1).unwrap();
+
+        let count = rt.script_count();
+        rt.load_attached_script(
+            "assets/scripts/n.lua",
+            "return { start = function() engine.log('new') end }",
+            "n",
+        )
+        .unwrap();
+        let kept = std::collections::HashSet::from(["k".to_owned()]);
+        rt.retire_scripts_before(count, &kept);
+        rt.set_scene_objects([object("k", true, true), object("n", true, true)]);
+
+        let logged = |commands: Vec<GameCommand>| -> Vec<String> {
+            commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    GameCommand::Log(message) => Some(message),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(logged(rt.start_except(&kept).unwrap()), ["new"]);
+        assert_eq!(logged(rt.update(0.1).unwrap()), ["kept=2"]);
+
+        let count = rt.script_count();
+        rt.load_attached_script(
+            "assets/scripts/x.lua",
+            "return { update = function() engine.log('x') end }",
+            "n",
+        )
+        .unwrap();
+        rt.discard_scripts_from(count);
+        assert_eq!(logged(rt.update(0.1).unwrap()), ["kept=3"]);
     }
 
     #[test]

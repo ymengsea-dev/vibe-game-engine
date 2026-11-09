@@ -43,7 +43,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use engine_ecs::prelude::Entity;
 use engine_renderer::{Camera, LightSet};
@@ -56,11 +56,14 @@ use crate::app::{GameContext, GameError};
 pub use bodies::GameplayQueries;
 pub use camera::{choose_active_camera, view_from_world};
 pub use collisions::{CollisionEvent, ContactKind, ContactTracker};
-pub use commands::{PrefabSpawner, apply_world_commands, find_object};
+pub use commands::{PrefabSpawner, apply_world_commands, find_object, find_objects_by_tag};
 pub use keys::platform_key;
-pub use prefab::{instantiate_prefab, valid_prefab_path};
+pub use prefab::{instantiate_prefab, refresh_prefab_copies, valid_prefab_path};
 pub use presentation::{scene_lights, spawn_audio_listener};
-pub use scenes::{SCENE_BUNDLE_FILE, SceneSource, clear_world, reset_physics, valid_scene_path};
+pub use scenes::{
+    SCENE_BUNDLE_FILE, SceneSource, clear_world, kept_object_ids, kept_objects,
+    kept_script_objects, reset_physics, valid_scene_path,
+};
 
 /// Why a gameplay request could not be carried out.
 #[derive(Debug, thiserror::Error)]
@@ -91,6 +94,28 @@ impl From<GameplayError> for GameError {
     }
 }
 
+/// Stores values the player changed with sliders and toggles in their
+/// variables, then makes every bound element show its variable's value.
+fn store_ui_changes(world: &mut engine_ecs::prelude::World, ui: &mut engine_ui::Ui) {
+    for change in ui.take_changes() {
+        let Some(name) = ui
+            .node(change.node)
+            .and_then(|node| node.variable.as_deref())
+        else {
+            continue;
+        };
+        // Back to a tidy decimal, so a slider at 0.1 reads 0.1 in `{volume}`.
+        let value = (f64::from(change.value) * 1e6).round() / 1e6;
+        let mut variables = world.get_resource_or_insert_with(engine_scene::RuleVariables::default);
+        if let Err(error) = variables.set(name, value) {
+            tracing::warn!(variable = name, %error, "a UI element could not change a variable");
+        }
+    }
+    if let Some(variables) = world.get_resource::<engine_scene::RuleVariables>() {
+        engine_scene::sync_ui_variables(ui, variables);
+    }
+}
+
 /// An object created by [`GameplayRuntime::apply`] from a prefab.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnedObject {
@@ -98,6 +123,12 @@ pub struct SpawnedObject {
     pub object_id: String,
     /// The prefab's attached script, for the host to load (`None` if unscripted).
     pub script: Option<String>,
+}
+
+/// A queued change to what is loaded on top of the current scene.
+enum SceneLoad {
+    Load(String),
+    Unload(String),
 }
 
 /// Runs an authored scene: instantiation, gameplay commands, visual rules,
@@ -137,12 +168,34 @@ pub struct GameplayRuntime {
     rule_spawns: Vec<SpawnedObject>,
     /// Object IDs removed by `Destroy` since the host last took them.
     destroyed: Vec<String>,
+    /// Load and unload requests waiting for the next safe point of a frame.
+    scene_loads: VecDeque<SceneLoad>,
+    /// The scenes loaded on top of the current one, with their objects' IDs.
+    loaded_scenes: Vec<(String, HashSet<String>)>,
+    /// The path of the current scene, when known. `None` means the start scene.
+    scene_path: Option<String>,
+    /// The loading screen scene, once looked for.
+    loading_screen: Option<Option<Scene>>,
+    /// A scene change waiting until its loading screen has been drawn.
+    change_after_loading: Option<String>,
+    /// The loading screen's nodes, while it is up.
+    loading_nodes: Vec<NodeId>,
+    /// Scene data of the objects kept from the last scene, until `setup` adds
+    /// it to the new scene.
+    carried: Vec<engine_scene::SceneEntity>,
+    /// The live objects kept from the last scene.
+    carried_objects: Vec<Entity>,
+    /// Their IDs: their start rules have already run.
+    carried_ids: HashSet<String>,
 }
 
 impl GameplayRuntime {
     /// A runtime for `scene`, resolving its assets from `assets` when present.
     /// Without assets the scene still runs, but entities have no geometry.
-    pub fn new(scene: Scene, assets: Option<AssetLibrary>) -> Self {
+    pub fn new(mut scene: Scene, assets: Option<AssetLibrary>) -> Self {
+        if let Some(library) = &assets {
+            refresh_prefab_copies(&mut scene, library);
+        }
         Self {
             scene,
             source: None,
@@ -165,6 +218,15 @@ impl GameplayRuntime {
             rule_guard: rule_runtime::ApplyGuard::default(),
             rule_spawns: Vec::new(),
             destroyed: Vec::new(),
+            scene_loads: VecDeque::new(),
+            loaded_scenes: Vec::new(),
+            scene_path: None,
+            loading_screen: None,
+            change_after_loading: None,
+            loading_nodes: Vec::new(),
+            carried: Vec::new(),
+            carried_objects: Vec::new(),
+            carried_ids: HashSet::new(),
         }
     }
 
@@ -177,6 +239,13 @@ impl GameplayRuntime {
             physics: ctx.physics(),
             grounded: Some(&self.grounded),
         }
+    }
+
+    /// Says which scene file this runtime starts on, for going to the next
+    /// scene. Without it the project's start scene is assumed.
+    pub fn with_scene_path(mut self, path: impl Into<String>) -> Self {
+        self.scene_path = Some(path.into());
+        self
     }
 
     /// Enables scene changes, reading requested scenes from `source`.
@@ -258,7 +327,9 @@ impl GameplayRuntime {
         self.active_camera = None;
         self.shake = None;
         self.shake_rng = engine_utils::Rng::new(camera::SHAKE_SEED);
+        // A camera the new scene brings wins over a kept one.
         self.scene_order = report.spawned.clone();
+        self.scene_order.append(&mut self.carried_objects);
         self.present_camera(ctx, 0.0);
         let camera = *ctx.camera_mut();
         spawn_audio_listener(ctx.world_mut(), &camera);
@@ -271,8 +342,22 @@ impl GameplayRuntime {
             let (world, physics, _, _) = ctx.object_parts();
             objects::disable_authored_subtrees(world, physics, &report.spawned);
         }
+        // Kept objects join the scene data only now, so they get no second
+        // collider, but their rules, UI and lights count from here on.
+        let offset = self.scene.entities.len();
+        self.scene
+            .entities
+            .extend(self.carried.drain(..).map(|mut entity| {
+                entity.parent = entity.parent.map(|parent| parent + offset);
+                entity
+            }));
         self.refresh_lights(ctx);
         self.ui_nodes = self.scene.mount_ui(ctx.ui_mut());
+        if let Some(library) = &self.assets {
+            ctx.set_scene_ui_images(&self.scene, library);
+        }
+        // Variables survive a scene change, so bars start out right.
+        self.sync_ui(ctx);
         let start = self.scene.environment.start_state;
         state::init_state(ctx.world_mut(), start);
         ctx.set_simulation_paused(state::simulation_paused(ctx.world()));
@@ -315,14 +400,216 @@ impl GameplayRuntime {
     /// lights so moved point lights follow their objects. Call at the start of
     /// `update`. A failed scene change is logged and the current scene keeps running.
     pub fn begin_frame(&mut self, ctx: &mut GameContext<'_>) {
-        if let Some(path) = self.pending_scene.take() {
+        let path = self.change_after_loading.take().or_else(|| {
+            let path = self.pending_scene.take()?;
+            // Drawn this frame; the change happens at the start of the next.
+            if self.load_scene(&path).is_ok() && self.show_loading_screen(ctx, &path) {
+                self.change_after_loading = Some(path);
+                return None;
+            }
+            Some(path)
+        });
+        if let Some(path) = path {
             match self.change_scene(ctx, &path) {
                 // The new scene's start rules fire once it is set up.
                 Ok(()) => self.start_rules(ctx),
-                Err(error) => tracing::error!(scene = %path, %error, "scene change failed"),
+                Err(error) => {
+                    self.hide_loading_screen(ctx);
+                    tracing::error!(scene = %path, %error, "scene change failed");
+                }
             }
         }
+        self.apply_scene_loads(ctx);
         self.refresh_lights(ctx);
+    }
+
+    /// Puts up the loading screen, the Game UI of [`engine_project::LOADING_SCENE`],
+    /// on top of everything, if the project has one and `target` isn't it.
+    /// Returns whether it is up, so the caller changes scene on the next frame.
+    pub fn show_loading_screen(&mut self, ctx: &mut GameContext<'_>, target: &str) -> bool {
+        if target == engine_project::LOADING_SCENE {
+            return false;
+        }
+        if self.loading_screen.is_none() {
+            self.loading_screen = Some(self.load_scene(engine_project::LOADING_SCENE).ok());
+        }
+        let Some(Some(screen)) = &self.loading_screen else {
+            return false;
+        };
+        let nodes = screen.append_ui(ctx.ui_mut());
+        if nodes.is_empty() {
+            return false;
+        }
+        self.loading_nodes = nodes.into_keys().collect();
+        if let Some(library) = &self.assets {
+            ctx.set_scene_ui_images(screen, library);
+        }
+        true
+    }
+
+    /// Takes the loading screen down after a scene change that failed.
+    pub fn hide_loading_screen(&mut self, ctx: &mut GameContext<'_>) {
+        for node in self.loading_nodes.drain(..) {
+            ctx.ui_mut().set_visible(node, false);
+        }
+        if let Some(library) = &self.assets {
+            ctx.set_scene_ui_images(&self.scene, library);
+        }
+    }
+
+    /// Queues the current scene's successor in the project's scene order.
+    /// After the last scene this warns and does nothing.
+    pub fn request_next_scene(&mut self) {
+        let Some(source) = &self.source else {
+            tracing::warn!("next scene: this game has no scene source");
+            return;
+        };
+        let order = source.scene_order();
+        let current = self.scene_path.as_deref().unwrap_or(&order.start);
+        match scenes::scene_after(&order.order, current) {
+            Some(next) => self.request_scene_change(&next),
+            None => tracing::warn!(scene = %current, "next scene: this is the last scene"),
+        }
+    }
+
+    /// Queues `path` to be loaded on top of the current scene at the next
+    /// [`Self::apply_scene_loads`].
+    pub fn request_scene_load(&mut self, path: &str) {
+        self.scene_loads.push_back(SceneLoad::Load(path.to_owned()));
+    }
+
+    /// Queues a scene loaded on top to be removed at the next
+    /// [`Self::apply_scene_loads`].
+    pub fn request_scene_unload(&mut self, path: &str) {
+        self.scene_loads
+            .push_back(SceneLoad::Unload(path.to_owned()));
+    }
+
+    /// The scenes loaded on top of the current one, oldest first.
+    pub fn loaded_scenes(&self) -> impl Iterator<Item = &str> {
+        self.loaded_scenes.iter().map(|(path, _)| path.as_str())
+    }
+
+    /// Carries out queued scene loads and unloads. [`Self::begin_frame`] calls
+    /// it. A problem is logged and the game goes on. The scripts of what was
+    /// loaded come out of [`Self::take_rule_spawns`], and of what was removed
+    /// out of [`Self::take_destroyed`].
+    pub fn apply_scene_loads(&mut self, ctx: &mut GameContext<'_>) {
+        while let Some(request) = self.scene_loads.pop_front() {
+            match request {
+                SceneLoad::Load(path) => {
+                    if let Err(error) = self.load_scene_on_top(ctx, &path) {
+                        tracing::error!(scene = %path, %error, "scene could not be loaded");
+                    }
+                }
+                SceneLoad::Unload(path) => self.unload_scene(ctx, &path),
+            }
+        }
+    }
+
+    fn load_scene_on_top(
+        &mut self,
+        ctx: &mut GameContext<'_>,
+        path: &str,
+    ) -> Result<(), GameplayError> {
+        let is_open = self.scene_path.as_deref() == Some(path)
+            || self.loaded_scenes.iter().any(|(open, _)| open == path);
+        if is_open {
+            tracing::warn!(scene = %path, "this scene is already loaded");
+            return Ok(());
+        }
+        let mut scene = self.load_scene(path)?;
+        // Whatever is already alive isn't made twice: a kept object, say.
+        let alive: HashSet<String> = scene
+            .entities
+            .iter()
+            .filter_map(|entity| entity.object_id.clone())
+            .filter(|id| find_object(ctx.world(), id).is_some())
+            .collect();
+        scene.remove_objects(&alive);
+        let existing: HashSet<String> = self
+            .scene
+            .entities
+            .iter()
+            .filter_map(|entity| entity.object_id.clone())
+            .collect();
+        let report = {
+            let parts = ctx.scene_parts();
+            match &self.assets {
+                Some(library) => {
+                    let mut resolver =
+                        RuntimeResolver::new(library, parts.gpu, parts.pipeline, parts.assets);
+                    scene.instantiate_with_resolver(parts.world, &mut resolver)
+                }
+                None => {
+                    scene.instantiate_with_resolver(parts.world, &mut engine_scene::NullResolver)
+                }
+            }
+        };
+        if let Some(library) = &self.assets {
+            ctx.spawn_scene_colliders(&scene, &report, library);
+            ctx.set_scene_sprite_atlas(library)
+                .map_err(|error| GameplayError::SceneRequest(path.to_owned(), error.to_string()))?;
+        }
+        {
+            let (world, physics, _, _) = ctx.object_parts();
+            objects::disable_authored_subtrees(world, physics, &report.spawned);
+        }
+        self.ui_nodes.extend(scene.append_ui(ctx.ui_mut()));
+        self.scene_order.extend(report.spawned.iter().copied());
+        let ids = scene
+            .entities
+            .iter()
+            .filter_map(|entity| entity.object_id.clone())
+            .collect();
+        self.loaded_scenes.push((path.to_owned(), ids));
+        self.rule_spawns
+            .extend(scene.entities.iter().filter_map(|data| {
+                Some(SpawnedObject {
+                    object_id: data.object_id.clone()?,
+                    script: data.script.clone(),
+                })
+            }));
+        let offset = self.scene.entities.len();
+        self.scene
+            .entities
+            .extend(scene.entities.into_iter().map(|mut entity| {
+                entity.parent = entity.parent.map(|parent| parent + offset);
+                entity
+            }));
+        if let Some(library) = &self.assets {
+            ctx.set_scene_ui_images(&self.scene, library);
+        }
+        self.sync_ui(ctx);
+        self.rule_clock.watch(
+            &self.scene,
+            ctx.world().get_resource::<engine_scene::RuleVariables>(),
+        );
+        self.run_rule_event(ctx, RuleEvent::SceneStartExcept(&existing));
+        Ok(())
+    }
+
+    fn unload_scene(&mut self, ctx: &mut GameContext<'_>, path: &str) {
+        let Some(at) = self.loaded_scenes.iter().position(|(open, _)| open == path) else {
+            tracing::warn!(scene = %path, "this scene is not loaded on top");
+            return;
+        };
+        let (_, mut ids) = self.loaded_scenes.remove(at);
+        ids.retain(|id| !kept_object_ids(ctx.world()).contains(id));
+        let commands = ids
+            .iter()
+            .filter(|id| find_object(ctx.world(), id).is_some())
+            .map(|id| GameCommand::Destroy {
+                object_id: id.clone(),
+            })
+            .collect();
+        if let Err(error) = self.apply(ctx, commands) {
+            tracing::warn!(scene = %path, %error, "scene could not be unloaded cleanly");
+        }
+        self.scene.remove_objects(&ids);
+        if let Some(library) = &self.assets {
+            ctx.set_scene_ui_images(&self.scene, library);
+        }
     }
 
     /// Re-applies scene lighting plus the current positions of point lights.
@@ -379,8 +666,8 @@ impl GameplayRuntime {
         };
         let spawned_objects = spawned
             .iter()
-            .filter_map(|(_, scene)| {
-                let data = scene.entities.first()?;
+            .flat_map(|(_, scene)| &scene.entities)
+            .filter_map(|data| {
                 Some(SpawnedObject {
                     object_id: data.object_id.clone()?,
                     script: data.script.clone(),
@@ -393,20 +680,21 @@ impl GameplayRuntime {
             let has_sprites = spawned
                 .iter()
                 .any(|(_, scene)| scene.entities.iter().any(|entity| entity.sprite.is_some()));
-            for (entity, mut scene) in spawned {
-                if let (Some(transform), Some(data)) = (
-                    ctx.world().get::<engine_ecs::components::Transform>(entity),
-                    scene.entities.first_mut(),
-                ) {
-                    data.transform = Some(transform.0.into());
+            for (entities, mut scene) in spawned {
+                for (&entity, data) in entities.iter().zip(&mut scene.entities) {
+                    if let Some(transform) =
+                        ctx.world().get::<engine_ecs::components::Transform>(entity)
+                    {
+                        data.transform = Some(transform.0.into());
+                    }
                 }
                 let report = engine_scene::InstantiateReport {
-                    spawned: vec![entity],
+                    spawned: entities,
                     unresolved: 0,
                 };
                 ctx.spawn_scene_colliders(&scene, &report, library);
                 let (world, physics, _, _) = ctx.object_parts();
-                objects::disable_authored_subtrees(world, physics, &[entity]);
+                objects::disable_authored_subtrees(world, physics, &report.spawned);
             }
             if has_sprites {
                 ctx.set_scene_sprite_atlas(library)?;
@@ -462,6 +750,9 @@ impl GameplayRuntime {
                     self.send_event(ctx, name);
                 }
                 GameCommand::ChangeScene { path } => self.request_scene_change(path),
+                GameCommand::LoadScene { path } => self.request_scene_load(path),
+                GameCommand::UnloadScene { path } => self.request_scene_unload(path),
+                GameCommand::NextScene => self.request_next_scene(),
                 GameCommand::RequestSave => ctx.request_save(),
                 _ => {}
             }
@@ -519,7 +810,12 @@ impl GameplayRuntime {
     /// Fires `SceneStart` rules. Call once after the scene is set up and its
     /// scripts' `start` has run (Rust games: at the end of `setup`).
     pub fn start_rules(&mut self, ctx: &mut GameContext<'_>) {
-        self.run_rule_event(ctx, RuleEvent::SceneStart);
+        let carried = std::mem::take(&mut self.carried_ids);
+        if carried.is_empty() {
+            self.run_rule_event(ctx, RuleEvent::SceneStart);
+        } else {
+            self.run_rule_event(ctx, RuleEvent::SceneStartExcept(&carried));
+        }
         // Values set by scripts' `start` and by these rules are the baseline,
         // so they do not raise change rules on the first frame.
         let current = state::current(ctx.world());
@@ -557,9 +853,39 @@ impl GameplayRuntime {
         }
     }
 
+    /// Stores values the player changed with sliders and toggles in their
+    /// variables, then makes every bound element show its variable's value.
+    fn sync_ui(&mut self, ctx: &mut GameContext<'_>) {
+        let (world, ui) = ctx.rule_targets_mut();
+        store_ui_changes(world, ui);
+    }
+
+    /// The current text of an authored UI element: what the player typed into
+    /// a text field, or a label, button or toggle's caption.
+    pub fn ui_text<'a>(&self, ctx: &'a GameContext<'_>, object_id: &str) -> Option<&'a str> {
+        engine_scene::authored_ui_text(ctx.ui(), &self.ui_nodes, object_id)
+    }
+
+    /// Every authored UI element that has text, by object ID.
+    pub fn ui_texts<'a>(
+        &'a self,
+        ctx: &'a GameContext<'_>,
+    ) -> impl Iterator<Item = (&'a str, &'a str)> {
+        self.ui_nodes.values().filter_map(move |id| {
+            engine_scene::authored_ui_text(ctx.ui(), &self.ui_nodes, id)
+                .map(|text| (id.as_str(), text))
+        })
+    }
+
     /// Runs click rules for this frame's clicked authored buttons and returns
-    /// their object IDs, in click order, for game code to react to.
+    /// their object IDs, in click order, for game code to react to. Pressing
+    /// Enter in a text field counts as clicking it.
+    ///
+    /// Also carries slider and toggle changes to their variables and refreshes
+    /// bound elements, so bars follow variables without any game code. A value
+    /// a script sets in `update` shows from the next frame.
     pub fn dispatch_ui_clicks(&mut self, ctx: &mut GameContext<'_>) -> Vec<String> {
+        self.sync_ui(ctx);
         let clicked: Vec<String> = ctx
             .ui_clicked()
             .iter()
@@ -599,10 +925,21 @@ impl GameplayRuntime {
 
     /// Reads and validates a scene from the scene source without changing anything.
     pub fn load_scene(&self, path: &str) -> Result<Scene, GameplayError> {
-        self.source
+        let mut scene = self
+            .source
             .as_ref()
             .ok_or_else(|| GameplayError::NoSceneSource(path.to_owned()))?
-            .load(path)
+            .load(path)?;
+        if let Some(library) = &self.assets {
+            refresh_prefab_copies(&mut scene, library);
+        }
+        Ok(scene)
+    }
+
+    /// Records which file the current scene came from, for a host that calls
+    /// [`Self::replace_scene`] itself.
+    pub fn set_scene_path(&mut self, path: &str) {
+        self.scene_path = Some(path.to_owned());
     }
 
     /// Loads `path` and switches to it; on failure the current scene is untouched.
@@ -612,21 +949,39 @@ impl GameplayRuntime {
         path: &str,
     ) -> Result<(), GameplayError> {
         let scene = self.load_scene(path)?;
-        self.replace_scene(ctx, scene)
+        self.replace_scene(ctx, scene)?;
+        self.set_scene_path(path);
+        Ok(())
     }
 
     /// Clears the world (keeping resources such as gameplay variables), physics,
     /// UI and contacts, restores the initial camera, and sets up `scene`.
+    ///
+    /// Objects marked Keep between scenes stay as they are, with their bodies
+    /// and sounds. A copy of one in `scene` is dropped, so going back to the
+    /// scene that placed it does not make a second one.
     pub fn replace_scene(
         &mut self,
         ctx: &mut GameContext<'_>,
-        scene: Scene,
+        mut scene: Scene,
     ) -> Result<(), GameplayError> {
+        let keep = kept_objects(ctx.world());
+        self.carried = Scene::capture_entities(ctx.world_mut(), &keep);
+        self.carried_objects = keep.iter().copied().collect();
+        self.carried_ids = self
+            .carried
+            .iter()
+            .filter_map(|entity| entity.object_id.clone())
+            .collect();
+        scene.remove_objects(&self.carried_ids);
+        {
+            let (world, physics, _, _) = ctx.object_parts();
+            scenes::clear_physics_except(world, physics, &keep);
+        }
         {
             let parts = ctx.scene_parts();
-            clear_world(parts.world, parts.assets);
+            scenes::clear_world_except(parts.world, parts.assets, &keep);
         }
-        reset_physics(ctx.physics_mut());
         ctx.ui_mut().clear();
         self.contacts.clear();
         self.warned.clear();
@@ -634,6 +989,10 @@ impl GameplayRuntime {
         self.pending_scene = None;
         self.rule_spawns.clear();
         self.destroyed.clear();
+        self.scene_loads.clear();
+        self.loaded_scenes.clear();
+        self.loading_nodes.clear();
+        self.change_after_loading = None;
         self.scene = scene;
         self.setup(ctx)?;
         Ok(())

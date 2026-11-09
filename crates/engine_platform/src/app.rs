@@ -201,6 +201,10 @@ impl<H: PlatformHandler> ApplicationHandler<UserEvent> for Runner<H> {
         if let WindowEvent::Focused(focused) = event {
             self.focused = focused;
         }
+        for character in crate::event::typed_characters(&event) {
+            self.handler
+                .on_event(crate::event::PlatformEvent::TextInput { character });
+        }
         let Some(mapped) = map_window_event(&event) else {
             return;
         };

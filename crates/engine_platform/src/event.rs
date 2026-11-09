@@ -71,6 +71,12 @@ pub enum PlatformEvent {
         /// Vertical scroll delta (lines, or approximated from pixels).
         delta_y: f32,
     },
+    /// A character the keyboard produced, in the player's own layout. Backspace,
+    /// Enter and Escape arrive as their control characters; see [`typed_characters`].
+    TextInput {
+        /// The character.
+        character: char,
+    },
     /// Raw mouse motion from the device, independent of the cursor
     /// position. Still arrives while the cursor is locked.
     MouseMotion {
@@ -140,6 +146,32 @@ pub fn map_window_event(event: &winit::event::WindowEvent) -> Option<PlatformEve
 /// Maps a raw `PhysicalKey` + press state to a [`PlatformEvent`], or `None`
 /// for keys winit couldn't resolve to a known [`KeyCode`].
 ///
+/// The characters a window event typed, for text fields. A key press can give
+/// several (a dead key resolving); anything else gives none.
+pub fn typed_characters(event: &winit::event::WindowEvent) -> Vec<char> {
+    match event {
+        winit::event::WindowEvent::KeyboardInput {
+            event,
+            is_synthetic: false,
+            ..
+        } if event.state.is_pressed() => event
+            .text
+            .as_deref()
+            .map_or_else(Vec::new, |text| printable_characters(text, event.repeat)),
+        _ => Vec::new(),
+    }
+}
+
+/// Filters a key press's text. Function and arrow keys report private-use
+/// characters on some systems. A held Enter or Escape must not repeat: one
+/// press ends the typing and the repeats would reach whatever comes next.
+fn printable_characters(text: &str, repeat: bool) -> Vec<char> {
+    text.chars()
+        .filter(|character| !matches!(character, '\u{E000}'..='\u{F8FF}'))
+        .filter(|character| !(repeat && matches!(character, '\r' | '\n' | '\u{1b}')))
+        .collect()
+}
+
 /// Split out from [`map_window_event`] because `winit::event::KeyEvent` has
 /// a private field and can't be constructed in tests; `PhysicalKey` has no
 /// such restriction, so this is the smallest testable unit of the mapping.
@@ -168,6 +200,15 @@ fn map_physical_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_text_drops_arrow_key_characters_and_repeated_enter() {
+        assert_eq!(printable_characters("a\u{F700}", false), vec!['a']);
+        assert_eq!(printable_characters("\r", false), vec!['\r']);
+        assert!(printable_characters("\r", true).is_empty());
+        assert!(printable_characters("\u{1b}", true).is_empty());
+        assert_eq!(printable_characters("\u{8}", true), vec!['\u{8}']);
+    }
     use winit::dpi::PhysicalSize;
     use winit::event::WindowEvent as WE;
 

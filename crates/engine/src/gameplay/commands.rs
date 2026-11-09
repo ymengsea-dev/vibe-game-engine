@@ -28,9 +28,22 @@ pub fn find_object(world: &World, object_id: &str) -> Option<Entity> {
         .map(|entity| entity.id())
 }
 
+/// The stable IDs of every live object carrying `tag`.
+pub fn find_objects_by_tag(world: &World, tag: &str) -> Vec<String> {
+    world
+        .iter_entities()
+        .filter(|entity| {
+            entity
+                .get::<engine_scene::SceneTags>()
+                .is_some_and(|tags| tags.0.iter().any(|candidate| candidate == tag))
+        })
+        .filter_map(|entity| entity.get::<SceneObjectId>().map(|id| id.0.clone()))
+        .collect()
+}
+
 /// Spawns one prefab instance: `(world, path, object_id, position)`.
 pub type PrefabSpawner<'a> =
-    dyn FnMut(&mut World, &str, &str, [f32; 3]) -> Result<(Entity, Scene), GameplayError> + 'a;
+    dyn FnMut(&mut World, &str, &str, [f32; 3]) -> Result<(Vec<Entity>, Scene), GameplayError> + 'a;
 
 /// Applies the world-level commands in order and returns spawned prefab instances,
 /// which still need colliders and sprite atlas updates from the caller.
@@ -43,13 +56,16 @@ pub fn apply_world_commands(
     world: &mut World,
     commands: &[GameCommand],
     spawn_prefab: &mut PrefabSpawner<'_>,
-) -> Result<Vec<(Entity, Scene)>, GameplayError> {
+) -> Result<Vec<(Vec<Entity>, Scene)>, GameplayError> {
     let mut spawned_prefabs = Vec::new();
     for command in commands {
         match command {
             GameCommand::Log(message) => tracing::info!("{message}"),
             GameCommand::RequestSave
             | GameCommand::ChangeScene { .. }
+            | GameCommand::LoadScene { .. }
+            | GameCommand::UnloadScene { .. }
+            | GameCommand::NextScene
             | GameCommand::UiSetText { .. }
             | GameCommand::SetMouseLocked { .. }
             | GameCommand::EmitEvent { .. }

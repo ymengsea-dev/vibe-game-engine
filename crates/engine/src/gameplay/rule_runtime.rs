@@ -84,6 +84,16 @@ impl RuleClock {
         self.state = Some(state);
     }
 
+    /// Starts watching the variables `scene`'s rules name that aren't watched
+    /// yet, from their current values. Timers need nothing: they start at zero
+    /// the first time they are seen.
+    pub(crate) fn watch(&mut self, scene: &Scene, variables: Option<&RuleVariables>) {
+        for name in watched_variables(scene).into_keys() {
+            let value = variables.map_or(0.0, |all| all.get(&name));
+            self.variables.entry(name).or_insert(value);
+        }
+    }
+
     /// Takes the current variables and state as already seen, without touching
     /// the timers. Called after scene start so what `start` callbacks and
     /// scene-start rules set does not raise change rules on the first frame.
@@ -241,6 +251,9 @@ pub(crate) fn rule_commands(
 ) -> Option<GameCommand> {
     Some(match action {
         RuleAction::ChangeScene { path } => GameCommand::ChangeScene { path: path.clone() },
+        RuleAction::LoadScene { path } => GameCommand::LoadScene { path: path.clone() },
+        RuleAction::UnloadScene { path } => GameCommand::UnloadScene { path: path.clone() },
+        RuleAction::NextScene => GameCommand::NextScene,
         RuleAction::SetVisible { target, visible } => GameCommand::SetVisible {
             object_id: target.clone(),
             visible: *visible,
@@ -485,6 +498,51 @@ mod tests {
             h.frame(&[], FRAME, false);
         }
         assert_eq!(h.count("tick"), 1.0, "fires once enabled");
+    }
+
+    #[test]
+    fn scene_rule_actions_become_commands_and_new_rules_get_watched() {
+        let world = crate::prelude::World::new();
+        let mut warned = HashSet::new();
+        let path = "scenes/extra.ron".to_owned();
+        assert_eq!(
+            rule_commands(
+                &RuleAction::LoadScene { path: path.clone() },
+                &world,
+                &mut warned
+            ),
+            Some(GameCommand::LoadScene { path: path.clone() })
+        );
+        assert_eq!(
+            rule_commands(
+                &RuleAction::UnloadScene { path: path.clone() },
+                &world,
+                &mut warned
+            ),
+            Some(GameCommand::UnloadScene { path })
+        );
+        assert_eq!(
+            rule_commands(&RuleAction::NextScene, &world, &mut warned),
+            Some(GameCommand::NextScene)
+        );
+
+        let mut clock = RuleClock::default();
+        let mut variables = RuleVariables::default();
+        let _ = variables.set("score", 5.0);
+        let scene = Scene {
+            entities: vec![engine_scene::SceneEntity {
+                rules: vec![rule(
+                    RuleTrigger::VariableChanged {
+                        name: "score".into(),
+                    },
+                    bump("changes"),
+                )],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        clock.watch(&scene, Some(&variables));
+        assert_eq!(clock.variables.get("score"), Some(&5.0));
     }
 
     #[test]
@@ -804,7 +862,7 @@ mod tests {
                         )),
                     ))
                     .id();
-                Ok((entity, Scene::default()))
+                Ok((vec![entity], Scene::default()))
             },
         )
         .expect("commands apply");

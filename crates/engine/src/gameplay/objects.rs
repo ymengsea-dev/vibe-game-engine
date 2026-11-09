@@ -41,7 +41,7 @@ fn warn_once(warned: &mut HashSet<(String, &'static str)>, id: &str, kind: &'sta
 }
 
 /// The entity and every descendant, parents before children.
-fn subtree(world: &World, root: Entity) -> Vec<Entity> {
+pub(super) fn subtree(world: &World, root: Entity) -> Vec<Entity> {
     let mut out = vec![root];
     let mut next = 0;
     while let Some(&entity) = out.get(next) {
@@ -210,7 +210,7 @@ pub(crate) fn set_physics_enabled(
 }
 
 /// Removes the entity's body (with its colliders) or its standalone collider.
-fn remove_physics(world: &World, physics: &mut PhysicsWorld, entity: Entity) {
+pub(super) fn remove_physics(world: &World, physics: &mut PhysicsWorld, entity: Entity) {
     if let Some(body) = world.get::<RigidBody>(entity) {
         physics.rapier.remove_body(body.0);
     } else if let Some(collider) = world.get::<Collider>(entity) {

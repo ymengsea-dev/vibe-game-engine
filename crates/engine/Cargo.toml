@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 tracing.workspace = true
+ron.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 glam.workspace = true

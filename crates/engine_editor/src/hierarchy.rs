@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 use engine_ecs::components::{
     AssetSource, Camera, Disabled, GlobalTransform, Hidden, Lock, MeshRenderer, MeshSource, Name,
-    Sprite, SpriteSource, Static, Transform as TransformComponent, WaterVolume,
+    Sprite, SpriteSource, Transform as TransformComponent, WaterVolume,
 };
 use engine_ecs::prelude::{ChildOf, Children, Entity, With, Without, World};
 use engine_scene::SiblingOrder;
@@ -35,10 +35,58 @@ use crate::object_clipboard::{self, ObjectClipboard};
 /// traversal here is bounded.
 const MAX_HIERARCHY_DEPTH: u32 = 256;
 
+/// A scene of the project that isn't open.
+#[derive(Debug, Clone)]
+pub(crate) struct ClosedScene {
+    /// Project-relative path.
+    pub(crate) path: PathBuf,
+    /// The name people read.
+    pub(crate) name: String,
+    /// The group it is in.
+    pub(crate) group: Option<String>,
+}
+
+/// One row of the scene list, in the order they are drawn.
+#[derive(Debug, Clone)]
+pub(crate) enum SceneListRow {
+    /// A group of scenes.
+    Group(String),
+    /// The open scene at this place in `open_scenes`.
+    Open { index: usize, group: Option<String> },
+    /// A scene that isn't open.
+    Closed(ClosedScene),
+}
+
 /// Cross-frame state for the hierarchy panel: the name filter and any
 /// in-progress inline rename. Owned by [`crate::EditorState`].
 #[derive(Debug, Default)]
 pub struct HierarchyState {
+    /// The open scenes in the project's order, each one's file and name. The
+    /// main scene has no file. Empty in a bare panel.
+    pub(crate) open_scenes: Vec<(Option<String>, String)>,
+    /// Every row of the scene list, open scenes and closed ones and groups. Empty
+    /// in a bare panel.
+    pub(crate) scene_list: Vec<SceneListRow>,
+    /// The groups scenes can move to.
+    pub(crate) scene_group_names: Vec<String>,
+    /// The working scene's file.
+    pub(crate) working_scene: Option<PathBuf>,
+    /// The file of the scene the game starts on.
+    pub(crate) start_scene: Option<PathBuf>,
+    /// A scene's "Lock": its file, or `None` for the working one, and which way.
+    pub(crate) lock_scene: Option<(Option<String>, bool)>,
+    /// The groups folded shut, by name.
+    collapsed_groups: HashSet<String>,
+    /// What a closed scene's row asked for; the shell carries it out.
+    pub(crate) scene_request: Option<crate::assets::SceneRowRequest>,
+    /// Rows asked to move to another open scene; `None` is the main one.
+    pub(crate) move_to_scene: Vec<(Entity, Option<String>)>,
+    /// A scene's "Close" was clicked.
+    pub(crate) close_scene: Option<String>,
+    /// A command from a scene row's menu.
+    pub(crate) scene_command: Option<crate::MenuCommand>,
+    /// The scenes folded shut, by file; `None` is the main scene.
+    collapsed_scenes: HashSet<Option<String>>,
     /// Case-insensitive substring the tree is filtered by; empty shows
     /// everything.
     pub search: String,
@@ -87,6 +135,9 @@ pub struct HierarchyState {
 impl HierarchyState {
     /// Starts renaming `entity` inline, as F2 does.
     pub(crate) fn start_rename(&mut self, world: &World, entity: Entity) {
+        if world.get::<Lock>(entity).is_some() {
+            return;
+        }
         self.renaming = Some(Renaming {
             entity,
             draft: display_name(world, entity),
@@ -97,7 +148,7 @@ impl HierarchyState {
 }
 
 /// `entity`'s parent chain, nearest first (bounded against cycles).
-fn ancestors(world: &World, entity: Entity) -> Vec<Entity> {
+pub(crate) fn ancestors(world: &World, entity: Entity) -> Vec<Entity> {
     let mut chain = Vec::new();
     let mut current = world.get::<ChildOf>(entity).map(ChildOf::parent);
     while let Some(parent) = current {
@@ -243,19 +294,351 @@ pub(crate) fn adopt_new_object(world: &mut World, child: Entity, parent: Entity)
     }
 }
 
-/// Gives every object the [`Hidden`] marker that `hidden` calls for: those
-/// listed, and everything under them. Undo rebuilds the world and drops the
+/// The scenes to list: those the shell gave, or one with no name in a bare panel.
+fn scene_groups(state: &HierarchyState) -> Vec<(Option<String>, String)> {
+    if state.open_scenes.is_empty() {
+        vec![(None, "Scene".to_owned())]
+    } else {
+        state.open_scenes.clone()
+    }
+}
+
+/// Which listed scene a top-level object is under. One naming a file that isn't
+/// open goes under the main scene, which is also where it is saved.
+fn row_group(world: &World, entity: Entity, state: &HierarchyState) -> Option<String> {
+    world
+        .get::<engine_scene::SceneFileOwner>(entity)
+        .map(|file| file.0.clone())
+        .filter(|file| {
+            state
+                .open_scenes
+                .iter()
+                .any(|(listed, _)| listed.as_deref() == Some(file))
+        })
+}
+
+/// Whether the project has more than one scene, so that scene rows have arrows.
+fn lists_several_scenes(state: &HierarchyState) -> bool {
+    let closed = state
+        .scene_list
+        .iter()
+        .filter(|row| matches!(row, SceneListRow::Closed(_)))
+        .count();
+    state.open_scenes.len() + closed > 1
+}
+
+/// The rows to draw: what the shell gave, or the bare panel's one scene.
+fn scene_listing(state: &HierarchyState) -> Vec<SceneListRow> {
+    if state.scene_list.is_empty() {
+        (0..scene_groups(state).len())
+            .map(|index| SceneListRow::Open { index, group: None })
+            .collect()
+    } else {
+        state.scene_list.clone()
+    }
+}
+
+/// The group an open scene is in.
+fn group_of_open_scene<'a>(state: &'a HierarchyState, file: &Option<String>) -> Option<&'a str> {
+    state.scene_list.iter().find_map(|row| match row {
+        SceneListRow::Open { index, group }
+            if state.open_scenes.get(*index).map(|(listed, _)| listed) == Some(file) =>
+        {
+            group.as_deref()
+        }
+        _ => None,
+    })
+}
+
+/// Whether a scene's objects are folded away. A lone scene never is: it has no
+/// arrow to unfold it with.
+fn is_folded(state: &HierarchyState, file: &Option<String>) -> bool {
+    lists_several_scenes(state)
+        && (state.collapsed_scenes.contains(file)
+            || group_of_open_scene(state, file)
+                .is_some_and(|group| state.collapsed_groups.contains(group)))
+}
+
+/// What a drop on a scene moves: the selection when the dragged row is in it.
+fn selection_or(dragged: Entity, selection: &[Entity]) -> Vec<Entity> {
+    if selection.contains(&dragged) {
+        selection.to_vec()
+    } else {
+        vec![dragged]
+    }
+}
+
+/// The top-level objects in the order their rows appear, leaving out scenes
+/// that are folded.
+fn rows_in_group_order(world: &mut World, state: &HierarchyState) -> Vec<Entity> {
+    let all = roots(world);
+    scene_groups(state)
+        .into_iter()
+        .filter(|(file, _)| !is_folded(state, file))
+        .flat_map(|(file, _)| {
+            all.iter()
+                .copied()
+                .filter(|&entity| row_group(world, entity, state) == file)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// A group of scenes: click to fold it.
+fn scene_group_row(ui: &mut egui::Ui, group: &str, state: &mut HierarchyState) {
+    let palette = crate::theme::NIGHT;
+    let folded = state.collapsed_groups.contains(group);
+    let row = ui.horizontal(|ui| {
+        ui.set_min_height(27.0);
+        let (arrow, _) = ui.allocate_exact_size(egui::vec2(14.0, 20.0), egui::Sense::hover());
+        crate::widgets::paint_chevron(
+            ui.painter(),
+            arrow.center(),
+            if folded { 0.0 } else { 1.0 },
+            palette.muted,
+        );
+        crate::assets::folder_icon(ui);
+        ui.add(egui::Label::new(egui::RichText::new(group).color(palette.text)).selectable(false));
+    });
+    let response = ui.interact(
+        row.response.rect.with_max_x(ui.max_rect().right()),
+        egui::Id::new(("hierarchy_scene_group", group)),
+        egui::Sense::click(),
+    );
+    if response.clicked() {
+        if folded {
+            state.collapsed_groups.remove(group);
+        } else {
+            state.collapsed_groups.insert(group.to_owned());
+        }
+    }
+    response.context_menu(|ui| {
+        crate::theme::style_context_menu(ui);
+        if let Some(asked) = crate::assets::scene_group_menu_items(ui, group) {
+            state.scene_request = Some(asked);
+        }
+    });
+}
+
+/// A scene that isn't open: click to work on it, or click its arrow to list its
+/// objects and stay in the working scene.
+fn closed_scene_row(ui: &mut egui::Ui, scene: &ClosedScene, state: &mut HierarchyState) {
+    use crate::assets::SceneRowRequest;
+    let palette = crate::theme::NIGHT;
+    let row = ui.horizontal(|ui| {
+        ui.set_min_height(27.0);
+        let (arrow, _) = ui.allocate_exact_size(egui::vec2(14.0, 20.0), egui::Sense::hover());
+        crate::widgets::paint_chevron(ui.painter(), arrow.center(), 0.0, palette.muted);
+        crate::assets::scene_icon(ui);
+        ui.add(
+            egui::Label::new(egui::RichText::new(&scene.name).color(palette.muted))
+                .selectable(false),
+        );
+        arrow
+    });
+    let response = ui
+        .interact(
+            row.response.rect.with_max_x(ui.max_rect().right()),
+            egui::Id::new(("hierarchy_closed_scene", &scene.path)),
+            egui::Sense::click(),
+        )
+        .on_hover_text("Click to work on this scene");
+    let arrow = ui.interact(
+        row.inner,
+        egui::Id::new(("hierarchy_closed_scene_arrow", &scene.path)),
+        egui::Sense::click(),
+    );
+    let file = Some(scene.path.to_string_lossy().replace('\\', "/"));
+    if arrow.clicked() {
+        state.collapsed_scenes.remove(&file);
+        state.scene_request = Some(SceneRowRequest::OpenBeside(scene.path.clone()));
+    } else if response.clicked() {
+        state.collapsed_scenes.remove(&file);
+        state.scene_request = Some(SceneRowRequest::Work(scene.path.clone()));
+    }
+    response.context_menu(|ui| {
+        crate::theme::style_context_menu(ui);
+        let is_start = state.start_scene.as_deref() == Some(scene.path.as_path());
+        let groups = state.scene_group_names.clone();
+        if let Some(asked) =
+            crate::assets::scene_menu_items(ui, &scene.path, false, is_start, &groups)
+        {
+            state.scene_request = Some(asked);
+        }
+    });
+}
+
+/// A scene's row above its objects: fold arrow, icon and name. Click the row to
+/// work on the scene, or the arrow to fold it. Objects or files dropped on it go
+/// to the top level of that scene. Returns an object dropped.
+fn scene_group_header(
+    ui: &mut egui::Ui,
+    file: &Option<String>,
+    name: &str,
+    rows: usize,
+    locked: bool,
+    state: &mut HierarchyState,
+) -> Option<Entity> {
+    let palette = crate::theme::NIGHT;
+    let folded = is_folded(state, file);
+    let can_fold = lists_several_scenes(state);
+    let working = file.is_none();
+    let background = ui.painter().add(egui::Shape::Noop);
+    let row = ui.horizontal(|ui| {
+        ui.set_min_height(27.0);
+        let arrow = can_fold.then(|| {
+            let (arrow, _) = ui.allocate_exact_size(egui::vec2(14.0, 20.0), egui::Sense::hover());
+            crate::widgets::paint_chevron(
+                ui.painter(),
+                arrow.center(),
+                if folded { 0.0 } else { 1.0 },
+                palette.muted,
+            );
+            arrow
+        });
+        crate::assets::scene_icon(ui);
+        if working {
+            ui.add(
+                egui::Label::new(crate::theme::semibold(name).color(palette.text))
+                    .selectable(false),
+            );
+        } else {
+            ui.add(
+                egui::Label::new(egui::RichText::new(name).color(palette.text)).selectable(false),
+            );
+        }
+        if rows == 0 {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("Empty")
+                        .size(11.5)
+                        .color(palette.subtle),
+                )
+                .selectable(false),
+            );
+        }
+        if locked {
+            paint_lock_icon(ui);
+        }
+        arrow
+    });
+    let row_rect = row.response.rect.with_max_x(ui.max_rect().right());
+    if working && can_fold {
+        ui.painter().set(
+            background,
+            egui::Shape::rect_filled(row_rect, 6.0, ui.visuals().selection.bg_fill),
+        );
+    }
+    let response = ui.interact(
+        row_rect,
+        egui::Id::new(("hierarchy_scene_row", file)),
+        egui::Sense::click(),
+    );
+    let arrow = row.inner.map(|arrow| {
+        ui.interact(
+            arrow,
+            egui::Id::new(("hierarchy_scene_arrow", file)),
+            egui::Sense::click(),
+        )
+    });
+    if arrow.is_some_and(|arrow| arrow.clicked()) {
+        if folded {
+            state.collapsed_scenes.remove(file);
+        } else {
+            state.collapsed_scenes.insert(file.clone());
+        }
+    } else if let Some(file) = file
+        && response.clicked()
+    {
+        state.scene_request = Some(crate::assets::SceneRowRequest::Work(PathBuf::from(file)));
+    }
+    response.context_menu(|ui| {
+        crate::theme::style_context_menu(ui);
+        let path = file
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| state.working_scene.clone());
+        if let Some(path) = path {
+            let is_start = state.start_scene.as_deref() == Some(path.as_path());
+            let groups = state.scene_group_names.clone();
+            if let Some(asked) =
+                crate::assets::scene_menu_items(ui, &path, working, is_start, &groups)
+            {
+                state.scene_request = Some(asked);
+            }
+        }
+        if ui
+            .add_enabled(
+                rows > 0,
+                egui::Button::new(if locked { "Unlock Scene" } else { "Lock Scene" }),
+            )
+            .on_hover_text("Lock or unlock every object in this scene")
+            .clicked()
+        {
+            state.lock_scene = Some((file.clone(), !locked));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("New Scene…").clicked() {
+            state.scene_command = Some(crate::MenuCommand::NewScene);
+            ui.close();
+        }
+        if ui.button("Save Scene As…").clicked() {
+            state.scene_command = Some(crate::MenuCommand::SaveSceneAs);
+            ui.close();
+        }
+        if ui.button("Scenes…").clicked() {
+            state.scene_command = Some(crate::MenuCommand::OpenScenes);
+            ui.close();
+        }
+        if let Some(file) = file {
+            ui.separator();
+            if ui.button("Close Scene").clicked() {
+                state.close_scene = Some(file.clone());
+                ui.close();
+            }
+        }
+    });
+    if file.is_none()
+        && let Some(path) = response.dnd_release_payload::<PathBuf>()
+    {
+        state.asset_drop_request = Some(((*path).clone(), None));
+    }
+    let hovered_with_object = response.dnd_hover_payload::<Entity>().is_some()
+        || (file.is_none() && response.dnd_hover_payload::<PathBuf>().is_some());
+    if hovered_with_object {
+        ui.painter().rect_filled(
+            response.rect,
+            4.0,
+            ui.visuals().selection.bg_fill.linear_multiply(0.3),
+        );
+    }
+    response
+        .dnd_release_payload::<Entity>()
+        .map(|dragged| *dragged)
+}
+
+/// Gives every object the [`Hidden`] marker that the Scene View calls for: those
+/// listed in `hidden`, disabled ones unless `selected` is one of them or inside
+/// one, and everything under those. Undo rebuilds the world and drops the
 /// markers, so this runs every frame. [`Hidden`] is not saved in scenes.
-pub fn sync_editor_hidden(world: &mut World, hidden: &BTreeSet<String>) {
+pub fn sync_editor_hidden(world: &mut World, hidden: &BTreeSet<String>, selected: Option<Entity>) {
+    let mut selection_path = Vec::new();
+    if let Some(entity) = selected.filter(|&entity| world.get_entity(entity).is_ok()) {
+        selection_path.push(entity);
+        selection_path.extend(ancestors(world, entity));
+    }
     let mut query = world.query::<(
         Entity,
         Option<&engine_scene::SceneObjectId>,
         bevy_ecs::query::Has<Hidden>,
+        bevy_ecs::query::Has<Disabled>,
     )>();
     let objects: Vec<(Entity, bool, bool)> = query
         .iter(world)
-        .map(|(entity, id, marked)| {
-            let listed = id.is_some_and(|id| hidden.contains(&id.0));
+        .map(|(entity, id, marked, disabled)| {
+            let listed = id.is_some_and(|id| hidden.contains(&id.0))
+                || (disabled && !selection_path.contains(&entity));
             (entity, listed, marked)
         })
         .collect();
@@ -335,15 +718,14 @@ fn create_menu_items(ui: &mut egui::Ui, state: &mut HierarchyState, parent: Opti
         state.create_request = Some((Command::CreateSprite, parent));
         ui.close();
     }
-    for (label, command) in [
-        ("UI Label", Command::CreateUiLabel),
-        ("UI Button", Command::CreateUiButton),
-    ] {
-        if ui.button(label).clicked() {
-            state.create_request = Some((command, parent));
-            ui.close();
+    ui.menu_button("Game UI", |ui| {
+        for kind in crate::menu::UI_KINDS {
+            if ui.button(crate::menu::ui_kind_name(kind)).clicked() {
+                state.create_request = Some((Command::CreateUiElement(kind), parent));
+                ui.close();
+            }
         }
-    }
+    });
 }
 
 /// `entities` without any whose parent is also listed, in tree order.
@@ -491,7 +873,6 @@ pub fn is_group(world: &World, entity: Entity) -> bool {
         TypeId::of::<engine_scene::SceneObjectId>(),
         TypeId::of::<Disabled>(),
         TypeId::of::<Lock>(),
-        TypeId::of::<Static>(),
         TypeId::of::<Hidden>(),
     ];
     !children_of(world, entity).is_empty()
@@ -851,6 +1232,15 @@ pub fn show(
             ui.add_space(14.0);
             ui.menu_button("+", |ui| {
                 crate::theme::style_context_menu(ui);
+                if ui.button("New Scene…").clicked() {
+                    state.scene_command = Some(crate::MenuCommand::NewScene);
+                    ui.close();
+                }
+                if ui.button("New Group…").clicked() {
+                    state.scene_request = Some(crate::assets::SceneRowRequest::NewGroup(None));
+                    ui.close();
+                }
+                ui.separator();
                 create_menu_items(ui, state, None);
                 ui.separator();
                 let selection = selection_list(*selected, secondary);
@@ -867,7 +1257,9 @@ pub fn show(
                     .clicked()
                 {
                     for entity in &selection {
-                        despawn_entity(world, *entity);
+                        if world.get::<Lock>(*entity).is_none() {
+                            despawn_entity(world, *entity);
+                        }
                     }
                     *selected = None;
                     secondary.clear();
@@ -915,10 +1307,12 @@ pub fn show(
                     ungroup_selection(world, selected, secondary);
                     ui.close();
                 }
-                // Prefabs are single-entity: acts on the primary only.
+                // One prefab at a time: acts on the primary only.
                 if ui
                     .add_enabled(selected.is_some(), egui::Button::new("Make Prefab"))
-                    .on_hover_text("Save the selected entity as a reusable .prefab")
+                    .on_hover_text(
+                        "Save the selected object and its children as a reusable .prefab",
+                    )
                     .clicked()
                     && let Some(entity) = *selected
                 {
@@ -948,31 +1342,6 @@ pub fn show(
                     });
                 });
 
-            // Drop target for un-parenting: a row dragged here becomes a root.
-            let root_strip = ui.add(
-                egui::Label::new(egui::RichText::new("\u{25b8} Scene root").weak())
-                    .sense(egui::Sense::click()),
-            );
-            let selection = selection_list(*selected, secondary);
-            if let Some(path) = root_strip.dnd_release_payload::<PathBuf>() {
-                state.asset_drop_request = Some(((*path).clone(), None));
-            } else if let Some(dragged) = root_strip.dnd_release_payload::<Entity>()
-                && drop_objects(world, *dragged, &selection, DropPlacement::Into, None)
-            {
-                if !selection.contains(&dragged) {
-                    select_only(selected, secondary, *dragged);
-                }
-            } else if root_strip.dnd_hover_payload::<Entity>().is_some()
-                || root_strip.dnd_hover_payload::<PathBuf>().is_some()
-            {
-                ui.painter().rect_filled(
-                    root_strip.rect,
-                    2.0,
-                    ui.visuals().selection.bg_fill.linear_multiply(0.3),
-                );
-            }
-            ui.add_space(4.0);
-
             let query = state.search.trim().to_lowercase();
             let visible: Option<HashSet<Entity>> = if query.is_empty() {
                 None
@@ -995,7 +1364,7 @@ pub fn show(
 
             // Rebuild the flat visible order (drives shift-click range select).
             state.flat_order.clear();
-            for root in roots(world) {
+            for root in rows_in_group_order(world, state) {
                 flatten_visible(world, root, visible.as_ref(), &mut state.flat_order);
             }
 
@@ -1003,16 +1372,102 @@ pub fn show(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     let root_entities = roots(world);
-                    for &entity in &root_entities {
-                        show_entity(
-                            ui,
-                            world,
-                            entity,
-                            selected,
-                            secondary,
-                            state,
-                            visible.as_ref(),
-                        );
+                    let selection = selection_list(*selected, secondary);
+                    let groups = scene_groups(state);
+                    for row in scene_listing(state) {
+                        let group = match row {
+                            SceneListRow::Group(group) => {
+                                if visible.is_none() {
+                                    scene_group_row(ui, &group, state);
+                                }
+                                continue;
+                            }
+                            SceneListRow::Closed(scene) => {
+                                let folded = scene
+                                    .group
+                                    .as_ref()
+                                    .is_some_and(|group| state.collapsed_groups.contains(group));
+                                if visible.is_some() || folded {
+                                    continue;
+                                }
+                                if scene.group.is_some() {
+                                    ui.indent(("closed_scene", &scene.path), |ui| {
+                                        closed_scene_row(ui, &scene, state);
+                                    });
+                                } else {
+                                    closed_scene_row(ui, &scene, state);
+                                }
+                                continue;
+                            }
+                            SceneListRow::Open { index, group } => (index, group),
+                        };
+                        let (index, group) = group;
+                        let Some((file, name)) = groups.get(index).cloned() else {
+                            continue;
+                        };
+                        let mut body = |ui: &mut egui::Ui| {
+                            let rows: Vec<Entity> = root_entities
+                                .iter()
+                                .copied()
+                                .filter(|&entity| row_group(world, entity, state) == file)
+                                .collect();
+                            if state.reveal.is_some_and(|entity| {
+                                let top =
+                                    ancestors(world, entity).last().copied().unwrap_or(entity);
+                                rows.contains(&top)
+                            }) {
+                                state.collapsed_scenes.remove(&file);
+                                if let Some(group) = &group {
+                                    state.collapsed_groups.remove(group);
+                                }
+                            }
+                            let locked = !rows.is_empty()
+                                && rows.iter().all(|&top| world.get::<Lock>(top).is_some());
+                            let folded_away = group
+                                .as_ref()
+                                .is_some_and(|group| state.collapsed_groups.contains(group));
+                            if folded_away && visible.is_none() {
+                                return;
+                            }
+                            if let Some(dragged) =
+                                scene_group_header(ui, &file, &name, rows.len(), locked, state)
+                                && drop_objects(
+                                    world,
+                                    dragged,
+                                    &selection,
+                                    DropPlacement::Into,
+                                    None,
+                                )
+                            {
+                                if !selection.contains(&dragged) {
+                                    select_only(selected, secondary, dragged);
+                                }
+                                if state.open_scenes.len() > 1 {
+                                    for moved in selection_or(dragged, &selection) {
+                                        state.move_to_scene.push((moved, file.clone()));
+                                    }
+                                }
+                            }
+                            if is_folded(state, &file) && visible.is_none() {
+                                return;
+                            }
+                            for entity in rows {
+                                show_entity(
+                                    ui,
+                                    world,
+                                    entity,
+                                    selected,
+                                    secondary,
+                                    state,
+                                    visible.as_ref(),
+                                );
+                            }
+                        };
+                        if group.is_some() {
+                            ui.indent(("open_scene", index), |ui| body(ui));
+                        } else {
+                            body(ui);
+                        }
                     }
                     if let Some(&last) = root_entities.last() {
                         end_drop_target(ui, world, last, selected, secondary, state);
@@ -1464,10 +1919,15 @@ fn ungroup_selection(
     }
 }
 
-fn paint_entity_icon(ui: &mut egui::Ui, icon: RowIcon) {
+fn paint_entity_icon(ui: &mut egui::Ui, icon: RowIcon, linked: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
     let at = |x: f32, y: f32| rect.min + egui::vec2(x, y);
-    let ink = crate::theme::NIGHT.muted;
+    // A linked prefab copy shows in the accent colour.
+    let ink = if linked {
+        crate::theme::NIGHT.accent
+    } else {
+        crate::theme::NIGHT.muted
+    };
     let stroke = egui::Stroke::new(1.2, ink);
     let painter = ui.painter();
     let line = |points: &[(f32, f32)]| {
@@ -1608,6 +2068,17 @@ fn paint_eye_icon(ui: &egui::Ui, rect: egui::Rect, hidden: bool, inherited: bool
     }
 }
 
+/// A pin: this object stays when the game changes scene.
+fn paint_keep_icon(ui: &mut egui::Ui) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+    response.on_hover_text("Keep between scenes");
+    let at = |x: f32, y: f32| rect.min + egui::vec2(x, y);
+    let color = crate::theme::NIGHT.subtle;
+    ui.painter().circle_filled(at(7.0, 5.0), 3.0, color);
+    ui.painter()
+        .line_segment([at(7.0, 8.0), at(7.0, 13.0)], egui::Stroke::new(1.2, color));
+}
+
 fn paint_lock_icon(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
     let at = |x: f32, y: f32| rect.min + egui::vec2(x, y);
@@ -1678,6 +2149,12 @@ fn entity_row(
         .get::<engine_scene::SceneObjectId>(entity)
         .is_some_and(|id| state.hidden.contains(&id.0));
     let hidden = hidden_itself || world.get::<Hidden>(entity).is_some();
+    // Left out for being disabled is not the eye's doing, so it shows no eye.
+    let under_disabled = disabled
+        || ancestors(world, entity)
+            .iter()
+            .any(|a| is_disabled(world, *a));
+    let eye_hidden = hidden_itself || (hidden && !under_disabled);
     let text = if disabled {
         egui::RichText::new(name)
             .color(crate::theme::NIGHT.subtle)
@@ -1691,47 +2168,59 @@ fn entity_row(
     };
 
     let row_id = egui::Id::new(("hierarchy_dnd", entity));
-    let row_rect = ui
-        .dnd_drag_source(row_id, entity, |ui| {
-            let row_rect =
-                egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 27.0));
-            ui.horizontal(|ui| {
-                paint_entity_icon(ui, row_icon(world, entity));
-                let reserved = EYE_SLOT_WIDTH + if locked { 20.0 } else { 0.0 };
-                ui.allocate_ui_with_layout(
-                    egui::vec2((ui.available_width() - reserved).max(0.0), 27.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.add(
-                            egui::Label::new(text)
-                                .truncate()
-                                .sense(egui::Sense::click()),
-                        );
-                    },
-                );
-                if locked {
-                    paint_lock_icon(ui);
-                }
-            });
-            row_rect
-        })
-        .inner;
+    let row_source = ui.dnd_drag_source(row_id, entity, |ui| {
+        let row_rect =
+            egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 27.0));
+        ui.horizontal(|ui| {
+            let linked = world.get::<engine_scene::ScenePrefabLink>(entity).is_some();
+            paint_entity_icon(ui, row_icon(world, entity), linked);
+            let kept = world
+                .get::<engine_scene::KeepBetweenScenes>(entity)
+                .is_some()
+                && world.get::<ChildOf>(entity).is_none();
+            let reserved =
+                EYE_SLOT_WIDTH + if locked { 20.0 } else { 0.0 } + if kept { 20.0 } else { 0.0 };
+            ui.allocate_ui_with_layout(
+                egui::vec2((ui.available_width() - reserved).max(0.0), 27.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.add(
+                        egui::Label::new(text)
+                            .truncate()
+                            .sense(egui::Sense::click()),
+                    );
+                },
+            );
+            if locked {
+                paint_lock_icon(ui);
+            }
+            if kept {
+                paint_keep_icon(ui);
+            }
+        });
+        row_rect
+    });
+    let row_rect = row_source.inner;
     let eye_rect = egui::Rect::from_center_size(
         egui::pos2(row_rect.right() - EYE_SLOT_WIDTH / 2.0, row_rect.center().y),
         egui::vec2(EYE_SLOT_WIDTH - 6.0, 14.0),
     );
     let response = ui.interact(row_rect, row_id, egui::Sense::click_and_drag());
+    // A drag source asks for a hand on hover; a row is mostly for clicking.
+    if row_source.response.contains_pointer() && !egui::DragAndDrop::has_any_payload(ui.ctx()) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+    }
     if state.reveal == Some(entity) {
         response.scroll_to_me(Some(egui::Align::Center));
     }
     // After the row, so a click on the eye toggles instead of selecting.
     let eye = ui.interact(eye_rect, row_id.with("eye"), egui::Sense::click());
-    if hidden || response.hovered() || eye.hovered() {
+    if eye_hidden || response.hovered() || eye.hovered() {
         paint_eye_icon(
             ui,
             eye_rect,
-            hidden,
-            hidden && !hidden_itself,
+            eye_hidden,
+            eye_hidden && !hidden_itself,
             eye.hovered(),
         );
     }
@@ -1764,6 +2253,7 @@ fn entity_row(
     }
     if *selected == Some(entity)
         && state.renaming.is_none()
+        && !locked
         && ui.input(|input| input.key_pressed(egui::Key::F2))
         && !ui.ctx().text_edit_focused()
     {
@@ -1781,7 +2271,10 @@ fn entity_row(
             create_menu_items(ui, state, Some(entity));
         });
         ui.separator();
-        if ui.button("Rename").clicked() {
+        if ui
+            .add_enabled(!locked, egui::Button::new("Rename"))
+            .clicked()
+        {
             state.renaming = Some(Renaming {
                 entity,
                 draft: display_name(world, entity),
@@ -1828,8 +2321,27 @@ fn entity_row(
             state.prefab_request = Some(entity);
             ui.close();
         }
+        // An object is saved with its top object, so only those can move.
+        if state.open_scenes.len() > 1 && world.get::<ChildOf>(entity).is_none() && !locked {
+            let here = row_group(world, entity, state);
+            ui.menu_button("Move to Scene", |ui| {
+                crate::theme::style_context_menu(ui);
+                for (file, name) in state.open_scenes.clone() {
+                    if ui
+                        .add_enabled(file != here, egui::Button::new(name))
+                        .clicked()
+                    {
+                        state.move_to_scene.push((entity, file));
+                        ui.close();
+                    }
+                }
+            });
+        }
         if ui
-            .button(if disabled { "Enable" } else { "Disable" })
+            .add_enabled(
+                !locked,
+                egui::Button::new(if disabled { "Enable" } else { "Disable" }),
+            )
             .clicked()
         {
             set_disabled(world, entity, !disabled);
@@ -1837,7 +2349,7 @@ fn entity_row(
         }
         if ui
             .button(if locked { "Unlock" } else { "Lock" })
-            .on_hover_text("A locked object cannot be moved or clicked in the Scene View")
+            .on_hover_text("A locked object cannot be changed until you unlock it")
             .clicked()
         {
             if locked {
@@ -1848,7 +2360,10 @@ fn entity_row(
             ui.close();
         }
         ui.separator();
-        if ui.button("Delete").clicked() {
+        if ui
+            .add_enabled(!locked, egui::Button::new("Delete"))
+            .clicked()
+        {
             despawn_entity(world, entity);
             if *selected == Some(entity) {
                 *selected = None;
@@ -1874,6 +2389,322 @@ mod tests {
         assert!(ancestors(&world, root).is_empty());
     }
     use engine_ecs::prelude::ChildOf;
+
+    #[test]
+    fn rows_go_under_their_scene_when_several_are_open() {
+        let mut world = World::new();
+        let main = world.spawn(Name::new("A main")).id();
+        let other = world
+            .spawn((
+                Name::new("B other"),
+                engine_scene::SceneFileOwner("scenes/b.ron".into()),
+            ))
+            .id();
+        let main_too = world.spawn(Name::new("C main")).id();
+        let mut state = HierarchyState::default();
+        assert_eq!(rows_in_group_order(&mut world, &state).len(), 3);
+
+        state.open_scenes = vec![
+            (None, "main".into()),
+            (Some("scenes/b.ron".into()), "b".into()),
+        ];
+        let rows = rows_in_group_order(&mut world, &state);
+        assert_eq!(rows.last(), Some(&other));
+        assert!(rows.contains(&main) && rows.contains(&main_too));
+
+        // A fold hides its rows from shift-click selection too.
+        state.collapsed_scenes.insert(None);
+        assert_eq!(rows_in_group_order(&mut world, &state), [other]);
+
+        // Back to one scene: it has no arrow, so a fold left over can't hide it.
+        state.open_scenes.truncate(1);
+        assert!(!is_folded(&state, &None));
+
+        // A closed scene counts: the project has two, so the fold holds.
+        state.scene_list.push(SceneListRow::Closed(ClosedScene {
+            path: "scenes/b.ron".into(),
+            name: "b".into(),
+            group: None,
+        }));
+        assert!(is_folded(&state, &None));
+    }
+
+    /// Clicks the row showing `name` in the panel.
+    fn click_row(world: &mut World, state: &mut HierarchyState, name: &str) {
+        click_at(world, state, name, 0.0);
+    }
+
+    #[test]
+    fn a_scene_row_shows_the_normal_cursor_not_the_text_one() {
+        let mut world = World::new();
+        for name in ["main", "lvl-2"] {
+            let mut state = two_scene_state();
+            let cursor = hover_at(&mut world, &mut state, name);
+            assert_ne!(cursor, egui::CursorIcon::Text, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_folded_group_hides_its_scenes_from_the_list_and_from_selection() {
+        let mut world = World::new();
+        world.spawn(Name::new("In main"));
+        let mut state = two_scene_state();
+        state.scene_list[0] = SceneListRow::Open {
+            index: 0,
+            group: Some("Town".into()),
+        };
+        state
+            .scene_list
+            .insert(0, SceneListRow::Group("Town".into()));
+        assert_eq!(rows_in_group_order(&mut world, &state).len(), 1);
+        click_row(&mut world, &mut state, "Town");
+        assert!(rows_in_group_order(&mut world, &state).is_empty());
+        click_row(&mut world, &mut state, "Town");
+        assert_eq!(rows_in_group_order(&mut world, &state).len(), 1);
+    }
+
+    /// The cursor with the pointer over the text `name`.
+    fn hover_at(world: &mut World, state: &mut HierarchyState, name: &str) -> egui::CursorIcon {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 400.0));
+        let mut time = 0.0;
+        let mut frame = |world: &mut World, state: &mut HierarchyState, events| {
+            time += 0.02;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(ui, world, &mut None, &mut Vec::new(), state),
+            );
+            output.textures_delta.clear();
+            let at = output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == name => {
+                    Some(text.pos + text.galley.size() / 2.0)
+                }
+                _ => None,
+            });
+            (at, output.platform_output.cursor_icon)
+        };
+        let (first, _) = frame(world, state, Vec::new());
+        let at = frame(world, state, Vec::new()).0.or(first).expect("row");
+        frame(world, state, vec![egui::Event::PointerMoved(at)]);
+        frame(world, state, Vec::new()).1
+    }
+
+    /// Clicks the arrow of the scene row showing `name`.
+    fn click_arrow(world: &mut World, state: &mut HierarchyState, name: &str) {
+        click_at(world, state, name, -39.0);
+    }
+
+    /// Clicks `offset` points to the right of the middle of the text `name`'s start.
+    fn click_at(world: &mut World, state: &mut HierarchyState, name: &str, offset: f32) {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 400.0));
+        let mut time = 0.0;
+        let mut frame = |world: &mut World, state: &mut HierarchyState, events| {
+            time += 0.02;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(ui, world, &mut None, &mut Vec::new(), state),
+            );
+            output.textures_delta.clear();
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == name => {
+                    let middle = egui::vec2(offset.min(0.0), text.galley.size().y / 2.0);
+                    Some(text.pos + middle + egui::vec2(4.0, 0.0))
+                }
+                _ => None,
+            })
+        };
+        let first = frame(world, state, Vec::new());
+        let at = frame(world, state, Vec::new())
+            .or(first)
+            .expect("the row shows");
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(world, state, vec![egui::Event::PointerMoved(at)]);
+        frame(world, state, vec![press(true)]);
+        frame(world, state, vec![press(false)]);
+    }
+
+    fn two_scene_state() -> HierarchyState {
+        HierarchyState {
+            open_scenes: vec![(None, "main".into())],
+            scene_list: vec![
+                SceneListRow::Open {
+                    index: 0,
+                    group: None,
+                },
+                SceneListRow::Closed(ClosedScene {
+                    path: "scenes/lvl-2.ron".into(),
+                    name: "lvl-2".into(),
+                    group: None,
+                }),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn clicking_a_closed_scene_asks_to_work_on_it() {
+        let mut world = World::new();
+        let mut state = two_scene_state();
+        click_row(&mut world, &mut state, "lvl-2");
+        assert_eq!(
+            state.scene_request,
+            Some(crate::assets::SceneRowRequest::Work(
+                "scenes/lvl-2.ron".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_closed_scenes_arrow_opens_it_without_working_on_it() {
+        let mut world = World::new();
+        let mut state = two_scene_state();
+        click_arrow(&mut world, &mut state, "lvl-2");
+        assert_eq!(
+            state.scene_request,
+            Some(crate::assets::SceneRowRequest::OpenBeside(
+                "scenes/lvl-2.ron".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn clicking_another_open_scene_asks_to_work_on_it_and_does_not_fold() {
+        let mut world = World::new();
+        let mut state = two_scene_state();
+        state.scene_list[1] = SceneListRow::Open {
+            index: 1,
+            group: None,
+        };
+        state
+            .open_scenes
+            .push((Some("scenes/lvl-2.ron".into()), "lvl-2".into()));
+        click_row(&mut world, &mut state, "lvl-2");
+        assert_eq!(
+            state.scene_request,
+            Some(crate::assets::SceneRowRequest::Work(
+                "scenes/lvl-2.ron".into()
+            ))
+        );
+        assert!(state.collapsed_scenes.is_empty());
+    }
+
+    #[test]
+    fn only_the_arrow_folds_a_scene() {
+        let mut world = World::new();
+        let mut state = two_scene_state();
+        click_row(&mut world, &mut state, "main");
+        assert!(!is_folded(&state, &None));
+        assert_eq!(state.scene_request, None);
+        click_arrow(&mut world, &mut state, "main");
+        assert!(is_folded(&state, &None));
+        click_arrow(&mut world, &mut state, "main");
+        assert!(!is_folded(&state, &None));
+    }
+
+    #[test]
+    fn clicking_the_only_scene_does_not_fold_it() {
+        let mut world = World::new();
+        let mut state = two_scene_state();
+        state.scene_list.pop();
+        click_row(&mut world, &mut state, "main");
+        assert!(state.collapsed_scenes.is_empty());
+    }
+
+    #[test]
+    fn an_object_naming_a_scene_that_isnt_open_stays_listed_under_the_main_one() {
+        let mut world = World::new();
+        let lost = world
+            .spawn((
+                Name::new("Lost"),
+                engine_scene::SceneFileOwner("scenes/closed.ron".into()),
+            ))
+            .id();
+        let state = HierarchyState::default();
+        assert_eq!(rows_in_group_order(&mut world, &state), [lost]);
+    }
+
+    #[test]
+    fn a_disabled_branch_is_left_out_of_the_view_unless_the_selection_is_inside() {
+        let mut world = World::new();
+        let menu = world.spawn(Disabled).id();
+        let button = world.spawn(ChildOf(menu)).id();
+        let other = world.spawn_empty().id();
+        let hidden = BTreeSet::new();
+        let marked = |world: &World| {
+            [menu, button, other].map(|entity| world.get::<Hidden>(entity).is_some())
+        };
+
+        sync_editor_hidden(&mut world, &hidden, None);
+        assert_eq!(marked(&world), [true, true, false]);
+        sync_editor_hidden(&mut world, &hidden, Some(other));
+        assert_eq!(marked(&world), [true, true, false]);
+        sync_editor_hidden(&mut world, &hidden, Some(menu));
+        assert_eq!(marked(&world), [false, false, false]);
+        sync_editor_hidden(&mut world, &hidden, Some(button));
+        assert_eq!(marked(&world), [false, false, false]);
+        sync_editor_hidden(&mut world, &hidden, None);
+        assert_eq!(marked(&world), [true, true, false]);
+    }
+
+    #[test]
+    fn a_hierarchy_row_shows_the_normal_pointer_not_a_hand() {
+        let ctx = egui::Context::default();
+        let mut world = World::new();
+        world.spawn(Name::new("Row"));
+        let mut selected = None;
+        let mut secondary = Vec::new();
+        let mut state = HierarchyState::default();
+        let mut hit_a_row = false;
+        for y in (0..200).step_by(4) {
+            let pointer = egui::pos2(60.0, y as f32);
+            let mut cursor = egui::CursorIcon::Default;
+            // Two frames: egui settles what is hovered on the second.
+            for _ in 0..2 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(320.0, 240.0),
+                        )),
+                        events: vec![egui::Event::PointerMoved(pointer)],
+                        ..Default::default()
+                    },
+                    |ui| show(ui, &mut world, &mut selected, &mut secondary, &mut state),
+                );
+                output.textures_delta.clear();
+                cursor = output.platform_output.cursor_icon;
+                hit_a_row |= output.shapes.iter().any(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) => {
+                        text.galley.text() == "Row"
+                            && text
+                                .galley
+                                .rect
+                                .translate(text.pos.to_vec2())
+                                .contains(pointer)
+                    }
+                    _ => false,
+                });
+            }
+            assert_ne!(cursor, egui::CursorIcon::Grab, "at y = {y}");
+        }
+        assert!(hit_a_row, "the pointer went over the row");
+    }
 
     #[test]
     fn hierarchy_header_uses_vector_icon_not_a_text_glyph() {
@@ -2196,7 +3027,7 @@ mod tests {
         let before = engine_scene::Scene::from_world(&mut world);
 
         set_editor_hidden(&mut world, &mut hidden, &[parent], true);
-        sync_editor_hidden(&mut world, &hidden);
+        sync_editor_hidden(&mut world, &hidden, None);
         assert!(world.get::<Hidden>(parent).is_some());
         assert!(world.get::<Hidden>(child).is_some(), "children follow");
         assert!(world.get::<Hidden>(other).is_none());
@@ -2210,7 +3041,7 @@ mod tests {
         let mut rebuilt = World::new();
         let spawned = before.instantiate(&mut rebuilt);
         assert!(spawned.iter().all(|&e| rebuilt.get::<Hidden>(e).is_none()));
-        sync_editor_hidden(&mut rebuilt, &hidden);
+        sync_editor_hidden(&mut rebuilt, &hidden, None);
         assert_eq!(
             spawned
                 .iter()
@@ -2220,7 +3051,7 @@ mod tests {
         );
 
         set_editor_hidden(&mut world, &mut hidden, &[parent], false);
-        sync_editor_hidden(&mut world, &hidden);
+        sync_editor_hidden(&mut world, &hidden, None);
         assert!(world.get::<Hidden>(parent).is_none());
         assert!(world.get::<Hidden>(child).is_none());
     }
@@ -2233,7 +3064,7 @@ mod tests {
         reparent(&mut world, tree, Some(group));
         let mut hidden = BTreeSet::new();
         set_editor_hidden(&mut world, &mut hidden, &[group], true);
-        sync_editor_hidden(&mut world, &hidden);
+        sync_editor_hidden(&mut world, &hidden, None);
         assert!(is_group(&world, group));
         assert_eq!(row_icon(&world, group), RowIcon::Group);
     }
@@ -2244,7 +3075,7 @@ mod tests {
         let entity = world.spawn(Name::new("New")).id();
         let mut hidden = BTreeSet::new();
         set_editor_hidden(&mut world, &mut hidden, &[entity], true);
-        sync_editor_hidden(&mut world, &hidden);
+        sync_editor_hidden(&mut world, &hidden, None);
         assert_eq!(hidden.len(), 1);
         assert!(world.get::<Hidden>(entity).is_some());
     }
@@ -2293,7 +3124,7 @@ mod tests {
             &[by_icon(RowIcon::Water), by_icon(RowIcon::Group)],
             true,
         );
-        sync_editor_hidden(&mut world, &state.hidden);
+        sync_editor_hidden(&mut world, &state.hidden, None);
         let path = crate::ui_snapshot::snapshot_dir().join("hierarchy-icons.png");
         crate::ui_snapshot::render_png(&path, egui::vec2(280.0, 480.0), 2.0, |ui| {
             egui::CentralPanel::default().show(ui, |ui| {

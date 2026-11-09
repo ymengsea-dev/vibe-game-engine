@@ -681,8 +681,9 @@ fn handle_prefab_request(state: &mut EditorState) {
         return;
     };
     let assets_dir = state.project.assets_dir();
-    match engine::editor::write_prefab(&state.world, entity, &assets_dir) {
+    match engine::editor::write_prefab(&mut state.world, entity, &assets_dir) {
         Ok(path) => {
+            state.mark_dirty();
             match engine_editor::scan_assets_with_folders(&assets_dir) {
                 Ok((assets, folders)) => {
                     state.assets = assets;
@@ -2138,13 +2139,18 @@ impl EditorHandler {
                 } else {
                     self.state.selected_configuration().cloned()
                 };
-                let Some(configuration) = configuration else {
+                let Some(mut configuration) = configuration else {
                     let message = "no build configuration selected".to_owned();
                     self.state.output.write_line(format!("[play] {message}"));
                     tracing::error!(error = %message, "project game could not start");
                     self.state.play.stop(&mut self.state.world);
                     return;
                 };
+                // Play shows the scene being worked on, unless the
+                // configuration names one of its own.
+                if configuration.scene.is_none() {
+                    configuration.scene = self.state.current_scene();
+                }
                 let changed = clear_lua_runtime_problems(&mut self.lsp_problems);
                 for path in &changed {
                     if let Some(code) = self.code.as_ref() {
@@ -2322,6 +2328,12 @@ impl EditorHandler {
                 if self.command_held && key == KeyCode::KeyP {
                     return true;
                 }
+                if !self.command_held {
+                    for character in engine::platform::typed_characters(event) {
+                        self.preview_input
+                            .push(ToGame::Input(InputEvent::Text { character }));
+                    }
+                }
                 // Esc always frees the cursor, and still reaches the game.
                 if key == KeyCode::Escape && pressed && !repeat {
                     let change = self.preview_lock.on_escape();
@@ -2370,7 +2382,10 @@ impl EditorHandler {
                 true
             }
             // Raw motion arrives through `on_event`, not window events.
-            InputEvent::MouseMotion { .. } | InputEvent::Focus { .. } => true,
+            // Typed characters are sent with their key press, above.
+            InputEvent::MouseMotion { .. } | InputEvent::Focus { .. } | InputEvent::Text { .. } => {
+                true
+            }
         }
     }
 
@@ -2695,6 +2710,7 @@ impl PlatformHandler for EditorHandler {
                 }
             }
             PlatformEvent::KeyboardInput { .. }
+            | PlatformEvent::TextInput { .. }
             | PlatformEvent::MouseButtonInput { .. }
             | PlatformEvent::CursorMoved { .. }
             | PlatformEvent::CursorLeft

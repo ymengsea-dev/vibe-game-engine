@@ -209,6 +209,7 @@ mod tests {
             velocity,
             visible: true,
             enabled: true,
+            tags: Vec::new(),
         }]);
         runtime
             .load_script(

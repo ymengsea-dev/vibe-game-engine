@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+ab_glyph.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 wgpu.workspace = true

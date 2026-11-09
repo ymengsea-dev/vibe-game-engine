@@ -35,7 +35,7 @@ use bevy_ecs::prelude::Entity;
 use bevy_ecs::world::EntityWorldMut;
 use engine_ecs::components::{
     AssetSource, Camera, Disabled, InstancedMeshRenderer, Lock, MeshRenderer, MeshSource, Name,
-    Script, Sprite, SpriteSource, Static, Transform, WaterVolume,
+    Script, Sprite, SpriteSource, Transform, WaterVolume,
 };
 use engine_renderer::UvRect;
 
@@ -233,11 +233,20 @@ pub(crate) fn insert_components(
     if data.disabled {
         entity_mut.insert(Disabled);
     }
-    if data.is_static {
-        entity_mut.insert(Static);
-    }
     if data.locked {
         entity_mut.insert(Lock);
+    }
+    if data.keep_between_scenes {
+        entity_mut.insert(crate::KeepBetweenScenes);
+    }
+    if !data.tags.is_empty() {
+        entity_mut.insert(crate::SceneTags(data.tags.clone()));
+    }
+    if let Some(file) = &data.open_from {
+        entity_mut.insert(crate::SceneFileOwner(file.clone()));
+    }
+    if let Some(link) = &data.prefab {
+        entity_mut.insert(crate::ScenePrefabLink(link.clone()));
     }
     if let Some(order) = data.sibling_order {
         entity_mut.insert(crate::format::SiblingOrder(order));

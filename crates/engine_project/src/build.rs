@@ -23,6 +23,18 @@ pub const LUA_EXPORT_VERSION: &[u8] = b"1\n";
 /// Every authored scene, packed so exported games (Lua or Rust) can change scene.
 /// `main.ron` is still written beside it for older players.
 pub const SCENE_BUNDLE_FILE: &str = "scenes.pak";
+/// Written beside [`SCENE_BUNDLE_FILE`]: the scene the game starts on and the
+/// scene order, as an [`ExportedSceneOrder`].
+pub const SCENE_ORDER_FILE: &str = "scene_order.ron";
+
+/// What an exported game knows about its scene order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExportedSceneOrder {
+    /// The scene the game starts on.
+    pub start: String,
+    /// Every scene, in order.
+    pub order: Vec<String>,
+}
 
 /// Which cargo profile to compile the export with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -417,6 +429,18 @@ fn stage_export(
     let scenes = project.resolve(Path::new(crate::SCENES_DIR))?;
     engine_asset::pack_dir(&scenes, &plan.export_dir.join(SCENE_BUNDLE_FILE))
         .map_err(|err| ProjectError::Build(format!("packing scenes: {err}")))?;
+    let order = ExportedSceneOrder {
+        start: project
+            .manifest()
+            .main_scene
+            .to_string_lossy()
+            .replace('\\', "/"),
+        order: project.ordered_scenes(),
+    };
+    let order_path = plan.export_dir.join(SCENE_ORDER_FILE);
+    let order_text = ron::ser::to_string_pretty(&order, ron::ser::PrettyConfig::default())
+        .map_err(|err| ProjectError::Build(format!("writing the scene order: {err}")))?;
+    std::fs::write(&order_path, order_text).map_err(|err| io(&order_path, err))?;
     if lua {
         std::fs::write(&marker, format!("2\n{}\n", project.manifest().project_id))
             .map_err(|err| io(&marker, err))?;
@@ -517,6 +541,34 @@ mod tests {
         let packed = engine_asset::Bundle::open(&plan.export_dir.join("scenes.pak"))
             .expect("repacked scenes");
         assert!(packed.get("level2.ron").is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_export_records_the_start_scene_and_the_scene_order() {
+        let root = std::env::temp_dir().join(format!("vge-export-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut project =
+            Project::create_with_language(&root, "Order", GameplayLanguage::Lua).expect("project");
+        engine_scene::Scene::default()
+            .save_to_file(&project.scenes_dir().join("level2.ron"))
+            .expect("second scene");
+        project.manifest_mut().scene_order = vec![
+            PathBuf::from("scenes/level2.ron"),
+            PathBuf::from("scenes/main.ron"),
+        ];
+        let player = root.join("bundled-player");
+        std::fs::write(&player, b"player binary").expect("fake player");
+        let plan = ExportPlan::for_configuration(
+            &project,
+            &BuildConfiguration::new("Debug", BuildProfile::Debug),
+            root.join("out"),
+        );
+        export_lua(&project, &plan, &player).expect("export");
+        let text = std::fs::read_to_string(plan.export_dir.join(SCENE_ORDER_FILE)).expect("file");
+        let order: ExportedSceneOrder = ron::from_str(&text).expect("parse");
+        assert_eq!(order.start, "scenes/main.ron");
+        assert_eq!(order.order, ["scenes/level2.ron", "scenes/main.ron"]);
         let _ = std::fs::remove_dir_all(root);
     }
 

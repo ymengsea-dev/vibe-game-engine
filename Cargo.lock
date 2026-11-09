@@ -1465,6 +1465,7 @@ dependencies = [
  "engine_ui",
  "engine_utils",
  "glam 0.33.6",
+ "ron",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1567,6 +1568,7 @@ dependencies = [
  "engine_renderer",
  "engine_scene",
  "engine_scripting",
+ "engine_ui",
  "engine_utils",
  "glam 0.33.6",
  "image",
@@ -1634,6 +1636,7 @@ dependencies = [
 name = "engine_renderer"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "bytemuck",
  "engine_platform",
  "engine_utils",

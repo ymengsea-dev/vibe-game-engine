@@ -37,7 +37,7 @@ use std::path::Path;
 
 use bevy_ecs::hierarchy::ChildOf;
 use bevy_ecs::prelude::{Entity, World};
-use engine_ecs::components::{AssetSource, Camera, Disabled, Name, Static, Transform, WaterVolume};
+use engine_ecs::components::{AssetSource, Camera, Disabled, Name, Transform, WaterVolume};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::capture::capture_renderables;
@@ -93,9 +93,6 @@ pub struct SavedEntity {
     /// Whether the entity was disabled.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
-    /// Whether the entity was marked static.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_static: bool,
     /// Authored water settings, including waves and buoyancy properties.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub water: Option<WaterData>,
@@ -177,7 +174,6 @@ impl WorldSnapshot {
             Option<&Camera>,
             Option<&AssetSource>,
             Option<&Disabled>,
-            Option<&Static>,
             Option<&WaterVolume>,
             Option<&crate::ScenePointLight>,
             Option<&crate::SceneFoliage>,
@@ -193,7 +189,6 @@ impl WorldSnapshot {
                     camera,
                     asset_source,
                     disabled,
-                    is_static,
                     water,
                     light,
                     foliage,
@@ -222,7 +217,6 @@ impl WorldSnapshot {
                             asset_source: asset_source.map(|source| source.path.clone()),
                             asset_id: asset_source.and_then(|source| source.id.clone()),
                             disabled: disabled.is_some(),
-                            is_static: is_static.is_some(),
                             water: water.map(|volume| volume.surface.into()),
                             point_light: light.map(|light| light.0),
                         },
@@ -331,8 +325,11 @@ impl SavedEntity {
             asset_source: self.asset_source.clone(),
             asset_id: self.asset_id.clone(),
             disabled: self.disabled,
-            is_static: self.is_static,
             locked: false,
+            tags: Vec::new(),
+            keep_between_scenes: false,
+            prefab: None,
+            open_from: None,
             // A save restores a live world, and a live emitter's sound is
             // already loaded — re-authoring one from the save file would
             // restart it.

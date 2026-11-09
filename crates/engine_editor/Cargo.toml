@@ -29,6 +29,7 @@ engine_platform.workspace = true
 engine_project.workspace = true
 engine_renderer.workspace = true
 engine_scene.workspace = true
+engine_ui.workspace = true
 engine_scripting.workspace = true
 engine_physics.workspace = true
 engine_utils.workspace = true

@@ -69,6 +69,14 @@ pub fn scan(world: &mut World, index: &AssetIndex) -> Vec<AssetDependency> {
     for (entity, source) in world.query::<(Entity, &SpriteSource)>().iter(world) {
         add(entity, "SpriteSource.atlas", &source.atlas);
     }
+    for (entity, element) in world
+        .query::<(Entity, &engine_scene::SceneUi)>()
+        .iter(world)
+    {
+        if let Some(image) = &element.0.image {
+            add(entity, "GameUi.image", &image.id);
+        }
+    }
     for (entity, source) in world.query::<(Entity, &SceneTilemap)>().iter(world) {
         add(entity, "Tilemap.atlas", &source.0.atlas.id);
     }
