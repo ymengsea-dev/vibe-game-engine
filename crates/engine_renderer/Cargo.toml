@@ -15,6 +15,7 @@ wgpu.workspace = true
 pollster.workspace = true
 bytemuck.workspace = true
 glam.workspace = true
+serde.workspace = true
 image.workspace = true
 engine_platform.workspace = true
 engine_utils.workspace = true

@@ -27,15 +27,16 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::Without;
 use engine_asset::AssetId;
 use engine_ecs::components::{
-    InstancedMeshRenderer, MeshRenderer, MeshSource, SkinnedMeshRenderer, Sprite, SpriteSource,
+    InstancedMeshRenderer, MeshLod, MeshRenderer, MeshSource, SkinnedMeshRenderer, Sprite,
+    SpriteSource,
 };
 use engine_ecs::prelude::{Entity, World};
 use engine_renderer::{
     GpuContext, Material, MaterialBinding, Mesh, Pipeline, RenderAssets, SkinnedPipeline, UvRect,
 };
 use engine_scene::{
-    AppliedMaterialOverride, AssetRef, MaterialOverrideData, SceneError, SceneFoliage,
-    SceneMaterialOverride, SceneModelAnimation, SceneResolver, SkinnedModel,
+    AppliedLod, AppliedMaterialOverride, AssetRef, LodCache, MaterialOverrideData, SceneError,
+    SceneFoliage, SceneMaterialOverride, SceneModelAnimation, SceneResolver, SkinnedModel,
     material_from_imported,
 };
 use engine_utils::AssetHandle;
@@ -60,6 +61,8 @@ pub struct EditorResolver<'a> {
     uploaded: HashMap<AssetId, (AssetHandle<Mesh>, AssetHandle<MaterialBinding>)>,
     /// Draws animated models when set; without it every model is still.
     skinned_pipeline: Option<&'a SkinnedPipeline>,
+    /// Detail tiers already uploaded this load.
+    lods: LodCache,
 }
 
 impl<'a> EditorResolver<'a> {
@@ -77,6 +80,7 @@ impl<'a> EditorResolver<'a> {
             assets,
             uploaded: HashMap::new(),
             skinned_pipeline: None,
+            lods: HashMap::new(),
         }
     }
 
@@ -150,9 +154,10 @@ impl SceneResolver for EditorResolver<'_> {
             )));
         };
 
-        let [primitive] = gltf.meshes.as_slice() else {
+        let Some(primitive) = engine_scene::base_mesh(gltf) else {
             return Err(SceneError::Resolve(format!(
-                "glTF asset {id} has {} primitives; the editor renderer supports exactly one",
+                "glTF asset {id} has {} primitives; the editor renderer supports exactly one \
+                 (or detail tiers named _LOD0, _LOD1, …)",
                 gltf.meshes.len()
             )));
         };
@@ -190,6 +195,27 @@ impl SceneResolver for EditorResolver<'_> {
             self.uploaded.insert(id, (renderer.mesh, renderer.material));
         }
         Ok(Some(renderer))
+    }
+
+    fn resolve_mesh_lods(
+        &mut self,
+        mesh: &AssetRef,
+        renderer: &mut MeshRenderer,
+        auto_generate: bool,
+    ) -> Result<(), SceneError> {
+        let id = asset_id(mesh)?;
+        let Some(ImportedAsset::Mesh(gltf)) = self.importer.get(id) else {
+            return Ok(());
+        };
+        engine_scene::attach_lod_tiers(
+            self.gpu,
+            self.assets,
+            &mut self.lods,
+            renderer,
+            id,
+            gltf,
+            auto_generate,
+        )
     }
 
     fn resolve_skinned_mesh(
@@ -330,8 +356,7 @@ pub fn resolve_pending(
         match resolver.resolve_skinned_mesh(&mesh, &material, authored.as_ref()) {
             Ok(Some(model)) => {
                 if let Some(previous) = world.get::<MeshRenderer>(entity) {
-                    resolver.assets.meshes.release(previous.mesh);
-                    resolver.assets.materials.release(previous.material);
+                    previous.release(resolver.assets);
                 }
                 let settings = world
                     .get::<SceneModelAnimation>(entity)
@@ -362,14 +387,19 @@ pub fn resolve_pending(
             }
         }
         match resolver.resolve_mesh_with_material(&mesh, &material, authored.as_ref()) {
-            Ok(Some(renderer)) => {
+            Ok(Some(mut renderer)) => {
                 if let Some(previous) = world.get::<MeshRenderer>(entity) {
-                    resolver.assets.meshes.release(previous.mesh);
-                    resolver.assets.materials.release(previous.material);
+                    previous.release(resolver.assets);
                 }
-                world
-                    .entity_mut(entity)
-                    .insert((renderer, AppliedMaterialOverride(authored)));
+                let auto_generate = wants_generated_lods(world, entity);
+                if let Err(err) = resolver.resolve_mesh_lods(&mesh, &mut renderer, auto_generate) {
+                    tracing::warn!(error = %err, "could not load a mesh's detail tiers");
+                }
+                world.entity_mut(entity).insert((
+                    renderer,
+                    AppliedMaterialOverride(authored),
+                    AppliedLod(auto_generate),
+                ));
                 report.resolved += 1;
             }
             Ok(None) => report.pending += 1,
@@ -379,6 +409,8 @@ pub fn resolve_pending(
             }
         }
     }
+
+    refresh_lods(world, &mut resolver);
 
     let sprite_report = resolve_pending_sprites(world, &mut resolver);
     report.resolved += sprite_report.resolved;
@@ -400,6 +432,46 @@ pub fn resolve_pending(
     }
 
     report
+}
+
+/// Whether `entity`'s [`MeshLod`] asks for generated detail tiers.
+fn wants_generated_lods(world: &World, entity: Entity) -> bool {
+    world
+        .get::<MeshLod>(entity)
+        .is_some_and(|lod| lod.auto_generate)
+}
+
+/// Rebuilds the detail tiers of every live mesh whose "Generate simpler
+/// meshes" setting changed since it was built.
+fn refresh_lods(world: &mut World, resolver: &mut EditorResolver<'_>) {
+    let stale: Vec<(Entity, String, bool)> = world
+        .query::<(
+            Entity,
+            &MeshSource,
+            &MeshRenderer,
+            Option<&MeshLod>,
+            Option<&AppliedLod>,
+        )>()
+        .iter(world)
+        .filter_map(|(entity, source, _, lod, applied)| {
+            let wanted = lod.is_some_and(|lod| lod.auto_generate);
+            (applied.map(|applied| applied.0) != Some(wanted))
+                .then(|| (entity, source.mesh.clone(), wanted))
+        })
+        .collect();
+    for (entity, mesh, wanted) in stale {
+        let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+            continue;
+        };
+        let Some(mut renderer) = entity_mut.take::<MeshRenderer>() else {
+            continue;
+        };
+        if let Err(err) = resolver.resolve_mesh_lods(&AssetRef { id: mesh }, &mut renderer, wanted)
+        {
+            tracing::warn!(error = %err, "could not rebuild a mesh's detail tiers");
+        }
+        entity_mut.insert((renderer, AppliedLod(wanted)));
+    }
 }
 
 /// Drops an animated model's renderer, clips and player, releasing its GPU

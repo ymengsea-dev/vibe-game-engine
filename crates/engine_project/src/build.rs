@@ -27,6 +27,18 @@ pub const SCENE_BUNDLE_FILE: &str = "scenes.pak";
 /// scene order, as an [`ExportedSceneOrder`].
 pub const SCENE_ORDER_FILE: &str = "scene_order.ron";
 
+/// Written beside [`SCENE_ORDER_FILE`]: project settings an exported game
+/// starts with, as an [`ExportedSettings`].
+pub const EXPORT_SETTINGS_FILE: &str = "settings.ron";
+
+/// Project settings an exported game (Lua or Rust) starts with.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExportedSettings {
+    /// The graphics quality the game starts at.
+    #[serde(default)]
+    pub quality: crate::QualityLevel,
+}
+
 /// What an exported game knows about its scene order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExportedSceneOrder {
@@ -441,6 +453,13 @@ fn stage_export(
     let order_text = ron::ser::to_string_pretty(&order, ron::ser::PrettyConfig::default())
         .map_err(|err| ProjectError::Build(format!("writing the scene order: {err}")))?;
     std::fs::write(&order_path, order_text).map_err(|err| io(&order_path, err))?;
+    let settings = ExportedSettings {
+        quality: project.manifest().quality,
+    };
+    let settings_path = plan.export_dir.join(EXPORT_SETTINGS_FILE);
+    let settings_text = ron::ser::to_string_pretty(&settings, ron::ser::PrettyConfig::default())
+        .map_err(|err| ProjectError::Build(format!("writing the project settings: {err}")))?;
+    std::fs::write(&settings_path, settings_text).map_err(|err| io(&settings_path, err))?;
     if lua {
         std::fs::write(&marker, format!("2\n{}\n", project.manifest().project_id))
             .map_err(|err| io(&marker, err))?;

@@ -1173,6 +1173,15 @@ fn game_state_lists_match() {
 }
 
 #[test]
+fn quality_level_lists_match() {
+    let names: Vec<&str> = engine_renderer::QualityLevel::ALL
+        .iter()
+        .map(|level| level.name())
+        .collect();
+    assert_eq!(names, engine_scripting::QUALITY_LEVELS);
+}
+
+#[test]
 fn set_game_state_pauses_the_simulation_this_frame() {
     let mut world = crate::prelude::World::new();
     state::init_state(&mut world, None);

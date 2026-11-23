@@ -139,6 +139,9 @@ enum SceneLoad {
 pub struct GameplayRuntime {
     scene: Scene,
     source: Option<SceneSource>,
+    /// Whether the project's starting graphics quality has been applied.
+    /// Only once: a quality the game picks later survives scene changes.
+    start_quality_applied: bool,
     assets: Option<AssetLibrary>,
     ui_nodes: HashMap<NodeId, String>,
     contacts: ContactTracker,
@@ -214,6 +217,7 @@ impl GameplayRuntime {
             follow_mouse: false,
             shake_rng: engine_utils::Rng::new(camera::SHAKE_SEED),
             scene_order: Vec::new(),
+            start_quality_applied: false,
             default_lights: None,
             ambient_bus: None,
             state_change: None,
@@ -275,6 +279,12 @@ impl GameplayRuntime {
     /// Instantiates the current scene: camera, lights, audio listener,
     /// ambient sounds, renderables, colliders, sprite atlas and authored UI.
     pub fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+        if !self.start_quality_applied {
+            self.start_quality_applied = true;
+            if let Some(source) = &self.source {
+                ctx.set_quality(source.quality());
+            }
+        }
         let live_camera = *ctx.camera_mut();
         let initial = *self.initial_camera.get_or_insert(live_camera);
         let mut camera = initial;
@@ -639,6 +649,12 @@ impl GameplayRuntime {
         for command in &commands {
             if let GameCommand::SetMouseLocked { locked } = command {
                 ctx.set_mouse_locked(*locked);
+            }
+            if let GameCommand::SetQuality { level } = command {
+                match engine_renderer::QualityLevel::from_name(level) {
+                    Some(level) => ctx.set_quality(level),
+                    None => tracing::warn!(%level, "unknown graphics quality"),
+                }
             }
             if let GameCommand::UiSetText { object_id, text } = command
                 && !engine_scene::set_authored_ui_text(

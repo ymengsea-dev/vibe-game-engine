@@ -69,6 +69,7 @@ pub fn apply_world_commands(
             | GameCommand::NextScene
             | GameCommand::UiSetText { .. }
             | GameCommand::SetMouseLocked { .. }
+            | GameCommand::SetQuality { .. }
             | GameCommand::EmitEvent { .. }
             | GameCommand::SetVelocity { .. }
             | GameCommand::AddForce { .. }

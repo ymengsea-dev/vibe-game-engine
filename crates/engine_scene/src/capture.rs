@@ -57,6 +57,10 @@ pub fn capture_renderables(
                 .get::<crate::SceneModelAnimation>(entity)
                 .map(|animation| animation.0.clone())
                 .filter(|animation| *animation != crate::ModelAnimationData::default()),
+            lod: world
+                .get::<engine_ecs::components::MeshLod>(entity)
+                .map(crate::LodData::from)
+                .filter(|lod| *lod != crate::LodData::default()),
         });
 
     let sprite = world.get::<SpriteSource>(entity).map(|source| {

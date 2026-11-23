@@ -1123,6 +1123,7 @@ mod tests {
 
     fn valid_mesh_renderer() -> MeshRendererData {
         MeshRendererData {
+            lod: None,
             mesh: valid_asset_ref(),
             material: valid_asset_ref(),
             material_override: None,

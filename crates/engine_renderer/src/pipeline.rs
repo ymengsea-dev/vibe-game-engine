@@ -254,9 +254,15 @@ pub struct ShadowMap {
     pub buffer: wgpu::Buffer,
     light_bind_group: wgpu::BindGroup,
     light_frustum: Frustum,
+    size: u32,
 }
 
 impl ShadowMap {
+    /// Width and height of the depth texture, in texels.
+    pub fn size(&self) -> u32 {
+        self.size
+    }
+
     /// Directional-light volume matching the matrix currently bound to the
     /// shadow pass. ECS uses it to cull casters independently of the camera.
     pub fn light_frustum(&self) -> &Frustum {
@@ -953,13 +959,25 @@ impl GpuContext {
         shadow_pipeline: &ShadowPipeline,
         light_space_matrix: Mat4,
     ) -> ShadowMap {
+        self.create_shadow_map_sized(shadow_pipeline, light_space_matrix, SHADOW_MAP_SIZE)
+    }
+
+    /// [`GpuContext::create_shadow_map`] with a `size`-square depth texture
+    /// (a quality setting), kept between 256 and the device's texture limit.
+    pub fn create_shadow_map_sized(
+        &self,
+        shadow_pipeline: &ShadowPipeline,
+        light_space_matrix: Mat4,
+        size: u32,
+    ) -> ShadowMap {
         let device = self.device();
+        let size = size.clamp(256, device.limits().max_texture_dimension_2d.max(256));
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow map"),
             size: wgpu::Extent3d {
-                width: SHADOW_MAP_SIZE,
-                height: SHADOW_MAP_SIZE,
+                width: size,
+                height: size,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -1000,6 +1018,7 @@ impl GpuContext {
             buffer,
             light_bind_group,
             light_frustum: Frustum::from_view_projection(&light_space_matrix),
+            size,
         }
     }
 

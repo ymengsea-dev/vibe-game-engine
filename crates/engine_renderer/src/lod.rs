@@ -87,6 +87,62 @@ impl LodSelector {
     }
 }
 
+/// How far past a switch distance the camera must move, as a share of
+/// that distance, before a mesh changes tier. Without it a mesh flickers
+/// between two tiers while the camera rests on the line.
+pub const LOD_HYSTERESIS: f32 = 0.1;
+
+/// Distance used for a tier boundary the caller gave no value for.
+const FIRST_SWITCH_DISTANCE: f32 = 15.0;
+
+/// Where tier `index` ends: `switch[index]`, or for a missing entry twice
+/// the boundary before it (so extra tiers still get used).
+fn switch_distance(switch: &[f32], index: usize) -> f32 {
+    match switch.get(index) {
+        Some(&distance) if distance.is_finite() && distance >= 0.0 => distance,
+        _ => match index.checked_sub(1) {
+            Some(previous) => switch_distance(switch, previous) * 2.0,
+            None => FIRST_SWITCH_DISTANCE,
+        },
+    }
+}
+
+/// The tier (0 = most detailed) to draw at `distance` out of `tiers`.
+///
+/// Tier `i` is drawn up to `switch[i]`; the last tier has no end. The
+/// mesh stays on `current` until the camera is [`LOD_HYSTERESIS`] past a
+/// boundary, so small camera moves don't swap meshes back and forth.
+pub fn select_lod_tier(switch: &[f32], tiers: usize, distance: f32, current: usize) -> usize {
+    let mut tier = 0;
+    while tier + 1 < tiers {
+        let boundary = switch_distance(switch, tier);
+        let boundary = if tier < current {
+            boundary * (1.0 - LOD_HYSTERESIS)
+        } else {
+            boundary * (1.0 + LOD_HYSTERESIS)
+        };
+        if distance > boundary {
+            tier += 1;
+        } else {
+            break;
+        }
+    }
+    tier
+}
+
+/// How much of an object to draw at `distance` when it disappears at
+/// `draw_distance`: 1 is fully drawn, 0 is gone, and the last
+/// `fade_length` before the draw distance blends between the two.
+pub fn distance_fade(distance: f32, draw_distance: f32, fade_length: f32) -> f32 {
+    if distance >= draw_distance {
+        return 0.0;
+    }
+    if fade_length <= 0.0 || !fade_length.is_finite() {
+        return 1.0;
+    }
+    ((draw_distance - distance) / fade_length).clamp(0.0, 1.0)
+}
+
 /// A deduplicating, bounded queue of asset IDs waiting for streaming.
 #[derive(Debug, Clone)]
 pub struct StreamQueue<T> {
@@ -132,6 +188,44 @@ impl<T: Copy + Eq + std::hash::Hash> StreamQueue<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tier_follows_switch_distances() {
+        let switch = [10.0, 30.0];
+        assert_eq!(select_lod_tier(&switch, 3, 5.0, 0), 0);
+        assert_eq!(select_lod_tier(&switch, 3, 20.0, 1), 1);
+        assert_eq!(select_lod_tier(&switch, 3, 100.0, 2), 2);
+        assert_eq!(select_lod_tier(&switch, 1, 100.0, 0), 0);
+        assert_eq!(select_lod_tier(&switch, 0, 100.0, 0), 0);
+    }
+
+    #[test]
+    fn tier_waits_past_the_boundary_before_switching() {
+        let switch = [10.0];
+        // Moving away: stays detailed until 10% past the line.
+        assert_eq!(select_lod_tier(&switch, 2, 10.5, 0), 0);
+        assert_eq!(select_lod_tier(&switch, 2, 11.5, 0), 1);
+        // Coming back: stays simple until 10% inside it.
+        assert_eq!(select_lod_tier(&switch, 2, 9.5, 1), 1);
+        assert_eq!(select_lod_tier(&switch, 2, 8.5, 1), 0);
+    }
+
+    #[test]
+    fn missing_switch_distances_double() {
+        assert_eq!(switch_distance(&[], 0), FIRST_SWITCH_DISTANCE);
+        assert_eq!(switch_distance(&[10.0], 1), 20.0);
+        assert_eq!(switch_distance(&[10.0, f32::NAN], 2), 40.0);
+        assert_eq!(select_lod_tier(&[10.0], 3, 50.0, 2), 2);
+    }
+
+    #[test]
+    fn fade_blends_over_the_last_stretch() {
+        assert_eq!(distance_fade(10.0, 100.0, 5.0), 1.0);
+        assert_eq!(distance_fade(97.5, 100.0, 5.0), 0.5);
+        assert_eq!(distance_fade(100.0, 100.0, 5.0), 0.0);
+        assert_eq!(distance_fade(150.0, 100.0, 5.0), 0.0);
+        assert_eq!(distance_fade(99.0, 100.0, 0.0), 1.0);
+    }
 
     #[test]
     fn lod_selection_is_sorted_and_falls_back() {

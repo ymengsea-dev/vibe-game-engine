@@ -1561,6 +1561,7 @@ mod tests {
             entities: vec![SceneEntity {
                 name: Some("Tinted crate".into()),
                 mesh_renderer: Some(crate::MeshRendererData {
+                    lod: None,
                     mesh: crate::AssetRef { id: MESH_ID.into() },
                     material: crate::AssetRef {
                         id: MATERIAL_ID.into(),
@@ -1614,6 +1615,58 @@ mod tests {
     }
 
     #[test]
+    fn lod_settings_survive_a_save_cycle() {
+        let lod = crate::LodData {
+            auto_generate: true,
+            switch_distances: vec![12.0, 30.0, 90.0],
+            draw_distance: Some(150.0),
+            fade_length: 6.0,
+        };
+        let mesh = |lod| crate::format::MeshRendererData {
+            lod,
+            mesh: crate::format::AssetRef { id: MESH_ID.into() },
+            material: crate::format::AssetRef {
+                id: MATERIAL_ID.into(),
+            },
+            material_override: None,
+            animation: None,
+        };
+        let original = Scene {
+            entities: vec![
+                SceneEntity {
+                    name: Some("Far rock".into()),
+                    mesh_renderer: Some(mesh(Some(lod.clone()))),
+                    ..Default::default()
+                },
+                SceneEntity {
+                    name: Some("Near rock".into()),
+                    mesh_renderer: Some(mesh(None)),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let text = original.to_ron_string().expect("save");
+        let mut world = World::new();
+        Scene::from_ron_str(&text)
+            .expect("load")
+            .instantiate(&mut world);
+        let resaved = Scene::from_world(&mut world);
+        let saved: Vec<_> = resaved
+            .entities
+            .iter()
+            .map(|entity| {
+                entity
+                    .mesh_renderer
+                    .as_ref()
+                    .and_then(|mesh| mesh.lod.clone())
+            })
+            .collect();
+        assert!(saved.contains(&Some(lod)), "{saved:?}");
+        assert!(saved.contains(&None), "default settings save nothing");
+    }
+
+    #[test]
     fn unresolved_reference_survives_a_save_cycle() {
         // The data-loss guard: open a scene whose asset file is gone,
         // save it again, and the reference must still be in the file.
@@ -1621,6 +1674,7 @@ mod tests {
             entities: vec![SceneEntity {
                 name: Some("Crate".into()),
                 mesh_renderer: Some(crate::format::MeshRendererData {
+                    lod: None,
                     mesh: crate::format::AssetRef { id: MESH_ID.into() },
                     material: crate::format::AssetRef {
                         id: MATERIAL_ID.into(),
@@ -1703,6 +1757,7 @@ mod tests {
             entities: vec![SceneEntity {
                 name: Some("Crate".into()),
                 mesh_renderer: Some(crate::format::MeshRendererData {
+                    lod: None,
                     mesh: crate::format::AssetRef { id: String::new() },
                     material: crate::format::AssetRef {
                         id: MATERIAL_ID.into(),

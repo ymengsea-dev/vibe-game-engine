@@ -11,6 +11,7 @@ repository.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 gltf.workspace = true
+meshopt.workspace = true
 glam.workspace = true
 image.workspace = true
 notify.workspace = true

@@ -151,6 +151,7 @@ Helper drawings. The game never shows them.
 | **Ground grid** | 1 m squares on the floor |
 | **Audio emitters** | Each sound and how far it can be heard |
 | **Nav grid** | Where characters can walk (red = blocked) |
+| **Distance detail** | Draws models as the game will from the Scene View camera: simpler versions far away, and nothing past each object's draw distance, at the project's graphics quality. Off shows every model in full |
 
 ## Cameras
 

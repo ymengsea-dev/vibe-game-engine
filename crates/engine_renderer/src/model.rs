@@ -12,6 +12,9 @@ pub struct ModelUniform {
     /// Column-major model matrix, matching WGSL's `mat4x4<f32>` memory
     /// layout.
     pub model: [[f32; 4]; 4],
+    /// `x` is the distance fade (1 = fully drawn, 0 = gone), applied as a
+    /// dither in the fragment stage; `yzw` are padding.
+    pub params: [f32; 4],
 }
 
 impl ModelUniform {
@@ -23,7 +26,21 @@ impl ModelUniform {
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ],
+        params: [1.0, 0.0, 0.0, 0.0],
     };
+
+    /// A fully drawn object at `model` (column-major).
+    pub fn from_cols(model: [[f32; 4]; 4]) -> Self {
+        Self::faded(model, 1.0)
+    }
+
+    /// An object at `model` drawn with distance `fade` (clamped to 0..=1).
+    pub fn faded(model: [[f32; 4]; 4], fade: f32) -> Self {
+        Self {
+            model,
+            params: [fade.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+        }
+    }
 }
 
 impl Default for ModelUniform {
@@ -35,9 +52,7 @@ impl Default for ModelUniform {
 
 impl From<&Transform> for ModelUniform {
     fn from(transform: &Transform) -> Self {
-        Self {
-            model: transform.to_matrix().to_cols_array_2d(),
-        }
+        Self::from_cols(transform.to_matrix().to_cols_array_2d())
     }
 }
 

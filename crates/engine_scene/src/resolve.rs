@@ -131,6 +131,26 @@ pub trait SceneResolver {
         self.resolve_mesh(mesh, material)
     }
 
+    /// Gives `renderer` (just resolved from `mesh`) its lower detail tiers:
+    /// those authored in the file, or generated ones when `auto_generate`
+    /// is on.
+    ///
+    /// Defaulted to doing nothing, so a resolver that knows nothing about
+    /// detail tiers draws every mesh in full.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Resolve`] if a tier cannot be uploaded.
+    fn resolve_mesh_lods(
+        &mut self,
+        mesh: &AssetRef,
+        renderer: &mut MeshRenderer,
+        auto_generate: bool,
+    ) -> Result<(), SceneError> {
+        let _ = (mesh, renderer, auto_generate);
+        Ok(())
+    }
+
     /// Resolves a mesh reference into an animated model when the file is
     /// skinned. `Ok(None)` means "not animated, or not available": the
     /// caller then falls back to [`SceneResolver::resolve_mesh_with_material`].
@@ -386,6 +406,13 @@ pub(crate) fn insert_components(
         if let Some(animation) = &mesh_renderer.animation {
             entity_mut.insert(crate::SceneModelAnimation(animation.clone()));
         }
+        if let Some(lod) = &mesh_renderer.lod {
+            entity_mut.insert(engine_ecs::components::MeshLod::from(lod));
+        }
+        let auto_generate = mesh_renderer
+            .lod
+            .as_ref()
+            .is_some_and(|lod| lod.auto_generate);
         match resolver.resolve_skinned_mesh(
             &mesh_renderer.mesh,
             &mesh_renderer.material,
@@ -402,10 +429,23 @@ pub(crate) fn insert_components(
                 &mesh_renderer.material,
                 mesh_renderer.material_override.as_ref(),
             ) {
-                Ok(Some(renderer)) => {
+                Ok(Some(mut renderer)) => {
+                    // A model whose tiers fail still draws, in full detail.
+                    if let Err(err) = resolver.resolve_mesh_lods(
+                        &mesh_renderer.mesh,
+                        &mut renderer,
+                        auto_generate,
+                    ) {
+                        tracing::warn!(
+                            mesh = %mesh_renderer.mesh.id,
+                            error = %err,
+                            "could not load a mesh's detail tiers"
+                        );
+                    }
                     entity_mut.insert((
                         renderer,
                         crate::AppliedMaterialOverride(mesh_renderer.material_override.clone()),
+                        crate::AppliedLod(auto_generate),
                     ));
                 }
                 Ok(None) => {}

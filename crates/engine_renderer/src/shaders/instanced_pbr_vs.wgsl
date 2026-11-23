@@ -6,7 +6,8 @@
 // (`InstanceRaw`, one entry per instance) instead of a `@group(2)`
 // uniform — so N copies of a mesh draw in one `draw_indexed(.., 0..N)`.
 // Locations 0..2 are the shared `Vertex` attributes; 3..6 are the model
-// matrix's four columns, advancing once per instance.
+// matrix's four columns and 7 the distance fade, advancing once per
+// instance.
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -16,6 +17,7 @@ struct VertexInput {
     @location(4) model_col1: vec4<f32>,
     @location(5) model_col2: vec4<f32>,
     @location(6) model_col3: vec4<f32>,
+    @location(7) fade: f32,
 };
 
 @vertex
@@ -31,5 +33,6 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     // matrix, so non-uniform instance scale would skew normals.
     out.world_normal = (model * vec4<f32>(in.normal, 0.0)).xyz;
     out.uv = in.uv;
+    out.fade = in.fade;
     return out;
 }

@@ -60,6 +60,23 @@ impl SceneSource {
 }
 
 impl SceneSource {
+    /// The graphics quality the game starts at: the project's setting, or
+    /// the one saved with the export (Medium when an older export has none).
+    pub fn quality(&self) -> engine_renderer::QualityLevel {
+        match self {
+            Self::Project(project) => project.manifest().quality,
+            Self::Export(root) => {
+                std::fs::read_to_string(root.join(engine_project::build::EXPORT_SETTINGS_FILE))
+                    .ok()
+                    .and_then(|text| {
+                        ron::from_str::<engine_project::build::ExportedSettings>(&text).ok()
+                    })
+                    .unwrap_or_default()
+                    .quality
+            }
+        }
+    }
+
     /// The scene the game starts on, and every scene in the project's order.
     pub fn scene_order(&self) -> engine_project::build::ExportedSceneOrder {
         match self {
@@ -96,8 +113,7 @@ pub(crate) fn scene_after(order: &[String], current: &str) -> Option<String> {
 /// with other entities survives and an unshared one is freed. Does not despawn.
 pub(crate) fn release_entity_assets(world: &World, entity: Entity, assets: &mut RenderAssets) {
     if let Some(renderer) = world.get::<MeshRenderer>(entity) {
-        assets.meshes.release(renderer.mesh);
-        assets.materials.release(renderer.material);
+        renderer.release(assets);
     }
     if let Some(renderer) = world.get::<SkinnedMeshRenderer>(entity) {
         assets.skinned_meshes.release(renderer.mesh);

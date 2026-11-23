@@ -2,7 +2,8 @@
 //! `draw_indexed(.., 0..N)` call, each copy placed by its own model matrix
 //! from an instance-step vertex buffer.
 //!
-//! [`InstanceRaw`] is the per-instance GPU record (just a model matrix);
+//! [`InstanceRaw`] is the per-instance GPU record (a model matrix plus a
+//! distance fade);
 //! [`InstancedPipeline`] is `pbr_common.wgsl` + `instanced_pbr_vs.wgsl`
 //! (model matrix from instance attributes, no `@group(2)` uniform);
 //! [`InstancedDrawable`] bundles what one instanced draw needs.
@@ -31,15 +32,31 @@ const INSTANCED_VS_SOURCE: &str = include_str!("shaders/instanced_pbr_vs.wgsl");
 pub struct InstanceRaw {
     /// Column-major model matrix, matching WGSL's `mat4x4<f32>` layout.
     pub model: [[f32; 4]; 4],
+    /// Distance fade (1 = fully drawn, 0 = gone), read at location 7.
+    pub fade: f32,
 }
 
 impl InstanceRaw {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
         3 => Float32x4,
         4 => Float32x4,
         5 => Float32x4,
         6 => Float32x4,
+        7 => Float32,
     ];
+
+    /// A fully drawn instance at `model` (column-major).
+    pub fn from_cols(model: [[f32; 4]; 4]) -> Self {
+        Self::faded(model, 1.0)
+    }
+
+    /// An instance at `model` drawn with distance `fade` (clamped to 0..=1).
+    pub fn faded(model: [[f32; 4]; 4], fade: f32) -> Self {
+        Self {
+            model,
+            fade: fade.clamp(0.0, 1.0),
+        }
+    }
 
     /// This record's wgpu buffer layout — `step_mode: Instance`, so each
     /// entry is read once per instance rather than once per vertex.
@@ -54,9 +71,7 @@ impl InstanceRaw {
 
 impl From<&Transform> for InstanceRaw {
     fn from(transform: &Transform) -> Self {
-        Self {
-            model: transform.to_matrix().to_cols_array_2d(),
-        }
+        Self::from_cols(transform.to_matrix().to_cols_array_2d())
     }
 }
 
@@ -184,20 +199,20 @@ mod tests {
     }
 
     #[test]
-    fn instance_layout_has_four_attributes_at_instance_step() {
+    fn instance_layout_has_five_attributes_at_instance_step() {
         let layout = InstanceRaw::layout();
-        assert_eq!(layout.attributes.len(), 4);
+        assert_eq!(layout.attributes.len(), 5);
         assert_eq!(layout.step_mode, wgpu::VertexStepMode::Instance);
     }
 
     #[test]
-    fn instance_layout_attribute_locations_are_3_through_6() {
+    fn instance_layout_attribute_locations_are_3_through_7() {
         let locations: Vec<u32> = InstanceRaw::layout()
             .attributes
             .iter()
             .map(|a| a.shader_location)
             .collect();
-        assert_eq!(locations, vec![3, 4, 5, 6]);
+        assert_eq!(locations, vec![3, 4, 5, 6, 7]);
     }
 
     #[test]

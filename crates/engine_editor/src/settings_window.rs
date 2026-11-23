@@ -1,12 +1,14 @@
 //! The Settings window (⌘,), shaped like a macOS settings window: native
 //! window controls at the top left, a sidebar of sections, and the chosen
-//! section on the right. Its first section is Storage. A segmented bar
+//! section on the right. Storage comes first, then Project (settings saved
+//! with the open project, such as graphics quality). In Storage a segmented bar
 //! (like macOS's own Storage settings) shows how the space splits by kind,
 //! then each project's items are listed in a rounded group with a Clean
 //! button per rebuildable item, then the optional automatic limits.
 
 use std::path::Path;
 
+use engine_project::QualityLevel;
 use engine_project::storage::{ProjectStorage, StorageItem, StorageKind};
 
 use crate::EditorState;
@@ -35,6 +37,32 @@ const CLOSE_RED: egui::Color32 = egui::Color32::from_rgb(0xFF, 0x5F, 0x57);
 const CLOSE_RED_EDGE: egui::Color32 = egui::Color32::from_rgb(0xE2, 0x46, 0x3F);
 const CLOSE_GLYPH: egui::Color32 = egui::Color32::from_rgb(0x4D, 0x00, 0x00);
 const CONTROL_OFF: egui::Color32 = egui::Color32::from_rgb(0x34, 0x37, 0x4B);
+
+/// The sidebar sections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Page {
+    /// What Studio may clean up on disk.
+    #[default]
+    Storage,
+    /// Settings saved in the open project.
+    Project,
+}
+
+impl Page {
+    const ALL: [Self; 2] = [Self::Storage, Self::Project];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Storage => "Storage",
+            Self::Project => "Project",
+        }
+    }
+}
+
+/// Where the chosen sidebar section is remembered between frames.
+fn page_id() -> egui::Id {
+    egui::Id::new("settings_page")
+}
 
 /// Choices offered for the automatic limits.
 const DAY_CHOICES: [u32; 5] = [7, 14, 30, 60, 90];
@@ -86,19 +114,24 @@ pub(crate) fn show(ctx: &egui::Context, state: &mut EditorState) {
             // full height is known.
             let sidebar_background = ui.painter().add(egui::Shape::Noop);
             let mut close = false;
+            let mut page: Page = ui.data(|data| data.get_temp(page_id()).unwrap_or_default());
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                close = sidebar(ui, &palette);
+                close = sidebar(ui, &palette, &mut page);
                 ui.add_space(CONTENT_MARGIN);
                 ui.vertical(|ui| {
                     ui.set_width(CONTENT_WIDTH);
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
                     ui.add_space(26.0);
-                    storage_section(ui, state, &palette);
+                    match page {
+                        Page::Storage => storage_section(ui, state, &palette),
+                        Page::Project => project_section(ui, state, &palette),
+                    }
                     ui.add_space(30.0);
                 });
                 ui.add_space(CONTENT_MARGIN);
             });
+            ui.data_mut(|data| data.insert_temp(page_id(), page));
             if close {
                 state.settings_open = false;
             }
@@ -129,46 +162,80 @@ pub(crate) fn show(ctx: &egui::Context, state: &mut EditorState) {
     }
 }
 
-/// The sidebar: macOS window controls, then the sections (Storage for
-/// now). Returns whether the close control was clicked.
-fn sidebar(ui: &mut egui::Ui, palette: &Palette) -> bool {
+/// The sidebar: macOS window controls, then the sections; clicking one
+/// shows it. Returns whether the close control was clicked.
+fn sidebar(ui: &mut egui::Ui, palette: &Palette, page: &mut Page) -> bool {
     let mut close = false;
     ui.vertical(|ui| {
         ui.set_width(SIDEBAR_WIDTH);
         close = window_controls(ui);
         ui.add_space(18.0);
-        let (row, _) =
-            ui.allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, 30.0), egui::Sense::hover());
-        let item = row.shrink2(egui::vec2(10.0, 0.0));
-        let painter = ui.painter();
-        painter.rect_filled(item, 6.0, palette.accent_fill);
-        // A drive glyph in an accent tile, like a System Settings icon.
-        let tile = egui::Rect::from_center_size(
-            item.left_center() + egui::vec2(18.0, 0.0),
-            egui::vec2(20.0, 20.0),
-        );
-        painter.rect_filled(tile, 5.0, palette.accent);
-        let drive = egui::Rect::from_center_size(tile.center(), egui::vec2(12.0, 7.0));
-        painter.rect_stroke(
-            drive,
-            2.0,
-            egui::Stroke::new(1.2, palette.shell),
-            egui::StrokeKind::Inside,
-        );
-        painter.circle_filled(
-            drive.right_center() - egui::vec2(3.0, 0.0),
-            1.1,
-            palette.shell,
-        );
-        painter.text(
-            tile.right_center() + egui::vec2(9.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            "Storage",
-            egui::FontId::proportional(13.5),
-            palette.text,
-        );
+        for item in Page::ALL {
+            if sidebar_item(ui, palette, item, *page == item) {
+                *page = item;
+            }
+            ui.add_space(2.0);
+        }
     });
     close
+}
+
+/// One sidebar row: a glyph in an accent tile, like a System Settings
+/// icon, and the section's name. Returns whether it was clicked.
+fn sidebar_item(ui: &mut egui::Ui, palette: &Palette, page: Page, selected: bool) -> bool {
+    let (row, response) =
+        ui.allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, 30.0), egui::Sense::click());
+    let item = row.shrink2(egui::vec2(10.0, 0.0));
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(item, 6.0, palette.accent_fill);
+    } else if response.hovered() {
+        painter.rect_filled(item, 6.0, palette.hover);
+    }
+    let tile = egui::Rect::from_center_size(
+        item.left_center() + egui::vec2(18.0, 0.0),
+        egui::vec2(20.0, 20.0),
+    );
+    painter.rect_filled(tile, 5.0, palette.accent);
+    match page {
+        Page::Storage => {
+            // A drive.
+            let drive = egui::Rect::from_center_size(tile.center(), egui::vec2(12.0, 7.0));
+            painter.rect_stroke(
+                drive,
+                2.0,
+                egui::Stroke::new(1.2, palette.shell),
+                egui::StrokeKind::Inside,
+            );
+            painter.circle_filled(
+                drive.right_center() - egui::vec2(3.0, 0.0),
+                1.1,
+                palette.shell,
+            );
+        }
+        Page::Project => {
+            // Two sliders.
+            for (dy, knob) in [(-2.5f32, -2.0f32), (2.5, 2.5)] {
+                let y = tile.center().y + dy;
+                painter.line_segment(
+                    [
+                        egui::pos2(tile.left() + 4.5, y),
+                        egui::pos2(tile.right() - 4.5, y),
+                    ],
+                    egui::Stroke::new(1.2, palette.shell),
+                );
+                painter.circle_filled(egui::pos2(tile.center().x + knob, y), 1.8, palette.shell);
+            }
+        }
+    }
+    painter.text(
+        tile.right_center() + egui::vec2(9.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        page.title(),
+        egui::FontId::proportional(13.5),
+        palette.text,
+    );
+    response.clicked()
 }
 
 /// The macOS close, minimise and zoom controls. Only close is offered;
@@ -579,6 +646,84 @@ fn project_group(
     });
 }
 
+/// Settings saved in the open project's `project.ron`.
+fn project_section(ui: &mut egui::Ui, state: &mut EditorState, palette: &Palette) {
+    ui.label(
+        crate::theme::semibold("Project")
+            .size(22.0)
+            .color(palette.text),
+    );
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(format!("Saved with {}", state.project.manifest().name))
+            .size(13.0)
+            .color(palette.muted),
+    );
+    ui.add_space(14.0);
+    let current = state.project.manifest().quality;
+    let mut chosen = current;
+    group(ui, palette, |ui| {
+        let quality = Row {
+            first: true,
+            swatch: None,
+            title: "Graphics quality",
+            detail: Some(quality_detail(current)),
+            enabled: true,
+        };
+        group_row(ui, palette, quality, |ui| {
+            // Its own left-to-right slot, so the track hugs the segments
+            // instead of filling the row's height.
+            ui.allocate_ui_with_layout(
+                egui::vec2(156.0, 28.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    crate::widgets::segmented(palette).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for level in QualityLevel::ALL {
+                            let label = quality_label(level);
+                            if crate::widgets::segment_label(ui, palette, chosen == level, label)
+                                .clicked()
+                            {
+                                chosen = level;
+                            }
+                        }
+                    });
+                },
+            );
+        });
+    });
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new("The game starts at this level. Scripts can change it while playing.")
+            .size(12.0)
+            .color(palette.subtle),
+    );
+    if chosen != current {
+        state.project.manifest_mut().quality = chosen;
+        if let Err(err) = state.project.save_manifest() {
+            state.project.manifest_mut().quality = current;
+            tracing::error!(error = %err, "could not save the graphics quality");
+        }
+    }
+}
+
+fn quality_label(level: QualityLevel) -> &'static str {
+    match level {
+        QualityLevel::Low => "Low",
+        QualityLevel::Medium => "Medium",
+        QualityLevel::High => "High",
+    }
+}
+
+/// What a quality level changes, in one line.
+fn quality_detail(level: QualityLevel) -> &'static str {
+    match level {
+        QualityLevel::Low => "Soft shadows, shorter view distance",
+        QualityLevel::Medium => "Balanced shadows and view distance",
+        QualityLevel::High => "Sharp shadows, longer view distance",
+    }
+}
+
 fn automatic_settings(ui: &mut egui::Ui, state: &mut EditorState, palette: &Palette) {
     let settings = &mut state.settings.storage;
     let before = *settings;
@@ -751,8 +896,19 @@ mod tests {
         show(ui.ctx(), state);
     }
 
+    fn draw_page(ui: &mut egui::Ui, state: &mut EditorState, page: Page) {
+        ui.data_mut(|data| data.insert_temp(page_id(), page));
+        draw(ui, state);
+    }
+
     #[test]
     fn everything_in_settings_stays_inside_the_window() {
+        for page in Page::ALL {
+            everything_stays_inside_the_window(page);
+        }
+    }
+
+    fn everything_stays_inside_the_window(page: Page) {
         let (root, mut state) = settings_state();
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
@@ -768,7 +924,7 @@ mod tests {
                     time: Some(f64::from(frame) * 0.5),
                     ..Default::default()
                 },
-                |ui| draw(ui, &mut state),
+                |ui| draw_page(ui, &mut state, page),
             );
         }
         output.textures_delta.clear();
@@ -846,6 +1002,30 @@ mod tests {
             })
             .expect("snapshot");
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `settings-project.png` for a visual check; needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_settings_project() {
+        let (root, mut state) = settings_state();
+        state.project.manifest_mut().quality = QualityLevel::High;
+        let path = crate::ui_snapshot::snapshot_dir().join("settings-project.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(900.0, 700.0), 2.0, |ui| {
+            draw_page(ui, &mut state, Page::Project);
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn choosing_a_quality_saves_it_with_the_project() {
+        let (root, mut state) = settings_state();
+        state.project.manifest_mut().quality = QualityLevel::Low;
+        state.project.save_manifest().expect("save");
+        let reopened = engine_project::Project::open(state.project.root()).expect("open");
+        assert_eq!(reopened.manifest().quality, QualityLevel::Low);
         let _ = std::fs::remove_dir_all(root);
     }
 }

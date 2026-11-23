@@ -412,7 +412,71 @@ pub struct MeshRendererData {
     /// and for animated ones left at the defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<ModelAnimationData>,
+    /// Detail tiers and draw distance. Absent when left at the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lod: Option<LodData>,
 }
+
+/// How a mesh changes with camera distance; the saved form of
+/// [`engine_ecs::components::MeshLod`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LodData {
+    /// Build simpler tiers on load when the model file has none.
+    #[serde(default)]
+    pub auto_generate: bool,
+    /// Distance where each tier ends, nearest first.
+    #[serde(default = "default_switch_distances")]
+    pub switch_distances: Vec<f32>,
+    /// Beyond this distance the mesh is not drawn; `None` draws it at any
+    /// distance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_distance: Option<f32>,
+    /// The stretch before `draw_distance` over which the mesh fades out.
+    #[serde(default = "default_fade_length")]
+    pub fade_length: f32,
+}
+
+fn default_switch_distances() -> Vec<f32> {
+    engine_ecs::components::MeshLod::default().switch_distances
+}
+
+fn default_fade_length() -> f32 {
+    engine_ecs::components::MeshLod::default().fade_length
+}
+
+impl Default for LodData {
+    fn default() -> Self {
+        Self::from(&engine_ecs::components::MeshLod::default())
+    }
+}
+
+impl From<&engine_ecs::components::MeshLod> for LodData {
+    fn from(lod: &engine_ecs::components::MeshLod) -> Self {
+        Self {
+            auto_generate: lod.auto_generate,
+            switch_distances: lod.switch_distances.clone(),
+            draw_distance: lod.draw_distance,
+            fade_length: lod.fade_length,
+        }
+    }
+}
+
+impl From<&LodData> for engine_ecs::components::MeshLod {
+    fn from(data: &LodData) -> Self {
+        Self {
+            auto_generate: data.auto_generate,
+            switch_distances: data.switch_distances.clone(),
+            draw_distance: data.draw_distance,
+            fade_length: data.fade_length,
+        }
+    }
+}
+
+/// Whether the live mesh was built with generated detail tiers; the editor
+/// compares this with [`engine_ecs::components::MeshLod::auto_generate`]
+/// to rebuild only meshes whose setting changed.
+#[derive(bevy_ecs::component::Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppliedLod(pub bool);
 
 /// How an animated (skinned) model plays. A still model ignores it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2141,6 +2205,7 @@ mod tests {
                         ))
                     }),
                     mesh_renderer: Some(MeshRendererData {
+                        lod: None,
                         mesh: AssetRef {
                             id: uuid::Uuid::nil().to_string(),
                         },

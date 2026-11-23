@@ -55,17 +55,17 @@ pub use capture::capture_renderables;
 pub use environment::{AmbientSound, spawn_ambient_sounds};
 pub use error::SceneError;
 pub use format::{
-    AmbientSoundData, AppliedMaterialOverride, AssetRef, AudioEmitterData, BodyKind, CameraData,
-    CameraFollowData, CameraFollowMode, ColliderData, ColliderShape, EnvironmentData, FoliageData,
-    KeepBetweenScenes, LightingData, MAX_RULE_CONDITIONS, MaterialOverrideData, MeshRendererData,
-    ModelAnimationData, NavGridData, OrbitInput, PointLightData, PrefabLink, ProjectionData,
-    RuleAction, RuleCompare, RuleCondition, RuleData, RuleMatch, RuleTrigger, Scene,
-    SceneAudioEmitter, SceneCollider, SceneEntity, SceneEnvironment, SceneFileOwner, SceneFoliage,
-    SceneLighting, SceneMaterialOverride, SceneModelAnimation, SceneNavGrid, SceneObjectId,
-    ScenePointLight, ScenePrefabLink, SceneRules, SceneSpriteAnimation, SceneSpriteClips,
-    SceneTags, SceneTilemap, SceneUi, SiblingOrder, SpawnAt, SpriteAnimationData, SpriteClipData,
-    SpriteClipPlayback, SpriteData, TilemapData, TransformData, UiAnchor, UiElementData, UiKind,
-    UiLayoutDirection, WaterData,
+    AmbientSoundData, AppliedLod, AppliedMaterialOverride, AssetRef, AudioEmitterData, BodyKind,
+    CameraData, CameraFollowData, CameraFollowMode, ColliderData, ColliderShape, EnvironmentData,
+    FoliageData, KeepBetweenScenes, LightingData, LodData, MAX_RULE_CONDITIONS,
+    MaterialOverrideData, MeshRendererData, ModelAnimationData, NavGridData, OrbitInput,
+    PointLightData, PrefabLink, ProjectionData, RuleAction, RuleCompare, RuleCondition, RuleData,
+    RuleMatch, RuleTrigger, Scene, SceneAudioEmitter, SceneCollider, SceneEntity, SceneEnvironment,
+    SceneFileOwner, SceneFoliage, SceneLighting, SceneMaterialOverride, SceneModelAnimation,
+    SceneNavGrid, SceneObjectId, ScenePointLight, ScenePrefabLink, SceneRules,
+    SceneSpriteAnimation, SceneSpriteClips, SceneTags, SceneTilemap, SceneUi, SiblingOrder,
+    SpawnAt, SpriteAnimationData, SpriteClipData, SpriteClipPlayback, SpriteData, TilemapData,
+    TransformData, UiAnchor, UiElementData, UiKind, UiLayoutDirection, WaterData,
 };
 pub use game_state::{GameState, GameStateName};
 pub use io::write_atomic;
@@ -84,9 +84,10 @@ pub use rules::{
     format_variable, valid_variable_name,
 };
 pub use runtime::{
-    AssetLibrary, BUNDLE_FILE, EXPORT_SCENE_FILE, ExportContent, LoadedSkinnedMesh, MeshGeometry,
-    RuntimeResolver, executable_dir, load_mesh_geometry, load_skinned_mesh, material_from_imported,
-    open_export, skinned_parts, upload_skinned_model,
+    AssetLibrary, BUNDLE_FILE, EXPORT_SCENE_FILE, ExportContent, LoadedSkinnedMesh, LodCache,
+    MeshGeometry, RuntimeResolver, attach_lod_tiers, base_mesh, executable_dir, load_mesh_geometry,
+    load_skinned_mesh, lod_tier_geometry, material_from_imported, open_export, skinned_parts,
+    upload_skinned_model,
 };
 pub use save::{CURRENT_SAVE_VERSION, SaveGame, SavedEntity, WorldSnapshot};
 pub use sprite_atlas::{

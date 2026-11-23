@@ -89,6 +89,11 @@ pub struct OverlayToggles {
     /// crossed out.
     #[serde(default)]
     pub nav: bool,
+    /// Draw meshes as the game would from the Scene View camera: simpler
+    /// detail tiers far away and nothing past each object's draw distance,
+    /// at the project's quality. Off shows every mesh in full detail.
+    #[serde(default)]
+    pub distance_detail: bool,
 }
 
 impl OverlayToggles {

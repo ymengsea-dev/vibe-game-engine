@@ -89,6 +89,7 @@ ron = "0.12"
 # `extras` so animation clips can carry their own events; glTF has no
 # event track, and `extras` is where a format puts what it does not model.
 gltf = { version = "1", features = ["extras"] }
+meshopt = "0.7"
 image = "0.25"
 # Concurrency
 rayon = "1"

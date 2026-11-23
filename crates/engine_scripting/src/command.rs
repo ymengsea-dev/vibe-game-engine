@@ -4,6 +4,11 @@
 /// them (`engine` tests that the two agree).
 pub const GAME_STATES: [&str; 4] = ["menu", "playing", "paused", "game_over"];
 
+/// The graphics quality names, lowest first, in the order
+/// `engine_renderer::QualityLevel::ALL` lists them (`engine` tests that the
+/// two agree).
+pub const QUALITY_LEVELS: [&str; 3] = ["low", "medium", "high"];
+
 /// A validated gameplay request for the engine to apply.
 ///
 /// Lua scripts produce these through `engine.*` calls; Rust games construct
@@ -140,6 +145,12 @@ pub enum GameCommand {
         object_id: String,
         /// Finite unit quaternion (xyzw).
         delta: [f32; 4],
+    },
+    /// Switch graphics quality: shadow sharpness, mesh detail and draw
+    /// distance.
+    SetQuality {
+        /// One of [`QUALITY_LEVELS`].
+        level: String,
     },
     /// Ask the host to lock (and hide) or release the mouse cursor.
     SetMouseLocked {

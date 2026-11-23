@@ -6,18 +6,19 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::query::Has;
 use bevy_ecs::world::World;
 use engine_renderer::{
-    Aabb, CameraBinding, DebugLinePipeline, DebugLineVertex, Drawable, Frustum, GpuContext,
-    HdrTarget, InstanceBuffer, InstanceRaw, InstancedDrawable, InstancedPipeline, LightsBinding,
-    Mesh, ModelUniform, ParticleFrame, Pipeline, PostProcessStack, RenderAssets, RenderTarget,
-    RendererError, ShadowMap, ShadowPipeline, SkinnedDrawable, SkinnedPipeline, SkyboxBinding,
-    SkyboxPipeline, SpriteAtlasBinding, SpriteBatch, SpriteFrame, SpriteInstance, SpritePipeline,
-    VegetationPipeline, WindBinding,
+    Aabb, CameraBinding, DebugLinePipeline, DebugLineVertex, DistanceQuality, Drawable, Frustum,
+    GpuContext, HdrTarget, InstanceBuffer, InstanceRaw, InstancedDrawable, InstancedPipeline,
+    LightsBinding, Mesh, ModelUniform, ParticleFrame, Pipeline, PostProcessStack, RenderAssets,
+    RenderTarget, RendererError, ShadowMap, ShadowPipeline, SkinnedDrawable, SkinnedPipeline,
+    SkyboxBinding, SkyboxPipeline, SpriteAtlasBinding, SpriteBatch, SpriteFrame, SpriteInstance,
+    SpritePipeline, VegetationPipeline, WindBinding,
 };
 use glam::Mat4;
+use std::sync::atomic::Ordering;
 
 use crate::components::{
-    Disabled, GlobalTransform, Hidden, InstancedMeshRenderer, MeshRenderer, SkinnedMeshRenderer,
-    Sprite, VegetationRenderer,
+    Disabled, GlobalTransform, Hidden, InstancedMeshRenderer, MeshLod, MeshRenderer,
+    SkinnedMeshRenderer, Sprite, VegetationRenderer,
 };
 use crate::propagate::propagate_transforms;
 
@@ -38,6 +39,9 @@ pub struct RenderStats {
     /// `MeshRenderer` entities with both their `mesh` and `material`
     /// handles resolved against `RenderAssets`.
     pub meshes_total: u32,
+    /// Of `meshes_total`, how many were past their draw distance and so
+    /// skipped in both the scene and shadow passes.
+    pub meshes_beyond_draw_distance: u32,
     /// Of `meshes_total`, how many were inside the camera frustum and so
     /// drawn in the scene pass — as individual draws plus
     /// `auto_batched_drawn` folded into batches.
@@ -89,6 +93,58 @@ pub struct RenderStats {
 /// outside.
 fn is_visible(frustum: &Frustum, local_bounds: &Aabb, world_from_local: &Mat4) -> bool {
     frustum.intersects_aabb(&local_bounds.transformed(world_from_local))
+}
+
+/// Tier boundaries for a mesh with no [`MeshLod`]; matches
+/// [`MeshLod::default`] without allocating each frame.
+const DEFAULT_SWITCH_DISTANCES: [f32; 2] = [15.0, 40.0];
+
+/// Which detail tier of `renderer` to draw this frame and how faded, or
+/// `None` when it is past its draw distance. Without `distance` (a caller
+/// that has no camera position) it is always the full mesh, fully drawn.
+///
+/// Distances are measured to the centre of the full mesh's bounds, so a
+/// large object switches when its middle crosses the line.
+fn distance_choice(
+    distance: Option<DistanceQuality>,
+    renderer: &MeshRenderer,
+    lod: Option<&MeshLod>,
+    full_mesh: &Mesh,
+    world_from_local: &Mat4,
+) -> Option<(engine_utils::AssetHandle<Mesh>, f32)> {
+    let Some(view) = distance else {
+        return Some((renderer.mesh, 1.0));
+    };
+    let centre = world_from_local.transform_point3(full_mesh.local_bounds.center());
+    let (switch, draw_distance, fade_length) = match lod {
+        Some(lod) => (
+            lod.switch_distances.as_slice(),
+            lod.draw_distance,
+            lod.fade_length,
+        ),
+        None => (DEFAULT_SWITCH_DISTANCES.as_slice(), None, 0.0),
+    };
+    let fade = match draw_distance {
+        Some(limit) => engine_renderer::distance_fade(
+            view.eye.distance(centre),
+            view.draw_distance(limit),
+            fade_length,
+        ),
+        None => 1.0,
+    };
+    if fade <= 0.0 {
+        return None;
+    }
+    let tiers = renderer.tier_count();
+    if tiers < 2 {
+        return Some((renderer.mesh, fade));
+    }
+    let current = usize::from(renderer.lod_tier.load(Ordering::Relaxed));
+    let tier = engine_renderer::select_lod_tier(switch, tiers, view.lod_distance(centre), current);
+    renderer
+        .lod_tier
+        .store(u8::try_from(tier).unwrap_or(u8::MAX), Ordering::Relaxed);
+    Some((renderer.tier_mesh(tier), fade))
 }
 
 /// The GPU handles a caller supplies for the sprite draw: the pipeline,
@@ -230,6 +286,8 @@ struct VisibleMesh<'a> {
     material: &'a engine_renderer::MaterialBinding,
     model: &'a engine_renderer::ModelBinding,
     world: Mat4,
+    /// Distance fade, 1 = fully drawn.
+    fade: f32,
 }
 
 /// One opaque shadow candidate. Kept separate from [`VisibleMesh`] because
@@ -241,6 +299,8 @@ struct ShadowMesh<'a> {
     material: &'a engine_renderer::MaterialBinding,
     model: &'a engine_renderer::ModelBinding,
     world: Mat4,
+    /// Distance fade, 1 = fully drawn.
+    fade: f32,
 }
 
 /// Propagates the entity hierarchy's transforms (see
@@ -350,6 +410,7 @@ pub fn extract_and_render(
     post: &PostProcessStack,
     camera: &CameraBinding,
     frustum: &Frustum,
+    distance: Option<DistanceQuality>,
     lights: &LightsBinding,
     skinned_pipeline: &SkinnedPipeline,
     instanced_pipeline: &InstancedPipeline,
@@ -375,6 +436,7 @@ pub fn extract_and_render(
         post,
         camera,
         frustum,
+        distance,
         lights,
         skinned_pipeline,
         instanced_pipeline,
@@ -425,6 +487,7 @@ pub fn extract_and_render_to(
     post: &PostProcessStack,
     camera: &CameraBinding,
     frustum: &Frustum,
+    distance: Option<DistanceQuality>,
     lights: &LightsBinding,
     skinned_pipeline: &SkinnedPipeline,
     instanced_pipeline: &InstancedPipeline,
@@ -447,8 +510,12 @@ pub fn extract_and_render_to(
     // All query states built up front: `world.query` needs `&mut World`,
     // but the collected drawables below borrow `&World` shared, so a
     // later `world.query` would conflict.
-    let mut mesh_query =
-        world.query_filtered::<(&GlobalTransform, &MeshRenderer, Has<Disabled>), DrawFilter>();
+    let mut mesh_query = world.query_filtered::<(
+        &GlobalTransform,
+        &MeshRenderer,
+        Option<&MeshLod>,
+        Has<Disabled>,
+    ), DrawFilter>();
     let mut skinned_query = world
         .query_filtered::<(&GlobalTransform, &SkinnedMeshRenderer, Has<Disabled>), DrawFilter>();
     let mut instanced_query =
@@ -461,14 +528,15 @@ pub fn extract_and_render_to(
     // (GPU batching, planned below).
     let mut shadow_meshes = Vec::new();
     let mut resolved_meshes = 0u32;
+    let mut beyond_draw_distance = 0u32;
     // `(view depth, drawable)` so the sort key survives the borrow.
     let mut transparent: Vec<(f32, Drawable<'_>)> = Vec::new();
     let mut visible: Vec<VisibleMesh<'_>> = Vec::new();
-    for (transform, mesh_renderer, disabled) in mesh_query.iter(&*world) {
+    for (transform, mesh_renderer, lod, disabled) in mesh_query.iter(&*world) {
         if disabled && !draw_disabled {
             continue;
         }
-        let Some(mesh) = assets.meshes.get(mesh_renderer.mesh) else {
+        let Some(full_mesh) = assets.meshes.get(mesh_renderer.mesh) else {
             tracing::warn!(
                 mesh = ?mesh_renderer.mesh,
                 "skipping MeshRenderer: mesh handle not registered in RenderAssets"
@@ -490,14 +558,28 @@ pub fn extract_and_render_to(
 
         resolved_meshes += 1;
 
+        let Some((mesh_handle, fade)) =
+            distance_choice(distance, mesh_renderer, lod, full_mesh, &world_from_local)
+        else {
+            beyond_draw_distance += 1;
+            continue;
+        };
+        // A tier missing from `assets` falls back to the full mesh rather
+        // than leaving a hole.
+        let (mesh_handle, mesh) = match assets.meshes.get(mesh_handle) {
+            Some(mesh) => (mesh_handle, mesh),
+            None => (mesh_renderer.mesh, full_mesh),
+        };
+
         if material.casts_shadow && !material.transparent {
             shadow_meshes.push(ShadowMesh {
-                mesh_handle: mesh_renderer.mesh,
+                mesh_handle,
                 material_handle: mesh_renderer.material,
                 mesh,
                 material,
                 model: &mesh_renderer.model,
                 world: world_from_local,
+                fade,
             });
         }
 
@@ -508,9 +590,7 @@ pub fn extract_and_render_to(
             if material.transparent {
                 gpu.write_uniform_buffer(
                     &mesh_renderer.model.buffer,
-                    &ModelUniform {
-                        model: world_from_local.to_cols_array_2d(),
-                    },
+                    &ModelUniform::faded(world_from_local.to_cols_array_2d(), fade),
                 );
                 transparent.push((
                     view_depth(frustum, world_from_local.w_axis.truncate()),
@@ -523,12 +603,13 @@ pub fn extract_and_render_to(
                 continue;
             }
             visible.push(VisibleMesh {
-                mesh_handle: mesh_renderer.mesh,
+                mesh_handle,
                 material_handle: mesh_renderer.material,
                 mesh,
                 material,
                 model: &mesh_renderer.model,
                 world: world_from_local,
+                fade,
             });
         }
     }
@@ -564,9 +645,7 @@ pub fn extract_and_render_to(
 
         gpu.write_uniform_buffer(
             &skinned.skin.model_buffer,
-            &ModelUniform {
-                model: transform.0.to_matrix().to_cols_array_2d(),
-            },
+            &ModelUniform::from_cols(transform.0.to_matrix().to_cols_array_2d()),
         );
 
         skinned_drawables.push(SkinnedDrawable {
@@ -602,9 +681,7 @@ pub fn extract_and_render_to(
         let mesh = &shadow_meshes[index];
         gpu.write_uniform_buffer(
             &mesh.model.buffer,
-            &ModelUniform {
-                model: mesh.world.to_cols_array_2d(),
-            },
+            &ModelUniform::faded(mesh.world.to_cols_array_2d(), mesh.fade),
         );
         shadow_casters.push(Drawable {
             model: mesh.model,
@@ -622,8 +699,9 @@ pub fn extract_and_render_to(
                 mesh: first.mesh,
                 raws: group
                     .iter()
-                    .map(|&index| InstanceRaw {
-                        model: shadow_meshes[index].world.to_cols_array_2d(),
+                    .map(|&index| {
+                        let mesh = &shadow_meshes[index];
+                        InstanceRaw::faded(mesh.world.to_cols_array_2d(), mesh.fade)
                     })
                     .collect(),
             }
@@ -700,9 +778,7 @@ pub fn extract_and_render_to(
         let mesh = &visible[index];
         gpu.write_uniform_buffer(
             &mesh.model.buffer,
-            &ModelUniform {
-                model: mesh.world.to_cols_array_2d(),
-            },
+            &ModelUniform::faded(mesh.world.to_cols_array_2d(), mesh.fade),
         );
         drawables.push(Drawable {
             model: mesh.model,
@@ -717,8 +793,8 @@ pub fn extract_and_render_to(
         let first = &visible[group[0]];
         let raws: Vec<InstanceRaw> = group
             .iter()
-            .map(|&index| InstanceRaw {
-                model: visible[index].world.to_cols_array_2d(),
+            .map(|&index| {
+                InstanceRaw::faded(visible[index].world.to_cols_array_2d(), visible[index].fade)
             })
             .collect();
         auto_batched_drawn += raws.len() as u32;
@@ -831,6 +907,7 @@ pub fn extract_and_render_to(
 
     let stats = RenderStats {
         meshes_total: resolved_meshes,
+        meshes_beyond_draw_distance: beyond_draw_distance,
         meshes_drawn: visible.len() as u32,
         skinned_drawn: skinned_drawables.len() as u32,
         instances_total,
@@ -998,8 +1075,7 @@ pub fn extract_sprites(world: &mut World, frustum: &Frustum, draw_disabled: bool
 /// (and was despawned), `false` if it didn't.
 pub fn despawn_mesh_renderer(world: &mut World, entity: Entity, assets: &mut RenderAssets) -> bool {
     if let Some(mesh_renderer) = world.get::<MeshRenderer>(entity) {
-        assets.meshes.release(mesh_renderer.mesh);
-        assets.materials.release(mesh_renderer.material);
+        mesh_renderer.release(assets);
     }
     world.despawn(entity)
 }

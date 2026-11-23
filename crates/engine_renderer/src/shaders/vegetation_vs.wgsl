@@ -65,5 +65,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     // blades (see the vegetation module docs).
     out.world_normal = (model * vec4<f32>(in.normal, 0.0)).xyz;
     out.uv = in.uv;
+    // No distance fade for this path yet.
+    out.fade = 1.0;
     return out;
 }

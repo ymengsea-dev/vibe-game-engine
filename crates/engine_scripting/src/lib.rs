@@ -7,7 +7,7 @@ mod input;
 mod lua;
 mod queries;
 
-pub use command::{GAME_STATES, GameCommand};
+pub use command::{GAME_STATES, GameCommand, QUALITY_LEVELS};
 pub use input::{
     ButtonState, InputSnapshot, ScriptGamepadAxis, ScriptGamepadButton, ScriptKey,
     ScriptMouseButton,
@@ -1190,5 +1190,31 @@ mod input_tests {
                 GameCommand::Log("true".into())
             ]
         );
+    }
+
+    #[test]
+    fn set_quality_queues_command_and_reads_back() {
+        let mut rt = runtime(
+            "engine.log(engine.get_quality()) engine.set_quality('HIGH') engine.log(engine.get_quality())",
+        );
+        assert_eq!(
+            rt.update(0.1).expect("update"),
+            vec![
+                GameCommand::Log("medium".into()),
+                GameCommand::SetQuality {
+                    level: "high".into()
+                },
+                GameCommand::Log("high".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn set_quality_rejects_unknown_levels() {
+        let message = runtime("engine.set_quality('ultra')")
+            .update(0.1)
+            .expect_err("unknown level")
+            .to_string();
+        assert!(message.contains("low, medium, high"), "{message}");
     }
 }

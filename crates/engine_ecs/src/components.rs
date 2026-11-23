@@ -256,9 +256,123 @@ pub struct MeshRenderer {
     /// This entity's model-matrix binding, rewritten from the sibling
     /// [`GlobalTransform`] component each frame.
     pub model: engine_renderer::ModelBinding,
+    /// Simpler versions of `mesh` for far away, most detailed first. Empty
+    /// for a mesh with no detail tiers; `mesh` is always tier 0 and is what
+    /// picking and collision use.
+    pub lods: Vec<engine_utils::AssetHandle<engine_renderer::Mesh>>,
+    /// Where `lods` came from.
+    pub lod_source: LodSource,
+    /// The tier drawn last frame, so a mesh only switches once the camera
+    /// is clearly past a boundary (see [`engine_renderer::select_lod_tier`]).
+    /// Atomic because the renderer reads the world shared.
+    pub lod_tier: std::sync::atomic::AtomicU8,
+}
+
+/// Where a [`MeshRenderer`]'s detail tiers came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LodSource {
+    /// No tiers: the full mesh at every distance.
+    #[default]
+    None,
+    /// `_LOD1`, `_LOD2`, … meshes in the model file.
+    File,
+    /// Simplified on load because [`MeshLod::auto_generate`] is on.
+    Generated,
+}
+
+/// How a mesh changes with camera distance: when it switches to simpler
+/// tiers and how far away it stops being drawn.
+///
+/// Optional: a [`MeshRenderer`] without one uses [`MeshLod::default`].
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct MeshLod {
+    /// Build simpler tiers on load when the model file has none.
+    pub auto_generate: bool,
+    /// Distance where each tier ends, nearest first: tier 0 is drawn up to
+    /// `switch_distances[0]`, tier 1 up to `[1]`, and so on.
+    pub switch_distances: Vec<f32>,
+    /// Beyond this distance the mesh is not drawn. `None` draws it at any
+    /// distance.
+    pub draw_distance: Option<f32>,
+    /// The stretch before `draw_distance` over which the mesh fades out.
+    pub fade_length: f32,
+}
+
+impl Default for MeshLod {
+    fn default() -> Self {
+        Self {
+            auto_generate: false,
+            switch_distances: vec![15.0, 40.0],
+            draw_distance: None,
+            fade_length: 3.0,
+        }
+    }
 }
 
 impl MeshRenderer {
+    /// Releases every GPU handle this renderer holds (mesh, detail tiers
+    /// and material) in `assets`. Call before removing or despawning it.
+    pub fn release(&self, assets: &mut engine_renderer::RenderAssets) {
+        assets.meshes.release(self.mesh);
+        for tier in &self.lods {
+            assets.meshes.release(*tier);
+        }
+        assets.materials.release(self.material);
+    }
+
+    /// Replaces the detail tiers with `lods` (already registered in
+    /// `assets`), releasing the old ones.
+    pub fn set_lods(
+        &mut self,
+        assets: &mut engine_renderer::RenderAssets,
+        lods: Vec<engine_utils::AssetHandle<engine_renderer::Mesh>>,
+        source: LodSource,
+    ) {
+        for tier in self.lods.drain(..) {
+            assets.meshes.release(tier);
+        }
+        self.lods = lods;
+        self.lod_source = if self.lods.is_empty() {
+            LodSource::None
+        } else {
+            source
+        };
+        *self.lod_tier.get_mut() = 0;
+    }
+
+    /// The mesh for detail tier `tier` (0 = `mesh`), clamped to the last.
+    pub fn tier_mesh(&self, tier: usize) -> engine_utils::AssetHandle<engine_renderer::Mesh> {
+        match tier.checked_sub(1) {
+            None => self.mesh,
+            Some(index) => self
+                .lods
+                .get(index)
+                .or(self.lods.last())
+                .copied()
+                .unwrap_or(self.mesh),
+        }
+    }
+
+    /// How many detail tiers this renderer has, counting `mesh`.
+    pub fn tier_count(&self) -> usize {
+        1 + self.lods.len()
+    }
+
+    fn with_handles(
+        mesh: engine_utils::AssetHandle<engine_renderer::Mesh>,
+        material: engine_utils::AssetHandle<engine_renderer::MaterialBinding>,
+        model: engine_renderer::ModelBinding,
+    ) -> Self {
+        Self {
+            mesh,
+            material,
+            model,
+            lods: Vec::new(),
+            lod_source: LodSource::None,
+            lod_tier: std::sync::atomic::AtomicU8::new(0),
+        }
+    }
+
     /// Builds a [`MeshRenderer`] straight from decoded geometry and an
     /// optional base-color image.
     ///
@@ -314,11 +428,11 @@ impl MeshRenderer {
         let material_binding = gpu.create_material_binding(pipeline, texture, &material.into());
         let model_binding =
             gpu.create_model_binding(pipeline, &engine_renderer::ModelUniform::IDENTITY);
-        Self {
-            mesh: assets.meshes.insert(mesh),
-            material: assets.materials.insert(material_binding),
-            model: model_binding,
-        }
+        Self::with_handles(
+            assets.meshes.insert(mesh),
+            assets.materials.insert(material_binding),
+            model_binding,
+        )
     }
 
     /// Builds a [`MeshRenderer`] that reuses an already-registered `mesh`
@@ -348,11 +462,11 @@ impl MeshRenderer {
         let material_binding = gpu.create_material_binding(pipeline, texture, &material.into());
         let model_binding =
             gpu.create_model_binding(pipeline, &engine_renderer::ModelUniform::IDENTITY);
-        Self {
+        Self::with_handles(
             mesh,
-            material: assets.materials.insert(material_binding),
-            model: model_binding,
-        }
+            assets.materials.insert(material_binding),
+            model_binding,
+        )
     }
 
     /// Builds a [`MeshRenderer`] that reuses both an already-registered
@@ -383,11 +497,7 @@ impl MeshRenderer {
         }
         let model_binding =
             gpu.create_model_binding(pipeline, &engine_renderer::ModelUniform::IDENTITY);
-        Self {
-            mesh,
-            material,
-            model: model_binding,
-        }
+        Self::with_handles(mesh, material, model_binding)
     }
 }
 

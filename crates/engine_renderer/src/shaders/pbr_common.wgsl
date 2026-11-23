@@ -145,7 +145,23 @@ struct VertexOutput {
     @location(0) world_normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) world_position: vec3<f32>,
+    // Distance fade: 1 = fully drawn, 0 = gone. Constant per object.
+    @location(3) @interpolate(flat) fade: f32,
 };
+
+// 4x4 ordered-dither threshold in (0, 1) for the pixel at `position`.
+// Shared by the scene and shadow passes so a fading object's shadow
+// thins out in step with it.
+fn dither_threshold(position: vec2<f32>) -> f32 {
+    let bayer = array<f32, 16>(
+        0.0, 8.0, 2.0, 10.0,
+        12.0, 4.0, 14.0, 6.0,
+        3.0, 11.0, 1.0, 9.0,
+        15.0, 7.0, 13.0, 5.0,
+    );
+    let cell = vec2<u32>(position) % vec2<u32>(4u);
+    return (bayer[cell.y * 4u + cell.x] + 0.5) / 16.0;
+}
 
 const PI: f32 = 3.14159265359;
 
@@ -248,6 +264,12 @@ fn shadow_factor(world_position: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Distance fade: drop a growing share of pixels in a fixed pattern,
+    // so far objects thin out instead of popping, without blending.
+    if in.fade < dither_threshold(in.clip_position.xy) {
+        discard;
+    }
+
     let tex_color = textureSample(base_color_texture, base_color_sampler, in.uv);
     let base_color = tex_color * material.base_color_factor;
 

@@ -570,6 +570,7 @@ impl Viewport {
         overlays: crate::OverlayToggles,
         sun: Option<crate::overlays::SunArrow>,
         selection: &[Entity],
+        quality: engine_renderer::QualityLevel,
     ) {
         self.update_water(gpu, world);
         self.tick_animation_previews(gpu, world);
@@ -660,6 +661,9 @@ impl Viewport {
             &self.post,
             &self.camera_binding,
             &frustum,
+            overlays
+                .distance_detail
+                .then(|| engine_renderer::DistanceQuality::new(self.camera.eye, quality)),
             &self.lights_binding,
             &self.skinned_pipeline,
             &self.instanced_pipeline,
@@ -724,9 +728,7 @@ impl Viewport {
             );
             gpu.write_uniform_buffer(
                 &binding.model.buffer,
-                &engine_renderer::ModelUniform {
-                    model: model.to_cols_array_2d(),
-                },
+                &engine_renderer::ModelUniform::from_cols(model.to_cols_array_2d()),
             );
         }
     }

@@ -252,4 +252,7 @@ pub struct InputSnapshot {
     pub gamepad_axes: HashMap<ScriptGamepadAxis, f32>,
     /// Whether the game currently wants the mouse locked.
     pub mouse_locked: bool,
+    /// The graphics quality the game is drawing at, one of
+    /// [`crate::QUALITY_LEVELS`]. Empty reads as `"medium"`.
+    pub quality: String,
 }

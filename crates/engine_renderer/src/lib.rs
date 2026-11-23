@@ -161,6 +161,7 @@ mod offscreen;
 mod particle;
 mod pipeline;
 mod post;
+mod quality;
 mod render_assets;
 mod render_graph;
 mod scatter;
@@ -190,7 +191,9 @@ pub use light::{
     AmbientLight, DirectionalLight, DirectionalLightUniform, LightSet, LightsUniform,
     MAX_DIRECTIONAL_LIGHTS, MAX_POINT_LIGHTS, PointLight, PointLightUniform,
 };
-pub use lod::{LodLevel, LodSelector, LodSet, StreamQueue};
+pub use lod::{
+    LOD_HYSTERESIS, LodLevel, LodSelector, LodSet, StreamQueue, distance_fade, select_lod_tier,
+};
 pub use material::{AlphaMode, Material, MaterialUniform};
 pub use mesh::{Mesh, Vertex, cube, quad};
 pub use model::ModelUniform;
@@ -208,6 +211,7 @@ pub use post::{
     BloomSettings, BlurUniform, ColorGrade, CompositeUniform, DEFAULT_EXPOSURE, OutlineSettings,
     PostProcessStack, PostSettings, PrefilterUniform,
 };
+pub use quality::{DistanceQuality, QualityLevel, QualityPreset};
 pub use render_assets::RenderAssets;
 pub use render_graph::RenderGraph;
 pub use scatter::{ScatterArea, ScatterConfig, ScatterError, scatter};

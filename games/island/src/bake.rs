@@ -267,6 +267,7 @@ impl BakedModel {
     /// material is not a separate asset to resolve.
     fn renderer(&self) -> MeshRendererData {
         MeshRendererData {
+            lod: None,
             mesh: AssetRef {
                 id: self.id.clone(),
             },

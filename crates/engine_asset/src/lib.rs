@@ -22,6 +22,7 @@ mod error;
 mod gltf_export;
 mod gltf_import;
 mod hot_reload;
+mod lod;
 mod meta;
 mod texture_import;
 
@@ -47,5 +48,8 @@ pub use gltf_import::{
     import_gltf_slice, import_gltf_slice_with,
 };
 pub use hot_reload::AssetWatcher;
+pub use lod::{
+    GENERATED_LOD_RATIOS, MIN_TRIANGLES_TO_SIMPLIFY, authored_lod_tiers, generated_lod_tiers,
+};
 pub use meta::{AssetMeta, AssetMetadataStore, ImportCache, hash_bytes};
 pub use texture_import::{ImportedTexture, generate_mip_chain, import_texture_bytes};

@@ -2976,6 +2976,7 @@ impl EditorHandler {
                     self.state.overlays,
                     sun,
                     &selection,
+                    self.state.project.manifest().quality,
                 );
             }
             self.state.profiler.record_span("viewport", span.elapsed());

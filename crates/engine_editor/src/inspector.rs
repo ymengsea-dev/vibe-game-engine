@@ -11,8 +11,8 @@
 //! View gizmo also calls [`transform_of`]/[`set_transform`] directly.
 
 use engine_ecs::components::{
-    ActiveCamera, AssetSource, Camera, CameraFollow, Disabled, Lock, MeshSource, Name, Script,
-    Sprite, SpriteSource, Transform, WaterVolume,
+    ActiveCamera, AssetSource, Camera, CameraFollow, Disabled, Lock, LodSource, MeshLod,
+    MeshRenderer, MeshSource, Name, Script, Sprite, SpriteSource, Transform, WaterVolume,
 };
 use engine_ecs::prelude::{Component, Entity, With, World};
 use engine_utils::Transform as MathTransform;
@@ -34,6 +34,27 @@ mod graph;
 
 #[cfg(test)]
 mod prototype_style_tests {
+    #[test]
+    fn lod_settings_store_nothing_at_the_defaults() {
+        use engine_ecs::components::{MeshLod, MeshSource};
+        let mut world = engine_ecs::prelude::World::new();
+        let rock = world.spawn(MeshSource::new("a", "a")).id();
+        let plain = world.spawn_empty().id();
+        let far = MeshLod {
+            draw_distance: Some(80.0),
+            ..Default::default()
+        };
+        assert!(super::set_mesh_lod(&mut world, rock, far.clone()));
+        assert_eq!(world.get::<MeshLod>(rock), Some(&far));
+        assert!(!super::set_mesh_lod(&mut world, rock, far));
+        assert!(super::set_mesh_lod(&mut world, rock, MeshLod::default()));
+        assert!(world.get::<MeshLod>(rock).is_none());
+        assert!(
+            !super::set_mesh_lod(&mut world, plain, MeshLod::default()),
+            "only models have distance settings"
+        );
+    }
+
     #[test]
     fn component_sections_are_soft_filled_cards() {
         let frame = super::component_frame();
@@ -196,6 +217,148 @@ fn set_material_override(
         entity_mut.remove::<SceneMaterialOverride>();
     }
     true
+}
+
+/// Stores `value` as `entity`'s distance settings; the defaults are stored
+/// as no component, so untouched meshes save nothing. Returns whether
+/// anything changed.
+fn set_mesh_lod(world: &mut World, entity: Entity, value: MeshLod) -> bool {
+    if world.get::<MeshSource>(entity).is_none()
+        || world.get::<MeshLod>(entity).cloned().unwrap_or_default() == value
+    {
+        return false;
+    }
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        return false;
+    };
+    if value == MeshLod::default() {
+        entity_mut.remove::<MeshLod>();
+    } else {
+        entity_mut.insert(value);
+    }
+    true
+}
+
+fn copy_mesh_lod(world: &mut World, from: Entity, to: Entity) {
+    let value = world.get::<MeshLod>(from).cloned().unwrap_or_default();
+    set_mesh_lod(world, to, value);
+}
+
+/// "Level of detail": simpler meshes far away and a draw distance.
+/// Returns whether the settings changed.
+fn lod_section(ui: &mut egui::Ui, world: &mut World, entity: Entity) -> bool {
+    let palette = crate::theme::NIGHT;
+    let before = world.get::<MeshLod>(entity).cloned().unwrap_or_default();
+    let mut value = before.clone();
+    let (tiers, source) = world
+        .get::<MeshRenderer>(entity)
+        .map_or((1, LodSource::None), |renderer| {
+            (renderer.tier_count(), renderer.lod_source)
+        });
+    // Every level gets a row; levels past the saved distances show the
+    // values the renderer would use (see `select_lod_tier`).
+    while value.switch_distances.len() + 1 < tiers {
+        let next = value
+            .switch_distances
+            .last()
+            .map_or(15.0, |last| last * 2.0);
+        value.switch_distances.push(next);
+    }
+    let shown = value.clone();
+    let mut reset = false;
+    section(
+        ui,
+        "Level of detail",
+        (before != MeshLod::default()).then_some(|ui: &mut egui::Ui| {
+            if ui.button("Reset").clicked() {
+                reset = true;
+                ui.close();
+            }
+        }),
+        |ui| {
+            note(ui, &lod_summary(source, tiers, value.auto_generate));
+            if source != LodSource::File {
+                property_row(ui, "Simplify", |ui| {
+                    crate::widgets::checkbox(
+                        ui,
+                        &palette,
+                        &mut value.auto_generate,
+                        "Generate simpler meshes",
+                    )
+                    .on_hover_text("Builds lighter copies of this model to draw far away");
+                });
+            }
+            for level in 1..tiers {
+                let index = level - 1;
+                property_row(ui, &format!("Level {level} from"), |ui| {
+                    number(
+                        ui,
+                        egui::DragValue::new(&mut value.switch_distances[index])
+                            .speed(0.5)
+                            .range(0.0..=100_000.0)
+                            .suffix(" m"),
+                    )
+                    .on_hover_text("Camera distance where this simpler mesh takes over");
+                });
+            }
+            property_row(ui, "Draw range", |ui| {
+                let mut limited = value.draw_distance.is_some();
+                if crate::widgets::checkbox(ui, &palette, &mut limited, "")
+                    .on_hover_text("Stop drawing this object far away")
+                    .changed()
+                {
+                    value.draw_distance = limited.then_some(100.0);
+                }
+                match value.draw_distance.as_mut() {
+                    Some(distance) => {
+                        number(
+                            ui,
+                            egui::DragValue::new(distance)
+                                .speed(1.0)
+                                .range(1.0..=100_000.0)
+                                .suffix(" m"),
+                        );
+                    }
+                    None => {
+                        ui.label(egui::RichText::new("Always drawn").color(palette.subtle));
+                    }
+                }
+            });
+            if value.draw_distance.is_some() {
+                property_row(ui, "Fade", |ui| {
+                    number(
+                        ui,
+                        egui::DragValue::new(&mut value.fade_length)
+                            .speed(0.1)
+                            .range(0.0..=1_000.0)
+                            .suffix(" m"),
+                    )
+                    .on_hover_text("How far before the draw distance it starts to fade");
+                });
+            }
+        },
+    );
+    if reset {
+        return set_mesh_lod(world, entity, MeshLod::default());
+    }
+    // Filled-in rows alone are not an edit.
+    if value == shown {
+        return false;
+    }
+    set_mesh_lod(world, entity, value)
+}
+
+/// One line saying which detail levels the mesh has.
+fn lod_summary(source: LodSource, tiers: usize, auto_generate: bool) -> String {
+    let simpler = tiers.saturating_sub(1);
+    match source {
+        LodSource::File => format!("{simpler} simpler meshes from the model file."),
+        LodSource::Generated => format!("{simpler} simpler meshes generated."),
+        LodSource::None if auto_generate => {
+            "This model is already simple; no lighter copies were needed.".to_owned()
+        }
+        LodSource::None => "Full detail at every distance.".to_owned(),
+    }
 }
 
 fn copy_material_override(world: &mut World, from: Entity, to: Entity) {
@@ -3076,6 +3239,12 @@ fn show_body(
         if changed && apply_to_all {
             for &other in others {
                 copy_material_override(world, entity, other);
+            }
+        }
+
+        if lod_section(ui, world, entity) && apply_to_all {
+            for &other in others {
+                copy_mesh_lod(world, entity, other);
             }
         }
     }

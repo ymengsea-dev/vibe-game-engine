@@ -4425,6 +4425,8 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
             ui.checkbox(&mut state.overlays.grid, "Ground grid");
             ui.checkbox(&mut state.overlays.audio, "Audio emitters");
             ui.checkbox(&mut state.overlays.nav, "Nav grid");
+            ui.checkbox(&mut state.overlays.distance_detail, "Distance detail")
+                .on_hover_text("Show simpler meshes and draw distances as the game would");
         });
         ui.menu_button("Terrain", |ui| {
             if ui.button("Create terrain").clicked() {
@@ -5949,6 +5951,42 @@ mod ui_tests {
         state.select_only(crate_entity);
         let path = crate::ui_snapshot::snapshot_dir().join("inspector-collider.png");
         crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 900.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `inspector-lod.png`: a model's Material and Level of detail
+    /// sections with a draw distance set. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_lod() {
+        let (root, mut state) = menu_test_state();
+        let id = uuid::Uuid::nil().to_string();
+        let rock = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Rock"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                engine_ecs::components::MeshSource::new(id.clone(), id),
+                engine_ecs::components::MeshLod {
+                    draw_distance: Some(120.0),
+                    fade_length: 5.0,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        state.select_only(rock);
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-lod.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 760.0), 2.0, |ui| {
             egui::Panel::right("snapshot_inspector")
                 .exact_size(420.0)
                 .frame(super::studio_panel_frame())

@@ -26,10 +26,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use engine_asset::{
-    AssetId, AssetMeta, AssetMetadataStore, Bundle, ImportedGltf, ImportedMaterial,
+    AssetId, AssetMeta, AssetMetadataStore, Bundle, ImportedGltf, ImportedMaterial, ImportedMesh,
     import_gltf_file, import_gltf_slice_with, import_texture_bytes,
 };
-use engine_ecs::components::MeshRenderer;
+use engine_ecs::components::{LodSource, MeshRenderer};
 use engine_renderer::{
     AlphaMode, GpuContext, Material, MaterialBinding, Mesh, Pipeline, RenderAssets, UvRect,
 };
@@ -395,6 +395,89 @@ pub struct RuntimeResolver<'a> {
     /// Files already imported this load, so checking whether a model is
     /// animated and then uploading it still reads it once.
     imported: HashMap<AssetId, std::sync::Arc<engine_asset::ImportedGltf>>,
+    /// Detail tiers already uploaded this load, by asset and whether they
+    /// include generated ones.
+    lods: LodCache,
+}
+
+/// Detail-tier uploads shared by every entity placing the same model.
+pub type LodCache = HashMap<(AssetId, bool), (Vec<AssetHandle<Mesh>>, LodSource)>;
+
+/// The mesh drawn up close: the file's only mesh, or its `_LOD0` when the
+/// file holds authored detail tiers. `None` for any other multi-mesh file.
+pub fn base_mesh(gltf: &ImportedGltf) -> Option<&ImportedMesh> {
+    match gltf.meshes.as_slice() {
+        [only] => Some(only),
+        _ => engine_asset::authored_lod_tiers(gltf).and_then(|tiers| tiers.first().copied()),
+    }
+}
+
+/// Geometry for `gltf`'s lower detail tiers, most detailed first: the
+/// authored `_LOD1`, `_LOD2`, … meshes when there are any, otherwise
+/// simplified copies when `auto_generate` is on.
+pub fn lod_tier_geometry(
+    gltf: &ImportedGltf,
+    auto_generate: bool,
+) -> (Vec<MeshGeometry>, LodSource) {
+    if let Some(tiers) = engine_asset::authored_lod_tiers(gltf) {
+        let geometry = tiers
+            .iter()
+            .skip(1)
+            .map(|mesh| (mesh.vertices.clone(), mesh.indices.clone()))
+            .collect();
+        return (geometry, LodSource::File);
+    }
+    match gltf.meshes.as_slice() {
+        [only] if auto_generate => {
+            let geometry = engine_asset::generated_lod_tiers(only)
+                .into_iter()
+                .map(|mesh| (mesh.vertices, mesh.indices))
+                .collect();
+            (geometry, LodSource::Generated)
+        }
+        _ => (Vec::new(), LodSource::None),
+    }
+}
+
+/// Gives `renderer` the lower detail tiers of `gltf` (asset `id`), reusing
+/// an upload in `cache` while every handle in it is still alive.
+///
+/// # Errors
+///
+/// [`SceneError::Resolve`] if a tier fails to upload.
+pub fn attach_lod_tiers(
+    gpu: &GpuContext,
+    assets: &mut RenderAssets,
+    cache: &mut LodCache,
+    renderer: &mut MeshRenderer,
+    id: AssetId,
+    gltf: &ImportedGltf,
+    auto_generate: bool,
+) -> Result<(), SceneError> {
+    let key = (id, auto_generate);
+    if let Some((handles, source)) = cache.get(&key)
+        && handles
+            .iter()
+            .all(|handle| assets.meshes.ref_count(*handle).is_some())
+    {
+        let handles = handles.clone();
+        for handle in &handles {
+            assets.meshes.retain(*handle);
+        }
+        renderer.set_lods(assets, handles, *source);
+        return Ok(());
+    }
+    let (geometry, source) = lod_tier_geometry(gltf, auto_generate);
+    let mut handles = Vec::with_capacity(geometry.len());
+    for (vertices, indices) in &geometry {
+        let mesh = gpu
+            .create_mesh("scene mesh detail tier", vertices, indices)
+            .map_err(|err| SceneError::Resolve(err.to_string()))?;
+        handles.push(assets.meshes.insert(mesh));
+    }
+    cache.insert(key, (handles.clone(), source));
+    renderer.set_lods(assets, handles, source);
+    Ok(())
 }
 
 impl<'a> RuntimeResolver<'a> {
@@ -413,6 +496,7 @@ impl<'a> RuntimeResolver<'a> {
             uploaded: HashMap::new(),
             skinned_pipeline: None,
             imported: HashMap::new(),
+            lods: HashMap::new(),
         }
     }
 
@@ -512,9 +596,10 @@ impl SceneResolver for RuntimeResolver<'_> {
         let Some(gltf) = self.import(mesh, id)? else {
             return Ok(None);
         };
-        let [primitive] = gltf.meshes.as_slice() else {
+        let Some(primitive) = base_mesh(&gltf) else {
             return Err(SceneError::Resolve(format!(
-                "asset {} has {} primitives; the runtime renderer supports exactly one",
+                "asset {} has {} primitives; the runtime renderer supports exactly one \
+                 (or detail tiers named _LOD0, _LOD1, …)",
                 mesh.id,
                 gltf.meshes.len()
             )));
@@ -544,6 +629,28 @@ impl SceneResolver for RuntimeResolver<'_> {
             self.uploaded.insert(id, (renderer.mesh, renderer.material));
         }
         Ok(Some(renderer))
+    }
+
+    fn resolve_mesh_lods(
+        &mut self,
+        mesh: &AssetRef,
+        renderer: &mut MeshRenderer,
+        auto_generate: bool,
+    ) -> Result<(), SceneError> {
+        let uuid = mesh.parse_id().map_err(SceneError::Resolve)?;
+        let id = AssetId::from_uuid(uuid);
+        let Some(gltf) = self.import(mesh, id)? else {
+            return Ok(());
+        };
+        attach_lod_tiers(
+            self.gpu,
+            self.assets,
+            &mut self.lods,
+            renderer,
+            id,
+            &gltf,
+            auto_generate,
+        )
     }
 
     fn resolve_skinned_mesh(
@@ -629,7 +736,7 @@ pub fn load_mesh_geometry(
     let Some(gltf) = library.import_mesh(&reference.id)? else {
         return Ok(None);
     };
-    let Some(primitive) = gltf.meshes.first() else {
+    let Some(primitive) = base_mesh(&gltf).or(gltf.meshes.first()) else {
         return Err(SceneError::Resolve(format!(
             "asset {} contains no mesh primitives",
             reference.id

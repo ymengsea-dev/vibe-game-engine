@@ -60,5 +60,7 @@ fn vs_main(in: SkinnedVertexInput) -> VertexOutput {
     // produces in practice.
     out.world_normal = (object.model * skin_matrix * vec4<f32>(in.normal, 0.0)).xyz;
     out.uv = in.uv;
+    // No distance fade for this path yet.
+    out.fade = 1.0;
     return out;
 }

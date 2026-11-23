@@ -94,6 +94,7 @@ pub(super) fn create_scene(
                     name: Some(name.into()),
                     transform: Some(transform(position, scale)),
                     mesh_renderer: Some(MeshRendererData {
+                        lod: None,
                         mesh: asset.clone(),
                         material: asset.clone(),
                         material_override: Some(MaterialOverrideData {

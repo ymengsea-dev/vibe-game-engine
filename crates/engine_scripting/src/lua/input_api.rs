@@ -191,6 +191,44 @@ pub(super) fn register(
         })?,
     )?;
 
+    let (snapshot, pending, is_active) = (Rc::clone(input), Rc::clone(commands), Rc::clone(active));
+    engine.set(
+        "set_quality",
+        lua.create_function(move |_, level: String| {
+            if !is_active.get() {
+                return Err(error("engine commands may only run in callbacks".into()));
+            }
+            let Some(level) = crate::QUALITY_LEVELS
+                .iter()
+                .find(|name| name.eq_ignore_ascii_case(&level))
+            else {
+                return Err(error(format!(
+                    "unknown quality '{level}'; expected one of: low, medium, high"
+                )));
+            };
+            let mut queue = pending.borrow_mut();
+            if queue.len() >= MAX_COMMANDS {
+                return Err(error("Lua command limit exceeded".into()));
+            }
+            queue.push(GameCommand::SetQuality {
+                level: (*level).to_owned(),
+            });
+            snapshot.borrow_mut().quality = (*level).to_owned();
+            Ok(())
+        })?,
+    )?;
+    let snapshot = Rc::clone(input);
+    engine.set(
+        "get_quality",
+        lua.create_function(move |_, ()| {
+            let quality = snapshot.borrow().quality.clone();
+            Ok(if quality.is_empty() {
+                "medium".to_owned()
+            } else {
+                quality
+            })
+        })?,
+    )?;
     let (snapshot, pending, active) = (Rc::clone(input), Rc::clone(commands), Rc::clone(active));
     engine.set(
         "set_mouse_locked",
@@ -212,5 +250,6 @@ pub(super) fn register(
         "is_mouse_locked",
         lua.create_function(move |_, ()| Ok(snapshot.borrow().mouse_locked))?,
     )?;
+
     Ok(())
 }

@@ -190,6 +190,10 @@ pub struct GameConfig {
     /// gameplay is unaffected until it builds a menu. Set `false` to
     /// bind menu navigation yourself.
     pub ui_navigation: bool,
+    /// Graphics quality the game starts at: shadow size, mesh detail and
+    /// draw distance. Games can change it while running with
+    /// [`GameContext::set_quality`].
+    pub quality: engine_renderer::QualityLevel,
 }
 
 impl GameConfig {
@@ -223,6 +227,7 @@ impl GameConfig {
             save_path: None,
             save_policy: SavePolicy::default(),
             ui_navigation: true,
+            quality: engine_renderer::QualityLevel::default(),
         }
     }
 
@@ -514,6 +519,7 @@ struct Runtime {
     post_settings: PostSettings,
     camera_binding: CameraBinding,
     lights_binding: LightsBinding,
+    quality: engine_renderer::QualityLevel,
 
     sprite_pipeline: engine_renderer::SpritePipeline,
     /// The unit quad every sprite instance stamps out. One upload for
@@ -743,6 +749,18 @@ impl GameContext<'_> {
     /// Statistics from the latest submitted scene frame.
     pub fn render_stats(&self) -> engine_ecs::RenderStats {
         self.runtime.render_stats
+    }
+
+    /// The graphics quality the game is drawing at.
+    pub fn quality(&self) -> engine_renderer::QualityLevel {
+        self.runtime.quality
+    }
+
+    /// Switches graphics quality from the next frame. A new shadow size
+    /// rebuilds the shadow map; mesh detail and draw distance follow at
+    /// once.
+    pub fn set_quality(&mut self, level: engine_renderer::QualityLevel) {
+        apply_quality(self.runtime, level);
     }
 
     /// The world snapshot read from the save at launch, if there was one.
@@ -2050,7 +2068,11 @@ fn build_runtime_with(
 
     let light_space_matrix =
         directional_light_view_projection(sun_direction, camera.target, SHADOW_RADIUS);
-    let shadow_map = gpu.create_shadow_map(&shadow_pipeline, light_space_matrix);
+    let shadow_map = gpu.create_shadow_map_sized(
+        &shadow_pipeline,
+        light_space_matrix,
+        config.quality.preset().shadow_map_size,
+    );
 
     let camera_binding = gpu.create_camera_binding(&pipeline, &camera.to_uniform());
     let lights_binding = gpu.create_lights_binding(&pipeline, &lights.to_uniform(), &shadow_map);
@@ -2133,6 +2155,7 @@ fn build_runtime_with(
         post_settings: config.post,
         camera_binding,
         lights_binding,
+        quality: config.quality,
         sprite_pipeline,
         sprite_quad,
         sprite_atlas: None,
@@ -2165,6 +2188,35 @@ fn build_runtime_with(
 /// walking away from the origin lost them entirely. Cascades would give
 /// crisp near shadows *and* long range; this is the single-map 80%.
 const SHADOW_RADIUS: f32 = 40.0;
+
+/// Switches `runtime` to `level`, rebuilding the shadow map (and the
+/// lights binding that samples it) only when its size changes.
+fn apply_quality(runtime: &mut Runtime, level: engine_renderer::QualityLevel) {
+    if runtime.quality == level {
+        return;
+    }
+    runtime.quality = level;
+    let size = level.preset().shadow_map_size;
+    if size == runtime.shadow_map.size() {
+        return;
+    }
+    let (sun_direction, _) = runtime.sun();
+    let light_space =
+        directional_light_view_projection(sun_direction, runtime.camera.target, SHADOW_RADIUS);
+    let shadow_map =
+        runtime
+            .gpu
+            .create_shadow_map_sized(&runtime.shadow_pipeline, light_space, size);
+    if shadow_map.size() == runtime.shadow_map.size() {
+        return;
+    }
+    runtime.lights_binding = runtime.gpu.create_lights_binding(
+        &runtime.pipeline,
+        &runtime.lights.to_uniform(),
+        &shadow_map,
+    );
+    runtime.shadow_map = shadow_map;
+}
 
 /// Re-fits the shadow projection around wherever the camera is looking.
 ///
@@ -2287,9 +2339,7 @@ fn update_water_render_data(runtime: &mut Runtime, delta: f32) {
         );
         runtime.gpu.write_uniform_buffer(
             &binding.model.buffer,
-            &engine_renderer::ModelUniform {
-                model: model.to_cols_array_2d(),
-            },
+            &engine_renderer::ModelUniform::from_cols(model.to_cols_array_2d()),
         );
     }
 }
@@ -2427,6 +2477,10 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
         &runtime.post,
         &runtime.camera_binding,
         &frustum,
+        Some(engine_renderer::DistanceQuality::new(
+            runtime.camera.eye,
+            runtime.quality,
+        )),
         &runtime.lights_binding,
         &runtime.skinned_pipeline,
         &runtime.instanced_pipeline,
@@ -2749,6 +2803,107 @@ mod tests {
         }
 
         fn update(&mut self, _ctx: &mut GameContext<'_>, _dt: f32) {}
+    }
+
+    /// Draws a mesh with two detail tiers and a draw distance through the
+    /// real frame path on a headless GPU, then switches quality, so the
+    /// distance-fade shaders and the shadow-map rebuild are exercised.
+    /// Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn distance_detail_renders_and_quality_switches_on_a_headless_gpu() {
+        use engine_ecs::components::{GlobalTransform, MeshLod, MeshRenderer, Transform};
+
+        struct LodGame {
+            frames: u32,
+        }
+        impl Game for LodGame {
+            fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+                let parts = ctx.scene_parts();
+                let cube = engine_renderer::cube();
+                let mut renderer = MeshRenderer::from_geometry(
+                    parts.gpu,
+                    parts.pipeline,
+                    parts.assets,
+                    &cube.0,
+                    &cube.1,
+                    None,
+                    engine_renderer::Material::DEFAULT,
+                )
+                .expect("cube");
+                let tier = parts
+                    .gpu
+                    .create_mesh("tier", &cube.0, &cube.1)
+                    .expect("tier");
+                let tier = parts.assets.meshes.insert(tier);
+                renderer.set_lods(
+                    parts.assets,
+                    vec![tier],
+                    engine_ecs::components::LodSource::Generated,
+                );
+                for z in [0.0f32, -20.0, -200.0] {
+                    let transform =
+                        engine_utils::Transform::from_translation(Vec3::new(0.0, 0.0, z));
+                    let mut copy = MeshRenderer::from_handles(
+                        parts.gpu,
+                        parts.pipeline,
+                        parts.assets,
+                        renderer.mesh,
+                        renderer.material,
+                    );
+                    parts.assets.meshes.retain(tier);
+                    copy.set_lods(
+                        parts.assets,
+                        vec![tier],
+                        engine_ecs::components::LodSource::Generated,
+                    );
+                    parts.world.spawn((
+                        copy,
+                        Transform::from(transform),
+                        GlobalTransform::from(transform),
+                        MeshLod {
+                            switch_distances: vec![5.0],
+                            draw_distance: Some(50.0),
+                            ..Default::default()
+                        },
+                    ));
+                }
+                parts.world.spawn((
+                    Transform::from(engine_utils::Transform::IDENTITY),
+                    GlobalTransform::from(engine_utils::Transform::IDENTITY),
+                    renderer,
+                ));
+                Ok(())
+            }
+
+            fn update(&mut self, ctx: &mut GameContext<'_>, _dt: f32) {
+                self.frames += 1;
+                if self.frames == 2 {
+                    ctx.set_quality(engine_renderer::QualityLevel::High);
+                }
+            }
+        }
+
+        let gpu = GpuContext::headless(64, 64).expect("headless GPU");
+        let mut config = GameConfig::new("lod", 64, 64);
+        config.quality = engine_renderer::QualityLevel::Low;
+        let mut runner = GameRunner::new(config, LodGame { frames: 0 }, Rc::new(Cell::new(None)));
+        runner.start_with_gpu(gpu, 64, 64);
+        for _ in 0..3 {
+            runner.on_event(PlatformEvent::RedrawRequested);
+        }
+        let runtime = runner.runtime.as_ref().expect("runtime");
+        assert!(runner.error_slot.take().is_none());
+        assert_eq!(runtime.quality, engine_renderer::QualityLevel::High);
+        assert_eq!(
+            runtime.shadow_map.size(),
+            engine_renderer::QualityLevel::High.preset().shadow_map_size
+        );
+        assert_eq!(runtime.render_stats.meshes_total, 4);
+        assert_eq!(
+            runtime.render_stats.meshes_beyond_draw_distance, 1,
+            "only the object 200 m away is past its draw distance"
+        );
     }
 
     #[test]
