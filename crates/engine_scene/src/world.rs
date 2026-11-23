@@ -1018,6 +1018,7 @@ mod tests {
                     color: [1.0, 1.0, 1.0, 1.0],
                     z_order: 0.0,
                     animation: None,
+                    clips: Vec::new(),
                 }),
                 ..Default::default()
             }],
@@ -1565,6 +1566,7 @@ mod tests {
                         id: MATERIAL_ID.into(),
                     },
                     material_override: Some(authored.clone()),
+                    animation: None,
                 }),
                 ..Default::default()
             }],
@@ -1624,6 +1626,7 @@ mod tests {
                         id: MATERIAL_ID.into(),
                     },
                     material_override: None,
+                    animation: None,
                 }),
                 ..Default::default()
             }],
@@ -1705,6 +1708,7 @@ mod tests {
                         id: MATERIAL_ID.into(),
                     },
                     material_override: None,
+                    animation: None,
                 }),
                 ..Default::default()
             }],

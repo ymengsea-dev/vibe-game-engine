@@ -153,6 +153,8 @@ fn overlay_lines(placeholders: &[Vec3]) -> Vec<DebugLineVertex> {
 /// The render target follows the visible panel size so the scene fills
 /// the Scene and Code viewports without stretching its camera aspect.
 pub struct Viewport {
+    /// When the last animation preview frame was drawn.
+    preview_clock: Option<std::time::Instant>,
     width: u32,
     height: u32,
     view: wgpu::TextureView,
@@ -281,6 +283,7 @@ impl Viewport {
         );
 
         Ok(Self {
+            preview_clock: None,
             width,
             height,
             view,
@@ -437,7 +440,14 @@ impl Viewport {
         importer: &crate::AssetImporter,
         gpu: &GpuContext,
     ) -> crate::ResolveReport {
-        let report = crate::resolve_pending(world, importer, gpu, &self.pipeline, &mut self.assets);
+        let report = crate::resolve_pending(
+            world,
+            importer,
+            gpu,
+            &self.pipeline,
+            &self.skinned_pipeline,
+            &mut self.assets,
+        );
         self.refresh_sprite_atlas(world, importer, gpu);
         report
     }
@@ -525,6 +535,7 @@ impl Viewport {
             if let Ok(mut entity_mut) = world.get_entity_mut(*entity) {
                 entity_mut.remove::<engine_ecs::components::MeshRenderer>();
             }
+            crate::resolve::release_skinned(world, &mut self.assets, *entity);
         }
         stale.len()
     }
@@ -541,6 +552,7 @@ impl Viewport {
             if let Ok(mut entity_mut) = world.get_entity_mut(*entity) {
                 entity_mut.remove::<engine_ecs::components::MeshRenderer>();
             }
+            crate::resolve::release_skinned(world, &mut self.assets, *entity);
         }
         stale.len()
     }
@@ -560,6 +572,7 @@ impl Viewport {
         selection: &[Entity],
     ) {
         self.update_water(gpu, world);
+        self.tick_animation_previews(gpu, world);
         self.lights = editor_lights(world);
         let sun_direction = self
             .lights
@@ -604,6 +617,14 @@ impl Viewport {
             sun,
             selection,
             |world, entity| {
+                if let Some(skinned) =
+                    world.get::<engine_ecs::components::SkinnedMeshRenderer>(entity)
+                {
+                    return assets
+                        .skinned_meshes
+                        .get(skinned.mesh)
+                        .map(|mesh| mesh.local_bounds);
+                }
                 let renderer = world.get::<engine_ecs::components::MeshRenderer>(entity)?;
                 assets
                     .meshes
@@ -661,6 +682,22 @@ impl Viewport {
         }
     }
 
+    /// Moves previewed animated models on by the time since the last frame.
+    fn tick_animation_previews(&mut self, gpu: &GpuContext, world: &mut World) {
+        let now = std::time::Instant::now();
+        let dt = self
+            .preview_clock
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
+        let playing = crate::animation_preview::tick(world, gpu, dt);
+        self.preview_clock = playing.then_some(now);
+    }
+
+    /// Whether an animated model is playing in the Scene View, so the
+    /// editor keeps drawing frames.
+    pub fn is_previewing_animation(&self) -> bool {
+        self.preview_clock.is_some()
+    }
+
     fn update_water(&mut self, gpu: &GpuContext, world: &mut World) {
         let surfaces = water_surfaces(world);
         self.water_bindings
@@ -715,6 +752,7 @@ fn placeholder_positions(world: &mut World) -> Vec<Vec3> {
     let mut query = world.query_filtered::<&GlobalTransform, (
         bevy_ecs::prelude::With<engine_ecs::components::MeshSource>,
         bevy_ecs::prelude::Without<MeshRenderer>,
+        bevy_ecs::prelude::Without<engine_ecs::components::SkinnedMeshRenderer>,
         bevy_ecs::prelude::Without<Sprite>,
         bevy_ecs::prelude::Without<Disabled>,
         bevy_ecs::prelude::Without<engine_ecs::components::Hidden>,

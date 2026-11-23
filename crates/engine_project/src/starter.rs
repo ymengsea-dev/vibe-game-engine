@@ -45,6 +45,7 @@ pub(super) fn create_scene(
                     color: [1.0; 4],
                     z_order: 0.0,
                     animation: None,
+                    clips: Vec::new(),
                 }),
                 asset_source: Some("assets/images/first_sprite.png".into()),
                 asset_id: Some(asset.id),
@@ -99,6 +100,7 @@ pub(super) fn create_scene(
                             tint,
                             ..Default::default()
                         }),
+                        animation: None,
                     }),
                     collider: Some(ColliderData::new(
                         ColliderShape::Cuboid {

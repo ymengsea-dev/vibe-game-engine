@@ -456,6 +456,47 @@ impl SkinnedMeshRenderer {
             skin,
         }
     }
+
+    /// Uploads `vertices`/`indices` and an optional base-colour image
+    /// (`(width, height, rgba8)`; white when `None`) and builds a
+    /// [`SkinnedMeshRenderer`] — the skinned twin of
+    /// [`MeshRenderer::from_geometry`].
+    ///
+    /// # Errors
+    ///
+    /// [`engine_renderer::RendererError`] if the geometry cannot be uploaded.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors MeshRenderer::from_geometry plus the skinned pipeline"
+    )]
+    pub fn from_geometry(
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        skinned_pipeline: &engine_renderer::SkinnedPipeline,
+        assets: &mut engine_renderer::RenderAssets,
+        vertices: &[engine_renderer::SkinnedVertex],
+        indices: &[u32],
+        base_color: Option<(u32, u32, &[u8])>,
+        material: engine_renderer::Material,
+    ) -> Result<Self, engine_renderer::RendererError> {
+        const LABEL: &str = "scene skinned mesh";
+        let mesh = gpu.create_skinned_mesh(LABEL, vertices, indices)?;
+        let texture = match base_color {
+            Some((width, height, rgba8)) => {
+                gpu.create_texture_from_rgba_tiled(LABEL, width, height, rgba8)
+            }
+            None => gpu.create_texture_from_rgba_tiled(LABEL, 1, 1, &[255, 255, 255, 255]),
+        };
+        Ok(Self::new(
+            gpu,
+            pipeline,
+            skinned_pipeline,
+            assets,
+            mesh,
+            &texture,
+            material,
+        ))
+    }
 }
 
 /// An entity that renders many copies of one mesh in a single instanced

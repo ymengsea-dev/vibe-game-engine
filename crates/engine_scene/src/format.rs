@@ -408,7 +408,53 @@ pub struct MeshRendererData {
     /// Optional per-object PBR changes; absent in older scenes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material_override: Option<MaterialOverrideData>,
+    /// How an animated model plays its clips. Absent for still models,
+    /// and for animated ones left at the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<ModelAnimationData>,
 }
+
+/// How an animated (skinned) model plays. A still model ignores it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelAnimationData {
+    /// The clip to play, by name. `None` plays the file's first clip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<String>,
+    /// Whether the clip starts again after its last frame.
+    #[serde(default = "default_true")]
+    pub looping: bool,
+    /// Playback rate; `1.0` is the authored speed.
+    #[serde(default = "default_speed")]
+    pub speed: f32,
+    /// Whether the clip starts by itself when the game starts.
+    #[serde(default = "default_true")]
+    pub play_on_start: bool,
+    /// A state graph that chooses the clip while the game runs. When set,
+    /// its first state replaces `clip`, `looping` and `speed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animator: Option<crate::AnimatorData>,
+}
+
+impl Default for ModelAnimationData {
+    fn default() -> Self {
+        Self {
+            clip: None,
+            looping: true,
+            speed: 1.0,
+            play_on_start: true,
+            animator: None,
+        }
+    }
+}
+
+fn default_speed() -> f32 {
+    1.0
+}
+
+/// Live carrier for [`ModelAnimationData`] on an entity, so the settings
+/// survive a save even when the model has not loaded.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq, Default)]
+pub struct SceneModelAnimation(pub ModelAnimationData);
 
 /// Per-object adjustments layered over the imported glTF material.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -494,6 +540,45 @@ pub struct SpriteData {
     /// Optional row-major flipbook starting at `region`'s grid cell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<SpriteAnimationData>,
+    /// Named flipbooks on the same sheet ("walk", "jump") that games
+    /// switch between by name. Absent in older scenes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<SpriteClipData>,
+}
+
+/// One named flipbook on a sprite's sheet grid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpriteClipData {
+    /// What games call it, 1 to 64 printable bytes, unique on the sprite.
+    pub name: String,
+    /// Its first cell, counted row by row from the sheet's top-left (0).
+    pub first: u32,
+    /// Consecutive row-major cells, including the first one.
+    pub frames: u32,
+    /// Playback speed in frames per second.
+    pub fps: f32,
+    /// Whether playback returns to the first frame after the last.
+    pub looping: bool,
+}
+
+/// Live carrier for a sprite's [`SpriteClipData`] list.
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq, Default)]
+pub struct SceneSpriteClips(pub Vec<SpriteClipData>);
+
+impl SceneSpriteClips {
+    /// The clip named `name`, if the sprite has one.
+    pub fn get(&self, name: &str) -> Option<&SpriteClipData> {
+        self.0.iter().find(|clip| clip.name == name)
+    }
+}
+
+/// A named clip a sprite is playing instead of its authored flipbook.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpriteClipPlayback {
+    /// First cell, row-major.
+    pub first: u32,
+    /// Playback settings, with the game's speed already applied to `fps`.
+    pub data: SpriteAnimationData,
 }
 
 /// A simple sprite-sheet flipbook. The first frame is the sprite's grid cell.
@@ -518,6 +603,11 @@ pub struct SceneSpriteAnimation {
     pub image_uv: Option<engine_renderer::UvRect>,
     /// Runtime playback state; not written into the authored scene.
     pub playing: bool,
+    /// Whether `data` was authored. `false` for a sprite that only has
+    /// named clips, which carries this component so a game can play them.
+    pub authored: bool,
+    /// The named clip playing instead of `data`, if a game chose one.
+    pub clip: Option<SpriteClipPlayback>,
 }
 
 impl SceneSpriteAnimation {
@@ -528,7 +618,48 @@ impl SceneSpriteAnimation {
             elapsed: 0.0,
             image_uv: None,
             playing: true,
+            authored: true,
+            clip: None,
         }
+    }
+
+    /// A still sprite that only has named clips: it shows its cell until a
+    /// game plays one.
+    pub fn clips_only() -> Self {
+        Self {
+            playing: false,
+            authored: false,
+            ..Self::new(SpriteAnimationData {
+                frames: 1,
+                fps: 1.0,
+                looping: false,
+            })
+        }
+    }
+
+    /// Plays `clip` from its first frame, `speed` times as fast as authored
+    /// and looping as `looping` says (the clip's own setting when `None`).
+    pub fn play_clip(&mut self, clip: &SpriteClipData, looping: Option<bool>, speed: f32) {
+        let speed = if speed.is_finite() && speed > 0.0 {
+            speed
+        } else {
+            1.0
+        };
+        self.clip = Some(SpriteClipPlayback {
+            first: clip.first,
+            data: SpriteAnimationData {
+                frames: clip.frames,
+                fps: (clip.fps * speed).clamp(0.1, 120.0),
+                looping: looping.unwrap_or(clip.looping),
+            },
+        });
+        self.elapsed = 0.0;
+        self.playing = true;
+    }
+
+    /// The settings playing now: the chosen clip's, else the authored ones.
+    pub fn current(&self) -> SpriteAnimationData {
+        self.clip.map_or(self.data, |clip| clip.data)
     }
 }
 
@@ -1001,6 +1132,12 @@ pub enum RuleTrigger {
     StateChanged {
         /// The state entered.
         state: crate::GameStateName,
+    },
+    /// This object's animation passed a named moment in its clip, such as
+    /// a footstep.
+    AnimationEvent {
+        /// The event's name in the clip.
+        name: String,
     },
 }
 
@@ -2011,6 +2148,7 @@ mod tests {
                             id: uuid::Uuid::nil().to_string(),
                         },
                         material_override: None,
+                        animation: None,
                     }),
                     sprite: Some(SpriteData {
                         atlas: AssetRef {
@@ -2021,6 +2159,7 @@ mod tests {
                         color: [1.0, 1.0, 1.0, 1.0],
                         z_order: 0.0,
                         animation: None,
+                        clips: Vec::new(),
                     }),
                     ..Default::default()
                 },
@@ -2125,6 +2264,33 @@ mod tests {
         let sprite: SpriteData = ron::from_str(text).unwrap();
         let saved = ron::to_string(&sprite).unwrap();
         assert!(saved.contains("animation:"), "{saved}");
+    }
+
+    #[test]
+    fn model_animation_round_trips_and_old_models_have_none() {
+        let old = r#"(
+            mesh: (id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+            material: (id: "9c858901-8a57-4791-81fe-4c455b099bc9"),
+        )"#;
+        let still: MeshRendererData = ron::from_str(old).unwrap();
+        assert!(still.animation.is_none());
+        assert!(!ron::to_string(&still).unwrap().contains("animation"));
+
+        let text = r#"(
+            mesh: (id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+            material: (id: "9c858901-8a57-4791-81fe-4c455b099bc9"),
+            animation: Some((clip: Some("walk"), speed: 1.5)),
+        )"#;
+        let animated: MeshRendererData = ron::from_str(text).unwrap();
+        let animation = animated.animation.clone().unwrap();
+        assert_eq!(animation.clip.as_deref(), Some("walk"));
+        assert_eq!(animation.speed, 1.5);
+        assert!(
+            animation.looping && animation.play_on_start,
+            "missing flags default on"
+        );
+        let saved: MeshRendererData = ron::from_str(&ron::to_string(&animated).unwrap()).unwrap();
+        assert_eq!(saved, animated);
     }
 
     #[test]

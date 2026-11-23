@@ -40,7 +40,50 @@ use engine_ecs::components::{
 use engine_renderer::UvRect;
 
 use crate::error::SceneError;
-use crate::format::{AssetRef, MaterialOverrideData, SceneEntity};
+use crate::format::{AssetRef, MaterialOverrideData, ModelAnimationData, SceneEntity};
+
+/// An animated model resolved for one scene object: its skinned renderer
+/// plus the skeleton and every clip in its file.
+pub struct SkinnedModel {
+    /// The uploaded skinned mesh and material.
+    pub renderer: engine_ecs::components::SkinnedMeshRenderer,
+    /// The skin the mesh is bound to.
+    pub skeleton: std::sync::Arc<engine_asset::ImportedSkeleton>,
+    /// Every clip in the file, in file order.
+    pub clips: Vec<std::sync::Arc<engine_asset::ImportedAnimation>>,
+}
+
+/// The player an animated model starts with, from its authored settings.
+///
+/// Picks the clip named in `settings`, or the file's first clip when none
+/// is named or the named one is missing (logged). `None` when the file has
+/// no clips: the model then stands in its bind pose.
+pub fn animation_player_for(
+    skeleton: &std::sync::Arc<engine_asset::ImportedSkeleton>,
+    clips: &[std::sync::Arc<engine_asset::ImportedAnimation>],
+    settings: &ModelAnimationData,
+) -> Option<engine_ecs::AnimationPlayer> {
+    let named = settings.clip.as_deref().and_then(|name| {
+        let found = clips.iter().find(|clip| clip.name.as_deref() == Some(name));
+        if found.is_none() {
+            tracing::warn!(
+                clip = name,
+                "animation clip not found; playing the first clip"
+            );
+        }
+        found
+    });
+    let clip = named.or_else(|| clips.first())?;
+    let mut player = engine_ecs::AnimationPlayer::new(
+        std::sync::Arc::clone(skeleton),
+        std::sync::Arc::clone(clip),
+    )
+    .with_events(engine_ecs::AnimationEvent::from_clip(clip));
+    player.looping = settings.looping;
+    player.speed = settings.speed;
+    player.playing = settings.play_on_start;
+    Some(player)
+}
 
 /// Resolves a scene's asset references into live renderable components.
 ///
@@ -86,6 +129,27 @@ pub trait SceneResolver {
     ) -> Result<Option<MeshRenderer>, SceneError> {
         let _ = material_override;
         self.resolve_mesh(mesh, material)
+    }
+
+    /// Resolves a mesh reference into an animated model when the file is
+    /// skinned. `Ok(None)` means "not animated, or not available": the
+    /// caller then falls back to [`SceneResolver::resolve_mesh_with_material`].
+    ///
+    /// Defaulted to `Ok(None)` so a resolver that knows nothing about
+    /// skinning keeps drawing every model still.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Resolve`] if the file is skinned but cannot be
+    /// uploaded.
+    fn resolve_skinned_mesh(
+        &mut self,
+        mesh: &AssetRef,
+        material: &AssetRef,
+        material_override: Option<&MaterialOverrideData>,
+    ) -> Result<Option<SkinnedModel>, SceneError> {
+        let _ = (mesh, material, material_override);
+        Ok(None)
     }
 
     /// Resolves an atlas reference plus a named region into the UV
@@ -319,26 +383,50 @@ pub(crate) fn insert_components(
         if let Some(material_override) = &mesh_renderer.material_override {
             entity_mut.insert(crate::SceneMaterialOverride(material_override.clone()));
         }
-        match resolver.resolve_mesh_with_material(
+        if let Some(animation) = &mesh_renderer.animation {
+            entity_mut.insert(crate::SceneModelAnimation(animation.clone()));
+        }
+        match resolver.resolve_skinned_mesh(
             &mesh_renderer.mesh,
             &mesh_renderer.material,
             mesh_renderer.material_override.as_ref(),
         ) {
-            Ok(Some(renderer)) => {
-                entity_mut.insert((
-                    renderer,
-                    crate::AppliedMaterialOverride(mesh_renderer.material_override.clone()),
-                ));
-            }
-            Ok(None) => {}
+            Ok(Some(model)) => insert_skinned_model(
+                entity_mut,
+                model,
+                mesh_renderer.animation.clone().unwrap_or_default(),
+                mesh_renderer.material_override.clone(),
+            ),
+            Ok(None) => match resolver.resolve_mesh_with_material(
+                &mesh_renderer.mesh,
+                &mesh_renderer.material,
+                mesh_renderer.material_override.as_ref(),
+            ) {
+                Ok(Some(renderer)) => {
+                    entity_mut.insert((
+                        renderer,
+                        crate::AppliedMaterialOverride(mesh_renderer.material_override.clone()),
+                    ));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    *unresolved += 1;
+                    tracing::warn!(
+                        entity = data.name.as_deref().unwrap_or("<unnamed>"),
+                        mesh = %mesh_renderer.mesh.id,
+                        material = %mesh_renderer.material.id,
+                        error = %err,
+                        "skipped unresolvable mesh renderer"
+                    );
+                }
+            },
             Err(err) => {
                 *unresolved += 1;
                 tracing::warn!(
                     entity = data.name.as_deref().unwrap_or("<unnamed>"),
                     mesh = %mesh_renderer.mesh.id,
-                    material = %mesh_renderer.material.id,
                     error = %err,
-                    "skipped unresolvable mesh renderer"
+                    "skipped unresolvable animated model"
                 );
             }
         }
@@ -374,6 +462,11 @@ pub(crate) fn insert_components(
         });
         if let Some(animation) = sprite.animation {
             entity_mut.insert(crate::SceneSpriteAnimation::new(animation));
+        } else if !sprite.clips.is_empty() {
+            entity_mut.insert(crate::SceneSpriteAnimation::clips_only());
+        }
+        if !sprite.clips.is_empty() {
+            entity_mut.insert(crate::SceneSpriteClips(sprite.clips.clone()));
         }
         match resolver.resolve_sprite_uv(&sprite.atlas, &sprite.region) {
             Ok(Some(uv)) => {
@@ -396,6 +489,27 @@ pub(crate) fn insert_components(
                 );
             }
         }
+    }
+}
+
+/// Inserts an animated model's renderer, clips and player.
+///
+/// Shared by scene loading and the editor's pending-resolution pass.
+pub fn insert_skinned_model(
+    entity_mut: &mut EntityWorldMut<'_>,
+    model: SkinnedModel,
+    settings: ModelAnimationData,
+    material_override: Option<MaterialOverrideData>,
+) {
+    let player = animation_player_for(&model.skeleton, &model.clips, &settings);
+    entity_mut.insert((
+        model.renderer,
+        engine_ecs::AnimationClips(model.clips),
+        engine_ecs::AnimationEvents::default(),
+        crate::AppliedMaterialOverride(material_override),
+    ));
+    if let Some(player) = player {
+        entity_mut.insert(player);
     }
 }
 
@@ -490,6 +604,7 @@ mod tests {
                 color: [1.0, 0.5, 0.25, 1.0],
                 z_order: 0.0,
                 animation: None,
+                clips: Vec::new(),
             }),
             ..Default::default()
         }
@@ -630,5 +745,84 @@ mod tests {
             unresolved: 2,
         };
         assert!(!dirty.is_fully_resolved());
+    }
+
+    fn clip(name: &str) -> std::sync::Arc<engine_asset::ImportedAnimation> {
+        std::sync::Arc::new(engine_asset::ImportedAnimation {
+            name: Some(name.into()),
+            events: vec![engine_asset::ImportedAnimationEvent {
+                time: 0.2,
+                name: format!("{name}_event"),
+            }],
+            duration: 1.0,
+            channels: std::collections::HashMap::new(),
+        })
+    }
+
+    fn skeleton() -> std::sync::Arc<engine_asset::ImportedSkeleton> {
+        std::sync::Arc::new(engine_asset::ImportedSkeleton {
+            name: None,
+            joints: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn animation_player_picks_the_named_clip_or_the_first() {
+        let clips = [clip("idle"), clip("walk")];
+        let settings = ModelAnimationData {
+            clip: Some("walk".into()),
+            looping: false,
+            speed: 2.0,
+            play_on_start: false,
+            animator: None,
+        };
+        let player = animation_player_for(&skeleton(), &clips, &settings).expect("player");
+        assert_eq!(player.clip.name.as_deref(), Some("walk"));
+        assert!(!player.looping && !player.playing);
+        assert_eq!(player.speed, 2.0);
+        assert_eq!(player.events[0].name, "walk_event", "the clip's own events");
+
+        let missing = ModelAnimationData {
+            clip: Some("swim".into()),
+            ..Default::default()
+        };
+        let player = animation_player_for(&skeleton(), &clips, &missing).expect("player");
+        assert_eq!(player.clip.name.as_deref(), Some("idle"));
+
+        assert!(animation_player_for(&skeleton(), &[], &missing).is_none());
+    }
+
+    /// Loads the island character and checks it arrives animated.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn skinned_model_uploads_with_its_clips_and_player() {
+        let gpu = engine_renderer::GpuContext::headless(4, 4).expect("headless GPU");
+        let pipeline = gpu.create_pbr_pipeline("test pbr");
+        let skinned_pipeline = gpu.create_skinned_pbr_pipeline(&pipeline, "test skinned");
+        let mut assets = engine_renderer::RenderAssets::default();
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/island/assets");
+        let gltf = engine_asset::import_gltf_file(&root.join("models/character.gltf"), &root)
+            .expect("character imports");
+
+        let model = crate::upload_skinned_model(
+            &gpu,
+            &pipeline,
+            &skinned_pipeline,
+            &mut assets,
+            &gltf,
+            "character",
+            None,
+        )
+        .expect("uploads")
+        .expect("the character is skinned");
+        let mut world = bevy_ecs::world::World::new();
+        let mut entity = world.spawn_empty();
+        insert_skinned_model(&mut entity, model, ModelAnimationData::default(), None);
+
+        assert!(entity.contains::<engine_ecs::components::SkinnedMeshRenderer>());
+        let clips = entity.get::<engine_ecs::AnimationClips>().expect("clips");
+        assert!(clips.get("walk").is_some(), "{:?}", clips.names());
+        assert!(entity.get::<engine_ecs::AnimationPlayer>().is_some());
     }
 }

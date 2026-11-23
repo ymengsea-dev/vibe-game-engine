@@ -14,6 +14,7 @@ use crate::GameCommand;
 use crate::input::ScriptKey;
 use crate::input::{ButtonState, InputSnapshot};
 
+mod animation_api;
 mod camera_api;
 mod input_api;
 mod object_api;
@@ -156,6 +157,8 @@ struct LoadedScript {
 enum Only<'a> {
     All,
     Object(&'a str),
+    /// One object's scripts plus the global scripts (no object).
+    ObjectAndGlobal(&'a str),
     Except(&'a HashSet<String>),
 }
 
@@ -164,6 +167,7 @@ impl Only<'_> {
         match self {
             Self::All => true,
             Self::Object(only) => object_id == Some(only),
+            Self::ObjectAndGlobal(only) => object_id.is_none_or(|id| id == only),
             Self::Except(skipped) => object_id.is_none_or(|id| !skipped.contains(id)),
         }
     }
@@ -967,6 +971,8 @@ impl LuaRuntime {
         .map_err(ScriptError::Initialize)?;
         camera_api::register(&lua, &engine, &commands, &scene, &active_callback)
             .map_err(ScriptError::Initialize)?;
+        animation_api::register(&lua, &engine, &commands, &active_callback)
+            .map_err(ScriptError::Initialize)?;
         state_api::register(&lua, &engine, &commands, &scene, &active_callback)
             .map_err(ScriptError::Initialize)?;
         object_api::register(&lua, &engine, &commands, &scene, &active_callback)
@@ -1451,6 +1457,21 @@ impl LuaRuntime {
         new: &str,
     ) -> Result<Vec<GameCommand>, ScriptError> {
         self.call("on_state_changed", CallbackArgs::StateChange(old, new))
+    }
+
+    /// Delivers a clip event an animated object passed, as
+    /// `on_animation_event(object_id, name)`, to that object's scripts and
+    /// the global scripts.
+    pub fn on_animation_event(
+        &mut self,
+        object_id: &str,
+        name: &str,
+    ) -> Result<Vec<GameCommand>, ScriptError> {
+        self.call_scripts(
+            "on_animation_event",
+            CallbackArgs::Event(object_id, name),
+            Only::ObjectAndGlobal(object_id),
+        )
     }
 
     /// Delivers one contact transition to the global script and the two involved objects.

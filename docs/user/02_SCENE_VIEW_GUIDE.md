@@ -115,6 +115,14 @@ Dropping a prefab places a linked copy, with everything under it. Its Hierarchy 
 
 A pin at the end of a Hierarchy row marks a top-level object with **Keep between scenes** ticked. It stays when the game changes scene, and you see this by playing, not in the Scene View: open a different scene and the object isn't listed there.
 
+## Animated characters
+
+A model with a skeleton stands in the first frame of its clip; nothing moves while you build. Select it and use the Inspector's **Animation** section: **Clip** picks which animation, **Loop**, **Speed** and **Play on start** say how it plays in the game, and **Preview → Play** plays it in the Scene View until you press **Stop** (a clip without Loop stops at its end). The preview is never saved and does not move the object. Click-to-select and the orange box use the model's resting pose, not the moving one.
+
+**Use animator** replaces the single clip with a state graph and opens the **Animator** window (**Edit animator** opens it again). The start state is marked ▶. **+ State** adds a state; **+ Transition**, then a click on another state, adds a transition from the selected state (select **Any state** first for one that can leave every state). Below the graph, a state picks one clip or **Blend by a number** (several clips, each at a value of a number such as `speed`); a transition sets its **Blend time**, **Wait for end**, and **Only if** checks on numbers. Drag states to arrange them and empty space to pan. Animator changes are scene edits: ⌘Z undoes them and Save keeps them. The Scene View preview plays one clip only; the animator runs in the game.
+
+A 2D sprite cut into a sheet grid can have named **Clips** in the Inspector's Sprite section: a name, first cell, frames, speed and loop each. A name that is empty or already used is not taken.
+
 ## Disabled objects
 
 A disabled object is left out of the Scene View, and so is everything under it, as in the game. In the game it also has no physics, and its scripts and rules wait; a rule or script can turn it back on.

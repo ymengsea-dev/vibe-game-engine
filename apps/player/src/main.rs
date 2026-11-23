@@ -833,6 +833,15 @@ impl Game for Player {
         }
         self.gameplay.update_rules(ctx, dt);
         self.flush_rule_spawns(ctx);
+        let fired = self.gameplay.animation_events(ctx);
+        self.flush_rule_spawns(ctx);
+        for event in fired {
+            if let Err(error) = self.run_callback(ctx, |lua| {
+                lua.on_animation_event(&event.object_id, &event.name)
+            }) {
+                tracing::error!(%error, "Lua animation event callback stopped");
+            }
+        }
         self.deliver_state_change(ctx);
         // A click or state callback may have paused or resumed the game.
         let phases = FramePhases::for_state(ctx.simulation_paused());
@@ -841,6 +850,7 @@ impl Game for Player {
         {
             tracing::error!(%error, "Lua update stopped");
         }
+        self.gameplay.update_animators(ctx);
         self.deliver_state_change(ctx);
         self.gameplay.refresh_lights(ctx);
         // Last, so the view reflects scripts and scene changes this frame.

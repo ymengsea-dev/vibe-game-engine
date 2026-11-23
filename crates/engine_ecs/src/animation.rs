@@ -25,6 +25,13 @@
 //! to the player itself — the frame a foot plants, the frame a swing
 //! connects.
 //!
+//! ## Switching clips
+//!
+//! A model placed in a scene also gets [`AnimationClips`], every clip its
+//! file carries. [`AnimationPlayer::play`] switches to another one and can
+//! crossfade: the old clip keeps playing underneath for the fade time and
+//! [`update_animations`] blends the two poses.
+//!
 //! ## Not here: state machines
 //!
 //! [`engine_animation::StateMachine`] borrows its clips (`StateMachine<'a>`)
@@ -34,7 +41,7 @@
 use std::sync::Arc;
 
 use bevy_ecs::prelude::{Component, World};
-use engine_animation::{compute_skinning_matrices, sample_looping, sample_pose};
+use engine_animation::{blend_poses, compute_skinning_matrices, sample_looping, sample_pose};
 use engine_asset::{ImportedAnimation, ImportedSkeleton};
 use engine_renderer::{GpuContext, JointMatricesUniform};
 
@@ -61,6 +68,105 @@ impl AnimationEvent {
             name: name.into(),
         }
     }
+
+    /// The events a clip carries in its file.
+    pub fn from_clip(clip: &ImportedAnimation) -> Vec<Self> {
+        clip.events
+            .iter()
+            .map(|event| Self::new(event.time, event.name.clone()))
+            .collect()
+    }
+}
+
+/// Every clip a model's file carries, in file order.
+///
+/// Lets a script or the Inspector switch clips by name without going back
+/// to the file. Shared behind [`Arc`] like [`AnimationPlayer::clip`].
+#[derive(Component, Clone, Default)]
+pub struct AnimationClips(pub Vec<Arc<ImportedAnimation>>);
+
+impl AnimationClips {
+    /// The clip named `name`, if the file has one.
+    pub fn get(&self, name: &str) -> Option<&Arc<ImportedAnimation>> {
+        self.0
+            .iter()
+            .find(|clip| clip.name.as_deref() == Some(name))
+    }
+
+    /// Every clip's name; unnamed clips are skipped.
+    pub fn names(&self) -> Vec<String> {
+        self.0.iter().filter_map(|clip| clip.name.clone()).collect()
+    }
+}
+
+/// Clips mixed by one number, as an animator's blend state sets them.
+#[derive(Clone)]
+pub struct Blend1d {
+    /// Each clip and its place on the number's scale, in ascending order.
+    pub clips: Vec<(f32, Arc<ImportedAnimation>)>,
+    /// The number now.
+    pub parameter: f32,
+}
+
+impl Blend1d {
+    /// The pose at `phase` (0..1 through each clip's cycle): the two clips
+    /// around `parameter` blended, or the end one alone outside the range.
+    fn pose(&self, skeleton: &ImportedSkeleton, phase: f32) -> Vec<engine_utils::Transform> {
+        let at = |clip: &ImportedAnimation| sample_looping(skeleton, clip, phase * clip.duration);
+        let upper = self
+            .clips
+            .iter()
+            .position(|(place, _)| *place >= self.parameter);
+        match upper {
+            Some(0) => at(&self.clips[0].1),
+            Some(index) => {
+                let (low_at, low) = &self.clips[index - 1];
+                let (high_at, high) = &self.clips[index];
+                let span = high_at - low_at;
+                let weight = if span > f32::EPSILON {
+                    (self.parameter - low_at) / span
+                } else {
+                    1.0
+                };
+                blend_poses(&at(low), &at(high), weight)
+            }
+            None => self
+                .clips
+                .last()
+                .map_or_else(Vec::new, |(_, clip)| at(clip)),
+        }
+    }
+}
+
+/// How far `time` is through a clip `duration` long, `0.0..1.0`.
+fn phase_of(time: f32, duration: f32) -> f32 {
+    if duration > f32::EPSILON && time.is_finite() {
+        (time / duration).rem_euclid(1.0)
+    } else {
+        0.0
+    }
+}
+
+/// The clip being faded out while [`AnimationPlayer::clip`] fades in.
+#[derive(Clone)]
+pub struct Crossfade {
+    /// The clip that was playing before the switch.
+    pub clip: Arc<ImportedAnimation>,
+    /// Its playback position, still advancing during the fade.
+    pub time: f32,
+    /// Whether it wraps while it fades.
+    pub looping: bool,
+    /// Seconds of fade done so far.
+    pub elapsed: f32,
+    /// Seconds the whole fade takes; always above zero.
+    pub duration: f32,
+}
+
+impl Crossfade {
+    /// How much of the new clip shows, from `0.0` (just switched) to `1.0`.
+    pub fn weight(&self) -> f32 {
+        (self.elapsed / self.duration).clamp(0.0, 1.0)
+    }
 }
 
 /// Plays one clip on one skinned entity.
@@ -83,6 +189,15 @@ pub struct AnimationPlayer {
     pub playing: bool,
     /// Events to report as the clock crosses them.
     pub events: Vec<AnimationEvent>,
+    /// The previous clip, blended out after a [`AnimationPlayer::play`]
+    /// with a fade time.
+    pub fade: Option<Crossfade>,
+    /// Whether the clip has reached its end since it started: a one-shot
+    /// stopped, or a looping clip wrapped at least once.
+    pub ended: bool,
+    /// Clips mixed by a number instead of `clip` alone (an animator's
+    /// blend state); `clip` is then the one keeping time.
+    pub blend: Option<Blend1d>,
     /// Last frame's `time`, so event crossings can be detected over the
     /// interval actually travelled rather than tested against a single
     /// instant.
@@ -100,8 +215,41 @@ impl AnimationPlayer {
             looping: true,
             playing: true,
             events: Vec::new(),
+            fade: None,
+            ended: false,
+            blend: None,
             previous_time: 0.0,
         }
+    }
+
+    /// Switches to `clip` from its start, with the clip's own events.
+    ///
+    /// With `fade_seconds` above zero the current clip keeps playing and
+    /// is blended out over that time; at zero (or not finite) the switch
+    /// is instant. Playing the clip already playing restarts it.
+    pub fn play(
+        &mut self,
+        clip: Arc<ImportedAnimation>,
+        looping: bool,
+        speed: f32,
+        fade_seconds: f32,
+    ) {
+        self.fade = (fade_seconds.is_finite() && fade_seconds > 0.0).then(|| Crossfade {
+            clip: Arc::clone(&self.clip),
+            time: self.time,
+            looping: self.looping,
+            elapsed: 0.0,
+            duration: fade_seconds,
+        });
+        self.events = AnimationEvent::from_clip(&clip);
+        self.clip = clip;
+        self.blend = None;
+        self.looping = looping;
+        if speed.is_finite() {
+            self.speed = speed;
+        }
+        self.playing = true;
+        self.restart();
     }
 
     /// The same player, playing once and stopping at the last frame.
@@ -122,6 +270,40 @@ impl AnimationPlayer {
     pub fn restart(&mut self) {
         self.time = 0.0;
         self.previous_time = 0.0;
+        self.ended = false;
+    }
+
+    /// Mixes `clips` (each with its place on the blend number's scale,
+    /// sorted by the caller or not) at `parameter`.
+    ///
+    /// The clip nearest `parameter` keeps time, and switching which one is
+    /// nearest keeps the place in the cycle, so a walk turning into a run
+    /// stays in step. Its events are the ones reported.
+    pub fn set_blend(&mut self, clips: Vec<(f32, Arc<ImportedAnimation>)>, parameter: f32) {
+        let mut clips = clips;
+        clips.retain(|(at, _)| at.is_finite());
+        clips.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let parameter = if parameter.is_finite() {
+            parameter
+        } else {
+            0.0
+        };
+        let Some((_, nearest)) = clips
+            .iter()
+            .min_by(|a, b| (a.0 - parameter).abs().total_cmp(&(b.0 - parameter).abs()))
+            .cloned()
+        else {
+            self.blend = None;
+            return;
+        };
+        if !Arc::ptr_eq(&nearest, &self.clip) {
+            let phase = phase_of(self.time, self.clip.duration);
+            self.time = phase * nearest.duration.max(0.0);
+            self.previous_time = self.time;
+            self.events = AnimationEvent::from_clip(&nearest);
+            self.clip = nearest;
+        }
+        self.blend = Some(Blend1d { clips, parameter });
     }
 
     /// Advances the clock by `dt` seconds, returning the events crossed.
@@ -132,6 +314,7 @@ impl AnimationPlayer {
         if !self.playing || !dt.is_finite() {
             return Vec::new();
         }
+        self.advance_fade(dt);
         let duration = self.clip.duration;
         if duration <= f32::EPSILON {
             return Vec::new();
@@ -145,18 +328,59 @@ impl AnimationPlayer {
             // past zero wraps to the end rather than going negative.
             let wrapped_time = advanced.rem_euclid(duration);
             self.time = wrapped_time;
+            if (advanced - wrapped_time).abs() > f32::EPSILON {
+                self.ended = true;
+            }
             return self.crossed_looping_events(self.previous_time, dt * self.speed, duration);
         } else if advanced >= duration {
             self.time = duration;
             self.playing = false;
+            self.ended = true;
         } else if advanced <= 0.0 {
             self.time = 0.0;
             self.playing = false;
+            self.ended = true;
         } else {
             self.time = advanced;
         }
 
         self.crossed_events(self.previous_time, self.time, false, duration)
+    }
+
+    /// Moves the faded-out clip on and drops it once the fade is done.
+    fn advance_fade(&mut self, dt: f32) {
+        let speed = self.speed;
+        let Some(fade) = &mut self.fade else {
+            return;
+        };
+        fade.elapsed += dt.abs();
+        if fade.elapsed >= fade.duration {
+            self.fade = None;
+            return;
+        }
+        let duration = fade.clip.duration;
+        let advanced = fade.time + dt * speed;
+        fade.time = if fade.looping && duration > f32::EPSILON {
+            advanced.rem_euclid(duration)
+        } else {
+            advanced.clamp(0.0, duration.max(0.0))
+        };
+    }
+
+    /// The pose this player shows now: its clip, blended with the clip
+    /// fading out if there is one.
+    pub fn pose(&self) -> Vec<engine_utils::Transform> {
+        let pose = match &self.blend {
+            Some(blend) => blend.pose(&self.skeleton, phase_of(self.time, self.clip.duration)),
+            None => sample_clip(&self.skeleton, &self.clip, self.time, self.looping),
+        };
+        match &self.fade {
+            Some(fade) => {
+                let old = sample_clip(&self.skeleton, &fade.clip, fade.time, fade.looping);
+                blend_poses(&old, &pose, fade.weight())
+            }
+            None => pose,
+        }
     }
 
     fn crossed_looping_events(&self, from: f32, travelled: f32, duration: f32) -> Vec<String> {
@@ -277,23 +501,35 @@ pub fn update_animations(world: &mut World, gpu: &GpuContext, dt: f32) {
             events.0 = fired;
         }
 
-        let Some(skinned) = skinned else {
-            continue;
-        };
+        if let Some(skinned) = skinned {
+            upload_pose(gpu, &player, skinned);
+        }
+    }
+}
 
-        // Looping clips sample with wrap-around interpolation so the last
-        // frame blends back into the first; one-shots clamp.
-        let pose = if player.looping {
-            sample_looping(&player.skeleton, &player.clip, player.time)
-        } else {
-            sample_pose(&player.skeleton, &player.clip, player.time)
-        };
-        let matrices = compute_skinning_matrices(&player.skeleton, &pose);
+/// Writes `player`'s current pose into `skinned`'s joint buffer without
+/// moving its clock. The editor uses this to show a paused or scrubbed
+/// pose.
+pub fn upload_pose(gpu: &GpuContext, player: &AnimationPlayer, skinned: &SkinnedMeshRenderer) {
+    let matrices = compute_skinning_matrices(&player.skeleton, &player.pose());
+    gpu.write_uniform_buffer(
+        &skinned.skin.joints_buffer,
+        &JointMatricesUniform::from_matrices(&matrices),
+    );
+}
 
-        gpu.write_uniform_buffer(
-            &skinned.skin.joints_buffer,
-            &JointMatricesUniform::from_matrices(&matrices),
-        );
+/// Looping clips sample with wrap-around interpolation so the last frame
+/// blends back into the first; one-shots clamp.
+fn sample_clip(
+    skeleton: &ImportedSkeleton,
+    clip: &ImportedAnimation,
+    time: f32,
+    looping: bool,
+) -> Vec<engine_utils::Transform> {
+    if looping {
+        sample_looping(skeleton, clip, time)
+    } else {
+        sample_pose(skeleton, clip, time)
     }
 }
 
@@ -497,5 +733,141 @@ mod tests {
         let events = AnimationEvents(vec!["footstep".into(), "swing".into()]);
         assert!(events.fired("footstep"));
         assert!(!events.fired("jump"));
+    }
+
+    fn named_clip(name: &str, duration: f32, events: &[(f32, &str)]) -> Arc<ImportedAnimation> {
+        Arc::new(ImportedAnimation {
+            name: Some(name.into()),
+            duration,
+            channels: HashMap::new(),
+            events: events
+                .iter()
+                .map(|(time, name)| engine_asset::ImportedAnimationEvent {
+                    time: *time,
+                    name: (*name).into(),
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn play_switches_clip_restarts_and_takes_the_clips_events() {
+        let mut player = AnimationPlayer::new(skeleton(), named_clip("idle", 1.0, &[]));
+        player.advance(0.4);
+        player.play(named_clip("walk", 2.0, &[(0.5, "step")]), false, 2.0, 0.0);
+
+        assert_eq!(player.clip.name.as_deref(), Some("walk"));
+        assert_eq!(player.time, 0.0);
+        assert!(!player.looping);
+        assert_eq!(player.speed, 2.0);
+        assert!(player.fade.is_none(), "a zero fade switches at once");
+        assert_eq!(player.advance(0.3), vec!["step".to_string()]);
+    }
+
+    #[test]
+    fn crossfade_blends_out_the_old_clip_then_drops_it() {
+        let mut player = AnimationPlayer::new(skeleton(), named_clip("idle", 1.0, &[]));
+        player.advance(0.4);
+        player.play(named_clip("run", 1.0, &[]), true, 1.0, 0.5);
+
+        let fade = player.fade.as_ref().expect("fading");
+        assert_eq!(fade.clip.name.as_deref(), Some("idle"));
+        assert!(
+            (fade.time - 0.4).abs() < 1e-5,
+            "the old clip keeps its place"
+        );
+        assert_eq!(fade.weight(), 0.0);
+
+        player.advance(0.25);
+        let fade = player.fade.as_ref().expect("still fading");
+        assert!((fade.weight() - 0.5).abs() < 1e-5);
+        assert!((fade.time - 0.65).abs() < 1e-5, "the old clip keeps moving");
+
+        player.advance(0.3);
+        assert!(player.fade.is_none(), "the fade ends after its time");
+    }
+
+    #[test]
+    fn a_paused_crossfade_does_not_move() {
+        let mut player = AnimationPlayer::new(skeleton(), named_clip("idle", 1.0, &[]));
+        player.play(named_clip("run", 1.0, &[]), true, 1.0, 0.5);
+        player.playing = false;
+        player.advance(1.0);
+        assert_eq!(player.fade.as_ref().map(Crossfade::weight), Some(0.0));
+    }
+
+    #[test]
+    fn non_finite_speed_or_fade_is_ignored() {
+        let mut player = AnimationPlayer::new(skeleton(), named_clip("idle", 1.0, &[]));
+        player.play(named_clip("run", 1.0, &[]), true, f32::NAN, f32::INFINITY);
+        assert_eq!(player.speed, 1.0);
+        assert!(player.fade.is_none());
+    }
+
+    #[test]
+    fn clips_find_by_name_and_list_named_ones() {
+        let mut unnamed = (*named_clip("x", 1.0, &[])).clone();
+        unnamed.name = None;
+        let clips = AnimationClips(vec![
+            named_clip("idle", 1.0, &[]),
+            Arc::new(unnamed),
+            named_clip("walk", 1.0, &[]),
+        ]);
+        assert_eq!(clips.names(), vec!["idle".to_string(), "walk".to_string()]);
+        assert!(clips.get("walk").is_some());
+        assert!(clips.get("jump").is_none());
+    }
+
+    #[test]
+    fn pose_blends_with_the_fading_clip() {
+        let mut player = AnimationPlayer::new(skeleton(), named_clip("idle", 1.0, &[]));
+        player.play(named_clip("run", 1.0, &[]), true, 1.0, 0.5);
+        assert_eq!(player.pose().len(), 1, "one pose entry per joint");
+    }
+
+    #[test]
+    fn ended_marks_a_finished_one_shot_and_a_wrapped_loop() {
+        let mut once = AnimationPlayer::new(skeleton(), clip(1.0)).once();
+        once.advance(0.5);
+        assert!(!once.ended);
+        once.advance(0.6);
+        assert!(once.ended);
+
+        let mut looping = AnimationPlayer::new(skeleton(), clip(1.0));
+        looping.advance(0.9);
+        assert!(!looping.ended);
+        looping.advance(0.2);
+        assert!(looping.ended, "wrapped once");
+        looping.restart();
+        assert!(!looping.ended);
+    }
+
+    #[test]
+    fn blend_keeps_the_place_in_the_cycle_when_the_nearest_clip_changes() {
+        let walk = named_clip("walk", 1.0, &[(0.5, "step")]);
+        let run = named_clip("run", 0.5, &[(0.25, "run_step")]);
+        let mut player = AnimationPlayer::new(skeleton(), Arc::clone(&walk));
+        player.set_blend(vec![(0.0, Arc::clone(&walk)), (4.0, Arc::clone(&run))], 1.0);
+        assert_eq!(player.clip.name.as_deref(), Some("walk"));
+        player.time = 0.4;
+
+        player.set_blend(vec![(0.0, walk), (4.0, run)], 3.5);
+        assert_eq!(
+            player.clip.name.as_deref(),
+            Some("run"),
+            "run is nearest now"
+        );
+        assert!((player.time - 0.2).abs() < 1e-5, "40% through either cycle");
+        assert_eq!(player.events[0].name, "run_step");
+        assert_eq!(player.pose().len(), 1);
+    }
+
+    #[test]
+    fn play_drops_a_blend() {
+        let walk = named_clip("walk", 1.0, &[]);
+        let mut player = AnimationPlayer::new(skeleton(), Arc::clone(&walk));
+        player.set_blend(vec![(0.0, Arc::clone(&walk))], 0.0);
+        player.play(named_clip("jump", 1.0, &[]), false, 1.0, 0.0);
+        assert!(player.blend.is_none());
     }
 }

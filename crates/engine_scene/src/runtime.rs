@@ -390,6 +390,11 @@ pub struct RuntimeResolver<'a> {
     /// Meshes already uploaded this load, so a scene placing one model
     /// many times uploads it once.
     uploaded: HashMap<AssetId, (AssetHandle<Mesh>, AssetHandle<MaterialBinding>)>,
+    /// Draws animated models when set; without it every model is still.
+    skinned_pipeline: Option<&'a engine_renderer::SkinnedPipeline>,
+    /// Files already imported this load, so checking whether a model is
+    /// animated and then uploading it still reads it once.
+    imported: HashMap<AssetId, std::sync::Arc<engine_asset::ImportedGltf>>,
 }
 
 impl<'a> RuntimeResolver<'a> {
@@ -406,12 +411,40 @@ impl<'a> RuntimeResolver<'a> {
             pipeline,
             assets,
             uploaded: HashMap::new(),
+            skinned_pipeline: None,
+            imported: HashMap::new(),
         }
+    }
+
+    /// The same resolver, also drawing animated (skinned) models.
+    pub fn with_skinned_pipeline(
+        mut self,
+        skinned_pipeline: &'a engine_renderer::SkinnedPipeline,
+    ) -> Self {
+        self.skinned_pipeline = Some(skinned_pipeline);
+        self
     }
 
     /// How many distinct meshes this resolver has uploaded.
     pub fn uploaded_count(&self) -> usize {
         self.uploaded.len()
+    }
+
+    /// The imported file for `mesh`, read once per load.
+    fn import(
+        &mut self,
+        mesh: &AssetRef,
+        id: AssetId,
+    ) -> Result<Option<std::sync::Arc<engine_asset::ImportedGltf>>, SceneError> {
+        if let Some(gltf) = self.imported.get(&id) {
+            return Ok(Some(std::sync::Arc::clone(gltf)));
+        }
+        let Some(gltf) = self.library.import_mesh(&mesh.id)? else {
+            return Ok(None);
+        };
+        let gltf = std::sync::Arc::new(gltf);
+        self.imported.insert(id, std::sync::Arc::clone(&gltf));
+        Ok(Some(gltf))
     }
 }
 
@@ -476,7 +509,7 @@ impl SceneResolver for RuntimeResolver<'_> {
         // Not carried by this project is not a failure: the scene may
         // reference something not shipped, and the entity is spawned
         // without geometry and counted as unresolved.
-        let Some(gltf) = self.library.import_mesh(&mesh.id)? else {
+        let Some(gltf) = self.import(mesh, id)? else {
             return Ok(None);
         };
         let [primitive] = gltf.meshes.as_slice() else {
@@ -511,6 +544,35 @@ impl SceneResolver for RuntimeResolver<'_> {
             self.uploaded.insert(id, (renderer.mesh, renderer.material));
         }
         Ok(Some(renderer))
+    }
+
+    fn resolve_skinned_mesh(
+        &mut self,
+        mesh: &AssetRef,
+        _material: &AssetRef,
+        material_override: Option<&MaterialOverrideData>,
+    ) -> Result<Option<crate::SkinnedModel>, SceneError> {
+        let Some(skinned_pipeline) = self.skinned_pipeline else {
+            return Ok(None);
+        };
+        let uuid = mesh.parse_id().map_err(SceneError::Resolve)?;
+        let id = AssetId::from_uuid(uuid);
+        // Uploaded as a still mesh already: it has no skin.
+        if self.uploaded.contains_key(&id) {
+            return Ok(None);
+        }
+        let Some(gltf) = self.import(mesh, id)? else {
+            return Ok(None);
+        };
+        upload_skinned_model(
+            self.gpu,
+            self.pipeline,
+            skinned_pipeline,
+            self.assets,
+            &gltf,
+            &mesh.id,
+            material_override,
+        )
     }
 
     fn resolve_sprite_uv(
@@ -626,28 +688,47 @@ pub fn load_skinned_mesh(
     let Some(gltf) = library.import_mesh(&reference.id)? else {
         return Ok(None);
     };
-    let Some(mesh) = gltf.meshes.first() else {
+    if gltf.meshes.is_empty() {
         return Err(SceneError::Resolve(format!(
             "asset {} contains no mesh primitives",
             reference.id
         )));
+    }
+    skinned_parts(&gltf, &reference.id)?
+        .map(Some)
+        .ok_or_else(|| {
+            SceneError::Resolve(format!(
+                "asset {} has no skin weights; it is not a skinned mesh",
+                reference.id
+            ))
+        })
+}
+
+/// The skinned geometry, skeleton and clips of an imported file, or
+/// `None` when its first mesh has no skin weights (a still model).
+///
+/// # Errors
+///
+/// [`SceneError::Resolve`] if the mesh has skin weights but no usable
+/// skeleton. `label` names the asset in the message.
+pub fn skinned_parts(
+    gltf: &engine_asset::ImportedGltf,
+    label: &str,
+) -> Result<Option<LoadedSkinnedMesh>, SceneError> {
+    let Some(mesh) = gltf.meshes.first() else {
+        return Ok(None);
     };
     let Some(weights) = &mesh.skin_weights else {
-        return Err(SceneError::Resolve(format!(
-            "asset {} has no skin weights; it is not a skinned mesh",
-            reference.id
-        )));
+        return Ok(None);
     };
     let skeleton_index = mesh.skeleton.ok_or_else(|| {
         SceneError::Resolve(format!(
-            "asset {} has skin weights but no skeleton to bind them to",
-            reference.id
+            "asset {label} has skin weights but no skeleton to bind them to"
         ))
     })?;
     let skeleton = gltf.skeletons.get(skeleton_index).ok_or_else(|| {
         SceneError::Resolve(format!(
-            "asset {} names skeleton {skeleton_index}, which the file does not have",
-            reference.id
+            "asset {label} names skeleton {skeleton_index}, which the file does not have"
         ))
     })?;
 
@@ -676,6 +757,59 @@ pub fn load_skinned_mesh(
             .cloned()
             .map(std::sync::Arc::new)
             .collect(),
+    }))
+}
+
+/// Uploads an imported file as an animated model, or `None` when it is a
+/// still model. Shared by the game's and Studio's resolvers so both show
+/// a character the same way.
+///
+/// # Errors
+///
+/// [`SceneError::Resolve`] if the file is skinned but its skeleton or
+/// geometry is unusable.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the GPU state a skinned upload needs, plus what to upload"
+)]
+pub fn upload_skinned_model(
+    gpu: &GpuContext,
+    pipeline: &Pipeline,
+    skinned_pipeline: &engine_renderer::SkinnedPipeline,
+    assets: &mut RenderAssets,
+    gltf: &engine_asset::ImportedGltf,
+    label: &str,
+    material_override: Option<&MaterialOverrideData>,
+) -> Result<Option<crate::SkinnedModel>, SceneError> {
+    let Some(parts) = skinned_parts(gltf, label)? else {
+        return Ok(None);
+    };
+    let imported_material = gltf
+        .meshes
+        .first()
+        .and_then(|mesh| mesh.material)
+        .and_then(|index| gltf.materials.get(index));
+    let base_color = imported_material
+        .and_then(|material| material.base_color_image)
+        .and_then(|index| gltf.images.get(index))
+        .map(|image| (image.width, image.height, image.rgba8.as_slice()));
+    let material = imported_material.map_or(Material::DEFAULT, material_from_imported);
+    let material = material_override.map_or(material, |value| value.apply(material));
+    let renderer = engine_ecs::components::SkinnedMeshRenderer::from_geometry(
+        gpu,
+        pipeline,
+        skinned_pipeline,
+        assets,
+        &parts.vertices,
+        &parts.indices,
+        base_color,
+        material,
+    )
+    .map_err(|err| SceneError::Resolve(format!("asset {label}: {err}")))?;
+    Ok(Some(crate::SkinnedModel {
+        renderer,
+        skeleton: parts.skeleton,
+        clips: parts.animations,
     }))
 }
 

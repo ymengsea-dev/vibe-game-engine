@@ -23,6 +23,7 @@
 //! [`SceneEntity`] shape as a reusable entity template, instantiable into
 //! a live `World` any number of times.
 
+mod animator;
 mod camera_pose;
 mod capture;
 mod environment;
@@ -43,6 +44,12 @@ mod validate;
 pub use validate::{MAX_TAG_BYTES, MAX_TAGS, valid_prefab_path, valid_scene_path};
 mod world;
 
+pub use animator::{
+    AnimatorData, AnimatorMotion, AnimatorState, AnimatorStateData, AnimatorTransitionData,
+    AnimatorValues, BlendClipData, MAX_ANIMATOR_STATES, MAX_ANIMATOR_TRANSITIONS, MAX_BLEND_CLIPS,
+    MAX_TRANSITION_FADE, default_position as default_animator_position,
+    valid_name as valid_animator_state_name,
+};
 pub use camera_pose::{adopt_legacy_camera_poses, camera_world_pose, look_rotation};
 pub use capture::capture_renderables;
 pub use environment::{AmbientSound, spawn_ambient_sounds};
@@ -51,12 +58,13 @@ pub use format::{
     AmbientSoundData, AppliedMaterialOverride, AssetRef, AudioEmitterData, BodyKind, CameraData,
     CameraFollowData, CameraFollowMode, ColliderData, ColliderShape, EnvironmentData, FoliageData,
     KeepBetweenScenes, LightingData, MAX_RULE_CONDITIONS, MaterialOverrideData, MeshRendererData,
-    NavGridData, OrbitInput, PointLightData, PrefabLink, ProjectionData, RuleAction, RuleCompare,
-    RuleCondition, RuleData, RuleMatch, RuleTrigger, Scene, SceneAudioEmitter, SceneCollider,
-    SceneEntity, SceneEnvironment, SceneFileOwner, SceneFoliage, SceneLighting,
-    SceneMaterialOverride, SceneNavGrid, SceneObjectId, ScenePointLight, ScenePrefabLink,
-    SceneRules, SceneSpriteAnimation, SceneTags, SceneTilemap, SceneUi, SiblingOrder, SpawnAt,
-    SpriteAnimationData, SpriteData, TilemapData, TransformData, UiAnchor, UiElementData, UiKind,
+    ModelAnimationData, NavGridData, OrbitInput, PointLightData, PrefabLink, ProjectionData,
+    RuleAction, RuleCompare, RuleCondition, RuleData, RuleMatch, RuleTrigger, Scene,
+    SceneAudioEmitter, SceneCollider, SceneEntity, SceneEnvironment, SceneFileOwner, SceneFoliage,
+    SceneLighting, SceneMaterialOverride, SceneModelAnimation, SceneNavGrid, SceneObjectId,
+    ScenePointLight, ScenePrefabLink, SceneRules, SceneSpriteAnimation, SceneSpriteClips,
+    SceneTags, SceneTilemap, SceneUi, SiblingOrder, SpawnAt, SpriteAnimationData, SpriteClipData,
+    SpriteClipPlayback, SpriteData, TilemapData, TransformData, UiAnchor, UiElementData, UiKind,
     UiLayoutDirection, WaterData,
 };
 pub use game_state::{GameState, GameStateName};
@@ -67,7 +75,10 @@ pub use prefab_link::{
     apply_copy, changed_fields, copy_changes, copy_root_of, refresh_copies,
     remap_object_references, revert_copy, stamp_overrides,
 };
-pub use resolve::{InstantiateReport, NullResolver, SceneResolver};
+pub use resolve::{
+    InstantiateReport, NullResolver, SceneResolver, SkinnedModel, animation_player_for,
+    insert_skinned_model,
+};
 pub use rules::{
     ContactRuleKind, RuleEvent, RuleOutcome, RuleVariableError, RuleVariables, expand_variables,
     format_variable, valid_variable_name,
@@ -75,7 +86,7 @@ pub use rules::{
 pub use runtime::{
     AssetLibrary, BUNDLE_FILE, EXPORT_SCENE_FILE, ExportContent, LoadedSkinnedMesh, MeshGeometry,
     RuntimeResolver, executable_dir, load_mesh_geometry, load_skinned_mesh, material_from_imported,
-    open_export,
+    open_export, skinned_parts, upload_skinned_model,
 };
 pub use save::{CURRENT_SAVE_VERSION, SaveGame, SavedEntity, WorldSnapshot};
 pub use sprite_atlas::{

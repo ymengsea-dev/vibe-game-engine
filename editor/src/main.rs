@@ -3004,6 +3004,9 @@ impl EditorHandler {
             );
 
             handle_prefab_request(&mut self.state);
+            if viewport.is_previewing_animation() {
+                window.request_redraw();
+            }
             let terrain_requested = self.state.create_terrain_request;
             handle_terrain_request(&mut self.state);
             if terrain_requested {

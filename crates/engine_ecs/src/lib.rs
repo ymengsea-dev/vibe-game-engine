@@ -55,7 +55,10 @@ pub mod render;
 pub mod stages;
 pub mod water;
 
-pub use animation::{AnimationEvent, AnimationEvents, AnimationPlayer, update_animations};
+pub use animation::{
+    AnimationClips, AnimationEvent, AnimationEvents, AnimationPlayer, Blend1d, Crossfade,
+    update_animations, upload_pose,
+};
 pub use audio::{AudioEmitter, AudioListener, update_audio};
 pub use error::EcsError;
 pub use particles::{

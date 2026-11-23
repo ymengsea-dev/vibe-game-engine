@@ -20,12 +20,44 @@ pub enum GameCommand {
         /// Stable scene object ID of the emitter.
         object_id: String,
     },
-    /// Pause or resume an authored sprite-sheet animation.
+    /// Pause or resume an authored sprite-sheet animation or an animated
+    /// model's clip.
     SetAnimationPlaying {
-        /// Stable scene object ID of the animated sprite.
+        /// Stable scene object ID of the animated sprite or model.
         object_id: String,
         /// Whether its frame clock should advance.
         playing: bool,
+    },
+    /// Play one of an animated model's or sprite's clips from its start.
+    PlayAnimation {
+        /// Stable scene object ID of the animated model or sprite.
+        object_id: String,
+        /// The clip's name in the model file or sprite (1 to 256 bytes).
+        clip: String,
+        /// Whether the clip starts again after its last frame; `None` keeps
+        /// the clip's own setting (a model's clips loop).
+        looping: Option<bool>,
+        /// Playback rate, finite and within `-100..=100`; `1` is authored speed.
+        speed: f32,
+        /// Seconds to blend from the clip playing now, `0..=10`; `0` switches at once.
+        fade: f32,
+    },
+    /// Set a number one object's animator reads before the game's shared
+    /// variables (such as its own `speed`).
+    SetAnimatorValue {
+        /// Stable scene object ID of the animated model.
+        object_id: String,
+        /// Printable name, 1 to 64 bytes.
+        name: String,
+        /// Finite value.
+        value: f64,
+    },
+    /// Change how fast an animated model's clip plays.
+    SetAnimationSpeed {
+        /// Stable scene object ID of the animated model.
+        object_id: String,
+        /// Playback rate, finite and within `-100..=100`.
+        speed: f32,
     },
     /// Change the visible caption of an authored label or button.
     UiSetText {

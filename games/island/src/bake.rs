@@ -274,6 +274,7 @@ impl BakedModel {
                 id: self.id.clone(),
             },
             material_override: None,
+            animation: None,
         }
     }
 }

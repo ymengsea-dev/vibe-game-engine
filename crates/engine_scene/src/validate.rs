@@ -250,9 +250,34 @@ impl MeshRendererData {
         {
             return Err("material override factors must be finite and in [0, 1]".into());
         }
+        if let Some(animation) = &self.animation {
+            if !animation.speed.is_finite() || animation.speed.abs() > MAX_ANIMATION_SPEED {
+                return Err(format!(
+                    "animation speed must be finite and between -{MAX_ANIMATION_SPEED} and {MAX_ANIMATION_SPEED}"
+                ));
+            }
+            if animation
+                .clip
+                .as_ref()
+                .is_some_and(|clip| clip.is_empty() || clip.len() > 256)
+            {
+                return Err("animation clip name must be 1 to 256 bytes".into());
+            }
+            if let Some(animator) = &animation.animator {
+                animator
+                    .validate()
+                    .map_err(|reason| format!("animator: {reason}"))?;
+            }
+        }
         Ok(())
     }
 }
+
+/// The most named clips one sprite may carry.
+const MAX_SPRITE_CLIPS: usize = 64;
+
+/// The fastest an authored animation may play, either way.
+const MAX_ANIMATION_SPEED: f32 = 100.0;
 
 impl FoliageData {
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -313,6 +338,42 @@ impl SpriteData {
             }
             if !animation.fps.is_finite() || !(0.1..=120.0).contains(&animation.fps) {
                 return Err("animation fps must be between 0.1 and 120".into());
+            }
+        }
+        if !self.clips.is_empty() {
+            let grid = crate::sprite_atlas::GridRegion::parse(&self.region)
+                .ok_or("sprite clips require a sprite sheet")?;
+            if self.clips.len() > MAX_SPRITE_CLIPS {
+                return Err(format!(
+                    "a sprite may have at most {MAX_SPRITE_CLIPS} clips"
+                ));
+            }
+            let cells = u64::from(grid.columns) * u64::from(grid.rows);
+            for (index, clip) in self.clips.iter().enumerate() {
+                if clip.name.is_empty()
+                    || clip.name.len() > 64
+                    || clip.name.chars().any(char::is_control)
+                {
+                    return Err("clip name must be 1 to 64 printable bytes".into());
+                }
+                if self.clips[..index]
+                    .iter()
+                    .any(|other| other.name == clip.name)
+                {
+                    return Err(format!("two clips are named {:?}", clip.name));
+                }
+                if clip.frames == 0
+                    || clip.frames > 4096
+                    || u64::from(clip.first) + u64::from(clip.frames) > cells
+                {
+                    return Err(format!("clip {:?} must fit inside the sheet", clip.name));
+                }
+                if !clip.fps.is_finite() || !(0.1..=120.0).contains(&clip.fps) {
+                    return Err(format!(
+                        "clip {:?} fps must be between 0.1 and 120",
+                        clip.name
+                    ));
+                }
             }
         }
         Ok(())
@@ -506,7 +567,9 @@ impl crate::RuleData {
             RuleTrigger::UiClicked if !owner_ui.is_some_and(|ui| ui.kind.raises_clicks()) => {
                 return Err("click trigger requires an owning UI Button or Text Input".into());
             }
-            RuleTrigger::Named(name) => validate_event_name(name)?,
+            RuleTrigger::Named(name) | RuleTrigger::AnimationEvent { name } => {
+                validate_event_name(name)?;
+            }
             RuleTrigger::KeyPressed { key } => {
                 if key.is_empty() || key.len() > 32 || key.chars().any(char::is_control) {
                     return Err("key name must be 1–32 printable bytes".into());
@@ -1063,12 +1126,37 @@ mod tests {
             mesh: valid_asset_ref(),
             material: valid_asset_ref(),
             material_override: None,
+            animation: None,
         }
     }
 
     #[test]
     fn mesh_renderer_with_valid_refs_passes() {
         assert!(valid_mesh_renderer().validate().is_ok());
+    }
+
+    #[test]
+    fn mesh_renderer_rejects_bad_animation_speed_and_clip_name() {
+        for speed in [f32::NAN, f32::INFINITY, 101.0, -101.0] {
+            let mut renderer = valid_mesh_renderer();
+            renderer.animation = Some(crate::ModelAnimationData {
+                speed,
+                ..Default::default()
+            });
+            assert!(renderer.validate().is_err(), "speed {speed}");
+        }
+        let mut renderer = valid_mesh_renderer();
+        renderer.animation = Some(crate::ModelAnimationData {
+            clip: Some(String::new()),
+            ..Default::default()
+        });
+        assert!(renderer.validate().is_err());
+        renderer.animation = Some(crate::ModelAnimationData {
+            clip: Some("walk".into()),
+            speed: -1.0,
+            ..Default::default()
+        });
+        assert!(renderer.validate().is_ok(), "backwards play is allowed");
     }
 
     #[test]
@@ -1113,6 +1201,7 @@ mod tests {
             color: [1.0, 1.0, 1.0, 1.0],
             z_order: 0.0,
             animation: None,
+            clips: Vec::new(),
         }
     }
 
@@ -1192,6 +1281,33 @@ mod tests {
             ..Default::default()
         };
         assert!(entity.validate().is_err());
+    }
+
+    #[test]
+    fn sprite_clips_must_fit_the_sheet_and_have_unique_names() {
+        let clip = |name: &str, first, frames| crate::SpriteClipData {
+            name: name.into(),
+            first,
+            frames,
+            fps: 8.0,
+            looping: true,
+        };
+        let mut sprite = valid_sprite();
+        sprite.region = "grid:4,2:0,0".into();
+        sprite.clips = vec![clip("walk", 0, 4), clip("jump", 4, 4)];
+        assert!(sprite.validate().is_ok());
+        sprite.clips[1].frames = 5;
+        assert!(sprite.validate().is_err(), "past the last cell");
+        sprite.clips[1] = clip("walk", 4, 1);
+        assert!(sprite.validate().is_err(), "duplicate name");
+        sprite.clips[1] = clip("", 4, 1);
+        assert!(sprite.validate().is_err(), "empty name");
+        sprite.clips[1] = clip("jump", 4, 1);
+        sprite.clips[1].fps = 0.0;
+        assert!(sprite.validate().is_err(), "fps");
+        sprite.clips[1].fps = 8.0;
+        sprite.region = "full".into();
+        assert!(sprite.validate().is_err(), "needs a sheet");
     }
 
     #[test]

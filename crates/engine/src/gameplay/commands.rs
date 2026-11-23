@@ -8,8 +8,9 @@ use std::collections::HashSet;
 
 use engine_ecs::components::{Name, RigidBody, Transform as TransformComponent};
 use engine_ecs::prelude::{ChildOf, Entity, World};
+use engine_ecs::{AnimationClips, AnimationPlayer};
 use engine_physics::{PhysicsWorld, RigidBodyHandle};
-use engine_scene::{RuleVariables, Scene, SceneObjectId, SceneSpriteAnimation};
+use engine_scene::{RuleVariables, Scene, SceneObjectId, SceneSpriteAnimation, SceneSpriteClips};
 use engine_scripting::GameCommand;
 use engine_utils::Transform;
 use glam::{Quat, Vec3};
@@ -87,11 +88,27 @@ pub fn apply_world_commands(
                 }
             }
             GameCommand::SetAnimationPlaying { object_id, playing } => {
+                set_animation_playing(world, object_id, *playing);
+            }
+            GameCommand::PlayAnimation {
+                object_id,
+                clip,
+                looping,
+                speed,
+                fade,
+            } => play_animation(world, object_id, clip, *looping, *speed, *fade),
+            GameCommand::SetAnimatorValue {
+                object_id,
+                name,
+                value,
+            } => set_animator_value(world, object_id, name, *value),
+            GameCommand::SetAnimationSpeed { object_id, speed } => {
                 match find_object(world, object_id)
-                    .and_then(|entity| world.get_mut::<SceneSpriteAnimation>(entity))
+                    .and_then(|entity| world.get_mut::<AnimationPlayer>(entity))
                 {
-                    Some(mut animation) => animation.playing = *playing,
-                    None => tracing::warn!(%object_id, "animation target is missing an animation"),
+                    Some(mut player) if speed.is_finite() => player.speed = *speed,
+                    Some(_) => tracing::warn!(%object_id, "requested a non-finite animation speed"),
+                    None => tracing::warn!(%object_id, "animation target is not an animated model"),
                 }
             }
             GameCommand::PlayAudio { object_id } => {
@@ -130,6 +147,84 @@ pub fn apply_world_commands(
         }
     }
     Ok(spawned_prefabs)
+}
+
+fn set_animator_value(world: &mut World, object_id: &str, name: &str, value: f64) {
+    if !engine_scene::valid_variable_name(name) || !value.is_finite() {
+        tracing::warn!(%object_id, name, "animator value needs a name and a finite number");
+        return;
+    }
+    let Some(entity) = find_object(world, object_id) else {
+        tracing::warn!(%object_id, "animator target was not found");
+        return;
+    };
+    match world.get_mut::<engine_scene::AnimatorValues>(entity) {
+        Some(mut values) => {
+            values.0.insert(name.to_owned(), value);
+        }
+        None => {
+            let values =
+                engine_scene::AnimatorValues([(name.to_owned(), value)].into_iter().collect());
+            world.entity_mut(entity).insert(values);
+        }
+    }
+}
+
+/// Pauses or resumes a sprite flipbook or an animated model's clip.
+fn set_animation_playing(world: &mut World, object_id: &str, playing: bool) {
+    let Some(entity) = find_object(world, object_id) else {
+        tracing::warn!(%object_id, "animation target was not found");
+        return;
+    };
+    if let Some(mut animation) = world.get_mut::<SceneSpriteAnimation>(entity) {
+        animation.playing = playing;
+    } else if let Some(mut player) = world.get_mut::<AnimationPlayer>(entity) {
+        // A one-shot clip that ended starts over rather than staying stuck
+        // on its last frame.
+        if playing && !player.looping && player.time >= player.clip.duration {
+            player.restart();
+        }
+        player.playing = playing;
+    } else {
+        tracing::warn!(%object_id, "animation target is missing an animation");
+    }
+}
+
+fn play_animation(
+    world: &mut World,
+    object_id: &str,
+    clip: &str,
+    looping: Option<bool>,
+    speed: f32,
+    fade: f32,
+) {
+    let Some(entity) = find_object(world, object_id) else {
+        tracing::warn!(%object_id, "animation target was not found");
+        return;
+    };
+    if let Some(found) = world
+        .get::<SceneSpriteClips>(entity)
+        .map(|clips| clips.get(clip).cloned())
+    {
+        match (found, world.get_mut::<SceneSpriteAnimation>(entity)) {
+            (Some(found), Some(mut animation)) => animation.play_clip(&found, looping, speed),
+            (None, _) => tracing::warn!(%object_id, clip, "the sprite has no clip with this name"),
+            (Some(_), None) => tracing::warn!(%object_id, "the sprite cannot animate"),
+        }
+        return;
+    }
+    let Some(found) = world
+        .get::<AnimationClips>(entity)
+        .and_then(|clips| clips.get(clip))
+        .cloned()
+    else {
+        tracing::warn!(%object_id, clip, "the model has no clip with this name");
+        return;
+    };
+    match world.get_mut::<AnimationPlayer>(entity) {
+        Some(mut player) => player.play(found, looping.unwrap_or(true), speed, fade),
+        None => tracing::warn!(%object_id, "animation target is not an animated model"),
+    }
 }
 
 /// Whether a runtime object request has a fresh UUID and a finite position.

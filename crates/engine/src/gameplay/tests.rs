@@ -1428,3 +1428,253 @@ fn an_exported_game_reads_its_scene_order_back() {
     assert_eq!(source.scene_order(), saved);
     let _ = std::fs::remove_dir_all(root);
 }
+
+fn clip(name: &str, duration: f32) -> std::sync::Arc<engine_asset::ImportedAnimation> {
+    std::sync::Arc::new(engine_asset::ImportedAnimation {
+        name: Some(name.into()),
+        events: Vec::new(),
+        duration,
+        channels: std::collections::HashMap::new(),
+    })
+}
+
+/// An animated model without a GPU: clips and a player, no renderer.
+fn animated(world: &mut crate::prelude::World, id: &str) {
+    let skeleton = std::sync::Arc::new(engine_asset::ImportedSkeleton {
+        name: None,
+        joints: Vec::new(),
+    });
+    let idle = clip("idle", 1.0);
+    world.spawn((
+        SceneObjectId(id.into()),
+        crate::ecs::AnimationClips(vec![std::sync::Arc::clone(&idle), clip("jump", 0.5)]),
+        crate::ecs::AnimationPlayer::new(skeleton, idle),
+    ));
+}
+
+fn player<'w>(world: &'w crate::prelude::World, id: &str) -> &'w crate::ecs::AnimationPlayer {
+    let entity = find_object(world, id).expect("object");
+    world
+        .get::<crate::ecs::AnimationPlayer>(entity)
+        .expect("player")
+}
+
+#[test]
+fn rust_and_lua_games_play_switch_and_pause_model_clips() {
+    let mut world = crate::prelude::World::new();
+    let id = "00000000-0000-4000-8000-0000000000a1";
+    animated(&mut world, id);
+
+    apply_commands(
+        &mut world,
+        vec![
+            GameCommand::PlayAnimation {
+                object_id: id.into(),
+                clip: "jump".into(),
+                looping: Some(false),
+                speed: 2.0,
+                fade: 0.2,
+            },
+            GameCommand::SetAnimationSpeed {
+                object_id: id.into(),
+                speed: 0.5,
+            },
+        ],
+    );
+    let playing = player(&world, id);
+    assert_eq!(playing.clip.name.as_deref(), Some("jump"));
+    assert!(!playing.looping);
+    assert_eq!(playing.speed, 0.5);
+    assert!(playing.fade.is_some(), "fades from idle");
+
+    apply_commands(
+        &mut world,
+        vec![GameCommand::SetAnimationPlaying {
+            object_id: id.into(),
+            playing: false,
+        }],
+    );
+    assert!(!player(&world, id).playing);
+}
+
+#[test]
+fn unknown_clip_leaves_the_model_playing_what_it_was() {
+    let mut world = crate::prelude::World::new();
+    let id = "00000000-0000-4000-8000-0000000000a2";
+    animated(&mut world, id);
+    apply_commands(
+        &mut world,
+        vec![GameCommand::PlayAnimation {
+            object_id: id.into(),
+            clip: "swim".into(),
+            looping: None,
+            speed: 1.0,
+            fade: 0.0,
+        }],
+    );
+    assert_eq!(player(&world, id).clip.name.as_deref(), Some("idle"));
+}
+
+#[test]
+fn resuming_a_finished_one_shot_starts_it_again() {
+    let mut world = crate::prelude::World::new();
+    let id = "00000000-0000-4000-8000-0000000000a3";
+    animated(&mut world, id);
+    let entity = find_object(&world, id).expect("object");
+    if let Some(mut player) = world.get_mut::<crate::ecs::AnimationPlayer>(entity) {
+        player.looping = false;
+        player.advance(5.0);
+        assert!(!player.playing);
+    }
+    apply_commands(
+        &mut world,
+        vec![GameCommand::SetAnimationPlaying {
+            object_id: id.into(),
+            playing: true,
+        }],
+    );
+    let resumed = player(&world, id);
+    assert!(resumed.playing);
+    assert_eq!(resumed.time, 0.0);
+}
+
+#[test]
+fn games_play_a_sprites_named_clip() {
+    let mut world = crate::prelude::World::new();
+    let id = "00000000-0000-4000-8000-0000000000a4";
+    let entity = world
+        .spawn((
+            SceneObjectId(id.into()),
+            crate::scene::SceneSpriteClips(vec![crate::scene::SpriteClipData {
+                name: "run".into(),
+                first: 3,
+                frames: 4,
+                fps: 10.0,
+                looping: true,
+            }]),
+            crate::scene::SceneSpriteAnimation::clips_only(),
+        ))
+        .id();
+    apply_commands(
+        &mut world,
+        vec![GameCommand::PlayAnimation {
+            object_id: id.into(),
+            clip: "run".into(),
+            looping: Some(false),
+            speed: 2.0,
+            fade: 0.0,
+        }],
+    );
+    let animation = world
+        .get::<crate::scene::SceneSpriteAnimation>(entity)
+        .expect("animation");
+    assert!(animation.playing);
+    let clip = animation.clip.expect("clip chosen");
+    assert_eq!(clip.first, 3);
+    assert_eq!(clip.data.fps, 20.0);
+    assert!(!clip.data.looping);
+    assert!(!animation.authored, "a clips-only sprite saves no flipbook");
+}
+
+/// A model with idle/walk/run clips and an animator: idle until `speed`
+/// passes 0.1, then a walk-to-run blend by `speed`.
+fn animated_with_animator(world: &mut crate::prelude::World, id: &str) {
+    use crate::scene::{
+        AnimatorData, AnimatorMotion, AnimatorStateData, AnimatorTransitionData, BlendClipData,
+        ModelAnimationData, RuleCompare, RuleCondition, SceneModelAnimation,
+    };
+    animated(world, id);
+    let entity = find_object(world, id).expect("object");
+    let mut go = AnimatorTransitionData::new(Some("idle".into()), "move");
+    go.conditions = vec![RuleCondition {
+        variable: "speed".into(),
+        compare: RuleCompare::Greater,
+        value: 0.1,
+    }];
+    let animator = AnimatorData {
+        states: vec![
+            AnimatorStateData::clip("idle", "idle"),
+            AnimatorStateData {
+                motion: AnimatorMotion::Blend {
+                    variable: "speed".into(),
+                    clips: vec![
+                        BlendClipData {
+                            clip: "idle".into(),
+                            at: 0.0,
+                        },
+                        BlendClipData {
+                            clip: "jump".into(),
+                            at: 4.0,
+                        },
+                    ],
+                },
+                ..AnimatorStateData::clip("move", "idle")
+            },
+        ],
+        transitions: vec![go],
+    };
+    world
+        .entity_mut(entity)
+        .insert(SceneModelAnimation(ModelAnimationData {
+            animator: Some(animator),
+            ..Default::default()
+        }));
+}
+
+#[test]
+fn animators_start_move_on_a_value_and_blend() {
+    let mut world = crate::prelude::World::new();
+    let id = "00000000-0000-4000-8000-0000000000a5";
+    animated_with_animator(&mut world, id);
+    let entity = find_object(&world, id).expect("object");
+
+    super::animation::update_animators(&mut world);
+    let state = world
+        .get::<crate::scene::AnimatorState>(entity)
+        .expect("state");
+    assert_eq!(state.current_name(), Some("idle"));
+
+    apply_commands(
+        &mut world,
+        vec![GameCommand::SetAnimatorValue {
+            object_id: id.into(),
+            name: "speed".into(),
+            value: 3.0,
+        }],
+    );
+    super::animation::update_animators(&mut world);
+    let state = world
+        .get::<crate::scene::AnimatorState>(entity)
+        .expect("state");
+    assert_eq!(state.current_name(), Some("move"));
+    let blend = player(&world, id).blend.clone().expect("blending");
+    assert_eq!(blend.parameter, 3.0);
+    assert_eq!(
+        player(&world, id).clip.name.as_deref(),
+        Some("jump"),
+        "nearest"
+    );
+}
+
+#[test]
+fn animators_fall_back_to_shared_variables() {
+    let mut world = crate::prelude::World::new();
+    let id = "00000000-0000-4000-8000-0000000000a6";
+    animated_with_animator(&mut world, id);
+    let entity = find_object(&world, id).expect("object");
+    super::animation::update_animators(&mut world);
+    apply_commands(
+        &mut world,
+        vec![GameCommand::SetVariable {
+            name: "speed".into(),
+            value: 1.0,
+        }],
+    );
+    super::animation::update_animators(&mut world);
+    assert_eq!(
+        world
+            .get::<crate::scene::AnimatorState>(entity)
+            .and_then(|state| state.current_name().map(str::to_owned)),
+        Some("move".into())
+    );
+}

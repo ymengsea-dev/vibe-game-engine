@@ -132,6 +132,10 @@ enum PendingEvent {
     },
     VariableChanged(String),
     StateChanged(GameStateName),
+    Animation {
+        owner: String,
+        name: String,
+    },
 }
 
 /// Which contact transition a [`RuleEvent::Contact`] reports.
@@ -182,6 +186,13 @@ pub enum RuleEvent<'a> {
     VariableChanged(&'a str),
     /// The game state changed to this state.
     StateChanged(GameStateName),
+    /// `owner`'s animation passed the clip event `name`.
+    Animation {
+        /// Object whose animation fired it.
+        owner: &'a str,
+        /// The event's name in the clip.
+        name: &'a str,
+    },
 }
 
 /// What dispatching one event did.
@@ -213,6 +224,10 @@ impl PendingEvent {
             },
             RuleEvent::VariableChanged(name) => Self::VariableChanged(name.to_owned()),
             RuleEvent::StateChanged(state) => Self::StateChanged(state),
+            RuleEvent::Animation { owner, name } => Self::Animation {
+                owner: owner.to_owned(),
+                name: name.to_owned(),
+            },
         }
     }
 
@@ -272,6 +287,9 @@ impl PendingEvent {
                 name == changed
             }
             (RuleTrigger::StateChanged { state }, Self::StateChanged(entered)) => state == entered,
+            (RuleTrigger::AnimationEvent { name }, Self::Animation { owner, name: fired }) => {
+                owner_id == Some(owner.as_str()) && name == fired
+            }
             _ => false,
         }
     }
@@ -1006,6 +1024,25 @@ b",
         let others = std::collections::HashSet::from(["other".to_owned()]);
         let event = RuleEvent::SceneStartExcept(&others);
         assert_eq!(fire(&scene, &mut world, event).applied, 1);
+    }
+
+    #[test]
+    fn animation_event_rules_fire_for_their_own_object_and_name() {
+        let scene = owner_scene(vec![RuleTrigger::AnimationEvent {
+            name: "step".into(),
+        }]);
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        let count = |world: &mut World, owner, name| {
+            fire(&scene, world, RuleEvent::Animation { owner, name }).applied
+        };
+        assert_eq!(count(&mut world, OWNER, "step"), 1);
+        assert_eq!(count(&mut world, OWNER, "jump"), 0);
+        assert_eq!(
+            count(&mut world, "other", "step"),
+            0,
+            "another object's step"
+        );
     }
 
     #[test]

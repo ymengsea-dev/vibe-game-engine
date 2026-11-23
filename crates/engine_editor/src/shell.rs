@@ -6044,6 +6044,158 @@ mod ui_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Writes `inspector-animation.png`: an animated model's Animation
+    /// section, mid-preview. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_animation() {
+        let (root, mut state) = menu_test_state();
+        let clip = |name: &str, duration| {
+            std::sync::Arc::new(engine_asset::ImportedAnimation {
+                name: Some(name.into()),
+                events: Vec::new(),
+                duration,
+                channels: std::collections::HashMap::new(),
+            })
+        };
+        let walk = clip("walk", 1.2);
+        let skeleton = std::sync::Arc::new(engine_asset::ImportedSkeleton {
+            name: None,
+            joints: Vec::new(),
+        });
+        let mut player = engine_ecs::AnimationPlayer::new(skeleton, std::sync::Arc::clone(&walk));
+        player.time = 0.4;
+        let model = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Hero"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                engine_ecs::components::MeshSource::new(
+                    "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                    "9c858901-8a57-4791-81fe-4c455b099bc9",
+                ),
+                engine_ecs::AnimationClips(vec![clip("idle", 2.0), walk, clip("jump", 0.8)]),
+                player,
+                engine_scene::SceneModelAnimation(engine_scene::ModelAnimationData {
+                    clip: Some("walk".into()),
+                    ..Default::default()
+                }),
+                crate::animation_preview::AnimationPreview,
+            ))
+            .id();
+        state.select_only(model);
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-animation.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 900.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `animator-window.png`: an animator with idle, walk/run blend
+    /// and jump states, the move state selected. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_animator_window() {
+        use engine_scene::{
+            AnimatorData, AnimatorMotion, AnimatorStateData, AnimatorTransitionData, BlendClipData,
+            RuleCompare, RuleCondition,
+        };
+        let (root, mut state) = menu_test_state();
+        let clip = |name: &str| {
+            std::sync::Arc::new(engine_asset::ImportedAnimation {
+                name: Some(name.into()),
+                events: Vec::new(),
+                duration: 1.0,
+                channels: std::collections::HashMap::new(),
+            })
+        };
+        let skeleton = std::sync::Arc::new(engine_asset::ImportedSkeleton {
+            name: None,
+            joints: Vec::new(),
+        });
+        let speed = |compare, value| RuleCondition {
+            variable: "speed".into(),
+            compare,
+            value,
+        };
+        let mut go = AnimatorTransitionData::new(Some("idle".into()), "move");
+        go.conditions = vec![speed(RuleCompare::Greater, 0.1)];
+        let mut stop = AnimatorTransitionData::new(Some("move".into()), "idle");
+        stop.conditions = vec![speed(RuleCompare::LessOrEqual, 0.1)];
+        let mut land = AnimatorTransitionData::new(Some("jump".into()), "idle");
+        land.at_end = true;
+        let animator = AnimatorData {
+            states: vec![
+                AnimatorStateData::clip("idle", "idle"),
+                AnimatorStateData {
+                    motion: AnimatorMotion::Blend {
+                        variable: "speed".into(),
+                        clips: vec![
+                            BlendClipData {
+                                clip: "walk".into(),
+                                at: 1.0,
+                            },
+                            BlendClipData {
+                                clip: "run".into(),
+                                at: 4.0,
+                            },
+                        ],
+                    },
+                    graph_position: Some([260.0, 110.0]),
+                    ..AnimatorStateData::clip("move", "walk")
+                },
+                AnimatorStateData {
+                    graph_position: Some([140.0, 220.0]),
+                    ..AnimatorStateData::clip("jump", "jump")
+                },
+            ],
+            transitions: vec![go, stop, AnimatorTransitionData::new(None, "jump"), land],
+        };
+        let model = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Hero"),
+                engine_ecs::AnimationClips(["idle", "walk", "run", "jump"].map(clip).to_vec()),
+                engine_ecs::AnimationPlayer::new(skeleton, clip("idle")),
+                engine_scene::SceneModelAnimation(engine_scene::ModelAnimationData {
+                    animator: Some(animator),
+                    ..Default::default()
+                }),
+            ))
+            .id();
+        state.select_only(model);
+        let path = crate::ui_snapshot::snapshot_dir().join("animator-window.png");
+        let mut first = true;
+        crate::ui_snapshot::render_png(&path, egui::vec2(820.0, 760.0), 2.0, |ui| {
+            if std::mem::take(&mut first) {
+                crate::inspector::open_animator(ui.ctx(), model, 1);
+            }
+            ui.painter()
+                .rect_filled(ui.max_rect(), 0.0, crate::theme::NIGHT.shell);
+            let mut batch = false;
+            let mut open_script = None;
+            crate::inspector::show(
+                ui,
+                &mut state.world,
+                Some(model),
+                &[],
+                &mut batch,
+                &crate::AssetIndex::new(),
+                &mut open_script,
+            );
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Writes `inspector-rules.png`: a Timer rule with two conditions on
     /// "Any" and a "Set game state" action. Needs a GPU adapter.
     #[test]

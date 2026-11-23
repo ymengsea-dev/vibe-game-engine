@@ -29,6 +29,7 @@ use engine_scene::{
 use crate::assets::{AssetIndex, AssetKind};
 use crate::inspect::{InspectField, Inspectable, number, property_row};
 
+mod animator_graph;
 mod graph;
 
 #[cfg(test)]
@@ -430,7 +431,7 @@ fn rules_name_objects(rules: &[RuleData]) -> bool {
 }
 
 /// The "When" choices, in picker order.
-const TRIGGER_CHOICES: [&str; 11] = [
+const TRIGGER_CHOICES: [&str; 12] = [
     "This button is clicked",
     "Scene starts",
     "Key pressed",
@@ -442,6 +443,7 @@ const TRIGGER_CHOICES: [&str; 11] = [
     "Variable changes",
     "Game state changes",
     "Named event",
+    "Animation event",
 ];
 
 /// The picker label for `trigger`.
@@ -458,6 +460,7 @@ fn trigger_choice_label(trigger: &RuleTrigger) -> &'static str {
         RuleTrigger::VariableChanged { .. } => TRIGGER_CHOICES[8],
         RuleTrigger::StateChanged { .. } => TRIGGER_CHOICES[9],
         RuleTrigger::Named(_) => TRIGGER_CHOICES[10],
+        RuleTrigger::AnimationEvent { .. } => TRIGGER_CHOICES[11],
     }
 }
 
@@ -484,11 +487,15 @@ fn trigger_for_choice(label: &str) -> Option<RuleTrigger> {
             state: engine_scene::GameStateName::Paused,
         },
         "Named event" => RuleTrigger::Named("game_start".into()),
+        "Animation event" => RuleTrigger::AnimationEvent {
+            name: "footstep".into(),
+        },
         _ => return None,
     })
 }
 
 /// Adds a starting condition. False at the limit.
+#[cfg(test)]
 fn add_condition(rule: &mut RuleData) -> bool {
     if rule.conditions.len() >= engine_scene::MAX_RULE_CONDITIONS {
         return false;
@@ -768,6 +775,11 @@ fn trigger_fields(
                 crate::widgets::text_field(ui, name, "Variable name");
             });
         }
+        RuleTrigger::AnimationEvent { name } => {
+            property_row(ui, "Event", |ui| {
+                crate::widgets::text_field(ui, name, "Event in the clip");
+            });
+        }
         RuleTrigger::StateChanged { state } => {
             property_row(ui, "State", |ui| {
                 state_choice(ui, ("visual_rule_state_trigger", salt), state);
@@ -980,23 +992,47 @@ fn variable_action_fields(ui: &mut egui::Ui, salt: (Entity, usize), action: &mut
 }
 
 fn rule_condition_fields(ui: &mut egui::Ui, salt: (Entity, usize), rule: &mut RuleData) {
+    condition_fields(
+        ui,
+        salt,
+        &mut rule.conditions,
+        &mut rule.match_mode,
+        "Run this rule only when a variable matches",
+        "score",
+    );
+}
+
+/// "Only if" checks on variables: add, edit and remove rows, and choose
+/// all or any once there are two. Shared by rules and animator transitions.
+fn condition_fields(
+    ui: &mut egui::Ui,
+    salt: (Entity, usize),
+    conditions: &mut Vec<RuleCondition>,
+    match_mode: &mut engine_scene::RuleMatch,
+    hint: &str,
+    new_variable: &str,
+) {
     let palette = crate::theme::NIGHT;
     property_row(ui, "Only if", |ui| {
-        let full = rule.conditions.len() >= engine_scene::MAX_RULE_CONDITIONS;
+        let full = conditions.len() >= engine_scene::MAX_RULE_CONDITIONS;
         if ui
             .add_enabled(
                 !full,
                 egui::Button::new("Add condition").fill(palette.hover),
             )
-            .on_hover_text("Run this rule only when a variable matches")
-            .on_disabled_hover_text("A rule can have up to 8 conditions")
+            .on_hover_text(hint)
+            .on_disabled_hover_text("Up to 8 conditions")
             .clicked()
         {
-            add_condition(rule);
+            conditions.push(RuleCondition {
+                variable: new_variable.into(),
+                compare: RuleCompare::GreaterOrEqual,
+                value: 1.0,
+            });
         }
     });
     let mut remove = None;
-    for (position, condition) in rule.conditions.iter_mut().enumerate() {
+    for (position, condition) in conditions.iter_mut().enumerate() {
         ui.horizontal(|ui| {
             let height = ui.spacing().interact_size.y;
             let field = crate::widgets::field(ui, &mut condition.variable, 12.0, height)
@@ -1022,13 +1058,13 @@ fn rule_condition_fields(ui: &mut egui::Ui, salt: (Entity, usize), rule: &mut Ru
         });
     }
     if let Some(position) = remove {
-        rule.conditions.remove(position);
+        conditions.remove(position);
     }
-    if rule.conditions.len() >= 2 {
+    if conditions.len() >= 2 {
         property_row(ui, "Match", |ui| {
-            let mut any = rule.match_mode == engine_scene::RuleMatch::Any;
+            let mut any = *match_mode == engine_scene::RuleMatch::Any;
             on_off_choice(ui, salt, &mut any, "Any of these", "All of these");
-            rule.match_mode = if any {
+            *match_mode = if any {
                 engine_scene::RuleMatch::Any
             } else {
                 engine_scene::RuleMatch::All
@@ -2104,7 +2140,11 @@ const REGISTRY: &[ComponentUi] = &[
                     changed = true;
                 }
                 if let Some(grid) = GridRegion::parse(&source.region) {
-                    let previous = world.get::<SceneSpriteAnimation>(entity).copied();
+                    changed |= sprite_clips(ui, world, entity, grid);
+                    let previous = world
+                        .get::<SceneSpriteAnimation>(entity)
+                        .copied()
+                        .filter(|animation| animation.authored);
                     let mut enabled = previous.is_some();
                     property_row(ui, "Animate", |ui| {
                         crate::widgets::checkbox(ui, &crate::theme::NIGHT, &mut enabled, "")
@@ -2968,6 +3008,10 @@ fn show_body(
         add_visual_rule(world, entity, kind, trigger);
     }
 
+    if world.get::<engine_ecs::AnimationClips>(entity).is_some() {
+        animation_section(ui, world, entity);
+    }
+
     if world.get::<MeshSource>(entity).is_some() {
         let mut changed = false;
         let mut reset = false;
@@ -3051,6 +3095,239 @@ fn show_body(
         set_sprite_image(world, entity, assets, &path);
     }
     add_component_menu(ui, world, entity);
+}
+
+/// Opens the Animator window for `entity` with state `state` selected
+/// (for snapshot tests).
+#[cfg(test)]
+pub(crate) fn open_animator(ctx: &egui::Context, entity: Entity, state: usize) {
+    animator_graph::open(ctx, entity);
+    animator_graph::select_state(ctx, entity, state);
+}
+
+/// A sprite's named clips: rows of name, first cell, frames, speed and
+/// loop, plus Add clip. Returns whether anything changed.
+fn sprite_clips(ui: &mut egui::Ui, world: &mut World, entity: Entity, grid: GridRegion) -> bool {
+    let palette = crate::theme::NIGHT;
+    let before = world
+        .get::<engine_scene::SceneSpriteClips>(entity)
+        .map(|clips| clips.0.clone())
+        .unwrap_or_default();
+    let mut clips = before.clone();
+    let cells = grid.columns.saturating_mul(grid.rows).max(1);
+    let mut remove = None;
+    subsection(ui, "Clips", |ui| {
+        if clips.is_empty() {
+            note(ui, "Named animations a game plays with play_animation.");
+        }
+        for (index, clip) in clips.iter_mut().enumerate() {
+            ui.push_id(("sprite_clip", index), |ui| {
+                property_row(ui, "Name", |ui| {
+                    crate::widgets::text_field(ui, &mut clip.name, "Clip name");
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new("Remove").color(palette.danger))
+                                .frame(false),
+                        )
+                        .clicked()
+                    {
+                        remove = Some(index);
+                    }
+                });
+                let mut column = clip.first % grid.columns;
+                let mut row = (clip.first / grid.columns).min(grid.rows - 1);
+                property_row(ui, "First cell", |ui| {
+                    number(
+                        ui,
+                        egui::DragValue::new(&mut column)
+                            .range(0..=grid.columns - 1)
+                            .prefix("X "),
+                    );
+                    number(
+                        ui,
+                        egui::DragValue::new(&mut row)
+                            .range(0..=grid.rows - 1)
+                            .prefix("Y "),
+                    );
+                });
+                clip.first = row * grid.columns + column;
+                let available = (cells - clip.first).min(4096);
+                property_row(ui, "Frames", |ui| {
+                    number(
+                        ui,
+                        egui::DragValue::new(&mut clip.frames).range(1..=available),
+                    );
+                });
+                clip.frames = clip.frames.clamp(1, available);
+                property_row(ui, "Speed", |ui| {
+                    number(
+                        ui,
+                        egui::DragValue::new(&mut clip.fps)
+                            .speed(0.1)
+                            .range(0.1..=120.0)
+                            .suffix(" fps"),
+                    );
+                });
+                property_row(ui, "Loop", |ui| {
+                    crate::widgets::checkbox(ui, &palette, &mut clip.looping, "");
+                });
+                ui.add_space(4.0);
+            });
+        }
+        if clips.len() < 64 && ui.button("Add clip").clicked() {
+            let taken = |name: &str| clips.iter().any(|clip| clip.name == name);
+            let name = (1..)
+                .map(|n| format!("clip{n}"))
+                .find(|name| !taken(name))
+                .unwrap_or_default();
+            clips.push(engine_scene::SpriteClipData {
+                name,
+                first: 0,
+                frames: cells.min(4),
+                fps: 8.0,
+                looping: true,
+            });
+        }
+    });
+    // A name that would make the scene invalid (empty, too long, or used
+    // twice) is not taken: the field goes back to the last good name.
+    for index in 0..clips.len() {
+        let name = &clips[index].name;
+        let bad = name.trim().is_empty()
+            || name.len() > 64
+            || name.chars().any(char::is_control)
+            || clips[..index].iter().any(|other| other.name == *name);
+        if bad && let Some(previous) = before.get(index) {
+            clips[index].name = previous.name.clone();
+        }
+    }
+    if let Some(index) = remove {
+        clips.remove(index);
+    }
+    if clips == before {
+        return false;
+    }
+    if clips.is_empty() {
+        world
+            .entity_mut(entity)
+            .remove::<engine_scene::SceneSpriteClips>();
+    } else {
+        world
+            .entity_mut(entity)
+            .insert(engine_scene::SceneSpriteClips(clips));
+    }
+    true
+}
+
+/// An animated model's clip settings, and the Scene View preview.
+fn animation_section(ui: &mut egui::Ui, world: &mut World, entity: Entity) {
+    use crate::animation_preview as preview;
+
+    let palette = crate::theme::NIGHT;
+    let names = world
+        .get::<engine_ecs::AnimationClips>(entity)
+        .map(engine_ecs::AnimationClips::names)
+        .unwrap_or_default();
+    let before = preview::settings(world, entity);
+    let mut value = before.clone();
+    let mut play = None;
+    section(ui, "Animation", None::<fn(&mut egui::Ui)>, |ui| {
+        let Some(first) = names.first() else {
+            note(ui, "This model has no animation clips.");
+            return;
+        };
+        let shown = value
+            .clip
+            .clone()
+            .filter(|name| names.contains(name))
+            .unwrap_or_else(|| first.clone());
+        property_row(ui, "Animator", |ui| {
+            if value.animator.is_some() {
+                if ui.button("Edit animator").clicked() {
+                    animator_graph::open(ui.ctx(), entity);
+                }
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Remove").color(palette.danger))
+                            .frame(false),
+                    )
+                    .clicked()
+                {
+                    value.animator = None;
+                }
+            } else if ui
+                .button("Use animator")
+                .on_hover_text("Choose the clip with states and transitions instead of a script")
+                .clicked()
+            {
+                value.animator = Some(engine_scene::AnimatorData::from_clips(&names, Some(&shown)));
+                animator_graph::open(ui.ctx(), entity);
+            }
+        });
+        if value.animator.is_some() {
+            note(
+                ui,
+                "The animator picks the clip while the game runs, starting with its first state.",
+            );
+        } else {
+            property_row(ui, "Clip", |ui| {
+                choice(("model_animation_clip", entity), ui)
+                    .selected_text(shown.as_str())
+                    .show_ui(ui, |ui| {
+                        for name in &names {
+                            if ui.selectable_label(*name == shown, name).clicked() {
+                                value.clip = Some(name.clone());
+                            }
+                        }
+                    });
+            });
+            property_row(ui, "Loop", |ui| {
+                crate::widgets::checkbox(ui, &palette, &mut value.looping, "");
+            });
+            property_row(ui, "Speed", |ui| {
+                number(
+                    ui,
+                    egui::DragValue::new(&mut value.speed)
+                        .speed(0.05)
+                        .range(-10.0..=10.0)
+                        .suffix("×"),
+                )
+                .on_hover_text("1 is the speed it was made at; below 0 plays backwards");
+            });
+            property_row(ui, "Play on start", |ui| {
+                crate::widgets::checkbox(ui, &palette, &mut value.play_on_start, "")
+                    .on_hover_text("Start this clip by itself when the game starts");
+            });
+        }
+        let playing = preview::is_playing(world, entity);
+        let (time, length) = world
+            .get::<engine_ecs::AnimationPlayer>(entity)
+            .map_or((0.0, 0.0), |player| (player.time, player.clip.duration));
+        property_row(ui, "Preview", |ui| {
+            let label = if playing { "Stop" } else { "Play" };
+            if crate::widgets::pill_button(ui, &palette, label, palette.text, true)
+                .on_hover_text("Play the clip in the Scene View")
+                .clicked()
+            {
+                play = Some(!playing);
+            }
+            ui.label(
+                egui::RichText::new(format!("{time:.1} / {length:.1} s")).color(palette.subtle),
+            );
+        });
+        if playing {
+            ui.ctx().request_repaint();
+        }
+    });
+    if let Some(animator) = value.animator.as_mut() {
+        animator_graph::show(ui.ctx(), entity, animator, &names);
+    }
+    if value != before {
+        preview::set_settings(world, entity, value);
+    }
+    if let Some(play) = play {
+        preview::set_playing(world, entity, play);
+    }
 }
 
 /// The Inspector's spacing: every control 24 points tall with the same

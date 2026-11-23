@@ -27,15 +27,16 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::Without;
 use engine_asset::AssetId;
 use engine_ecs::components::{
-    InstancedMeshRenderer, MeshRenderer, MeshSource, Sprite, SpriteSource,
+    InstancedMeshRenderer, MeshRenderer, MeshSource, SkinnedMeshRenderer, Sprite, SpriteSource,
 };
 use engine_ecs::prelude::{Entity, World};
 use engine_renderer::{
-    GpuContext, Material, MaterialBinding, Mesh, Pipeline, RenderAssets, UvRect,
+    GpuContext, Material, MaterialBinding, Mesh, Pipeline, RenderAssets, SkinnedPipeline, UvRect,
 };
 use engine_scene::{
     AppliedMaterialOverride, AssetRef, MaterialOverrideData, SceneError, SceneFoliage,
-    SceneMaterialOverride, SceneResolver, material_from_imported,
+    SceneMaterialOverride, SceneModelAnimation, SceneResolver, SkinnedModel,
+    material_from_imported,
 };
 use engine_utils::AssetHandle;
 
@@ -57,6 +58,8 @@ pub struct EditorResolver<'a> {
     /// its own model-matrix binding, and each share has to go through
     /// [`MeshRenderer::from_handles`] so the ref counts stay right.
     uploaded: HashMap<AssetId, (AssetHandle<Mesh>, AssetHandle<MaterialBinding>)>,
+    /// Draws animated models when set; without it every model is still.
+    skinned_pipeline: Option<&'a SkinnedPipeline>,
 }
 
 impl<'a> EditorResolver<'a> {
@@ -73,7 +76,14 @@ impl<'a> EditorResolver<'a> {
             pipeline,
             assets,
             uploaded: HashMap::new(),
+            skinned_pipeline: None,
         }
+    }
+
+    /// The same resolver, also drawing animated (skinned) models.
+    pub fn with_skinned_pipeline(mut self, skinned_pipeline: &'a SkinnedPipeline) -> Self {
+        self.skinned_pipeline = Some(skinned_pipeline);
+        self
     }
 
     /// How many distinct meshes this resolver has uploaded.
@@ -182,6 +192,34 @@ impl SceneResolver for EditorResolver<'_> {
         Ok(Some(renderer))
     }
 
+    fn resolve_skinned_mesh(
+        &mut self,
+        mesh: &AssetRef,
+        _material: &AssetRef,
+        material_override: Option<&MaterialOverrideData>,
+    ) -> Result<Option<SkinnedModel>, SceneError> {
+        let Some(skinned_pipeline) = self.skinned_pipeline else {
+            return Ok(None);
+        };
+        let id = asset_id(mesh)?;
+        // Uploaded as a still mesh already: it has no skin.
+        if self.uploaded.contains_key(&id) {
+            return Ok(None);
+        }
+        let Some(ImportedAsset::Mesh(gltf)) = self.importer.get(id) else {
+            return Ok(None);
+        };
+        engine_scene::upload_skinned_model(
+            self.gpu,
+            self.pipeline,
+            skinned_pipeline,
+            self.assets,
+            gltf,
+            &mesh.id,
+            material_override,
+        )
+    }
+
     fn resolve_sprite_uv(
         &mut self,
         atlas: &AssetRef,
@@ -228,10 +266,33 @@ pub fn resolve_pending(
     importer: &AssetImporter,
     gpu: &GpuContext,
     pipeline: &Pipeline,
+    skinned_pipeline: &SkinnedPipeline,
     assets: &mut RenderAssets,
 ) -> ResolveReport {
+    // An animated model whose material changed is rebuilt from scratch:
+    // its renderer is released here and it rejoins the pending list.
+    let stale_skinned: Vec<Entity> = world
+        .query::<(
+            Entity,
+            &SkinnedMeshRenderer,
+            Option<&SceneMaterialOverride>,
+            Option<&AppliedMaterialOverride>,
+        )>()
+        .iter(world)
+        .filter(|(_, _, authored, applied)| {
+            material_needs_refresh(authored.map(|value| &value.0), *applied)
+        })
+        .map(|(entity, ..)| entity)
+        .collect();
+    for entity in stale_skinned {
+        release_skinned(world, assets, entity);
+    }
+
     let pending: Vec<(Entity, MeshSource, Option<MaterialOverrideData>)> = world
-        .query_filtered::<(Entity, &MeshSource, Option<&SceneMaterialOverride>), Without<MeshRenderer>>()
+        .query_filtered::<
+            (Entity, &MeshSource, Option<&SceneMaterialOverride>),
+            (Without<MeshRenderer>, Without<SkinnedMeshRenderer>),
+        >()
         .iter(world)
         .map(|(entity, source, authored)| (entity, source.clone(), authored.map(|value| value.0.clone())))
         .collect();
@@ -257,7 +318,8 @@ pub fn resolve_pending(
         })
         .collect();
 
-    let mut resolver = EditorResolver::new(importer, gpu, pipeline, assets);
+    let mut resolver = EditorResolver::new(importer, gpu, pipeline, assets)
+        .with_skinned_pipeline(skinned_pipeline);
     let mut report = ResolveReport::default();
 
     for (entity, source, authored) in pending.into_iter().chain(refresh) {
@@ -265,6 +327,40 @@ pub fn resolve_pending(
         let material = AssetRef {
             id: source.material,
         };
+        match resolver.resolve_skinned_mesh(&mesh, &material, authored.as_ref()) {
+            Ok(Some(model)) => {
+                if let Some(previous) = world.get::<MeshRenderer>(entity) {
+                    resolver.assets.meshes.release(previous.mesh);
+                    resolver.assets.materials.release(previous.material);
+                }
+                let settings = world
+                    .get::<SceneModelAnimation>(entity)
+                    .map(|animation| animation.0.clone())
+                    .unwrap_or_default();
+                let mut entity_mut = world.entity_mut(entity);
+                entity_mut.remove::<MeshRenderer>();
+                engine_scene::insert_skinned_model(&mut entity_mut, model, settings, authored);
+                if let Some(mut player) = entity_mut.get_mut::<engine_ecs::AnimationPlayer>() {
+                    // Studio plays a clip only when asked to (Preview).
+                    player.playing = false;
+                }
+                // The Scene View shows the first frame, not the bind pose.
+                if let (Some(player), Some(skinned)) = (
+                    entity_mut.get::<engine_ecs::AnimationPlayer>(),
+                    entity_mut.get::<SkinnedMeshRenderer>(),
+                ) {
+                    engine_ecs::upload_pose(gpu, player, skinned);
+                }
+                report.resolved += 1;
+                continue;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                report.failed += 1;
+                tracing::warn!(error = %err, "could not resolve a scene entity's animated model");
+                continue;
+            }
+        }
         match resolver.resolve_mesh_with_material(&mesh, &material, authored.as_ref()) {
             Ok(Some(renderer)) => {
                 if let Some(previous) = world.get::<MeshRenderer>(entity) {
@@ -304,6 +400,24 @@ pub fn resolve_pending(
     }
 
     report
+}
+
+/// Drops an animated model's renderer, clips and player, releasing its GPU
+/// handles, so the next pass rebuilds it.
+pub fn release_skinned(world: &mut World, assets: &mut RenderAssets, entity: Entity) {
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        return;
+    };
+    if let Some(renderer) = entity_mut.take::<SkinnedMeshRenderer>() {
+        assets.skinned_meshes.release(renderer.mesh);
+        assets.materials.release(renderer.material);
+    }
+    entity_mut.remove::<(
+        engine_ecs::AnimationPlayer,
+        engine_ecs::AnimationClips,
+        engine_ecs::AnimationEvents,
+        AppliedMaterialOverride,
+    )>();
 }
 
 fn material_needs_refresh(

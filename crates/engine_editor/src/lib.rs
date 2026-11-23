@@ -25,6 +25,7 @@
 // this crate too (not just downstream ones).
 extern crate self as engine_editor;
 
+mod animation_preview;
 mod asset_import;
 mod assets;
 mod chrome;

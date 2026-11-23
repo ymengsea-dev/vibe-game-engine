@@ -38,6 +38,10 @@ impl MyGame {
 
     /// Your gameplay: two objects with colliders started or stopped touching.
     fn on_collision(&mut self, _ctx: &mut GameContext<'_>, _contact: &CollisionEvent) {}
+
+    /// Your gameplay: an animated object passed a named moment in its clip,
+    /// such as a footstep (its "Animation event" rules already ran).
+    fn on_animation_event(&mut self, _ctx: &mut GameContext<'_>, _event: &AnimationEventFired) {}
 }
 
 impl MyGame {
@@ -68,10 +72,15 @@ impl Game for MyGame {
         }
         // Key, timer, variable and state rules.
         self.gameplay.update_rules(ctx, dt);
+        for event in self.gameplay.animation_events(ctx) {
+            self.on_animation_event(ctx, &event);
+        }
         if let Some((old, new)) = self.gameplay.take_state_change() {
             self.on_state_changed(ctx, old, new);
         }
         self.on_update(ctx, dt);
+        // Animators pick each animated model's clip from its states.
+        self.gameplay.update_animators(ctx);
         self.drain_rule_queues();
         // Show the active camera object's view (move or rotate that object to move the view).
         self.gameplay.present_camera(ctx, dt);

@@ -41,7 +41,8 @@ pub mod prelude {
         SceneParts, Time, run_game,
     };
     pub use crate::gameplay::{
-        CollisionEvent, ContactKind, GameplayError, GameplayRuntime, SceneSource, SpawnedObject,
+        AnimationEventFired, AnimatorState, AnimatorValues, CollisionEvent, ContactKind,
+        GameplayError, GameplayRuntime, SceneSource, SpawnedObject,
     };
     pub use engine_ai::{
         GridCoord, NavError, NavGrid, find_path, find_path_world, follow_path, line_of_sight,
@@ -67,12 +68,13 @@ pub mod prelude {
     pub use engine_core::{App, AppState, EngineConfig, EngineError, FixedTimestep};
     pub use engine_ecs::prelude::{Bundle, ChildOf, Children, Entity, WaterVolume, World};
     pub use engine_ecs::{
-        AnimationEvent, AnimationEvents, AnimationPlayer, AudioEmitter, AudioListener, BlendMode,
-        BuoyantBody, Ecs, ParticleEmitter, ParticleEmitterConfig, RenderStats, Rng, SpriteTarget,
-        WaterEvents, WaterInteractionEvent, WaterInteractor, despawn_instanced_mesh_renderer,
-        despawn_mesh_renderer, despawn_skinned_mesh_renderer, despawn_vegetation_renderer,
-        extract_and_render, extract_particles, extract_sprites, sync_rigid_bodies, update_audio,
-        update_particles, update_water,
+        AnimationClips, AnimationEvent, AnimationEvents, AnimationPlayer, AudioEmitter,
+        AudioListener, BlendMode, BuoyantBody, Crossfade, Ecs, ParticleEmitter,
+        ParticleEmitterConfig, RenderStats, Rng, SpriteTarget, WaterEvents, WaterInteractionEvent,
+        WaterInteractor, despawn_instanced_mesh_renderer, despawn_mesh_renderer,
+        despawn_skinned_mesh_renderer, despawn_vegetation_renderer, extract_and_render,
+        extract_particles, extract_sprites, sync_rigid_bodies, update_audio, update_particles,
+        update_water,
     };
     #[cfg(feature = "studio")]
     pub use engine_editor::{
@@ -120,12 +122,13 @@ pub mod prelude {
         AmbientSoundData, AssetLibrary, AssetRef, AudioEmitterData, BUNDLE_FILE, BodyKind,
         CURRENT_SCENE_VERSION, CameraData, ColliderData, ColliderShape, ContactRuleKind,
         EXPORT_SCENE_FILE, EnvironmentData, ExportContent, GameState, GameStateName,
-        InstantiateReport, LoadedSkinnedMesh, MeshRendererData, NavGridData, NullResolver, Prefab,
-        ProjectionData, RuleAction, RuleCompare, RuleCondition, RuleData, RuleEvent, RuleOutcome,
-        RuleTrigger, RuleVariables, RuntimeResolver, SaveGame, SavedEntity, Scene,
-        SceneAudioEmitter, SceneCollider, SceneEntity, SceneError, SceneNavGrid, SceneResolver,
-        SceneSpriteAnimation, SpriteAnimationData, SpriteData, TransformData, WorldSnapshot,
-        capture_renderables, executable_dir, load_mesh_geometry, load_skinned_mesh, open_export,
+        InstantiateReport, LoadedSkinnedMesh, MeshRendererData, ModelAnimationData, NavGridData,
+        NullResolver, Prefab, ProjectionData, RuleAction, RuleCompare, RuleCondition, RuleData,
+        RuleEvent, RuleOutcome, RuleTrigger, RuleVariables, RuntimeResolver, SaveGame, SavedEntity,
+        Scene, SceneAudioEmitter, SceneCollider, SceneEntity, SceneError, SceneModelAnimation,
+        SceneNavGrid, SceneResolver, SceneSpriteAnimation, SkinnedModel, SpriteAnimationData,
+        SpriteData, TransformData, WorldSnapshot, capture_renderables, executable_dir,
+        load_mesh_geometry, load_skinned_mesh, open_export,
     };
     pub use engine_scripting::GameCommand;
     #[cfg(feature = "lua")]

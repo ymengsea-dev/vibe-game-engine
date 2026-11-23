@@ -80,9 +80,13 @@ fn animation_uv(
     animation: &SceneSpriteAnimation,
 ) -> Option<UvRect> {
     let grid = GridRegion::parse(&source.region)?;
-    let first = u64::from(grid.row) * u64::from(grid.columns) + u64::from(grid.column);
-    let frame = (animation.elapsed * animation.data.fps).floor() as u64;
-    let index = first.checked_add(frame.min(u64::from(animation.data.frames.saturating_sub(1))))?;
+    let data = animation.current();
+    let first = animation.clip.map_or(
+        u64::from(grid.row) * u64::from(grid.columns) + u64::from(grid.column),
+        |clip| u64::from(clip.first),
+    );
+    let frame = (animation.elapsed * data.fps).floor() as u64;
+    let index = first.checked_add(frame.min(u64::from(data.frames.saturating_sub(1))))?;
     let columns = u64::from(grid.columns);
     (index < columns * u64::from(grid.rows)).then(|| {
         GridRegion {
@@ -109,15 +113,15 @@ pub fn advance_sprite_animations(world: &mut World, dt: f32) {
         if !animation.elapsed.is_finite() || animation.elapsed < 0.0 {
             animation.elapsed = 0.0;
         }
-        let duration = animation.data.frames as f32 / animation.data.fps;
+        let data = animation.current();
+        let duration = data.frames as f32 / data.fps;
         if !duration.is_finite() || duration <= 0.0 {
             continue;
         }
-        animation.elapsed = if animation.data.looping {
+        animation.elapsed = if data.looping {
             (animation.elapsed + dt.rem_euclid(duration)).rem_euclid(duration)
         } else {
-            (animation.elapsed + dt)
-                .min((animation.data.frames.saturating_sub(1)) as f32 / animation.data.fps)
+            (animation.elapsed + dt).min((data.frames.saturating_sub(1)) as f32 / data.fps)
         };
         if let Some(uv) = animation_uv(full, source, &animation) {
             sprite.uv = uv;
@@ -135,7 +139,7 @@ pub fn next_sprite_animation_frame(world: &World) -> Option<Duration> {
         })
         .filter_map(|entity| entity.get::<SceneSpriteAnimation>())
         .filter_map(|animation| {
-            let data = animation.data;
+            let data = animation.current();
             if data.frames <= 1
                 || !animation.playing
                 || data.frames > 4096
@@ -412,6 +416,36 @@ mod tests {
         assert_eq!(next_sprite_animation_frame(&world), None);
         advance_sprite_animations(&mut world, 0.5);
         assert_eq!(world.get::<Sprite>(entity).unwrap().uv.min[0], 0.25);
+
+        // A named clip starts at its own cell and uses its own settings.
+        world
+            .get_mut::<crate::SceneSpriteAnimation>(entity)
+            .unwrap()
+            .play_clip(
+                &crate::SpriteClipData {
+                    name: "jump".into(),
+                    first: 2,
+                    frames: 2,
+                    fps: 1.0,
+                    looping: false,
+                },
+                None,
+                2.0,
+            );
+        advance_sprite_animations(&mut world, 0.25);
+        assert_eq!(world.get::<Sprite>(entity).unwrap().uv.min[0], 0.5);
+        advance_sprite_animations(&mut world, 0.3);
+        assert_eq!(
+            world.get::<Sprite>(entity).unwrap().uv.min[0],
+            0.75,
+            "2 fps"
+        );
+        advance_sprite_animations(&mut world, 5.0);
+        assert_eq!(
+            world.get::<Sprite>(entity).unwrap().uv.min[0],
+            0.75,
+            "holds"
+        );
     }
 
     fn pixel(rgba: [u8; 4]) -> ImportedTexture {

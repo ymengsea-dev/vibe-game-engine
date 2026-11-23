@@ -29,6 +29,7 @@
 //! }
 //! ```
 
+mod animation;
 mod bodies;
 mod camera;
 mod collisions;
@@ -53,10 +54,12 @@ use engine_ui::NodeId;
 
 use crate::app::{GameContext, GameError};
 
+pub use animation::AnimationEventFired;
 pub use bodies::GameplayQueries;
 pub use camera::{choose_active_camera, view_from_world};
 pub use collisions::{CollisionEvent, ContactKind, ContactTracker};
 pub use commands::{PrefabSpawner, apply_world_commands, find_object, find_objects_by_tag};
+pub use engine_scene::{AnimatorState, AnimatorValues};
 pub use keys::platform_key;
 pub use prefab::{instantiate_prefab, refresh_prefab_copies, valid_prefab_path};
 pub use presentation::{scene_lights, spawn_audio_listener};
@@ -290,7 +293,8 @@ impl GameplayRuntime {
             match &self.assets {
                 Some(library) => {
                     let mut resolver =
-                        RuntimeResolver::new(library, parts.gpu, parts.pipeline, parts.assets);
+                        RuntimeResolver::new(library, parts.gpu, parts.pipeline, parts.assets)
+                            .with_skinned_pipeline(parts.skinned_pipeline);
                     let report = self
                         .scene
                         .instantiate_with_resolver(parts.world, &mut resolver);
@@ -538,7 +542,8 @@ impl GameplayRuntime {
             match &self.assets {
                 Some(library) => {
                     let mut resolver =
-                        RuntimeResolver::new(library, parts.gpu, parts.pipeline, parts.assets);
+                        RuntimeResolver::new(library, parts.gpu, parts.pipeline, parts.assets)
+                            .with_skinned_pipeline(parts.skinned_pipeline);
                     scene.instantiate_with_resolver(parts.world, &mut resolver)
                 }
                 None => {
@@ -652,6 +657,7 @@ impl GameplayRuntime {
             let assets = self.assets.as_ref();
             let mut resolver = assets.map(|library| {
                 RuntimeResolver::new(library, parts.gpu, parts.pipeline, parts.assets)
+                    .with_skinned_pipeline(parts.skinned_pipeline)
             });
             let mut spawner = |world: &mut _, path: &str, object_id: &str, position| {
                 let (Some(library), Some(resolver)) = (assets, resolver.as_mut()) else {
@@ -895,6 +901,34 @@ impl GameplayRuntime {
             self.run_rule_event(ctx, RuleEvent::UiClicked(id));
         }
         clicked
+    }
+
+    /// Runs animators: each animated model with one moves between its
+    /// states by their transitions. Call once per frame in `update`, after
+    /// the game's own update, so values it set this frame count. Does
+    /// nothing while the game is paused.
+    pub fn update_animators(&mut self, ctx: &mut GameContext<'_>) {
+        if !ctx.simulation_paused() {
+            animation::update_animators(ctx.world_mut());
+        }
+    }
+
+    /// The clip events animated objects passed since the last call, after
+    /// running their "Animation event" rules. Call once per frame in
+    /// `update`, after `update_rules`, and give each to the object's script
+    /// (Lua: `on_animation_event(object_id, name)`).
+    pub fn animation_events(&mut self, ctx: &mut GameContext<'_>) -> Vec<AnimationEventFired> {
+        let fired = animation::take_animation_events(ctx.world_mut());
+        for event in &fired {
+            self.run_rule_event(
+                ctx,
+                RuleEvent::Animation {
+                    owner: &event.object_id,
+                    name: &event.name,
+                },
+            );
+        }
+        fired
     }
 
     /// Contact enter/exit events since the last call, after running their

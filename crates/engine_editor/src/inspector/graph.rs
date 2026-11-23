@@ -216,6 +216,7 @@ fn event_label(trigger: &RuleTrigger, object_targets: &[(String, String)]) -> St
         ),
         RuleTrigger::VariableChanged { name } => format!("When variable\n{name} changes"),
         RuleTrigger::StateChanged { state } => format!("When state\n{}", state.label()),
+        RuleTrigger::AnimationEvent { name } => format!("When animation\n{name}"),
     }
 }
 

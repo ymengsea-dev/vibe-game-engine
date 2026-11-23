@@ -53,6 +53,10 @@ pub fn capture_renderables(
             material_override: world
                 .get::<crate::SceneMaterialOverride>(entity)
                 .map(|override_data| override_data.0.clone()),
+            animation: world
+                .get::<crate::SceneModelAnimation>(entity)
+                .map(|animation| animation.0.clone())
+                .filter(|animation| *animation != crate::ModelAnimationData::default()),
         });
 
     let sprite = world.get::<SpriteSource>(entity).map(|source| {
@@ -67,7 +71,12 @@ pub fn capture_renderables(
             z_order: live.map_or(source.z_order, |sprite| sprite.z_order),
             animation: world
                 .get::<crate::SceneSpriteAnimation>(entity)
+                .filter(|animation| animation.authored)
                 .map(|animation| animation.data),
+            clips: world
+                .get::<crate::SceneSpriteClips>(entity)
+                .map(|clips| clips.0.clone())
+                .unwrap_or_default(),
         }
     });
 
@@ -113,6 +122,34 @@ mod tests {
             "9c858901-8a57-4791-81fe-4c455b099bc9"
         );
         assert!(sprite.is_none());
+    }
+
+    #[test]
+    fn captures_model_animation_only_when_changed_from_the_defaults() {
+        let mut world = World::new();
+        let plain = world
+            .spawn((mesh_source(), crate::SceneModelAnimation::default()))
+            .id();
+        let walking = world
+            .spawn((
+                mesh_source(),
+                crate::SceneModelAnimation(crate::ModelAnimationData {
+                    clip: Some("walk".into()),
+                    ..Default::default()
+                }),
+            ))
+            .id();
+
+        let (plain, _) = capture_renderables(&world, plain);
+        let (walking, _) = capture_renderables(&world, walking);
+
+        assert!(plain.and_then(|data| data.animation).is_none());
+        assert_eq!(
+            walking
+                .and_then(|data| data.animation)
+                .and_then(|data| data.clip),
+            Some("walk".into())
+        );
     }
 
     #[test]
