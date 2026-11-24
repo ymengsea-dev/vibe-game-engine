@@ -126,4 +126,4 @@ pub use shell::EditorShell;
 pub use state::{AUTOSAVE_FILE, DEFAULT_SCENE_PATH, EditorState, recovery_candidate};
 #[cfg(feature = "terminal")]
 pub use terminal::{Terminal, TerminalError};
-pub use viewport::Viewport;
+pub use viewport::{CullReport, Viewport};

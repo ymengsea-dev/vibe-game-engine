@@ -52,6 +52,8 @@ Put each version in the same glTF file as its own mesh, named with `_LOD` and a 
 
 Turn on **Overlays → Distance detail** to see simpler models and draw ranges from the Scene View camera, at the project's quality. Off, every model and plant is drawn in full.
 
+With **Overlays → Cull from game camera** also on, distances are measured from the game camera instead, so you can fly around and watch what it would draw.
+
 ## Not available yet
 
 - Animated characters always draw in full detail and at any distance.

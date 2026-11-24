@@ -24,7 +24,7 @@ use crate::propagate::propagate_transforms;
 
 /// What one [`extract_and_render`] call did this frame.
 ///
-/// `meshes_total - meshes_drawn` is the number of meshes frustum culling
+/// [`RenderStats::meshes_culled`] is the number of meshes frustum culling
 /// removed from the scene pass. Every resolved mesh — culled or not —
 /// may be culled separately by the directional light's frustum before the
 /// shadow pass.
@@ -46,6 +46,10 @@ pub struct RenderStats {
     /// drawn in the scene pass — as individual draws plus
     /// `auto_batched_drawn` folded into batches.
     pub meshes_drawn: u32,
+    /// Of `meshes_total`, how many transparent meshes were inside the
+    /// camera frustum and drawn in the back-to-front blended pass. Not part
+    /// of `meshes_drawn`.
+    pub transparent_drawn: u32,
     /// `SkinnedMeshRenderer` entities drawn this frame (both handles
     /// resolved). Not frustum-culled — an animated pose can deform a mesh
     /// outside its bind-pose bounds.
@@ -89,6 +93,18 @@ pub struct RenderStats {
     pub shadow_draws: u32,
     /// Submitted scene-pass draw calls, after batching.
     pub main_draws: u32,
+}
+
+impl RenderStats {
+    /// Of `meshes_total`, how many were outside the camera frustum and so
+    /// skipped in the scene pass (they may still cast shadows).
+    #[must_use]
+    pub fn meshes_culled(&self) -> u32 {
+        self.meshes_total
+            .saturating_sub(self.meshes_beyond_draw_distance)
+            .saturating_sub(self.meshes_drawn)
+            .saturating_sub(self.transparent_drawn)
+    }
 }
 
 /// Whether a mesh whose object-space extent is `local_bounds`, positioned
@@ -1069,6 +1085,7 @@ pub fn extract_and_render_to(
         meshes_total: resolved_meshes,
         meshes_beyond_draw_distance: beyond_draw_distance,
         meshes_drawn: visible.len() as u32,
+        transparent_drawn: transparent.len() as u32,
         skinned_drawn: skinned_drawables.len() as u32,
         instances_total,
         instances_drawn,
@@ -1818,5 +1835,18 @@ mod tests {
         // Copy + Eq still hold with the new fields.
         let copy = stats;
         assert_eq!(stats, copy);
+    }
+
+    #[test]
+    fn render_stats_culled_meshes_leave_out_far_and_transparent_ones() {
+        let stats = RenderStats {
+            meshes_total: 10,
+            meshes_beyond_draw_distance: 2,
+            meshes_drawn: 4,
+            transparent_drawn: 1,
+            ..RenderStats::default()
+        };
+        assert_eq!(stats.meshes_culled(), 3);
+        assert_eq!(RenderStats::default().meshes_culled(), 0);
     }
 }

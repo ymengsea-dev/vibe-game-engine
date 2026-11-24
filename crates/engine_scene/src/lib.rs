@@ -23,6 +23,7 @@
 //! [`SceneEntity`] shape as a reusable entity template, instantiable into
 //! a live `World` any number of times.
 
+mod active_camera;
 mod ai;
 mod animator;
 mod behaviour_tree;
@@ -40,6 +41,7 @@ mod resolve;
 mod rules;
 mod runtime;
 mod save;
+mod stream_area;
 mod sprite_atlas;
 mod terrain;
 mod ui;
@@ -60,6 +62,7 @@ pub use animator::{
     MAX_TRANSITION_FADE, default_position as default_animator_position,
     valid_name as valid_animator_state_name,
 };
+pub use active_camera::{choose_active_camera, game_camera_view, view_from_world};
 pub use camera_pose::{adopt_legacy_camera_poses, camera_world_pose, look_rotation};
 pub use capture::capture_renderables;
 pub use environment::{AmbientSound, spawn_ambient_sounds};
@@ -100,10 +103,15 @@ pub use rules::{
     format_variable, valid_variable_name,
 };
 pub use runtime::{
-    AssetLibrary, BUNDLE_FILE, EXPORT_SCENE_FILE, ExportContent, LoadedSkinnedMesh, LodCache,
+    AssetLibrary, BUNDLE_FILE, EXPORT_SCENE_FILE, ExportContent, ImportCache, LoadedSkinnedMesh,
+    LodCache,
     MeshGeometry, RuntimeResolver, attach_lod_tiers, base_mesh, executable_dir, load_mesh_geometry,
     load_skinned_mesh, lod_tier_geometry, material_from_imported, open_export, skinned_parts,
     upload_skinned_model,
+};
+pub use stream_area::{
+    MAX_AREA_DISTANCE, PlacedArea, SceneStreamArea, StreamAreaData, StreamPlan, distance_to_area,
+    plan_streaming,
 };
 pub use save::{CURRENT_SAVE_VERSION, SaveGame, SavedEntity, WorldSnapshot};
 pub use sprite_atlas::{

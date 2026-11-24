@@ -9,95 +9,19 @@ use std::collections::HashSet;
 
 use engine_ecs::AudioListener;
 use engine_ecs::components::{
-    ActiveCamera, Camera as CameraComponent, CameraFollow, FollowMode, GlobalTransform, OrbitInput,
+    Camera as CameraComponent, CameraFollow, FollowMode, GlobalTransform, OrbitInput,
     ThirdPersonState, Transform as TransformComponent,
 };
 use engine_ecs::prelude::{ChildOf, Entity, World};
-use engine_scene::{SceneObjectId, camera_world_pose, look_rotation};
+use engine_scene::{SceneObjectId, game_camera_view as presented_view, look_rotation};
+pub use engine_scene::{choose_active_camera, view_from_world};
 use engine_scripting::GameCommand;
 use engine_utils::Rng;
-use glam::{Mat3, Mat4, Quat, Vec2, Vec3};
+use glam::{Mat3, Quat, Vec2, Vec3};
 
 use super::GameplayRuntime;
 use super::commands::find_object;
 use crate::app::GameContext;
-
-/// The camera entity the game views through.
-///
-/// `scene_order` is the scene's entities in scene order. Among those that are
-/// still cameras, the first with [`ActiveCamera`] wins, else the first camera.
-/// When none qualify, other camera entities (spawned at runtime) are ordered
-/// by entity index, again preferring [`ActiveCamera`].
-pub fn choose_active_camera(world: &mut World, scene_order: &[Entity]) -> Option<Entity> {
-    // A disabled camera object is switched off; never view through it.
-    let is_camera = |world: &World, entity: Entity| {
-        world.get::<CameraComponent>(entity).is_some()
-            && world
-                .get::<engine_ecs::components::Disabled>(entity)
-                .is_none()
-    };
-    let is_active = |world: &World, entity: Entity| world.get::<ActiveCamera>(entity).is_some();
-    let listed: Vec<Entity> = scene_order
-        .iter()
-        .copied()
-        .filter(|entity| is_camera(world, *entity))
-        .collect();
-    let candidates = if listed.is_empty() {
-        let mut others: Vec<Entity> = world
-            .query::<(Entity, &CameraComponent)>()
-            .iter(world)
-            .map(|(entity, _)| entity)
-            .filter(|entity| is_camera(world, *entity))
-            .collect();
-        others.sort_by_key(|entity| entity.index());
-        others
-    } else {
-        listed
-    };
-    candidates
-        .iter()
-        .copied()
-        .find(|entity| is_active(world, *entity))
-        .or_else(|| candidates.first().copied())
-}
-
-/// The renderer camera for a camera object whose world matrix is `world`:
-/// eye, target and up from the matrix, everything else from `camera`.
-pub fn view_from_world(
-    camera: &engine_renderer::Camera,
-    world: Mat4,
-    aspect: f32,
-) -> engine_renderer::Camera {
-    let (eye, target, up) = camera_world_pose(world);
-    engine_renderer::Camera {
-        eye,
-        target,
-        up,
-        aspect_ratio: aspect,
-        ..*camera
-    }
-}
-
-/// The view `entity` presents, or `None` when it is not a camera. An object
-/// with no transform keeps the camera component's own view.
-fn presented_view(world: &World, entity: Entity, aspect: f32) -> Option<engine_renderer::Camera> {
-    let camera = world.get::<CameraComponent>(entity)?.0;
-    let matrix = world
-        .get::<GlobalTransform>(entity)
-        .map(|global| global.0.to_matrix())
-        .or_else(|| {
-            world
-                .get::<TransformComponent>(entity)
-                .map(|local| local.0.to_matrix())
-        });
-    Some(match matrix {
-        Some(matrix) => view_from_world(&camera, matrix, aspect),
-        None => engine_renderer::Camera {
-            aspect_ratio: aspect,
-            ..camera
-        },
-    })
-}
 
 /// Where the audio listener sits for `camera`: at the eye, facing the view.
 pub(super) fn listener_transform(camera: &engine_renderer::Camera) -> engine_utils::Transform {
@@ -767,6 +691,7 @@ pub(crate) fn present_in_world(
 mod tests {
     use super::*;
     use crate::scene::Scene;
+    use engine_ecs::components::ActiveCamera;
     use engine_ecs::components::{CameraFollow, OrbitInput};
     use engine_ecs::components::{GlobalTransform, Transform};
     use engine_ecs::prelude::ChildOf;

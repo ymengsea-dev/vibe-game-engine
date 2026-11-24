@@ -882,7 +882,7 @@ pub fn is_group(world: &World, entity: Entity) -> bool {
 }
 
 /// Every entity in the tree, parents before children, in sibling order.
-fn tree_order(world: &mut World) -> Vec<Entity> {
+pub(crate) fn tree_order(world: &mut World) -> Vec<Entity> {
     let mut order = Vec::new();
     for root in roots(world) {
         flatten_visible(world, root, None, &mut order);

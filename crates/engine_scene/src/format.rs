@@ -1988,6 +1988,10 @@ pub struct SceneEntity {
     /// How this object walks, senses and decides, if it has AI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<crate::ai::AiData>,
+    /// The world area this object marks, if it is one: a scene loaded
+    /// while the camera is near.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_area: Option<crate::stream_area::StreamAreaData>,
     /// In Studio with several scenes open, the scene file this object is
     /// saved to, when it isn't the main one. Never written to a file: the file
     /// an object is in says this already.

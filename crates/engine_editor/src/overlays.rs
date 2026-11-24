@@ -67,6 +67,18 @@ const AI_SIGHT_COLOR: [f32; 4] = [0.88, 0.69, 0.41, 0.8];
 const AI_HEARING_COLOR: [f32; 4] = [0.733, 0.604, 0.969, 0.7];
 /// Colour of patrol points and the route between them: `theme::NIGHT.success`.
 const AI_ROUTE_COLOR: [f32; 4] = [0.62, 0.81, 0.42, 0.9];
+/// Colour of the game camera's view volume while the Scene View culls from
+/// it: `theme::NIGHT.info` (#7DCFFF), brighter than the other cameras.
+const CULL_CAMERA_COLOR: [f32; 4] = [0.49, 0.81, 1.0, 1.0];
+/// Colour of the outline around an object the game camera skips:
+/// `theme::NIGHT.danger` (#F7768E), faint so a crowded scene stays readable.
+const CULLED_COLOR: [f32; 4] = [0.97, 0.46, 0.56, 0.45];
+/// Colour of a world area's box: `theme::NIGHT.info` (#7DCFFF).
+const AREA_COLOR: [f32; 4] = [0.49, 0.81, 1.0, 0.9];
+/// Colour of the box where a world area starts loading: the same, fainter.
+const AREA_LOAD_COLOR: [f32; 4] = [0.49, 0.81, 1.0, 0.35];
+/// Most skipped objects outlined per frame.
+const MAX_CULLED_OUTLINES: usize = 4_096;
 
 /// Size of a point-light marker, in world units.
 const LIGHT_MARKER_SIZE: f32 = 0.35;
@@ -107,13 +119,28 @@ pub struct OverlayToggles {
     /// at the project's quality. Off shows every mesh in full detail.
     #[serde(default)]
     pub distance_detail: bool,
+    /// Skip objects, and pick distance detail, as the game camera would,
+    /// while the Scene View camera stays free. Draws the game camera's view
+    /// volume and outlines what it skips.
+    #[serde(default)]
+    pub cull_from_game_camera: bool,
+    /// Every world area: its box, and the bigger box where its scene starts
+    /// loading. A selected area is always drawn.
+    #[serde(default)]
+    pub stream_areas: bool,
 }
 
 impl OverlayToggles {
     /// Whether any overlay is on. All off draws nothing at all — no
     /// vertices, and the caller skips the draw call.
     pub fn any(self) -> bool {
-        self.all_colliders || self.lights || self.cameras || self.grid || self.audio || self.nav
+        self.all_colliders
+            || self.lights
+            || self.cameras
+            || self.grid
+            || self.audio
+            || self.nav
+            || self.stream_areas
     }
 }
 
@@ -151,6 +178,7 @@ pub fn build(
     let selected = selected_with_descendants(world, selection);
     draw_selection_bounds(world, &selected, &mesh_bounds, draw);
     draw_ai(world, selection, draw);
+    draw_stream_areas(world, selection, toggles.stream_areas, draw);
     draw_colliders(world, draw, &selected, toggles.all_colliders);
     if let Some(sun) = sun {
         draw_sun(lights, sun, draw);
@@ -172,6 +200,32 @@ pub fn build(
     }
     if toggles.nav {
         draw_nav_grid(world, draw);
+    }
+}
+
+/// World areas: the selected ones, or all of them when `all`. Each gets its
+/// box and, fainter, the box grown by its load distance (the corners of the
+/// real loading shape are rounded; the box is close enough to place it).
+fn draw_stream_areas(world: &mut World, selection: &[Entity], all: bool, draw: &mut DebugDraw) {
+    let areas: Vec<Entity> = if all {
+        world
+            .query_filtered::<Entity, bevy_ecs::query::With<engine_scene::SceneStreamArea>>()
+            .iter(world)
+            .collect()
+    } else {
+        selection.to_vec()
+    };
+    for entity in areas {
+        let Some(area) = world.get::<engine_scene::SceneStreamArea>(entity) else {
+            continue;
+        };
+        let half = Vec3::from(area.0.half_extents);
+        let grown = half + Vec3::splat(area.0.load_distance);
+        let centre = world_matrix(world, entity).transform_point3(Vec3::ZERO);
+        draw.wire_box(centre, half, AREA_COLOR);
+        if area.0.load_distance > 0.0 {
+            draw.wire_box(centre, grown, AREA_LOAD_COLOR);
+        }
     }
 }
 
@@ -507,6 +561,45 @@ fn draw_cameras(world: &mut World, draw: &mut DebugDraw) {
         }
         draw.frustum(camera.view_projection_matrix(), CAMERA_COLOR);
     }
+}
+
+/// The game camera's view volume, drawn while the Scene View culls from it.
+pub(crate) fn draw_game_camera(draw: &mut DebugDraw, view: &engine_renderer::Camera) {
+    draw.frustum(view.view_projection_matrix(), CULL_CAMERA_COLOR);
+}
+
+/// Outlines every mesh object outside `frustum`: the ones the game camera
+/// skips. `bounds` gives an entity's local mesh bounds, and `None` for
+/// anything the camera never culls. Returns how many were outlined.
+pub(crate) fn draw_culled(
+    world: &mut World,
+    frustum: &engine_renderer::Frustum,
+    bounds: impl Fn(&World, Entity) -> Option<Aabb>,
+    draw: &mut DebugDraw,
+) -> usize {
+    let meshes: Vec<Entity> = world
+        .query_filtered::<Entity, Without<engine_ecs::components::Hidden>>()
+        .iter(world)
+        .collect();
+    let mut outlined = 0;
+    for entity in meshes {
+        if outlined == MAX_CULLED_OUTLINES {
+            break;
+        }
+        let Some(local) = bounds(world, entity) else {
+            continue;
+        };
+        let world_bounds = local.transformed(&world_matrix(world, entity));
+        if !frustum.intersects_aabb(&world_bounds) {
+            draw.wire_box(
+                world_bounds.center(),
+                world_bounds.half_extents(),
+                CULLED_COLOR,
+            );
+            outlined += 1;
+        }
+    }
+    outlined
 }
 
 /// The sun's direction as an arrow pointing into `sun.at`, the way its
@@ -1110,5 +1203,59 @@ mod tests {
             !draw.is_empty(),
             "objects without a mesh still get a marker"
         );
+    }
+
+    #[test]
+    fn objects_outside_the_game_camera_are_outlined() {
+        let mut world = World::new();
+        let place = |z: f32| {
+            Transform::from(engine_utils::Transform::from_translation(Vec3::new(
+                0.0, 0.0, z,
+            )))
+        };
+        world.spawn((Name::new("In front"), place(-10.0)));
+        world.spawn((Name::new("Behind"), place(10.0)));
+        world.spawn((
+            Name::new("Hidden"),
+            place(10.0),
+            engine_ecs::components::Hidden,
+        ));
+        // The camera itself has no mesh, so it is never outlined.
+        world.spawn(place(0.0));
+        let camera = engine_renderer::Camera::new(Vec3::ZERO, Vec3::NEG_Z, 1.5);
+        let unit = Aabb {
+            min: Vec3::splat(-0.5),
+            max: Vec3::splat(0.5),
+        };
+        let mut draw = DebugDraw::new();
+        let outlined = draw_culled(
+            &mut world,
+            &camera.frustum(),
+            |world, entity| world.get::<Name>(entity).map(|_| unit),
+            &mut draw,
+        );
+        assert_eq!(outlined, 1);
+        assert!(!draw.vertices().is_empty());
+    }
+
+    #[test]
+    fn a_selected_world_area_draws_its_box_and_where_it_loads() {
+        let mut world = World::new();
+        let area = world
+            .spawn((
+                Name::new("Forest area"),
+                Transform::from(engine_utils::Transform::IDENTITY),
+                engine_scene::SceneStreamArea(engine_scene::StreamAreaData::default()),
+            ))
+            .id();
+        let mut draw = DebugDraw::new();
+        draw_stream_areas(&mut world, &[], false, &mut draw);
+        assert!(draw.vertices().is_empty(), "nothing selected, overlay off");
+        draw_stream_areas(&mut world, &[area], false, &mut draw);
+        let one_box = draw.vertices().len() / 2;
+        assert!(one_box > 0);
+        let mut all = DebugDraw::new();
+        draw_stream_areas(&mut world, &[], true, &mut all);
+        assert_eq!(all.vertices().len(), draw.vertices().len());
     }
 }

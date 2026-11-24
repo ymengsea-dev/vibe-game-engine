@@ -42,6 +42,7 @@ mod presentation;
 mod rule_runtime;
 mod scenes;
 mod state;
+mod streaming;
 #[cfg(test)]
 mod tests;
 
@@ -186,6 +187,10 @@ pub struct GameplayRuntime {
     scene_loads: VecDeque<SceneLoad>,
     /// The scenes loaded on top of the current one, with their objects' IDs.
     loaded_scenes: Vec<(String, HashSet<String>)>,
+    /// Which of `loaded_scenes` world areas loaded (see `streaming`).
+    streamed: HashSet<String>,
+    /// Scenes and model files kept for areas that load again.
+    stream_cache: streaming::StreamCache,
     /// The path of the current scene, when known. `None` means the start scene.
     scene_path: Option<String>,
     /// The loading screen scene, once looked for.
@@ -241,6 +246,8 @@ impl GameplayRuntime {
             destroyed: Vec::new(),
             scene_loads: VecDeque::new(),
             loaded_scenes: Vec::new(),
+            streamed: HashSet::new(),
+            stream_cache: streaming::StreamCache::default(),
             scene_path: None,
             loading_screen: None,
             change_after_loading: None,
@@ -526,6 +533,7 @@ impl GameplayRuntime {
     /// loaded come out of [`Self::take_rule_spawns`], and of what was removed
     /// out of [`Self::take_destroyed`].
     pub fn apply_scene_loads(&mut self, ctx: &mut GameContext<'_>) {
+        self.queue_streaming(ctx);
         while let Some(request) = self.scene_loads.pop_front() {
             match request {
                 SceneLoad::Load(path) => {
@@ -549,7 +557,7 @@ impl GameplayRuntime {
             tracing::warn!(scene = %path, "this scene is already loaded");
             return Ok(());
         }
-        let mut scene = self.load_scene(path)?;
+        let mut scene = self.scene_to_load(path)?;
         // Whatever is already alive isn't made twice: a kept object, say.
         let alive: HashSet<String> = scene
             .entities
@@ -568,10 +576,16 @@ impl GameplayRuntime {
             let parts = ctx.scene_parts();
             match &self.assets {
                 Some(library) => {
+                    // Model files stay imported between loads on top, so an
+                    // area coming back doesn't read them again.
                     let mut resolver =
                         RuntimeResolver::new(library, parts.gpu, parts.pipeline, parts.assets)
-                            .with_skinned_pipeline(parts.skinned_pipeline);
-                    scene.instantiate_with_resolver(parts.world, &mut resolver)
+                            .with_skinned_pipeline(parts.skinned_pipeline)
+                            .with_imports(std::mem::take(&mut self.stream_cache.imports));
+                    let report = scene.instantiate_with_resolver(parts.world, &mut resolver);
+                    self.stream_cache.imports = resolver.take_imports();
+                    self.stream_cache.trim();
+                    report
                 }
                 None => {
                     scene.instantiate_with_resolver(parts.world, &mut engine_scene::NullResolver)
@@ -1134,6 +1148,8 @@ impl GameplayRuntime {
         self.ai_events.clear();
         self.scene_loads.clear();
         self.loaded_scenes.clear();
+        self.streamed.clear();
+        self.stream_cache = streaming::StreamCache::default();
         self.loading_nodes.clear();
         self.change_after_loading = None;
         self.scene = scene;

@@ -105,6 +105,30 @@ The header shows `main + 1` when one more scene is open. The Hierarchy has a row
 
 A scene loaded on top brings its objects, scripts, rules and Game UI. Its lighting, environment and nav grid are not used. Changing scene removes everything loaded on top, except objects with **Keep between scenes**. Asking for the next scene after the last one does nothing.
 
+### World areas (streaming)
+
+A big world can be split into areas that load only while the game camera is near, so the game keeps just the nearby parts in memory.
+
+1. Put each part of the world in its own scene (for example `scenes/forest.ron`), placed where it belongs in the world.
+2. In the main scene, add an empty object where the area is, and add **World Area** to it from the Inspector's **Add component**.
+3. Pick its **Scene**, set the **Size** of its box and **Load within**: how close to the box the game camera must come for the scene to load.
+
+| Setting | What it does |
+| --- | --- |
+| **Scene** | The scene that holds this part of the world |
+| **Size** | The box the area covers. It is centred on the object |
+| **Load within** | How close to the box the game camera must come for the scene to load. It unloads once the camera is a little farther away (10 % more, at least 2 m), so standing at the edge doesn't load it over and over |
+
+While playing, at most one area loads per frame, the nearest first. Model files stay loaded after an area unloads, so coming back is quicker. A selected area shows its box and, fainter, the box where it starts loading; **Overlays → World areas** shows every area. To edit an area's scene beside the main one, use **Open beside** in the Scenes window.
+
+Limits:
+
+- The box doesn't turn or scale with its object.
+- An area's own lighting, environment and nav grid are not used, as with any scene loaded on top.
+- Areas load around the game camera, not around a chosen object.
+- A big area can still pause the game for a moment while it loads.
+- A scene a rule or script loaded on top is left alone by areas.
+
 ### Loading screen
 
 If the project has a scene at `scenes/loading.ron`, its Game UI covers the game while another scene loads. **New Loading Screen** in the Scenes window makes one, a dark panel with "Loading…", and you can change it like any Game UI. It isn't used when loading a scene on top. The game doesn't move while the screen is up, and there is no progress bar.
@@ -151,7 +175,16 @@ Helper drawings. The game never shows them.
 | **Ground grid** | 1 m squares on the floor |
 | **Audio emitters** | Each sound and how far it can be heard |
 | **Nav grid** | The walkable area: where characters can walk, lying on the ground (red cross = blocked). Big areas draw every few cells |
+| **World areas** | Every world area's box, and fainter, the box where its scene starts loading |
 | **Distance detail** | Draws models as the game will from the Scene View camera: simpler versions far away, and nothing past each object's draw distance, at the project's graphics quality. Off shows every model in full |
+| **Cull from game camera** | Skips what the game camera can't see, while you keep moving the Scene View camera freely. The game camera's view is outlined in light blue, and each skipped model gets a faint red box. A badge in the top-left corner counts models drawn, skipped and too far away, plus plants and terrain pieces drawn out of the total. Distance detail and terrain detail are measured from the game camera too. The game camera is the one ticked **Active camera** (or the first camera) |
+
+**Cull from game camera** limits:
+
+- Animated characters and 2D sprites are never skipped, in the game too.
+- Skipped models still cast shadows, as in the game.
+- Skipped plants and terrain pieces are counted but get no red box.
+- The view takes the Scene View panel's shape, as when you press Play there. A game window of another shape sees a little more or less at the sides.
 
 ## Cameras
 

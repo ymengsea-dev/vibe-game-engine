@@ -1340,9 +1340,84 @@ fn show_scene_viewport(ui: &mut egui::Ui, viewport: &Viewport, state: &mut Edito
         .on_hover_cursor(egui::CursorIcon::Default);
     handle_scene_view_input(ui, viewport, state, &image_response);
     paint_scene_ui_preview(ui, state, image_response.rect);
+    if state.overlays.cull_from_game_camera
+        && let Some(report) = &state.cull_report
+    {
+        paint_cull_badge(ui, image_response.rect, report);
+    }
     if let Some(message) = &state.game_view.error {
         crate::game_view::paint_error(ui, image_response.rect, message);
     }
+}
+
+/// The drawn and skipped counts while the Scene View culls from the game
+/// camera, as a pill in the image's top-left corner.
+fn paint_cull_badge(ui: &egui::Ui, image: egui::Rect, report: &crate::CullReport) {
+    let palette = crate::theme::NIGHT;
+    let painter = ui.painter_at(image);
+    let galley = painter.layout_no_wrap(
+        cull_badge_text(report),
+        egui::FontId::proportional(12.0),
+        palette.text,
+    );
+    let badge = egui::Rect::from_min_size(
+        image.left_top() + egui::vec2(10.0, 10.0),
+        galley.size() + egui::vec2(16.0, 6.0),
+    );
+    painter.rect_filled(
+        badge,
+        badge.height() / 2.0,
+        palette.raised.gamma_multiply(0.92),
+    );
+    painter.galley(badge.center() - galley.size() / 2.0, galley, palette.text);
+}
+
+/// The line [`paint_cull_badge`] shows: objects drawn, skipped and too far,
+/// then instances and terrain pieces when the scene has any.
+fn cull_badge_text(report: &crate::CullReport) -> String {
+    if report.camera.is_none() {
+        return "No game camera in this scene".to_owned();
+    }
+    let stats = &report.stats;
+    let mut text = format!(
+        "Game camera · {} drawn · {} skipped",
+        count(stats.meshes_drawn + stats.transparent_drawn + stats.skinned_drawn),
+        count(stats.meshes_culled()),
+    );
+    if stats.meshes_beyond_draw_distance > 0 {
+        text.push_str(&format!(
+            " · {} too far",
+            count(stats.meshes_beyond_draw_distance)
+        ));
+    }
+    if stats.instances_total > 0 {
+        text.push_str(&format!(
+            " · instances {} / {}",
+            count(stats.instances_drawn),
+            count(stats.instances_total)
+        ));
+    }
+    if stats.terrain_chunks_total > 0 {
+        text.push_str(&format!(
+            " · terrain {} / {}",
+            count(stats.terrain_chunks_drawn),
+            count(stats.terrain_chunks_total)
+        ));
+    }
+    text
+}
+
+/// `n` with thousands separated by commas: 12,345.
+fn count(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// Shows why a scene didn't open, in the Scenes window.
@@ -4459,8 +4534,15 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
             ui.checkbox(&mut state.overlays.grid, "Ground grid");
             ui.checkbox(&mut state.overlays.audio, "Audio emitters");
             ui.checkbox(&mut state.overlays.nav, "Nav grid");
+            ui.checkbox(&mut state.overlays.stream_areas, "World areas")
+                .on_hover_text("Show every world area and where it starts loading");
             ui.checkbox(&mut state.overlays.distance_detail, "Distance detail")
                 .on_hover_text("Show simpler meshes and draw distances as the game would");
+            ui.checkbox(
+                &mut state.overlays.cull_from_game_camera,
+                "Cull from game camera",
+            )
+            .on_hover_text("Skip objects the game camera can't see, while you look around freely");
         });
         ui.menu_button("Terrain", |ui| {
             if ui.button("Create terrain").clicked() {
@@ -5002,6 +5084,39 @@ mod ui_tests {
         scene_ui_preview_tree, scroll_intent, shell_layout, viewport_render_size,
     };
     use crate::chrome::Workspace;
+
+    #[test]
+    fn cull_badge_counts_what_the_game_camera_drew_and_skipped() {
+        let mut world = engine_ecs::prelude::World::new();
+        let camera = world.spawn_empty().id();
+        let report = crate::CullReport {
+            camera: Some(camera),
+            stats: engine_ecs::RenderStats {
+                meshes_total: 1_500,
+                meshes_drawn: 120,
+                transparent_drawn: 4,
+                meshes_beyond_draw_distance: 12,
+                instances_total: 9_800,
+                instances_drawn: 4_200,
+                ..engine_ecs::RenderStats::default()
+            },
+        };
+        assert_eq!(
+            super::cull_badge_text(&report),
+            "Game camera · 124 drawn · 1,364 skipped · 12 too far · instances 4,200 / 9,800"
+        );
+        let none = crate::CullReport {
+            camera: None,
+            ..report
+        };
+        assert_eq!(
+            super::cull_badge_text(&none),
+            "No game camera in this scene"
+        );
+        assert_eq!(super::count(0), "0");
+        assert_eq!(super::count(999), "999");
+        assert_eq!(super::count(1_234_567), "1,234,567");
+    }
 
     #[test]
     fn ui_preview_places_elements_as_the_game_does() {
@@ -6612,6 +6727,42 @@ mod ui_tests {
         }
     }
 
+    /// Writes `inspector-stream-area.png`: a world area that loads the
+    /// forest scene. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_stream_area() {
+        let (root, mut state) = menu_test_state();
+        engine_scene::Scene::default()
+            .save_to_file(&root.join("scenes/forest.ron"))
+            .expect("forest scene");
+        let area = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Forest area"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                engine_scene::SceneStreamArea(engine_scene::StreamAreaData {
+                    scene: "scenes/forest.ron".into(),
+                    ..engine_scene::StreamAreaData::default()
+                }),
+            ))
+            .id();
+        state.select_only(area);
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-stream-area.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 620.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Writes `behaviour-tree-window.png`: a guard's tree that chases a seen
     /// target and otherwise patrols and waits, the patrol node selected.
     /// Needs a GPU adapter.
@@ -7020,6 +7171,42 @@ mod ui_tests {
         })
         .expect("snapshot");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The drawn/skipped badge over a dark Scene View, written to
+    /// `$VGE_SNAPSHOT_DIR/scene-cull-badge.png` for a visual check. Needs a
+    /// GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_scene_cull_badge() {
+        let mut world = engine_ecs::prelude::World::new();
+        let report = crate::CullReport {
+            camera: Some(world.spawn_empty().id()),
+            stats: engine_ecs::RenderStats {
+                meshes_total: 430,
+                meshes_drawn: 120,
+                transparent_drawn: 4,
+                meshes_beyond_draw_distance: 12,
+                instances_total: 9_800,
+                instances_drawn: 4_200,
+                terrain_chunks_total: 64,
+                terrain_chunks_drawn: 18,
+                ..engine_ecs::RenderStats::default()
+            },
+        };
+        let path = crate::ui_snapshot::snapshot_dir().join("scene-cull-badge.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(640.0, 120.0), 2.0, |ui| {
+            let rect = ui.max_rect();
+            ui.painter()
+                .rect_filled(rect, 0.0, egui::Color32::from_rgb(0x2A, 0x30, 0x3C));
+            super::paint_cull_badge(ui, rect, &report);
+            let none = crate::CullReport {
+                camera: None,
+                ..report
+            };
+            super::paint_cull_badge(ui, rect.translate(egui::vec2(0.0, 50.0)), &none);
+        })
+        .expect("snapshot");
     }
 
     /// A drag on a small handle must be judged from where the button went

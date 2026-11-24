@@ -400,11 +400,15 @@ pub struct RuntimeResolver<'a> {
     skinned_pipeline: Option<&'a engine_renderer::SkinnedPipeline>,
     /// Files already imported this load, so checking whether a model is
     /// animated and then uploading it still reads it once.
-    imported: HashMap<AssetId, std::sync::Arc<engine_asset::ImportedGltf>>,
+    imported: ImportCache,
     /// Detail tiers already uploaded this load, by asset and whether they
     /// include generated ones.
     lods: LodCache,
 }
+
+/// Imported model files by asset, kept so a later load can skip importing
+/// them again (see [`RuntimeResolver::with_imports`]).
+pub type ImportCache = HashMap<AssetId, std::sync::Arc<engine_asset::ImportedGltf>>;
 
 /// Detail-tier uploads shared by every entity placing the same model.
 pub type LodCache = HashMap<(AssetId, bool), (Vec<AssetHandle<Mesh>>, LodSource)>;
@@ -513,6 +517,20 @@ impl<'a> RuntimeResolver<'a> {
     ) -> Self {
         self.skinned_pipeline = Some(skinned_pipeline);
         self
+    }
+
+    /// The same resolver, starting from files an earlier load imported, so
+    /// loading a scene again doesn't re-read its models. Take them back with
+    /// [`Self::take_imports`].
+    pub fn with_imports(mut self, imported: ImportCache) -> Self {
+        self.imported = imported;
+        self
+    }
+
+    /// The files imported so far, including those passed to
+    /// [`Self::with_imports`]. Leaves this resolver's own cache empty.
+    pub fn take_imports(&mut self) -> ImportCache {
+        std::mem::take(&mut self.imported)
     }
 
     /// How many distinct meshes this resolver has uploaded.

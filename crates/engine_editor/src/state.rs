@@ -179,6 +179,9 @@ pub struct EditorState {
     /// Which Scene-view debug overlays are on. Persisted per project in
     /// the session.
     pub overlays: OverlayToggles,
+    /// What the last Scene View frame drew and skipped while culling from
+    /// the game camera; `None` while that overlay is off.
+    pub cull_report: Option<crate::CullReport>,
     /// The gizmo coordinate space shown in the toolbar (display-only for
     /// now — the gizmo still uses world axes).
     pub transform_space: TransformSpace,
@@ -544,6 +547,7 @@ impl EditorState {
             pending_action: None,
             configuration_index: 0,
             overlays: OverlayToggles::default(),
+            cull_report: None,
             export_request: None,
             sdk_upgrade_request: false,
             sdk_upgrade_message: None,

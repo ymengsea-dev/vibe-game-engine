@@ -344,6 +344,9 @@ impl SavedEntity {
             // Like the collider: the scene that spawned the object already
             // gave it its AI.
             ai: None,
+            // Like AI: the scene that spawned the object already made it an
+            // area.
+            stream_area: None,
             water: self.water,
             point_light: self.point_light,
             ui: None,

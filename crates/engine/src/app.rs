@@ -2859,6 +2859,124 @@ mod tests {
         fn update(&mut self, _ctx: &mut GameContext<'_>, _dt: f32) {}
     }
 
+    /// A world area loads its scene while the camera is near and unloads it
+    /// once the camera has gone, through the shared gameplay runtime as a
+    /// Rust game drives it. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn streaming_loads_an_area_near_the_camera_and_unloads_it_after() {
+        use crate::gameplay::{GameplayRuntime, SceneSource, find_object};
+        use engine_scene::{CameraData, SceneEntity, StreamAreaData, TransformData};
+        use std::cell::RefCell;
+
+        const CAMERA: &str = "00000000-0000-4000-8000-00000000c0a1";
+        const TREE: &str = "00000000-0000-4000-8000-00000000f0e1";
+
+        struct StreamGame {
+            gameplay: GameplayRuntime,
+            frames: u32,
+            log: Rc<RefCell<Vec<(bool, bool)>>>,
+        }
+        impl Game for StreamGame {
+            fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+                self.gameplay.setup(ctx)
+            }
+
+            fn update(&mut self, ctx: &mut GameContext<'_>, dt: f32) {
+                self.gameplay.begin_frame(ctx);
+                let streamed = self.gameplay.streamed_areas().count() == 1;
+                let tree = find_object(ctx.world(), TREE).is_some();
+                self.log.borrow_mut().push((streamed, tree));
+                self.frames += 1;
+                if self.frames == 3
+                    && let Some(camera) = find_object(ctx.world(), CAMERA)
+                    && let Some(mut transform) = ctx
+                        .world_mut()
+                        .get_mut::<engine_ecs::components::Transform>(camera)
+                {
+                    transform.0.translation = Vec3::new(500.0, 0.0, 0.0);
+                }
+                self.gameplay.present_camera(ctx, dt);
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("vge-streaming-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = engine_project::Project::create(&root, "Streaming").expect("project");
+        let mut main = engine_scene::Scene::default();
+        let mut camera = CameraData::from(engine_renderer::Camera::new(
+            Vec3::ZERO,
+            Vec3::NEG_Z,
+            1.0,
+        ));
+        camera.pose_from_transform = true;
+        camera.active = true;
+        main.entities.push(SceneEntity {
+            object_id: Some(CAMERA.into()),
+            name: Some("Camera".into()),
+            transform: Some(TransformData::from(engine_utils::Transform::IDENTITY)),
+            camera: Some(camera),
+            ..SceneEntity::default()
+        });
+        main.entities.push(SceneEntity {
+            name: Some("Forest area".into()),
+            transform: Some(TransformData::from(
+                engine_utils::Transform::from_translation(Vec3::new(0.0, 0.0, -20.0)),
+            )),
+            stream_area: Some(StreamAreaData {
+                scene: "scenes/forest.ron".into(),
+                half_extents: [10.0, 5.0, 10.0],
+                load_distance: 30.0,
+            }),
+            ..SceneEntity::default()
+        });
+        let mut forest = engine_scene::Scene::default();
+        forest.entities.push(SceneEntity {
+            object_id: Some(TREE.into()),
+            name: Some("Tree".into()),
+            transform: Some(TransformData::from(
+                engine_utils::Transform::from_translation(Vec3::new(0.0, 0.0, -20.0)),
+            )),
+            ..SceneEntity::default()
+        });
+        let scenes = root.join("scenes");
+        std::fs::create_dir_all(&scenes).expect("scenes folder");
+        main.save_to_file(&scenes.join("main.ron")).expect("main scene");
+        forest
+            .save_to_file(&scenes.join("forest.ron"))
+            .expect("forest scene");
+
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let game = StreamGame {
+            gameplay: GameplayRuntime::new(main, None)
+                .with_scene_source(SceneSource::Project(project)),
+            frames: 0,
+            log: Rc::clone(&log),
+        };
+        let gpu = GpuContext::headless(64, 64).expect("headless GPU");
+        let mut runner = GameRunner::new(
+            GameConfig::new("streaming", 64, 64),
+            game,
+            Rc::new(Cell::new(None)),
+        );
+        runner.start_with_gpu(gpu, 64, 64);
+        for _ in 0..6 {
+            runner.on_event(PlatformEvent::RedrawRequested);
+        }
+        assert!(runner.error_slot.take().is_none());
+        let log = log.borrow();
+        assert!(
+            log.iter().take(3).any(|&(streamed, tree)| streamed && tree),
+            "the forest loads while the camera is near: {log:?}"
+        );
+        assert_eq!(
+            log.last().copied(),
+            Some((false, false)),
+            "the forest unloads once the camera is 500 m away: {log:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Draws a mesh with two detail tiers and a draw distance through the
     /// real frame path on a headless GPU, then switches quality, so the
     /// distance-fade shaders and the shadow-map rebuild are exercised.

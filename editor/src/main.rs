@@ -2963,7 +2963,7 @@ impl EditorHandler {
                 }
             } else {
                 let sun = self.state.sun_arrow();
-                viewport.render(
+                self.state.cull_report = viewport.render(
                     gpu,
                     &mut self.state.world,
                     self.state.overlays,

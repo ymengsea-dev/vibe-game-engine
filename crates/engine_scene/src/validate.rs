@@ -568,6 +568,10 @@ impl SceneEntity {
         if let Some(ai) = &self.ai {
             ai.validate().map_err(|reason| format!("ai: {reason}"))?;
         }
+        if let Some(area) = &self.stream_area {
+            area.validate()
+                .map_err(|reason| format!("stream_area: {reason}"))?;
+        }
         if let Some(water) = self.water {
             engine_physics::WaterSurface::try_from(water)
                 .map_err(|error| format!("water: {error}"))?;

@@ -310,6 +310,9 @@ impl Scene {
             scene_entity.ai = world
                 .get::<crate::ai::SceneAi>(*entity)
                 .map(|carrier| carrier.0.clone());
+            scene_entity.stream_area = world
+                .get::<crate::stream_area::SceneStreamArea>(*entity)
+                .map(|carrier| carrier.0.clone());
             scene_entity.water = world
                 .get::<engine_ecs::components::WaterVolume>(*entity)
                 .map(|volume| volume.surface.into());

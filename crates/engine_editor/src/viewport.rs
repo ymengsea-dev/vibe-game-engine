@@ -601,7 +601,7 @@ impl Viewport {
         sun: Option<crate::overlays::SunArrow>,
         selection: &[Entity],
         quality: engine_renderer::QualityLevel,
-    ) {
+    ) -> Option<CullReport> {
         self.update_water(gpu, world);
         self.tick_animation_previews(gpu, world);
         self.lights = editor_lights(world);
@@ -667,6 +667,29 @@ impl Viewport {
             },
             &mut self.debug_draw,
         );
+        // Culling from the game camera: its view volume picks what is drawn
+        // and its eye picks distance detail; the Scene camera still decides
+        // what you see.
+        let game_view = if overlays.cull_from_game_camera {
+            game_camera(world, self.camera.aspect_ratio)
+        } else {
+            None
+        };
+        if let Some((_, view)) = &game_view {
+            crate::overlays::draw_game_camera(&mut self.debug_draw, view);
+            crate::overlays::draw_culled(
+                world,
+                &view.frustum(),
+                |world, entity| {
+                    let renderer = world.get::<engine_ecs::components::MeshRenderer>(entity)?;
+                    assets
+                        .meshes
+                        .get(renderer.mesh)
+                        .map(|mesh| mesh.local_bounds)
+                },
+                &mut self.debug_draw,
+            );
+        }
         if self.brush_ring.len() > 1 {
             self.debug_draw
                 .polyline(&self.brush_ring, crate::overlays::BRUSH_RING_COLOR);
@@ -674,7 +697,10 @@ impl Viewport {
         let lines = self.debug_draw.vertices();
         let debug_lines = (!lines.is_empty()).then_some((&self.debug_line_pipeline, lines));
 
-        let frustum = self.camera.frustum();
+        let (frustum, eye) = match &game_view {
+            Some((_, view)) => (view.frustum(), view.eye),
+            None => (self.camera.frustum(), self.camera.eye),
+        };
         let water_draws: Vec<_> = self
             .water_bindings
             .values()
@@ -684,7 +710,7 @@ impl Viewport {
             pipeline: &self.water_pipeline,
             draws: &water_draws,
         });
-        if let Err(err) = engine_ecs::extract_and_render_to(
+        let rendered = engine_ecs::extract_and_render_to(
             Some(RenderTarget::new(&self.view)),
             world,
             &self.assets,
@@ -700,13 +726,10 @@ impl Viewport {
             &frustum,
             overlays
                 .distance_detail
-                .then(|| engine_renderer::DistanceQuality::new(self.camera.eye, quality)),
+                .then(|| engine_renderer::DistanceQuality::new(eye, quality)),
             // Terrain always picks chunk detail by distance; the overlay
             // only governs meshes.
-            Some(engine_renderer::DistanceQuality::new(
-                self.camera.eye,
-                quality,
-            )),
+            Some(engine_renderer::DistanceQuality::new(eye, quality)),
             &self.lights_binding,
             &self.skinned_pipeline,
             &self.instanced_pipeline,
@@ -724,8 +747,16 @@ impl Viewport {
             None,
             // Scene View keeps drawing Disabled objects (ruling D5).
             true,
-        ) {
-            tracing::error!(error = %err, "editor viewport frame failed");
+        );
+        match rendered {
+            Ok(stats) => overlays.cull_from_game_camera.then(|| CullReport {
+                camera: game_view.map(|(entity, _)| entity),
+                stats,
+            }),
+            Err(err) => {
+                tracing::error!(error = %err, "editor viewport frame failed");
+                None
+            }
         }
     }
 
@@ -804,6 +835,24 @@ fn water_surfaces(world: &mut World) -> Vec<(Entity, engine_physics::WaterSurfac
         .collect()
 }
 
+/// What the Scene View drew while culling from the game camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CullReport {
+    /// The game camera culled from, or `None` when the scene has none (the
+    /// Scene camera culled as usual).
+    pub camera: Option<Entity>,
+    /// What the frame drew and skipped.
+    pub stats: engine_ecs::RenderStats,
+}
+
+/// The camera object the game would view through, and its view at
+/// `aspect`. The Scene View passes its own shape: Play shows the game there.
+fn game_camera(world: &mut World, aspect: f32) -> Option<(Entity, engine_renderer::Camera)> {
+    let order = crate::hierarchy::tree_order(world);
+    let entity = engine_scene::choose_active_camera(world, &order)?;
+    engine_scene::game_camera_view(world, entity, aspect).map(|view| (entity, view))
+}
+
 /// World-space positions of every visible entity that names a model
 /// ([`MeshSource`]) but has no [`MeshRenderer`]: its asset is missing or
 /// failed to load. These get a red box so the problem is visible. Objects
@@ -839,6 +888,33 @@ fn terrain_bounds(terrain: &engine_ecs::TerrainRenderer) -> Option<engine_render
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn culling_uses_the_camera_the_game_would_view_through() {
+        let mut world = World::new();
+        assert!(game_camera(&mut world, 1.5).is_none());
+        let camera = |z: f32| {
+            (
+                engine_ecs::prelude::Name::new("Camera"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::from_translation(
+                    Vec3::new(0.0, 2.0, z),
+                )),
+                engine_ecs::components::Camera(engine_renderer::Camera::new(
+                    Vec3::ZERO,
+                    Vec3::NEG_Z,
+                    1.25,
+                )),
+            )
+        };
+        world.spawn(camera(5.0));
+        let active = world
+            .spawn((camera(9.0), engine_ecs::components::ActiveCamera))
+            .id();
+        let (entity, view) = game_camera(&mut world, 1.5).expect("a game camera");
+        assert_eq!(entity, active);
+        assert_eq!(view.eye, Vec3::new(0.0, 2.0, 9.0));
+        assert_eq!(view.aspect_ratio, 1.5);
+    }
 
     #[test]
     fn rendered_sprite_does_not_get_missing_mesh_placeholder() {

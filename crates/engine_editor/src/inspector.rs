@@ -33,6 +33,7 @@ mod ai;
 mod animator_graph;
 mod behaviour_tree_graph;
 mod graph;
+mod stream_area;
 
 #[cfg(test)]
 mod prototype_style_tests {
@@ -2246,6 +2247,21 @@ const REGISTRY: &[ComponentUi] = &[
         remove: strip::<engine_scene::SceneAi>,
         inspect: |world, entity, ui, _| ai::inspect(world, entity, ui),
         copy_to: copy_component::<engine_scene::SceneAi>,
+    },
+    ComponentUi {
+        name: "World Area",
+        type_name: "SceneStreamArea",
+        present: has::<engine_scene::SceneStreamArea>,
+        insert_default: |world, entity| {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(engine_scene::SceneStreamArea(
+                    engine_scene::StreamAreaData::default(),
+                ));
+            }
+        },
+        remove: strip::<engine_scene::SceneStreamArea>,
+        inspect: |world, entity, ui, _| stream_area::inspect(world, entity, ui),
+        copy_to: copy_component::<engine_scene::SceneStreamArea>,
     },
     ComponentUi {
         name: "Audio Emitter",
