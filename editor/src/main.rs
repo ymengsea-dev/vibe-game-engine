@@ -3001,6 +3001,15 @@ impl EditorHandler {
             if viewport.is_previewing_animation() {
                 window.request_redraw();
             }
+            if std::mem::take(&mut self.state.nav_bake_request) {
+                if let Err(error) = self
+                    .state
+                    .bake_nav_grid(&|world, entity| viewport.mesh_bounds(world, entity))
+                {
+                    self.state.asset_browser.operation_error = Some(error);
+                }
+                window.request_redraw();
+            }
             let terrain_requested = self.state.create_terrain_request;
             handle_terrain_request(&mut self.state);
             if terrain_requested {

@@ -1448,6 +1448,7 @@ dependencies = [
 name = "engine"
 version = "0.1.0"
 dependencies = [
+ "bevy_ecs",
  "engine_ai",
  "engine_animation",
  "engine_asset",

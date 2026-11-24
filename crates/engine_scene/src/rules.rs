@@ -136,6 +136,25 @@ enum PendingEvent {
         owner: String,
         name: String,
     },
+    Ai {
+        owner: String,
+        event: AiRuleEvent,
+    },
+}
+
+/// What an object's AI did, for [`RuleEvent::Ai`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiRuleEvent {
+    /// It noticed a target.
+    TargetSeen,
+    /// It lost its target.
+    TargetLost,
+    /// It heard a noise.
+    NoiseHeard,
+    /// It reached where it was walking to.
+    MoveFinished,
+    /// Its Simple brain entered this state.
+    StateChanged(crate::AiState),
 }
 
 /// Which contact transition a [`RuleEvent::Contact`] reports.
@@ -193,6 +212,13 @@ pub enum RuleEvent<'a> {
         /// The event's name in the clip.
         name: &'a str,
     },
+    /// `owner`'s AI did or noticed something.
+    Ai {
+        /// Object whose AI it was.
+        owner: &'a str,
+        /// What happened.
+        event: AiRuleEvent,
+    },
 }
 
 /// What dispatching one event did.
@@ -227,6 +253,10 @@ impl PendingEvent {
             RuleEvent::Animation { owner, name } => Self::Animation {
                 owner: owner.to_owned(),
                 name: name.to_owned(),
+            },
+            RuleEvent::Ai { owner, event } => Self::Ai {
+                owner: owner.to_owned(),
+                event,
             },
         }
     }
@@ -289,6 +319,20 @@ impl PendingEvent {
             (RuleTrigger::StateChanged { state }, Self::StateChanged(entered)) => state == entered,
             (RuleTrigger::AnimationEvent { name }, Self::Animation { owner, name: fired }) => {
                 owner_id == Some(owner.as_str()) && name == fired
+            }
+            (trigger, Self::Ai { owner, event }) => {
+                owner_id == Some(owner.as_str())
+                    && match (trigger, event) {
+                        (RuleTrigger::TargetSeen, AiRuleEvent::TargetSeen)
+                        | (RuleTrigger::TargetLost, AiRuleEvent::TargetLost)
+                        | (RuleTrigger::NoiseHeard, AiRuleEvent::NoiseHeard)
+                        | (RuleTrigger::MoveFinished, AiRuleEvent::MoveFinished) => true,
+                        (
+                            RuleTrigger::AiStateChanged { state },
+                            AiRuleEvent::StateChanged(entered),
+                        ) => state.is_none_or(|wanted| wanted == *entered),
+                        _ => false,
+                    }
             }
             _ => false,
         }
@@ -422,7 +466,10 @@ impl Scene {
                         | RuleAction::SetEnabled { .. }
                         | RuleAction::SpawnPrefab { .. }
                         | RuleAction::Destroy { .. }
-                        | RuleAction::SetGameState { .. } => {
+                        | RuleAction::SetGameState { .. }
+                        | RuleAction::MoveTo { .. }
+                        | RuleAction::StopMoving { .. }
+                        | RuleAction::MakeNoise { .. } => {
                             outcome.deferred.push(rule.action.clone());
                             false
                         }

@@ -729,6 +729,22 @@ impl Viewport {
         self.preview_clock = playing.then_some(now);
     }
 
+    /// An entity's local mesh bounds, once its mesh is uploaded.
+    pub fn mesh_bounds(&self, world: &World, entity: Entity) -> Option<engine_renderer::Aabb> {
+        if let Some(skinned) = world.get::<engine_ecs::components::SkinnedMeshRenderer>(entity) {
+            return self
+                .assets
+                .skinned_meshes
+                .get(skinned.mesh)
+                .map(|mesh| mesh.local_bounds);
+        }
+        let renderer = world.get::<engine_ecs::components::MeshRenderer>(entity)?;
+        self.assets
+            .meshes
+            .get(renderer.mesh)
+            .map(|mesh| mesh.local_bounds)
+    }
+
     /// Whether an animated model is playing in the Scene View, so the
     /// editor keeps drawing frames.
     pub fn is_previewing_animation(&self) -> bool {

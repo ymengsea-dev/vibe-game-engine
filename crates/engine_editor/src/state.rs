@@ -311,6 +311,12 @@ pub struct EditorState {
     /// Set by the Terrain menu; the host writes an editable terrain mesh
     /// and refreshes imports after the UI frame.
     pub create_terrain_request: bool,
+    /// Settings for the next walkable-area bake, when the scene has no
+    /// baked grid to take them from.
+    pub nav_bake: engine_scene::NavBakeSettings,
+    /// Set by the Navigation menu; the host bakes after the UI frame,
+    /// because mesh collider bounds come from the viewport.
+    pub nav_bake_request: bool,
     /// Set when the user picked `Assets ▸ Import…`. The host opens the
     /// file dialog, because the dialog blocks and the copy needs the
     /// project directory — neither belongs in a menu closure that only
@@ -591,6 +597,8 @@ impl EditorState {
             scene_files_listed: None,
             prefab_status_cache: None,
             create_terrain_request: false,
+            nav_bake: engine_scene::NavBakeSettings::default(),
+            nav_bake_request: false,
             import_request: false,
             dropped_files: Vec::new(),
             rescan_request: false,
@@ -2649,6 +2657,55 @@ impl EditorState {
         }
     }
 
+    /// Bakes the scene's walkable area into its nav grid with the settings
+    /// the menu shows, and turns the Nav grid overlay on so the result is
+    /// visible. Undo restores the previous grid.
+    ///
+    /// `mesh_bounds` gives an entity's local mesh bounds, for mesh colliders.
+    pub fn bake_nav_grid(
+        &mut self,
+        mesh_bounds: &dyn Fn(&World, Entity) -> Option<engine_renderer::Aabb>,
+    ) -> Result<(), String> {
+        // Each terrain's tiles, from the live sculpted copy, so unsaved
+        // sculpting counts.
+        let terrains: Vec<Entity> = self
+            .world
+            .query_filtered::<Entity, engine_ecs::prelude::With<engine_scene::SceneTerrain>>()
+            .iter(&self.world)
+            .collect();
+        let tiles: HashMap<Entity, Vec<(engine_renderer::Heightmap, glam::Mat4)>> = terrains
+            .into_iter()
+            .map(|entity| (entity, self.terrain_tile_heightmaps(entity)))
+            .collect();
+        let inputs = crate::nav_bake::collect(&mut self.world, mesh_bounds, &|_, entity| {
+            tiles.get(&entity).cloned().unwrap_or_default()
+        });
+        let settings = self.nav_bake_settings();
+        let grid = crate::nav_bake::bake(&inputs, settings)?;
+        self.world.insert_resource(engine_scene::SceneNavGrid(grid));
+        self.overlays.nav = true;
+        self.mark_dirty();
+        Ok(())
+    }
+
+    /// Removes the scene's nav grid, keeping its settings for the next bake.
+    pub fn clear_nav_grid(&mut self) {
+        if let Some(grid) = self.world.remove_resource::<engine_scene::SceneNavGrid>() {
+            if let Some(bake) = grid.0.bake {
+                self.nav_bake = bake;
+            }
+            self.mark_dirty();
+        }
+    }
+
+    /// The settings the next bake uses: the scene grid's own, else the menu's.
+    pub fn nav_bake_settings(&self) -> engine_scene::NavBakeSettings {
+        self.world
+            .get_resource::<engine_scene::SceneNavGrid>()
+            .and_then(|grid| grid.0.bake)
+            .unwrap_or(self.nav_bake)
+    }
+
     /// Bakes a selected model into one instanced group on the selected terrain.
     pub fn scatter_selected_mesh_on_terrain(&mut self) -> Result<usize, String> {
         let model = self
@@ -3069,6 +3126,66 @@ mod tests {
             Vec::new(),
             ConsoleLog::new(),
         )
+    }
+
+    #[test]
+    fn baking_the_walkable_area_is_saved_and_undoable() {
+        use engine_scene::{BodyKind, ColliderData, ColliderShape, SceneCollider, SceneNavGrid};
+
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let solid_box = |half_extents, y: f32| {
+            (
+                engine_ecs::components::Transform::from(engine_utils::Transform::from_translation(
+                    Vec3::new(0.0, y, 0.0),
+                )),
+                SceneCollider(ColliderData::new(
+                    ColliderShape::Cuboid { half_extents },
+                    BodyKind::Fixed,
+                )),
+            )
+        };
+        state.world.spawn(solid_box([5.0, 0.5, 5.0], -0.5));
+        state.world.spawn(solid_box([0.5, 0.5, 0.5], 0.5));
+        state
+            .history
+            .begin_frame(&mut state.world, state.selected_entity);
+        state.bake_nav_grid(&|_, _| None).expect("bakes");
+        assert!(state.overlays.nav, "baking shows the result");
+        let baked = state
+            .world
+            .get_resource::<SceneNavGrid>()
+            .expect("grid")
+            .0
+            .clone();
+        assert!(baked.blocked.iter().any(|cell| *cell));
+        assert_eq!(baked.bake, Some(state.nav_bake));
+        assert_eq!(Scene::from_world(&mut state.world).nav_grid, Some(baked));
+        assert!(
+            state
+                .history
+                .settle(&mut state.world, state.selected_entity)
+        );
+        state.undo();
+        assert!(state.world.get_resource::<SceneNavGrid>().is_none());
+
+        state.redo();
+        let tuned = engine_scene::NavBakeSettings {
+            cell_size: 2.0,
+            ..engine_scene::NavBakeSettings::default()
+        };
+        state.world.resource_mut::<SceneNavGrid>().0.bake = Some(tuned);
+        assert_eq!(
+            state.nav_bake_settings(),
+            tuned,
+            "a baked grid keeps its settings"
+        );
+        state.clear_nav_grid();
+        assert!(state.world.get_resource::<SceneNavGrid>().is_none());
+        assert_eq!(
+            state.nav_bake, tuned,
+            "clearing keeps them for the next bake"
+        );
     }
 
     #[test]

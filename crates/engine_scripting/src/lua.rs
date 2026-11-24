@@ -14,6 +14,7 @@ use crate::GameCommand;
 use crate::input::ScriptKey;
 use crate::input::{ButtonState, InputSnapshot};
 
+mod ai_api;
 mod animation_api;
 mod camera_api;
 mod input_api;
@@ -451,6 +452,8 @@ enum CallbackArgs<'a> {
     None,
     Delta(f32),
     Event(&'a str, &'a str),
+    Object(&'a str),
+    ObjectAt(&'a str, [f32; 3]),
     StateChange(&'a str, &'a str),
     Collision(&'a str, &'a str, &'a str),
 }
@@ -973,6 +976,8 @@ impl LuaRuntime {
             .map_err(ScriptError::Initialize)?;
         animation_api::register(&lua, &engine, &commands, &active_callback)
             .map_err(ScriptError::Initialize)?;
+        ai_api::register(&lua, &engine, &commands, &active_callback)
+            .map_err(ScriptError::Initialize)?;
         state_api::register(&lua, &engine, &commands, &scene, &active_callback)
             .map_err(ScriptError::Initialize)?;
         object_api::register(&lua, &engine, &commands, &scene, &active_callback)
@@ -1474,6 +1479,69 @@ impl LuaRuntime {
         )
     }
 
+    /// Tells an AI object's scripts and the global scripts that it noticed a
+    /// target: `on_target_seen(object_id, target_id)`.
+    pub fn on_target_seen(
+        &mut self,
+        object_id: &str,
+        target_id: &str,
+    ) -> Result<Vec<GameCommand>, ScriptError> {
+        self.call_scripts(
+            "on_target_seen",
+            CallbackArgs::Event(object_id, target_id),
+            Only::ObjectAndGlobal(object_id),
+        )
+    }
+
+    /// `on_target_lost(object_id, target_id)`, to the object's and global scripts.
+    pub fn on_target_lost(
+        &mut self,
+        object_id: &str,
+        target_id: &str,
+    ) -> Result<Vec<GameCommand>, ScriptError> {
+        self.call_scripts(
+            "on_target_lost",
+            CallbackArgs::Event(object_id, target_id),
+            Only::ObjectAndGlobal(object_id),
+        )
+    }
+
+    /// `on_noise_heard(object_id, position)`, to the object's and global scripts.
+    pub fn on_noise_heard(
+        &mut self,
+        object_id: &str,
+        position: [f32; 3],
+    ) -> Result<Vec<GameCommand>, ScriptError> {
+        self.call_scripts(
+            "on_noise_heard",
+            CallbackArgs::ObjectAt(object_id, position),
+            Only::ObjectAndGlobal(object_id),
+        )
+    }
+
+    /// `on_move_finished(object_id)` once an object reaches where `move_to`
+    /// or its AI sent it, to the object's and global scripts.
+    pub fn on_move_finished(&mut self, object_id: &str) -> Result<Vec<GameCommand>, ScriptError> {
+        self.call_scripts(
+            "on_move_finished",
+            CallbackArgs::Object(object_id),
+            Only::ObjectAndGlobal(object_id),
+        )
+    }
+
+    /// `on_ai_state_changed(object_id, state)`, to the object's and global scripts.
+    pub fn on_ai_state_changed(
+        &mut self,
+        object_id: &str,
+        state: &str,
+    ) -> Result<Vec<GameCommand>, ScriptError> {
+        self.call_scripts(
+            "on_ai_state_changed",
+            CallbackArgs::Event(object_id, state),
+            Only::ObjectAndGlobal(object_id),
+        )
+    }
+
     /// Delivers one contact transition to the global script and the two involved objects.
     pub fn on_collision(
         &mut self,
@@ -1520,6 +1588,13 @@ impl LuaRuntime {
             CallbackArgs::None => function.call::<()>(()),
             CallbackArgs::Delta(dt) => function.call::<()>(dt),
             CallbackArgs::Event(kind, value) => function.call::<()>((kind, value)),
+            CallbackArgs::Object(id) => function.call::<()>(id),
+            CallbackArgs::ObjectAt(id, position) => {
+                match vec3::to_lua(&self.lua, glam::Vec3::from_array(position)) {
+                    Ok(at) => function.call::<()>((id, at)),
+                    Err(error) => Err(error),
+                }
+            }
             CallbackArgs::StateChange(old, new) => function.call::<()>((old, new)),
             CallbackArgs::Collision(kind, _, _) => match collision_ids {
                 Some((first, second)) => function.call::<()>((kind, first, second)),

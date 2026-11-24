@@ -353,6 +353,9 @@ pub(crate) fn insert_components(
     if let Some(order) = data.sibling_order {
         entity_mut.insert(crate::format::SiblingOrder(order));
     }
+    if let Some(ai) = &data.ai {
+        entity_mut.insert(crate::ai::SceneAi(ai.clone()));
+    }
     if let Some(emitter) = &data.audio_emitter {
         // The carrier always goes on, resolved or not — same rule as
         // `MeshSource`: it is the only place the authored values survive

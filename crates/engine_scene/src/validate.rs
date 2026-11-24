@@ -540,6 +540,9 @@ impl SceneEntity {
                 .validate()
                 .map_err(|reason| format!("audio_emitter: {reason}"))?;
         }
+        if let Some(ai) = &self.ai {
+            ai.validate().map_err(|reason| format!("ai: {reason}"))?;
+        }
         if let Some(water) = self.water {
             engine_physics::WaterSurface::try_from(water)
                 .map_err(|error| format!("water: {error}"))?;
@@ -629,8 +632,22 @@ impl crate::RuleData {
             RuleAction::EmitEvent { name } => return validate_event_name(name),
             RuleAction::SetVariable { name, value } => return validate_variable(name, *value),
             RuleAction::AddToVariable { name, amount } => return validate_variable(name, *amount),
+            RuleAction::MakeNoise { at, radius } => {
+                if !radius.is_finite() || !(0.0..=crate::MAX_AI_DISTANCE).contains(radius) {
+                    return Err("noise radius must be 0 to 10000".into());
+                }
+                return validate_spawn_at(at);
+            }
+            RuleAction::MoveTo { target, to } => {
+                validate_spawn_at(to)?;
+                if target.is_empty() {
+                    return Err("action needs a target object".into());
+                }
+                target
+            }
             RuleAction::SetVisible { target, .. }
             | RuleAction::SetEnabled { target, .. }
+            | RuleAction::StopMoving { target }
             | RuleAction::Destroy { target } => {
                 if target.is_empty() {
                     return Err("action needs a target object".into());
@@ -653,22 +670,26 @@ impl crate::RuleData {
                         "prefab path must be under assets/prefabs and end in .prefab".into(),
                     );
                 }
-                return match at {
-                    crate::SpawnAt::Object(id) => validate_object_id(id),
-                    crate::SpawnAt::Position(position) => {
-                        if position.iter().all(|value| value.is_finite()) {
-                            Ok(())
-                        } else {
-                            Err("spawn position must be finite".into())
-                        }
-                    }
-                };
+                return validate_spawn_at(at);
             }
             RuleAction::SetGameState { .. } => return Ok(()),
         };
         uuid::Uuid::parse_str(target)
             .map_err(|_| "action target must be an object ID".to_string())?;
         Ok(())
+    }
+}
+
+fn validate_spawn_at(at: &crate::SpawnAt) -> Result<(), String> {
+    match at {
+        crate::SpawnAt::Object(id) => validate_object_id(id),
+        crate::SpawnAt::Position(position) => {
+            if position.iter().all(|value| value.is_finite()) {
+                Ok(())
+            } else {
+                Err("position must be finite".into())
+            }
+        }
     }
 }
 
@@ -839,6 +860,19 @@ impl crate::format::NavGridData {
                 self.blocked.len(),
                 self.cell_count()
             ));
+        }
+        if !self.heights.is_empty()
+            && (self.heights.len() != self.cell_count()
+                || !self.heights.iter().all(|height| height.is_finite()))
+        {
+            return Err(format!(
+                "{} heights for {} cells",
+                self.heights.len(),
+                self.cell_count()
+            ));
+        }
+        if let Some(bake) = &self.bake {
+            bake.validate()?;
         }
         Ok(())
     }

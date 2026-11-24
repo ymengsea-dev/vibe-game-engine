@@ -29,7 +29,9 @@ use engine_scene::{
 use crate::assets::{AssetIndex, AssetKind};
 use crate::inspect::{InspectField, Inspectable, number, property_row};
 
+mod ai;
 mod animator_graph;
+mod behaviour_tree_graph;
 mod graph;
 
 #[cfg(test)]
@@ -550,6 +552,9 @@ enum RuleActionKind {
     Spawn,
     Destroy,
     State,
+    Walk,
+    StopWalking,
+    Noise,
 }
 
 impl RuleActionKind {
@@ -577,7 +582,10 @@ fn rule_target_matches(world: &World, entity: Entity, kind: RuleActionKind) -> b
             RuleActionKind::Visible
             | RuleActionKind::Enabled
             | RuleActionKind::Destroy
-            | RuleActionKind::Spawn => true,
+            | RuleActionKind::Spawn
+            | RuleActionKind::Walk
+            | RuleActionKind::StopWalking
+            | RuleActionKind::Noise => true,
             RuleActionKind::Event
             | RuleActionKind::Variable
             | RuleActionKind::ChangeScene
@@ -625,7 +633,13 @@ fn rules_name_objects(rules: &[RuleData]) -> bool {
             RuleAction::SetVisible { .. }
                 | RuleAction::SetEnabled { .. }
                 | RuleAction::Destroy { .. }
+                | RuleAction::MoveTo { .. }
+                | RuleAction::StopMoving { .. }
                 | RuleAction::SpawnPrefab {
+                    at: SpawnAt::Object(_),
+                    ..
+                }
+                | RuleAction::MakeNoise {
                     at: SpawnAt::Object(_),
                     ..
                 }
@@ -634,7 +648,7 @@ fn rules_name_objects(rules: &[RuleData]) -> bool {
 }
 
 /// The "When" choices, in picker order.
-const TRIGGER_CHOICES: [&str; 12] = [
+const TRIGGER_CHOICES: [&str; 17] = [
     "This button is clicked",
     "Scene starts",
     "Key pressed",
@@ -647,6 +661,11 @@ const TRIGGER_CHOICES: [&str; 12] = [
     "Game state changes",
     "Named event",
     "Animation event",
+    "Notices a target",
+    "Loses its target",
+    "Hears a noise",
+    "Reaches its destination",
+    "AI state changes",
 ];
 
 /// The picker label for `trigger`.
@@ -664,6 +683,11 @@ fn trigger_choice_label(trigger: &RuleTrigger) -> &'static str {
         RuleTrigger::StateChanged { .. } => TRIGGER_CHOICES[9],
         RuleTrigger::Named(_) => TRIGGER_CHOICES[10],
         RuleTrigger::AnimationEvent { .. } => TRIGGER_CHOICES[11],
+        RuleTrigger::TargetSeen => TRIGGER_CHOICES[12],
+        RuleTrigger::TargetLost => TRIGGER_CHOICES[13],
+        RuleTrigger::NoiseHeard => TRIGGER_CHOICES[14],
+        RuleTrigger::MoveFinished => TRIGGER_CHOICES[15],
+        RuleTrigger::AiStateChanged { .. } => TRIGGER_CHOICES[16],
     }
 }
 
@@ -693,6 +717,11 @@ fn trigger_for_choice(label: &str) -> Option<RuleTrigger> {
         "Animation event" => RuleTrigger::AnimationEvent {
             name: "footstep".into(),
         },
+        "Notices a target" => RuleTrigger::TargetSeen,
+        "Loses its target" => RuleTrigger::TargetLost,
+        "Hears a noise" => RuleTrigger::NoiseHeard,
+        "Reaches its destination" => RuleTrigger::MoveFinished,
+        "AI state changes" => RuleTrigger::AiStateChanged { state: None },
         _ => return None,
     })
 }
@@ -803,6 +832,23 @@ fn add_visual_rule(
         RuleActionKind::State => RuleAction::SetGameState {
             state: engine_scene::GameStateName::GameOver,
         },
+        RuleActionKind::Walk | RuleActionKind::StopWalking | RuleActionKind::Noise => {
+            // These start out pointing at the rule's own object.
+            let Some(own) = world.get::<SceneObjectId>(owner).map(|id| id.0.clone()) else {
+                return false;
+            };
+            match kind {
+                RuleActionKind::Walk => RuleAction::MoveTo {
+                    target: own,
+                    to: SpawnAt::Position([0.0; 3]),
+                },
+                RuleActionKind::StopWalking => RuleAction::StopMoving { target: own },
+                _ => RuleAction::MakeNoise {
+                    at: SpawnAt::Object(own),
+                    radius: 10.0,
+                },
+            }
+        }
     };
     rules.push(RuleData {
         trigger,
@@ -988,7 +1034,79 @@ fn trigger_fields(
                 state_choice(ui, ("visual_rule_state_trigger", salt), state);
             });
         }
-        RuleTrigger::UiClicked | RuleTrigger::SceneStart => {}
+        RuleTrigger::AiStateChanged { state } => {
+            property_row(ui, "State", |ui| {
+                choice(("visual_rule_ai_state", salt), ui)
+                    .selected_text(state.map_or("Any state", ai_state_label))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(state, None, "Any state");
+                        for candidate in engine_scene::AiState::ALL {
+                            ui.selectable_value(state, Some(candidate), ai_state_label(candidate));
+                        }
+                    });
+            });
+        }
+        RuleTrigger::UiClicked
+        | RuleTrigger::SceneStart
+        | RuleTrigger::TargetSeen
+        | RuleTrigger::TargetLost
+        | RuleTrigger::NoiseHeard
+        | RuleTrigger::MoveFinished => {}
+    }
+}
+
+/// How Studio names a Simple brain state.
+pub(crate) fn ai_state_label(state: engine_scene::AiState) -> &'static str {
+    match state {
+        engine_scene::AiState::Idle => "Idle",
+        engine_scene::AiState::Patrol => "Patrol",
+        engine_scene::AiState::Chase => "Chase",
+        engine_scene::AiState::Attack => "Attack",
+    }
+}
+
+/// Picks an object or a fixed position, for rules that point at a place.
+fn place_fields(
+    ui: &mut egui::Ui,
+    salt: (Entity, usize),
+    at: &mut SpawnAt,
+    object_targets: &[(String, String)],
+) {
+    property_row(ui, "At", |ui| {
+        let mut at_object = matches!(at, SpawnAt::Object(_));
+        let was_object = at_object;
+        on_off_choice(ui, salt, &mut at_object, "An object", "A position");
+        if at_object != was_object {
+            *at = if at_object {
+                SpawnAt::Object(
+                    object_targets
+                        .first()
+                        .map(|(id, _)| id.clone())
+                        .unwrap_or_default(),
+                )
+            } else {
+                SpawnAt::Position([0.0; 3])
+            };
+        }
+    });
+    match at {
+        SpawnAt::Object(target) => {
+            property_row(ui, "Object", |ui| {
+                rule_target_picker(ui, salt, target, object_targets);
+            });
+        }
+        SpawnAt::Position(position) => {
+            property_row(ui, "Position", |ui| {
+                for (axis, component) in ["X", "Y", "Z"].into_iter().zip(position.iter_mut()) {
+                    number(
+                        ui,
+                        egui::DragValue::new(component)
+                            .speed(0.1)
+                            .prefix(format!("{axis} ")),
+                    );
+                }
+            });
+        }
     }
 }
 
@@ -1103,44 +1221,30 @@ fn rule_fields(
             property_row(ui, "Spawn", |ui| {
                 crate::widgets::text_field(ui, path, "assets/prefabs/coin.prefab");
             });
-            property_row(ui, "At", |ui| {
-                let mut at_object = matches!(at, SpawnAt::Object(_));
-                let was_object = at_object;
-                on_off_choice(ui, salt, &mut at_object, "An object", "A position");
-                if at_object != was_object {
-                    *at = if at_object {
-                        SpawnAt::Object(
-                            object_targets
-                                .first()
-                                .map(|(id, _)| id.clone())
-                                .unwrap_or_default(),
-                        )
-                    } else {
-                        SpawnAt::Position([0.0; 3])
-                    };
-                }
+            place_fields(ui, salt, at, object_targets);
+        }
+        RuleAction::MoveTo { target, to } => {
+            property_row(ui, "Walk", |ui| {
+                rule_target_picker(ui, salt, target, object_targets);
             });
-            match at {
-                SpawnAt::Object(target) => {
-                    property_row(ui, "Object", |ui| {
-                        rule_target_picker(ui, salt, target, object_targets);
-                    });
-                }
-                SpawnAt::Position(position) => {
-                    property_row(ui, "Position", |ui| {
-                        for (axis, component) in
-                            ["X", "Y", "Z"].into_iter().zip(position.iter_mut())
-                        {
-                            number(
-                                ui,
-                                egui::DragValue::new(component)
-                                    .speed(0.1)
-                                    .prefix(format!("{axis} ")),
-                            );
-                        }
-                    });
-                }
-            }
+            place_fields(ui, salt, to, object_targets);
+            note(ui, "Walks along the walkable area, if the scene has one.");
+        }
+        RuleAction::StopMoving { target } => {
+            property_row(ui, "Stop", |ui| {
+                rule_target_picker(ui, salt, target, object_targets);
+            });
+        }
+        RuleAction::MakeNoise { at, radius } => {
+            place_fields(ui, salt, at, object_targets);
+            property_row(ui, "Heard within", |ui| {
+                number(
+                    ui,
+                    egui::DragValue::new(radius)
+                        .speed(0.1)
+                        .range(0.0..=engine_scene::MAX_AI_DISTANCE),
+                );
+            });
         }
         RuleAction::Destroy { target } => {
             property_row(ui, "Destroy", |ui| {
@@ -1985,6 +2089,25 @@ const REGISTRY: &[ComponentUi] = &[
             }
         },
         copy_to: copy_component::<WaterVolume>,
+    },
+    ComponentUi {
+        name: "AI",
+        type_name: "SceneAi",
+        present: has::<engine_scene::SceneAi>,
+        insert_default: |world, entity| {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(engine_scene::SceneAi(engine_scene::AiData {
+                    senses: Some(engine_scene::SensesData::default()),
+                    brain: Some(engine_scene::AiBrainData::Simple(
+                        engine_scene::SimpleBrainData::default(),
+                    )),
+                    ..engine_scene::AiData::default()
+                }));
+            }
+        },
+        remove: strip::<engine_scene::SceneAi>,
+        inspect: |world, entity, ui, _| ai::inspect(world, entity, ui),
+        copy_to: copy_component::<engine_scene::SceneAi>,
     },
     ComponentUi {
         name: "Audio Emitter",
@@ -3126,6 +3249,9 @@ fn show_body(
                         ("Spawn prefab", RuleActionKind::Spawn, true),
                         ("Destroy object", RuleActionKind::Destroy, has_object_target),
                         ("Set game state", RuleActionKind::State, true),
+                        ("Walk somewhere", RuleActionKind::Walk, true),
+                        ("Stop walking", RuleActionKind::StopWalking, true),
+                        ("Make a noise", RuleActionKind::Noise, true),
                     ] {
                         if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                             add_rule = Some((kind, None));
@@ -3315,6 +3441,13 @@ fn show_body(
 pub(crate) fn open_animator(ctx: &egui::Context, entity: Entity, state: usize) {
     animator_graph::open(ctx, entity);
     animator_graph::select_state(ctx, entity, state);
+}
+
+/// Opens `entity`'s behaviour tree window with node `index` selected.
+#[cfg(test)]
+pub(crate) fn open_behaviour_tree(ctx: &egui::Context, entity: Entity, index: usize) {
+    behaviour_tree_graph::open(ctx, entity);
+    behaviour_tree_graph::select_node(ctx, entity, index);
 }
 
 /// A sprite's named clips: rows of name, first cell, frames, speed and

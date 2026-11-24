@@ -52,6 +52,7 @@ const FIELDS: &[Field] = &[
     field!(collider),
     field!(audio_emitter),
     field!(terrain),
+    field!(ai),
     field!(water),
     field!(point_light),
     field!(ui),
@@ -77,11 +78,22 @@ pub fn remap_object_references(entity: &mut SceneEntity, map: &HashMap<String, S
             | RuleAction::PlayAudio { target }
             | RuleAction::SetVisible { target, .. }
             | RuleAction::SetEnabled { target, .. }
+            | RuleAction::StopMoving { target }
             | RuleAction::Destroy { target } => remap(target),
             RuleAction::SpawnPrefab {
                 at: SpawnAt::Object(id),
                 ..
+            }
+            | RuleAction::MakeNoise {
+                at: SpawnAt::Object(id),
+                ..
             } => remap(id),
+            RuleAction::MoveTo { target, to } => {
+                remap(target);
+                if let SpawnAt::Object(id) = to {
+                    remap(id);
+                }
+            }
             _ => {}
         }
         if let RuleTrigger::CollisionEnter { with: Some(id) }

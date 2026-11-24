@@ -42,6 +42,13 @@ impl MyGame {
     /// Your gameplay: an animated object passed a named moment in its clip,
     /// such as a footstep (its "Animation event" rules already ran).
     fn on_animation_event(&mut self, _ctx: &mut GameContext<'_>, _event: &AnimationEventFired) {}
+
+    /// Your gameplay: an object with AI noticed or lost a target, heard a
+    /// noise, reached where it was walking, or its brain changed state (its
+    /// AI rules already ran). Walk an object somewhere with
+    /// `GameCommand::MoveTo { object_id, target: [x, y, z], speed: None }`;
+    /// ask for a route with `self.gameplay.queries(ctx).find_path(from, to)`.
+    fn on_ai_event(&mut self, _ctx: &mut GameContext<'_>, _event: &AiEvent) {}
 }
 
 impl MyGame {
@@ -70,10 +77,13 @@ impl Game for MyGame {
         for button_id in self.gameplay.dispatch_ui_clicks(ctx) {
             self.on_ui_click(ctx, &button_id);
         }
-        // Key, timer, variable and state rules.
+        // Key, timer, variable and state rules, then AI.
         self.gameplay.update_rules(ctx, dt);
         for event in self.gameplay.animation_events(ctx) {
             self.on_animation_event(ctx, &event);
+        }
+        for event in self.gameplay.take_ai_events() {
+            self.on_ai_event(ctx, &event);
         }
         if let Some((old, new)) = self.gameplay.take_state_change() {
             self.on_state_changed(ctx, old, new);

@@ -268,19 +268,20 @@ pub(crate) fn rule_commands(
         RuleAction::SetGameState { state } => GameCommand::SetGameState {
             state: state.name().to_owned(),
         },
+        RuleAction::StopMoving { target } => GameCommand::StopMoving {
+            object_id: target.clone(),
+        },
+        RuleAction::MoveTo { target, to } => GameCommand::MoveTo {
+            object_id: target.clone(),
+            target: place(world, to, warned)?,
+            speed: None,
+        },
+        RuleAction::MakeNoise { at, radius } => GameCommand::MakeNoise {
+            position: place(world, at, warned)?,
+            radius: *radius,
+        },
         RuleAction::SpawnPrefab { path, at } => {
-            let position = match at {
-                SpawnAt::Position(position) => *position,
-                SpawnAt::Object(id) => match object_position(world, id) {
-                    Some(position) => position,
-                    None => {
-                        if warned.insert((id.clone(), "spawn_at")) {
-                            tracing::warn!(object_id = %id, "spawn rule's anchor object is missing");
-                        }
-                        return None;
-                    }
-                },
-            };
+            let position = place(world, at, warned)?;
             GameCommand::SpawnPrefab {
                 object_id: uuid::Uuid::new_v4().to_string(),
                 path: path.clone(),
@@ -293,6 +294,25 @@ pub(crate) fn rule_commands(
         | RuleAction::SetVariable { .. }
         | RuleAction::AddToVariable { .. } => return None,
     })
+}
+
+/// The world position `at` names; `None` (warned once) when its object is
+/// missing.
+fn place(
+    world: &World,
+    at: &SpawnAt,
+    warned: &mut HashSet<(String, &'static str)>,
+) -> Option<[f32; 3]> {
+    match at {
+        SpawnAt::Position(position) => Some(*position),
+        SpawnAt::Object(id) => {
+            let found = object_position(world, id);
+            if found.is_none() && warned.insert((id.clone(), "spawn_at")) {
+                tracing::warn!(object_id = %id, "a rule's anchor object is missing");
+            }
+            found
+        }
+    }
 }
 
 fn object_position(world: &World, id: &str) -> Option<[f32; 3]> {

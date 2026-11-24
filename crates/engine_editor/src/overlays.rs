@@ -56,6 +56,17 @@ const NAV_BLOCKED_COLOR: [f32; 4] = [0.95, 0.35, 0.3, 1.0];
 /// Height above the grid's plane that nav cells are drawn at, so they do
 /// not z-fight the ground.
 const NAV_LIFT: f32 = 0.02;
+/// About how many nav cells the overlay draws before it starts drawing only
+/// every few.
+const NAV_MAX_DRAWN_CELLS: usize = 16_384;
+
+/// Colour of an AI object's view: `theme::NIGHT.highlight` (#E0AF68), a
+/// little see-through so it reads apart from the selection box.
+const AI_SIGHT_COLOR: [f32; 4] = [0.88, 0.69, 0.41, 0.8];
+/// Colour of an AI object's hearing ring: `theme::NIGHT.purple`.
+const AI_HEARING_COLOR: [f32; 4] = [0.733, 0.604, 0.969, 0.7];
+/// Colour of patrol points and the route between them: `theme::NIGHT.success`.
+const AI_ROUTE_COLOR: [f32; 4] = [0.62, 0.81, 0.42, 0.9];
 
 /// Size of a point-light marker, in world units.
 const LIGHT_MARKER_SIZE: f32 = 0.35;
@@ -139,6 +150,7 @@ pub fn build(
 ) {
     let selected = selected_with_descendants(world, selection);
     draw_selection_bounds(world, &selected, &mesh_bounds, draw);
+    draw_ai(world, selection, draw);
     draw_colliders(world, draw, &selected, toggles.all_colliders);
     if let Some(sun) = sun {
         draw_sun(lights, sun, draw);
@@ -163,6 +175,87 @@ pub fn build(
     }
 }
 
+/// For each selected object with AI: its view (two edges and an arc at its
+/// sight range), a ring at its hearing range, and its patrol route.
+fn draw_ai(world: &World, selection: &[Entity], draw: &mut DebugDraw) {
+    for &entity in selection {
+        let Some(ai) = world.get::<engine_scene::SceneAi>(entity) else {
+            continue;
+        };
+        let matrix = world_matrix(world, entity);
+        let position = matrix.transform_point3(Vec3::ZERO);
+        if let Some(senses) = &ai.0.senses {
+            let eye = position + Vec3::Y * senses.eye_height;
+            let forward = matrix.transform_vector3(Vec3::NEG_Z);
+            let forward = Vec3::new(forward.x, 0.0, forward.z)
+                .try_normalize()
+                .unwrap_or(Vec3::NEG_Z);
+            draw_view(eye, forward, senses.sight_range, senses.sight_angle, draw);
+            if senses.hearing_radius > 0.0 {
+                draw_ring(
+                    position + Vec3::Y * NAV_LIFT,
+                    senses.hearing_radius,
+                    AI_HEARING_COLOR,
+                    draw,
+                );
+            }
+        }
+        let points: &[[f32; 3]] = match &ai.0.brain {
+            Some(engine_scene::AiBrainData::Simple(brain))
+                if brain.start == engine_scene::AiState::Patrol =>
+            {
+                &brain.patrol_points
+            }
+            _ => &[],
+        };
+        let route: Vec<Vec3> = points
+            .iter()
+            .map(|point| Vec3::from_array(*point))
+            .collect();
+        for point in &route {
+            draw.cross(*point, LIGHT_MARKER_SIZE, AI_ROUTE_COLOR);
+        }
+        for pair in route.windows(2) {
+            draw.line(pair[0], pair[1], AI_ROUTE_COLOR);
+        }
+        if route.len() > 2 {
+            draw.line(route[route.len() - 1], route[0], AI_ROUTE_COLOR);
+        }
+    }
+}
+
+/// A view `angle` degrees wide around `forward`, out to `range`: its two
+/// edges and the arc between them, flat at eye height.
+fn draw_view(eye: Vec3, forward: Vec3, range: f32, angle: f32, draw: &mut DebugDraw) {
+    if range <= 0.0 {
+        return;
+    }
+    if angle >= 360.0 {
+        draw_ring(eye, range, AI_SIGHT_COLOR, draw);
+        return;
+    }
+    let half = (angle * 0.5).to_radians();
+    let point = |turn: f32| eye + glam::Quat::from_rotation_y(turn) * forward * range;
+    draw.line(eye, point(half), AI_SIGHT_COLOR);
+    draw.line(eye, point(-half), AI_SIGHT_COLOR);
+    let steps = ((angle / 10.0).ceil() as usize).max(2);
+    let arc: Vec<Vec3> = (0..=steps)
+        .map(|step| point(-half + 2.0 * half * step as f32 / steps as f32))
+        .collect();
+    draw.polyline(&arc, AI_SIGHT_COLOR);
+}
+
+/// A flat circle of `radius` around `centre`.
+fn draw_ring(centre: Vec3, radius: f32, color: [f32; 4], draw: &mut DebugDraw) {
+    let points: Vec<Vec3> = (0..=48)
+        .map(|step| {
+            let turn = step as f32 / 48.0 * std::f32::consts::TAU;
+            centre + Vec3::new(turn.cos(), 0.0, turn.sin()) * radius
+        })
+        .collect();
+    draw.polyline(&points, color);
+}
+
 /// A marker per audio emitter, with a ring at the distance it carries.
 ///
 /// The radius is the point of the overlay: a sound's reach is invisible
@@ -183,11 +276,12 @@ fn draw_audio_emitters(world: &mut World, draw: &mut DebugDraw) {
     }
 }
 
-/// The scene's nav grid, lying in its own plane.
+/// The scene's nav grid, lying on the ground it was baked from.
 ///
 /// Walkable cells are drawn as an outline and blocked ones crossed out,
 /// rather than every cell as a box: a 64x64 grid is 4096 cells, and the
-/// overlay has to stay readable as well as cheap.
+/// overlay has to stay readable as well as cheap. A big grid draws every
+/// few lines and crosses so the line count stays bounded.
 fn draw_nav_grid(world: &mut World, draw: &mut DebugDraw) {
     let Some(grid) = world
         .get_resource::<SceneNavGrid>()
@@ -200,37 +294,72 @@ fn draw_nav_grid(world: &mut World, draw: &mut DebugDraw) {
     }
 
     let cell = grid.cell_size;
-    let origin = Vec3::new(grid.origin[0], NAV_LIFT, grid.origin[1]);
-    // Outline first — one line list for the whole grid, not per cell.
-    for x in 0..=grid.width {
-        let offset = x as f32 * cell;
-        draw.line(
-            origin + Vec3::new(offset, 0.0, 0.0),
-            origin + Vec3::new(offset, 0.0, grid.height as f32 * cell),
-            NAV_WALKABLE_COLOR,
-        );
-    }
-    for z in 0..=grid.height {
-        let offset = z as f32 * cell;
-        draw.line(
-            origin + Vec3::new(0.0, 0.0, offset),
-            origin + Vec3::new(grid.width as f32 * cell, 0.0, offset),
-            NAV_WALKABLE_COLOR,
-        );
+    let width = grid.width as usize;
+    let height_of = |x: usize, z: usize| -> f32 {
+        let x = x.min(width - 1);
+        let z = z.min(grid.height as usize - 1);
+        grid.heights.get(z * width + x).copied().unwrap_or(0.0) + NAV_LIFT
+    };
+    let corner = |x: usize, z: usize, y: f32| {
+        Vec3::new(
+            grid.origin[0] + x as f32 * cell,
+            y,
+            grid.origin[1] + z as f32 * cell,
+        )
+    };
+    let stride = ((grid.cell_count() as f32 / NAV_MAX_DRAWN_CELLS as f32)
+        .sqrt()
+        .ceil() as usize)
+        .max(1);
+
+    if grid.heights.is_empty() {
+        // Flat: one line per row and column for the whole grid.
+        let (far_x, far_z) = (grid.width as usize, grid.height as usize);
+        for x in (0..=far_x).step_by(stride) {
+            draw.line(
+                corner(x, 0, NAV_LIFT),
+                corner(x, far_z, NAV_LIFT),
+                NAV_WALKABLE_COLOR,
+            );
+        }
+        for z in (0..=far_z).step_by(stride) {
+            draw.line(
+                corner(0, z, NAV_LIFT),
+                corner(far_x, z, NAV_LIFT),
+                NAV_WALKABLE_COLOR,
+            );
+        }
+    } else {
+        // On hills each cell's edges sit at its own height.
+        for z in (0..grid.height as usize).step_by(stride) {
+            for x in (0..width).step_by(stride) {
+                let y = height_of(x, z);
+                draw.line(
+                    corner(x, z, y),
+                    corner(x + stride, z, y),
+                    NAV_WALKABLE_COLOR,
+                );
+                draw.line(
+                    corner(x, z, y),
+                    corner(x, z + stride, y),
+                    NAV_WALKABLE_COLOR,
+                );
+            }
+        }
     }
 
     for (index, blocked) in grid.blocked.iter().enumerate() {
-        if !blocked {
+        let (x, z) = (index % width, index / width);
+        if !blocked || x % stride != 0 || z % stride != 0 {
             continue;
         }
-        let x = (index % grid.width as usize) as f32 * cell;
-        let z = (index / grid.width as usize) as f32 * cell;
-        let min = origin + Vec3::new(x, 0.0, z);
-        let max = min + Vec3::new(cell, 0.0, cell);
-        draw.line(min, max, NAV_BLOCKED_COLOR);
+        let y = height_of(x, z);
+        let span = cell * stride as f32;
+        let min = corner(x, z, y);
+        draw.line(min, min + Vec3::new(span, 0.0, span), NAV_BLOCKED_COLOR);
         draw.line(
-            min + Vec3::new(cell, 0.0, 0.0),
-            min + Vec3::new(0.0, 0.0, cell),
+            min + Vec3::new(span, 0.0, 0.0),
+            min + Vec3::new(0.0, 0.0, span),
             NAV_BLOCKED_COLOR,
         );
     }
@@ -704,6 +833,91 @@ mod tests {
         // blocked cell: outlines are drawn per row and column, not per
         // cell, so the overlay stays cheap on a big grid.
         assert_eq!(draw.len(), (4 + 4) * 2 + 2 * 2);
+    }
+
+    fn nav_lines(world: &mut World) -> DebugDraw {
+        let mut draw = DebugDraw::new();
+        build(
+            world,
+            &LightSet::default(),
+            OverlayToggles {
+                nav: true,
+                ..Default::default()
+            },
+            None,
+            &[],
+            |_, _| None,
+            &mut draw,
+        );
+        draw
+    }
+
+    #[test]
+    fn a_baked_nav_grid_sits_on_its_ground_heights() {
+        use engine_scene::NavGridData;
+
+        let mut world = World::new();
+        let mut grid = NavGridData::new(2, 1, 1.0, [0.0, 0.0]);
+        grid.heights = vec![1.0, 3.0];
+        world.insert_resource(SceneNavGrid(grid));
+        let draw = nav_lines(&mut world);
+        let heights: Vec<f32> = draw.vertices().iter().map(|v| v.position[1]).collect();
+        assert!(heights.contains(&(1.0 + NAV_LIFT)));
+        assert!(heights.contains(&(3.0 + NAV_LIFT)));
+        assert!(heights.iter().all(|y| *y >= 1.0));
+    }
+
+    #[test]
+    fn a_selected_guard_shows_its_view_hearing_and_patrol() {
+        use engine_scene::{AiBrainData, AiData, AiState, SceneAi, SensesData, SimpleBrainData};
+
+        let mut world = World::new();
+        let ai = AiData {
+            senses: Some(SensesData::default()),
+            brain: Some(AiBrainData::Simple(SimpleBrainData {
+                start: AiState::Patrol,
+                patrol_points: vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 0.0, 4.0]],
+                ..SimpleBrainData::default()
+            })),
+            ..AiData::default()
+        };
+        let guard = world.spawn((Transform::default(), SceneAi(ai))).id();
+        let draw_for = |world: &mut World, selection: &[Entity]| {
+            let mut draw = DebugDraw::new();
+            build(
+                world,
+                &LightSet::default(),
+                OverlayToggles::default(),
+                None,
+                selection,
+                |_, _| None,
+                &mut draw,
+            );
+            draw.vertices()
+                .iter()
+                .filter(|vertex| {
+                    vertex.color == AI_ROUTE_COLOR
+                        || vertex.color == AI_SIGHT_COLOR
+                        || vertex.color == AI_HEARING_COLOR
+                })
+                .count()
+        };
+        assert_eq!(draw_for(&mut world, &[]), 0, "only while selected");
+        let shown = draw_for(&mut world, &[guard]);
+        assert!(shown > 100, "view arc, hearing ring and route: {shown}");
+    }
+
+    #[test]
+    fn a_huge_nav_grid_draws_a_bounded_number_of_lines() {
+        use engine_scene::NavGridData;
+
+        let mut world = World::new();
+        let mut grid = NavGridData::new(500, 500, 1.0, [0.0, 0.0]);
+        grid.heights = vec![0.5; 500 * 500];
+        grid.blocked.iter_mut().for_each(|cell| *cell = true);
+        world.insert_resource(SceneNavGrid(grid));
+        let draw = nav_lines(&mut world);
+        assert!(draw.len() <= NAV_MAX_DRAWN_CELLS * 8, "{}", draw.len());
     }
 
     #[test]

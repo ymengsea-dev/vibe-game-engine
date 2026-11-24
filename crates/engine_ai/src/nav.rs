@@ -62,6 +62,14 @@ pub enum NavError {
         /// The rejected world-space origin.
         origin: Vec2,
     },
+    /// A height list did not have one finite value per cell.
+    #[error("navigation grid needs one finite height per cell (got {count} for {cells} cells)")]
+    InvalidHeights {
+        /// Heights given.
+        count: usize,
+        /// Cells in the grid.
+        cells: usize,
+    },
     /// `width * height` exceeded the internal cell-count limit.
     #[error("navigation grid too large: {cells} cells exceeds the {max} limit")]
     GridTooLarge {
@@ -98,6 +106,8 @@ pub struct NavGrid {
     origin: Vec2,
     /// Row-major, `width * height`. `true` = blocked.
     blocked: Vec<bool>,
+    /// Row-major ground height per cell, or empty for a flat grid at `0`.
+    heights: Vec<f32>,
 }
 
 impl NavGrid {
@@ -134,7 +144,28 @@ impl NavGrid {
             cell_size,
             origin,
             blocked: vec![false; cells as usize],
+            heights: Vec::new(),
         })
+    }
+
+    /// This grid with a ground height per cell (row-major), so agents
+    /// walking it can follow hills. An empty list keeps the grid flat.
+    ///
+    /// # Errors
+    ///
+    /// [`NavError::InvalidHeights`] if `heights` is neither empty nor one
+    /// finite value per cell.
+    pub fn with_heights(mut self, heights: Vec<f32>) -> Result<Self, NavError> {
+        if !heights.is_empty()
+            && (heights.len() != self.blocked.len() || !heights.iter().all(|h| h.is_finite()))
+        {
+            return Err(NavError::InvalidHeights {
+                count: heights.len(),
+                cells: self.blocked.len(),
+            });
+        }
+        self.heights = heights;
+        Ok(self)
     }
 
     /// Builds a grid straight from row-major blocked flags — what a
@@ -221,6 +252,47 @@ impl NavGrid {
         if let Some(index) = self.index(coord) {
             self.blocked[index] = blocked;
         }
+    }
+
+    /// The ground height of the cell holding `world_xz`, clamped to the
+    /// nearest edge cell. `0` on a flat grid.
+    pub fn height_at(&self, world_xz: Vec2) -> f32 {
+        if self.heights.is_empty() {
+            return 0.0;
+        }
+        let coord = self.world_to_coord(world_xz);
+        let x = coord.x.clamp(0, self.width as i32 - 1) as usize;
+        let y = coord.y.clamp(0, self.height as i32 - 1) as usize;
+        self.heights[y * self.width as usize + x]
+    }
+
+    /// The walkable cell closest to `coord` within `max_rings` rings of
+    /// cells around it, `coord` itself first. Agents and targets often stand
+    /// in a blocked cell (against a wall the bake grew by the agent's
+    /// radius), and a route still has to start and end somewhere.
+    pub fn nearest_walkable(&self, coord: GridCoord, max_rings: i32) -> Option<GridCoord> {
+        if self.is_walkable(coord) {
+            return Some(coord);
+        }
+        for ring in 1..=max_rings.max(0) {
+            let mut best: Option<(i32, GridCoord)> = None;
+            for dy in -ring..=ring {
+                for dx in -ring..=ring {
+                    if dx.abs() != ring && dy.abs() != ring {
+                        continue;
+                    }
+                    let candidate = GridCoord::new(coord.x + dx, coord.y + dy);
+                    let distance = dx * dx + dy * dy;
+                    if self.is_walkable(candidate) && best.is_none_or(|(d, _)| distance < d) {
+                        best = Some((distance, candidate));
+                    }
+                }
+            }
+            if let Some((_, found)) = best {
+                return Some(found);
+            }
+        }
+        None
     }
 
     /// The cell containing world position `world_xz`. May be out of bounds
@@ -435,6 +507,40 @@ pub fn find_path_world(grid: &NavGrid, start: Vec2, goal: Vec2) -> Option<Vec<Ve
             .map(|coord| grid.coord_to_world_center(coord))
             .collect(),
     )
+}
+
+/// How many rings of cells [`find_route`] searches for a walkable cell
+/// when a route starts or ends in a blocked one.
+const ROUTE_SNAP_RINGS: i32 = 4;
+
+/// A walkable route between two world positions (`(x, z)`), ready to walk:
+/// A* on the grid, string-pulled with [`smooth_path`], starting at
+/// `start` itself and ending at `goal` itself.
+///
+/// An endpoint in a blocked cell snaps to the nearest walkable cell a few
+/// cells away; past that, or with no route at all, the result is `None`.
+/// When the goal snapped, the route ends at that cell's centre instead,
+/// since `goal` itself is not reachable.
+pub fn find_route(grid: &NavGrid, start: Vec2, goal: Vec2) -> Option<Vec<Vec2>> {
+    let start_cell = grid.nearest_walkable(grid.world_to_coord(start), ROUTE_SNAP_RINGS)?;
+    let goal_coord = grid.world_to_coord(goal);
+    let goal_cell = grid.nearest_walkable(goal_coord, ROUTE_SNAP_RINGS)?;
+    let cells = smooth_path(grid, &find_path(grid, start_cell, goal_cell)?);
+    let mut route: Vec<Vec2> = cells
+        .iter()
+        .skip(1)
+        .map(|&coord| grid.coord_to_world_center(coord))
+        .collect();
+    let end = if goal_cell == goal_coord {
+        goal
+    } else {
+        grid.coord_to_world_center(goal_cell)
+    };
+    match route.last_mut() {
+        Some(last) => *last = end,
+        None => route.push(end),
+    }
+    Some(route)
 }
 
 /// Whether every cell the straight segment from `a` to `b` passes through
@@ -835,6 +941,68 @@ mod tests {
         assert_eq!(follow_path(Vec2::ONE, &path, 0.0, 1.0), (Vec2::ONE, 0));
         assert_eq!(follow_path(Vec2::ONE, &[], 3.0, 1.0), (Vec2::ONE, 0));
         assert_eq!(follow_path(Vec2::ONE, &path, 3.0, f32::NAN), (Vec2::ONE, 0));
+    }
+
+    #[test]
+    fn heights_follow_the_cell_and_clamp_at_the_edge() {
+        let hills = NavGrid::new(2, 1, 1.0, Vec2::ZERO)
+            .and_then(|grid| grid.with_heights(vec![1.0, 3.0]))
+            .expect("valid heights");
+        assert_eq!(hills.height_at(Vec2::new(0.5, 0.5)), 1.0);
+        assert_eq!(hills.height_at(Vec2::new(1.5, 0.5)), 3.0);
+        assert_eq!(hills.height_at(Vec2::new(9.0, -9.0)), 3.0);
+        assert_eq!(hills.height_at(Vec2::new(-9.0, 0.5)), 1.0);
+        assert_eq!(grid(2, 2).height_at(Vec2::ONE), 0.0);
+    }
+
+    #[test]
+    fn with_heights_rejects_wrong_counts_and_nan() {
+        assert!(matches!(
+            grid(2, 2).with_heights(vec![0.0; 3]),
+            Err(NavError::InvalidHeights { count: 3, cells: 4 })
+        ));
+        assert!(grid(1, 1).with_heights(vec![f32::NAN]).is_err());
+        assert!(grid(1, 1).with_heights(Vec::new()).is_ok());
+    }
+
+    #[test]
+    fn nearest_walkable_finds_the_closest_free_cell() {
+        let mut grid = grid(5, 5);
+        grid.block_aabb(Vec2::new(1.0, 1.0), Vec2::new(3.9, 3.9));
+        assert_eq!(
+            grid.nearest_walkable(GridCoord::new(0, 0), 2),
+            Some(GridCoord::new(0, 0))
+        );
+        let near = grid
+            .nearest_walkable(GridCoord::new(2, 2), 2)
+            .expect("free ring");
+        assert!(grid.is_walkable(near));
+        assert_eq!((near.x - 2).abs().max((near.y - 2).abs()), 2);
+        assert_eq!(grid.nearest_walkable(GridCoord::new(2, 2), 1), None);
+    }
+
+    #[test]
+    fn find_route_starts_after_the_agent_and_ends_on_the_goal() {
+        let mut grid = grid(10, 10);
+        grid.block_aabb(Vec2::new(5.0, 0.0), Vec2::new(5.9, 7.9));
+        let goal = Vec2::new(8.3, 1.2);
+        let route = find_route(&grid, Vec2::new(1.5, 1.5), goal).expect("route");
+        assert_eq!(route.last().copied(), Some(goal));
+        // Around the wall, so at least one corner before the goal.
+        assert!(route.len() >= 2);
+        assert!(route.iter().any(|point| point.y > 7.9));
+        assert_eq!(
+            find_route(&grid, Vec2::new(1.5, 1.5), Vec2::new(2.5, 1.5)),
+            Some(vec![Vec2::new(2.5, 1.5)])
+        );
+    }
+
+    #[test]
+    fn find_route_snaps_a_blocked_goal_to_the_nearest_cell() {
+        let mut grid = grid(6, 1);
+        grid.set_blocked(GridCoord::new(5, 0), true);
+        let route = find_route(&grid, Vec2::new(0.5, 0.5), Vec2::new(5.5, 0.5)).expect("route");
+        assert_eq!(route.last().copied(), Some(Vec2::new(4.5, 0.5)));
     }
 
     #[test]

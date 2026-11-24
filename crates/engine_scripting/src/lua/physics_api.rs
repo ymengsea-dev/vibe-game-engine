@@ -88,13 +88,16 @@ pub(super) fn register(
         )?;
     }
     // Outside `with_queries` there is no world to ask: no hit, not grounded.
+    let nil = lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?;
     let stubs = QueryStubs {
         engine: engine.clone(),
-        raycast: lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?,
+        raycast: nil.clone(),
         is_grounded: lua.create_function(|_, _: MultiValue| Ok(false))?,
+        find_path: nil.clone(),
+        line_of_sight: lua.create_function(|_, _: MultiValue| Ok(false))?,
+        get_ai_state: nil,
     };
-    engine.set("raycast", stubs.raycast.clone())?;
-    engine.set("is_grounded", stubs.is_grounded.clone())?;
+    stubs.restore()?;
     Ok(stubs)
 }
 
@@ -106,6 +109,21 @@ pub(super) struct QueryStubs {
     engine: Table,
     raycast: Function,
     is_grounded: Function,
+    find_path: Function,
+    line_of_sight: Function,
+    get_ai_state: Function,
+}
+
+impl QueryStubs {
+    /// Puts every stub back on the `engine` table.
+    fn restore(&self) -> mlua::Result<()> {
+        self.engine.set("raycast", self.raycast.clone())?;
+        self.engine.set("is_grounded", self.is_grounded.clone())?;
+        self.engine.set("find_path", self.find_path.clone())?;
+        self.engine
+            .set("line_of_sight", self.line_of_sight.clone())?;
+        self.engine.set("get_ai_state", self.get_ai_state.clone())
+    }
 }
 
 fn raycast(lua: &Lua, mut args: MultiValue, queries: &dyn ScriptQueries) -> mlua::Result<Value> {
@@ -163,10 +181,6 @@ pub(super) fn with_queries<R>(
     f: impl FnOnce() -> R,
 ) -> mlua::Result<R> {
     let engine = &stubs.engine;
-    let restore = || -> mlua::Result<()> {
-        engine.set("raycast", stubs.raycast.clone())?;
-        engine.set("is_grounded", stubs.is_grounded.clone())
-    };
     let outcome = lua.scope(|scope| {
         engine.set(
             "raycast",
@@ -182,11 +196,29 @@ pub(super) fn with_queries<R>(
                 Ok(queries.is_grounded(&object_id))
             })?,
         )?;
+        engine.set(
+            "find_path",
+            scope.create_function(|lua, args: MultiValue| {
+                super::ai_api::find_path(lua, args, queries)
+            })?,
+        )?;
+        engine.set(
+            "line_of_sight",
+            scope.create_function(|lua, args: MultiValue| {
+                super::ai_api::line_of_sight(lua, args, queries)
+            })?,
+        )?;
+        engine.set(
+            "get_ai_state",
+            scope.create_function(|lua, args: MultiValue| {
+                super::ai_api::get_ai_state(lua, args, queries)
+            })?,
+        )?;
         Ok(f())
     });
     // The scoped functions die with the scope; always put the stubs back so
     // later plain callbacks see nil and false, whatever happened above.
-    let restored = restore();
+    let restored = stubs.restore();
     let result = outcome?;
     restored?;
     Ok(result)

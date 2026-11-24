@@ -23,7 +23,9 @@
 //! [`SceneEntity`] shape as a reusable entity template, instantiable into
 //! a live `World` any number of times.
 
+mod ai;
 mod animator;
+mod behaviour_tree;
 mod camera_pose;
 mod capture;
 mod environment;
@@ -45,6 +47,13 @@ mod validate;
 pub use validate::{MAX_TAG_BYTES, MAX_TAGS, valid_prefab_path, valid_scene_path};
 mod world;
 
+pub use ai::{
+    AiBrainData, AiClips, AiData, AiState, MAX_AI_DISTANCE, MAX_AI_NAME_BYTES, MAX_PATROL_POINTS,
+    NavAgentData, NavBakeSettings, SceneAi, SensesData, SimpleBrainData,
+};
+pub use behaviour_tree::{
+    BehaviourTreeData, BtNodeData, BtNodeKind, MAX_BT_CHILDREN, MAX_BT_NODES,
+};
 pub use animator::{
     AnimatorData, AnimatorMotion, AnimatorState, AnimatorStateData, AnimatorTransitionData,
     AnimatorValues, BlendClipData, MAX_ANIMATOR_STATES, MAX_ANIMATOR_TRANSITIONS, MAX_BLEND_CLIPS,
@@ -87,7 +96,7 @@ pub use resolve::{
     insert_skinned_model,
 };
 pub use rules::{
-    ContactRuleKind, RuleEvent, RuleOutcome, RuleVariableError, RuleVariables, expand_variables,
+    AiRuleEvent, ContactRuleKind, RuleEvent, RuleOutcome, RuleVariableError, RuleVariables, expand_variables,
     format_variable, valid_variable_name,
 };
 pub use runtime::{

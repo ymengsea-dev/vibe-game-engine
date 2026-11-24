@@ -31,4 +31,26 @@ pub trait ScriptQueries {
 
     /// Whether the object stands on something.
     fn is_grounded(&self, object_id: &str) -> bool;
+
+    /// The corners of a walkable route from `from` to `to` over the scene's
+    /// nav grid, ending at `to` (or the nearest reachable spot), or `None`
+    /// when there is no way there. Without a nav grid the route is straight.
+    fn find_path(&self, from: [f32; 3], to: [f32; 3]) -> Option<Vec<[f32; 3]>> {
+        let _ = from;
+        Some(vec![to])
+    }
+
+    /// Whether nothing solid stands between `from` and `to`. Triggers are
+    /// ignored, and so is `ignore`'s collider.
+    fn line_of_sight(&self, from: [f32; 3], to: [f32; 3], ignore: Option<&str>) -> bool {
+        let _ = (from, to, ignore);
+        true
+    }
+
+    /// The state of the object's Simple AI brain (`idle`, `patrol`, `chase`
+    /// or `attack`), if it has one.
+    fn ai_state(&self, object_id: &str) -> Option<String> {
+        let _ = object_id;
+        None
+    }
 }

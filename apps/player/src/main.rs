@@ -844,6 +844,29 @@ impl Game for Player {
                 tracing::error!(%error, "Lua animation event callback stopped");
             }
         }
+        for event in self.gameplay.take_ai_events() {
+            use engine::gameplay::AiEvent;
+            if let Err(error) = self.run_callback(ctx, |lua| match &event {
+                AiEvent::Arrived { object_id } => lua.on_move_finished(object_id),
+                AiEvent::TargetSeen {
+                    object_id,
+                    target_id,
+                } => lua.on_target_seen(object_id, target_id),
+                AiEvent::TargetLost {
+                    object_id,
+                    target_id,
+                } => lua.on_target_lost(object_id, target_id),
+                AiEvent::NoiseHeard {
+                    object_id,
+                    position,
+                } => lua.on_noise_heard(object_id, *position),
+                AiEvent::StateChanged { object_id, state } => {
+                    lua.on_ai_state_changed(object_id, state)
+                }
+            }) {
+                tracing::error!(%error, "Lua AI callback stopped");
+            }
+        }
         self.deliver_state_change(ctx);
         // A click or state callback may have paused or resumed the game.
         let phases = FramePhases::for_state(ctx.simulation_paused());
@@ -1840,6 +1863,61 @@ mod tests {
             .expect("scope")
             .expect("frame");
         assert_eq!(commands, vec![GameCommand::Log("wall-id".into())]);
+    }
+
+    #[test]
+    fn lua_finds_paths_around_the_baked_grid_and_checks_line_of_sight() {
+        use engine::gameplay::GameplayQueries;
+        use engine::physics::{ColliderBuilder, PhysicsWorld, RigidBodyBuilder};
+        let mut physics = PhysicsWorld::default();
+        let mut world = engine::prelude::World::new();
+        let (body, collider) = engine::ecs::components::RigidBody::spawn(
+            &mut physics,
+            RigidBodyBuilder::fixed().translation([5.5, 1.0, 4.0].into()),
+            ColliderBuilder::cuboid(0.5, 2.0, 4.0),
+        );
+        world.spawn((
+            engine::scene::SceneObjectId("wall-id".into()),
+            engine::ecs::components::Transform::default(),
+            body,
+            collider,
+        ));
+        physics.step(0.0).expect("refresh broad phase");
+        // The same wall, baked into a 10 x 10 grid: x = 5, z = 0..8 blocked.
+        let mut grid = engine::scene::NavGridData::new(10, 10, 1.0, [0.0, 0.0]);
+        for z in 0..8 {
+            grid.blocked[z * 10 + 5] = true;
+        }
+        world.insert_resource(engine::scene::SceneNavGrid(grid));
+        let mut lua = LuaRuntime::new().expect("runtime");
+        lua.load_script(
+            "assets/scripts/main.lua",
+            "return { update = function(dt)
+               local path = engine.find_path(vec3(1.5, 0, 1.5), vec3(8.5, 0, 1.5))
+               local around = false
+               for _, corner in ipairs(path) do
+                 if corner.z > 7.9 then around = true end
+               end
+               engine.log(tostring(around) .. ' ' .. path[#path].x)
+               engine.log(tostring(engine.line_of_sight(vec3(1, 1, 2), vec3(9, 1, 2))))
+               engine.log(tostring(engine.line_of_sight(vec3(1, 1, 9.5), vec3(9, 1, 9.5))))
+             end }",
+        )
+        .expect("script");
+        sync_lua_scene(&mut lua, &world, &physics);
+        let queries = GameplayQueries::new(&world, &physics);
+        let commands = lua
+            .with_queries(&queries, |lua| lua.update(0.0))
+            .expect("scope")
+            .expect("frame");
+        assert_eq!(
+            commands,
+            vec![
+                GameCommand::Log("true 8.5".into()),
+                GameCommand::Log("false".into()),
+                GameCommand::Log("true".into()),
+            ]
+        );
     }
 
     #[test]

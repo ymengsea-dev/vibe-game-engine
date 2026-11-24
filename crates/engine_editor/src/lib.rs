@@ -48,6 +48,7 @@ pub mod inspector;
 mod menu;
 pub(crate) mod object_clipboard;
 mod output;
+pub mod nav_bake;
 pub mod overlays;
 pub mod perf_budget;
 pub mod play;

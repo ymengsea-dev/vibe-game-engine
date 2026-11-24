@@ -74,7 +74,12 @@ fn edge_point(rect: egui::Rect, to: egui::Pos2) -> egui::Pos2 {
     center + direction * scale.min(1.0)
 }
 
-fn arrow(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32) {
+pub(super) fn arrow(
+    painter: &egui::Painter,
+    from: egui::Pos2,
+    to: egui::Pos2,
+    color: egui::Color32,
+) {
     let stroke = egui::Stroke::new(2.0, color);
     painter.line_segment([from, to], stroke);
     let direction = (to - from).normalized();
@@ -350,7 +355,7 @@ fn canvas(
     clippy::too_many_arguments,
     reason = "a node's place, identity and look, kept flat like graph::node"
 )]
-fn node(
+pub(super) fn node(
     ui: &mut egui::Ui,
     painter: &egui::Painter,
     canvas: egui::Rect,

@@ -7,7 +7,7 @@ mod input;
 mod lua;
 mod queries;
 
-pub use command::{GAME_STATES, GameCommand, QUALITY_LEVELS};
+pub use command::{AI_STATES, GAME_STATES, GameCommand, QUALITY_LEVELS};
 pub use input::{
     ButtonState, InputSnapshot, ScriptGamepadAxis, ScriptGamepadButton, ScriptKey,
     ScriptMouseButton,

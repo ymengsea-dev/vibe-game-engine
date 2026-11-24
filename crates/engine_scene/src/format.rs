@@ -1203,6 +1203,19 @@ pub enum RuleTrigger {
         /// The event's name in the clip.
         name: String,
     },
+    /// This object's AI noticed a target, by sight or hearing.
+    TargetSeen,
+    /// This object's AI lost its target.
+    TargetLost,
+    /// This object's AI heard a noise.
+    NoiseHeard,
+    /// This object reached where it was walking to.
+    MoveFinished,
+    /// This object's Simple AI brain entered a state.
+    AiStateChanged {
+        /// The state entered; `None` matches any.
+        state: Option<crate::AiState>,
+    },
 }
 
 /// Where a spawned prefab appears.
@@ -1295,6 +1308,25 @@ pub enum RuleAction {
     SetGameState {
         /// The state to enter.
         state: crate::GameStateName,
+    },
+    /// Walk an object to a place along the scene's walkable area.
+    MoveTo {
+        /// Stable ID of the object that walks.
+        target: String,
+        /// Where it walks to: another object's position, or a fixed one.
+        to: SpawnAt,
+    },
+    /// Stop an object walking.
+    StopMoving {
+        /// Stable ID of the object.
+        target: String,
+    },
+    /// Make a noise that AI within `radius` hears.
+    MakeNoise {
+        /// Where the noise is made.
+        at: SpawnAt,
+        /// How far it carries, in world units.
+        radius: f32,
     },
 }
 
@@ -1510,6 +1542,14 @@ pub struct NavGridData {
     /// Row-major blocked flags, `width * height` of them. Any other
     /// length is a malformed grid — see [`Scene::validate`].
     pub blocked: Vec<bool>,
+    /// Row-major ground height per cell, written by Studio's bake so agents
+    /// follow hills. Empty means flat at `0`, as in hand-made grids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heights: Vec<f32>,
+    /// The settings the grid was last baked with, so a re-bake starts from
+    /// them. Absent on a grid that was never baked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bake: Option<crate::ai::NavBakeSettings>,
 }
 
 impl NavGridData {
@@ -1521,6 +1561,8 @@ impl NavGridData {
             cell_size,
             origin,
             blocked: vec![false; (width as usize) * (height as usize)],
+            heights: Vec::new(),
+            bake: None,
         }
     }
 
@@ -1871,6 +1913,9 @@ pub struct SceneEntity {
     /// The prefab this object is a linked copy of, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefab: Option<PrefabLink>,
+    /// How this object walks, senses and decides, if it has AI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<crate::ai::AiData>,
     /// In Studio with several scenes open, the scene file this object is
     /// saved to, when it isn't the main one. Never written to a file: the file
     /// an object is in says this already.

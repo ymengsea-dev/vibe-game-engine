@@ -90,6 +90,15 @@ fn action_label(
             format!("Destroy\n{}", target_name(target, object_targets))
         }
         RuleAction::SetGameState { state } => format!("Set state\n{}", state.label()),
+        RuleAction::MoveTo { target, .. } => {
+            format!("Walk\n{}", target_name(target, object_targets))
+        }
+        RuleAction::StopMoving { target } => {
+            format!("Stop walking\n{}", target_name(target, object_targets))
+        }
+        RuleAction::MakeNoise { radius, .. } => {
+            format!("Make a noise\n{} m", format_variable(f64::from(*radius)))
+        }
     };
     if rule.conditions.is_empty() {
         return label;
@@ -217,6 +226,14 @@ fn event_label(trigger: &RuleTrigger, object_targets: &[(String, String)]) -> St
         RuleTrigger::VariableChanged { name } => format!("When variable\n{name} changes"),
         RuleTrigger::StateChanged { state } => format!("When state\n{}", state.label()),
         RuleTrigger::AnimationEvent { name } => format!("When animation\n{name}"),
+        RuleTrigger::TargetSeen => "When it\nnotices a target".to_owned(),
+        RuleTrigger::TargetLost => "When it\nloses its target".to_owned(),
+        RuleTrigger::NoiseHeard => "When it\nhears a noise".to_owned(),
+        RuleTrigger::MoveFinished => "When it\nreaches its destination".to_owned(),
+        RuleTrigger::AiStateChanged { state } => format!(
+            "When AI state\n{}",
+            state.map_or("changes", super::ai_state_label)
+        ),
     }
 }
 

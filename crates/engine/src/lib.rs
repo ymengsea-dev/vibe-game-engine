@@ -41,12 +41,12 @@ pub mod prelude {
         SceneParts, Time, run_game,
     };
     pub use crate::gameplay::{
-        AnimationEventFired, AnimatorState, AnimatorValues, CollisionEvent, ContactKind,
-        GameplayError, GameplayRuntime, SceneSource, SpawnedObject,
+        AiEvent, AnimationEventFired, AnimatorState, AnimatorValues, CollisionEvent, ContactKind,
+        GameplayError, GameplayQueries, GameplayRuntime, SceneSource, SpawnedObject,
     };
     pub use engine_ai::{
-        GridCoord, NavError, NavGrid, find_path, find_path_world, follow_path, line_of_sight,
-        smooth_path,
+        GridCoord, NavError, NavGrid, find_path, find_path_world, find_route, follow_path,
+        line_of_sight, smooth_path,
     };
     pub use engine_animation::{
         AnimationState, BlendMotion, StateMachine, StateMachineError, Transition,
@@ -130,7 +130,7 @@ pub mod prelude {
         SpriteData, TransformData, WorldSnapshot, capture_renderables, executable_dir,
         load_mesh_geometry, load_skinned_mesh, open_export,
     };
-    pub use engine_scripting::GameCommand;
+    pub use engine_scripting::{GameCommand, ScriptQueries};
     #[cfg(feature = "lua")]
     pub use engine_scripting::{LuaRuntime, ScriptError};
     pub use engine_ui::{

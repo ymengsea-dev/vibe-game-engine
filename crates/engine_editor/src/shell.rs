@@ -4485,6 +4485,42 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
                 ui.close();
             }
         });
+        ui.menu_button("Navigation", |ui| {
+            let mut settings = state.nav_bake_settings();
+            if crate::nav_bake::show_controls(ui, &mut settings) {
+                // A baked grid keeps its settings in the scene file.
+                match state.world.get_resource_mut::<engine_scene::SceneNavGrid>() {
+                    Some(mut grid) if grid.0.bake.is_some() => {
+                        grid.0.bake = Some(settings);
+                        state.mark_dirty();
+                    }
+                    _ => state.nav_bake = settings,
+                }
+            }
+            ui.separator();
+            if ui
+                .button("Bake walkable area")
+                .on_hover_text(
+                    "Work out where characters can walk, from the ground and solid objects",
+                )
+                .clicked()
+            {
+                state.nav_bake_request = true;
+                ui.close();
+            }
+            let has_grid = state
+                .world
+                .contains_resource::<engine_scene::SceneNavGrid>();
+            if ui
+                .add_enabled(has_grid, egui::Button::new("Clear walkable area"))
+                .clicked()
+            {
+                state.clear_nav_grid();
+                ui.close();
+            }
+            ui.checkbox(&mut state.overlays.nav, "Show walkable area");
+            ui.weak("Bake again after moving walls or ground.");
+        });
         ui.menu_button("Tilemap", |ui| {
             if ui
                 .add_enabled(
@@ -6444,6 +6480,126 @@ mod ui_tests {
                 ui,
                 &mut state.world,
                 Some(model),
+                &[],
+                &mut batch,
+                &crate::AssetIndex::new(),
+                &mut open_script,
+            );
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `inspector-ai.png` (a guard with senses and a patrolling Simple
+    /// brain) and `inspector-ai-tree.png` (the same guard with a behaviour
+    /// tree). Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_ai() {
+        use engine_scene::{
+            AiBrainData, AiData, AiState, BehaviourTreeData, SceneAi, SensesData, SimpleBrainData,
+        };
+        let simple = AiData {
+            senses: Some(SensesData::default()),
+            brain: Some(AiBrainData::Simple(SimpleBrainData {
+                start: AiState::Patrol,
+                patrol_points: vec![[0.0, 0.0, 0.0], [6.0, 0.0, 0.0], [6.0, 0.0, 6.0]],
+                ..SimpleBrainData::default()
+            })),
+            ..AiData::default()
+        };
+        let tree = AiData {
+            brain: Some(AiBrainData::Tree(BehaviourTreeData::default())),
+            ..simple.clone()
+        };
+        for (file, ai) in [
+            ("inspector-ai.png", simple),
+            ("inspector-ai-tree.png", tree),
+        ] {
+            let (root, mut state) = menu_test_state();
+            let guard = state
+                .world
+                .spawn((
+                    engine_ecs::components::Name::new("Guard"),
+                    engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                    SceneAi(ai),
+                ))
+                .id();
+            state.select_only(guard);
+            let path = crate::ui_snapshot::snapshot_dir().join(file);
+            crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 1300.0), 2.0, |ui| {
+                egui::Panel::right("snapshot_inspector")
+                    .exact_size(420.0)
+                    .frame(super::studio_panel_frame())
+                    .show_separator_line(false)
+                    .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                    .show(ui, |_| {});
+            })
+            .expect("snapshot");
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    /// Writes `behaviour-tree-window.png`: a guard's tree that chases a seen
+    /// target and otherwise patrols and waits, the patrol node selected.
+    /// Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_behaviour_tree_window() {
+        use engine_scene::{
+            AiBrainData, AiData, BehaviourTreeData, BtNodeData, BtNodeKind, SceneAi, SensesData,
+        };
+        let node = |kind, children: Vec<usize>| BtNodeData {
+            kind,
+            children,
+            graph_position: None,
+        };
+        let tree = BehaviourTreeData {
+            nodes: vec![
+                node(BtNodeKind::Selector, vec![1, 4]),
+                node(BtNodeKind::Sequence, vec![2, 3]),
+                node(BtNodeKind::CanSeeTarget, vec![]),
+                node(BtNodeKind::MoveToTarget { speed: Some(5.0) }, vec![]),
+                node(BtNodeKind::Sequence, vec![5, 6]),
+                node(
+                    BtNodeKind::Patrol {
+                        points: vec![[0.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+                    },
+                    vec![],
+                ),
+                node(BtNodeKind::Wait { seconds: 2.0 }, vec![]),
+            ],
+        };
+        let (root, mut state) = menu_test_state();
+        let guard = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Guard"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                SceneAi(AiData {
+                    senses: Some(SensesData::default()),
+                    brain: Some(AiBrainData::Tree(tree)),
+                    ..AiData::default()
+                }),
+            ))
+            .id();
+        state.select_only(guard);
+        let path = crate::ui_snapshot::snapshot_dir().join("behaviour-tree-window.png");
+        let mut first = true;
+        crate::ui_snapshot::render_png(&path, egui::vec2(840.0, 780.0), 2.0, |ui| {
+            if std::mem::take(&mut first) {
+                crate::inspector::open_behaviour_tree(ui.ctx(), guard, 5);
+            }
+            ui.painter()
+                .rect_filled(ui.max_rect(), 0.0, crate::theme::NIGHT.shell);
+            let mut batch = false;
+            let mut open_script = None;
+            crate::inspector::show(
+                ui,
+                &mut state.world,
+                Some(guard),
                 &[],
                 &mut batch,
                 &crate::AssetIndex::new(),

@@ -150,7 +150,7 @@ Helper drawings. The game never shows them.
 | **Cameras** | What each game camera sees |
 | **Ground grid** | 1 m squares on the floor |
 | **Audio emitters** | Each sound and how far it can be heard |
-| **Nav grid** | Where characters can walk (red = blocked) |
+| **Nav grid** | The walkable area: where characters can walk, lying on the ground (red cross = blocked). Big areas draw every few cells |
 | **Distance detail** | Draws models as the game will from the Scene View camera: simpler versions far away, and nothing past each object's draw distance, at the project's graphics quality. Off shows every model in full |
 
 ## Cameras
@@ -201,6 +201,29 @@ Each tile is a `.terrain` file in `terrain/<Name>/`, with its paint in `.splat` 
 Terrains made by older versions of Studio are converted when the scene opens. Studio saves a copy of the scene file as `<scene>.ron.terrain-v1.bak` the first time it saves over it, and leaves the old `.gltf` model in place.
 
 Limits: textures blend smoothly, not by height. Sculpting while the game plays doesn't change its collision. If you reshape the ground after scattering, delete the copies and scatter again.
+
+## Navigation
+
+Characters with AI find their way around walls along the scene's **walkable area**. Bake it here; the game does not bake it by itself.
+
+| Option | What it does |
+| --- | --- |
+| **Cell size** | Size of one square of the area. Smaller finds narrower gaps but makes a bigger area (at most 250,000 squares) |
+| **Character radius** | How far characters keep from walls |
+| **Character height** | Anything lower overhead blocks the way |
+| **Step height** | Ledges up to this high can be stepped over |
+| **Steepest slope °** | Ground steeper than this is not walkable |
+| **Bake walkable area** | Works out the area from the ground (terrain, or the top of a fixed box collider) and the fixed solid colliders standing on it, then shows it. ⌘Z undoes it |
+| **Clear walkable area** | Removes it; characters then walk straight to where they are sent |
+| **Show walkable area** | The same as the **Nav grid** overlay |
+
+What counts: only **Fixed** colliders that are not triggers block, by the box around them. Moving bodies, triggers, disabled objects and objects with AI never block. Without any ground the area is flat at height 0 around the solid objects. The area has one floor: a bridge or an upper storey is not walkable.
+
+Bake again after moving walls or reshaping the ground; the area does not follow by itself.
+
+### AI markers
+
+Select an object with an **AI** section to see, in yellow, what it can see (its view angle out to its sight range, at eye height), in purple, how far it hears, and in green, its patrol points and the route between them. Other objects' markers are hidden.
 
 ## Tilemap (2D view)
 

@@ -127,6 +127,21 @@ An object that is several things shows the first match in this list. Terrain sho
 | Drag empty space | Move the view |
 | Click an event, then an action | Connect them |
 
+## Behaviour tree window
+
+Open it from the Inspector: **AI → Brain → Behaviour tree → Edit behaviour tree**.
+
+| Shortcut | What it does |
+| --- | --- |
+| Click a node | Select it and show its settings below |
+| Drag a node | Move it (the layout saves with the scene) |
+| Drag empty space | Move the view |
+| **+ Node** | Add a node under the selected Sequence, Selector or Not, or after the selected node |
+| **◀** / **▶** | Run the selected node earlier or later among its siblings |
+| **Delete** | Remove the selected node and everything under it (not the top node) |
+| **Tidy** | Put every node back in the automatic layout |
+| **Add point here** (Patrol) | Add the object's current position as a patrol point |
+
 ## Code panel
 
 | Shortcut | What it does |

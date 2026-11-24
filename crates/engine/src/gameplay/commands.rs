@@ -75,6 +75,10 @@ pub fn apply_world_commands(
             | GameCommand::AddForce { .. }
             | GameCommand::AddImpulse { .. }
             | GameCommand::MoveCharacter { .. }
+            | GameCommand::MoveTo { .. }
+            | GameCommand::StopMoving { .. }
+            | GameCommand::MakeNoise { .. }
+            | GameCommand::SetAiState { .. }
             | GameCommand::SetCamera { .. }
             | GameCommand::Destroy { .. }
             | GameCommand::SetVisible { .. }

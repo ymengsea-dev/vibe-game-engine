@@ -14,13 +14,15 @@
 //! cells), queries [`find_path`] / [`find_path_world`], optionally
 //! [`smooth_path`]s the result, and advances an agent with [`follow_path`].
 //!
-//! Polygon navmeshes, a `NavAgent` ECS component + follow system, local
-//! steering / obstacle avoidance, and building the grid automatically from
-//! physics colliders or terrain slope are all future work.
+//! Grids can carry a ground height per cell ([`NavGrid::with_heights`]),
+//! and [`find_route`] is the one-call route a walking agent uses. Studio
+//! bakes grids from colliders and terrain slope; `engine::gameplay` walks
+//! agents along them. Polygon navmeshes and local steering / obstacle
+//! avoidance are future work.
 
 pub mod nav;
 
 pub use nav::{
-    GridCoord, NavError, NavGrid, find_path, find_path_world, follow_path, line_of_sight,
-    smooth_path,
+    GridCoord, NavError, NavGrid, find_path, find_path_world, find_route, follow_path,
+    line_of_sight, smooth_path,
 };

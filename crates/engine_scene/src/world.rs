@@ -307,6 +307,9 @@ impl Scene {
             scene_entity.audio_emitter = world
                 .get::<crate::format::SceneAudioEmitter>(*entity)
                 .map(|carrier| carrier.0.clone());
+            scene_entity.ai = world
+                .get::<crate::ai::SceneAi>(*entity)
+                .map(|carrier| carrier.0.clone());
             scene_entity.water = world
                 .get::<engine_ecs::components::WaterVolume>(*entity)
                 .map(|volume| volume.surface.into());
@@ -1234,12 +1237,39 @@ mod tests {
     }
 
     #[test]
+    fn ai_settings_round_trip_through_the_live_world() {
+        let ai = crate::AiData {
+            senses: Some(crate::SensesData::default()),
+            brain: Some(crate::AiBrainData::Tree(crate::BehaviourTreeData::default())),
+            ..crate::AiData::default()
+        };
+        let scene = Scene {
+            version: crate::CURRENT_SCENE_VERSION,
+            entities: vec![SceneEntity {
+                name: Some("Guard".into()),
+                ai: Some(ai.clone()),
+                ..SceneEntity::default()
+            }],
+            nav_grid: None,
+            lighting: None,
+            environment: Default::default(),
+        };
+        scene.validate().expect("valid");
+        let mut world = World::new();
+        scene.instantiate(&mut world);
+        let captured = Scene::from_world(&mut world);
+        assert_eq!(captured.entities[0].ai, Some(ai));
+    }
+
+    #[test]
     fn nav_grid_round_trips() {
         use crate::format::NavGridData;
 
         let mut grid = NavGridData::new(4, 3, 2.0, [-4.0, -3.0]);
         grid.blocked[5] = true;
         grid.blocked[6] = true;
+        grid.heights = (0..12).map(|cell| cell as f32 * 0.25).collect();
+        grid.bake = Some(crate::NavBakeSettings::default());
 
         let scene = Scene {
             version: crate::CURRENT_SCENE_VERSION,

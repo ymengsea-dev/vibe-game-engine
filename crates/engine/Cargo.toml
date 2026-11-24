@@ -32,6 +32,8 @@ engine_utils.workspace = true
 # Unconditional: navigation is gameplay, not tooling. It is grid A* with
 # no editor dependency, and a shipped game needs to pathfind (T-10).
 engine_ai.workspace = true
+# For the gameplay runtime's own AI components (routes, memory).
+bevy_ecs.workspace = true
 
 # Editor-only subsystems. Off with `default-features = false` so a
 # shipped runtime (e.g. `apps/player`) never compiles egui / wry

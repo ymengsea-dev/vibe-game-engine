@@ -200,6 +200,7 @@ pub(super) fn clear_world_except(
         }
     }
     world.remove_resource::<SceneNavGrid>();
+    world.remove_resource::<super::ai::ActiveNavGrid>();
 }
 
 /// Empties the physics world of everything but `keep`'s bodies. With nothing to

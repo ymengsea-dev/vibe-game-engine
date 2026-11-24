@@ -341,6 +341,9 @@ impl SavedEntity {
             // the scene that spawned it already described its collider,
             // and rebuilding one here would double it up.
             collider: None,
+            // Like the collider: the scene that spawned the object already
+            // gave it its AI.
+            ai: None,
             water: self.water,
             point_light: self.point_light,
             ui: None,

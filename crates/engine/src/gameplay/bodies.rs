@@ -252,6 +252,40 @@ impl ScriptQueries for GameplayQueries<'_> {
             Ok(Some(_))
         )
     }
+
+    fn find_path(&self, from: [f32; 3], to: [f32; 3]) -> Option<Vec<[f32; 3]>> {
+        let (from, to) = (Vec3::from_array(from), Vec3::from_array(to));
+        if !from.is_finite() || !to.is_finite() {
+            return None;
+        }
+        let built;
+        let grid = match self.world.get_resource::<super::ai::ActiveNavGrid>() {
+            Some(active) => Some(&active.0),
+            None => {
+                built = self
+                    .world
+                    .get_resource::<engine_scene::SceneNavGrid>()
+                    .and_then(|data| super::ai::nav_grid(&data.0));
+                built.as_ref()
+            }
+        };
+        super::ai::find_world_route(grid, from, to)
+            .map(|route| route.iter().map(Vec3::to_array).collect())
+    }
+
+    fn line_of_sight(&self, from: [f32; 3], to: [f32; 3], ignore: Option<&str>) -> bool {
+        let (from, to) = (Vec3::from_array(from), Vec3::from_array(to));
+        if !from.is_finite() || !to.is_finite() {
+            return false;
+        }
+        let ignore = ignore.and_then(|id| find_object(self.world, id));
+        super::ai::line_of_sight(self.world, self.physics, ignore, None, from, to)
+    }
+
+    fn ai_state(&self, object_id: &str) -> Option<String> {
+        let entity = find_object(self.world, object_id)?;
+        super::ai::ai_state(self.world, entity).map(str::to_owned)
+    }
 }
 
 impl GameplayQueries<'_> {

@@ -29,6 +29,7 @@
 //! }
 //! ```
 
+mod ai;
 mod animation;
 mod bodies;
 mod camera;
@@ -54,6 +55,7 @@ use engine_ui::NodeId;
 
 use crate::app::{GameContext, GameError};
 
+pub use ai::{AiEvent, ai_state};
 pub use animation::AnimationEventFired;
 pub use bodies::GameplayQueries;
 pub use camera::{choose_active_camera, view_from_world};
@@ -118,6 +120,12 @@ fn store_ui_changes(world: &mut engine_ecs::prelude::World, ui: &mut engine_ui::
         engine_scene::sync_ui_variables(ui, variables);
     }
 }
+
+/// Most AI events kept for a host that has not taken them.
+const MAX_PENDING_AI_EVENTS: usize = 1_024;
+
+/// Seed for behaviour-tree chance nodes, so a run is repeatable.
+const AI_SEED: u64 = 0x005E_EDA1;
 
 /// An object created by [`GameplayRuntime::apply`] from a prefab.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +201,12 @@ pub struct GameplayRuntime {
     carried_objects: Vec<Entity>,
     /// Their IDs: their start rules have already run.
     carried_ids: HashSet<String>,
+    /// Noises made since AI last listened.
+    noises: Vec<ai::Noise>,
+    /// AI events not yet taken by the host.
+    ai_events: Vec<AiEvent>,
+    /// Random source for behaviour-tree chance nodes, seeded once per game.
+    ai_rng: engine_utils::Rng,
 }
 
 impl GameplayRuntime {
@@ -234,6 +248,9 @@ impl GameplayRuntime {
             carried: Vec::new(),
             carried_objects: Vec::new(),
             carried_ids: HashSet::new(),
+            noises: Vec::new(),
+            ai_events: Vec::new(),
+            ai_rng: engine_utils::Rng::new(AI_SEED),
         }
     }
 
@@ -737,6 +754,21 @@ impl GameplayRuntime {
             &commands,
             fixed_step,
         );
+        ai::apply_route_commands(ctx.world_mut(), &mut self.warned, &commands);
+        ai::apply_state_commands(ctx.world_mut(), &commands);
+        for command in &commands {
+            if let GameCommand::MakeNoise { position, radius } = command {
+                let position = glam::Vec3::from_array(*position);
+                if position.is_finite() && radius.is_finite() && *radius >= 0.0 {
+                    self.noises.push(ai::Noise {
+                        position,
+                        radius: *radius,
+                    });
+                } else {
+                    tracing::warn!("make_noise needs a finite position and radius");
+                }
+            }
+        }
         camera::apply_camera_commands(
             ctx.world_mut(),
             &mut self.active_camera,
@@ -873,6 +905,65 @@ impl GameplayRuntime {
         for event in &due {
             self.run_rule_event(ctx, event.as_event());
         }
+        if !paused {
+            self.update_ai(ctx, dt);
+        }
+    }
+
+    /// One frame of AI: senses, brains and walking, then the rules for what
+    /// happened. Runs inside [`Self::update_rules`], so every game that runs
+    /// rules runs AI too.
+    fn update_ai(&mut self, ctx: &mut GameContext<'_>, dt: f32) {
+        let noises = std::mem::take(&mut self.noises);
+        let tick = {
+            let (world, physics, _, _) = ctx.object_parts();
+            ai::tick(world, physics, &noises, dt, &mut self.ai_rng)
+        };
+        if !tick.commands.is_empty()
+            && let Err(error) = self.apply(ctx, tick.commands)
+        {
+            tracing::warn!(%error, "an AI action failed");
+        }
+        for event in &tick.events {
+            self.run_ai_rules(ctx, event);
+        }
+        self.ai_events.extend(tick.events);
+        // A host that never takes them (an older Rust game) keeps the newest.
+        if self.ai_events.len() > MAX_PENDING_AI_EVENTS {
+            let extra = self.ai_events.len() - MAX_PENDING_AI_EVENTS;
+            self.ai_events.drain(..extra);
+        }
+    }
+
+    /// Runs the visual rules for one AI event.
+    fn run_ai_rules(&mut self, ctx: &mut GameContext<'_>, event: &AiEvent) {
+        let kind = match event {
+            AiEvent::Arrived { .. } => engine_scene::AiRuleEvent::MoveFinished,
+            AiEvent::TargetSeen { .. } => engine_scene::AiRuleEvent::TargetSeen,
+            AiEvent::TargetLost { .. } => engine_scene::AiRuleEvent::TargetLost,
+            AiEvent::NoiseHeard { .. } => engine_scene::AiRuleEvent::NoiseHeard,
+            AiEvent::StateChanged { state, .. } => match engine_scene::AiState::from_name(state) {
+                Some(state) => engine_scene::AiRuleEvent::StateChanged(state),
+                None => return,
+            },
+        };
+        self.run_rule_event(
+            ctx,
+            RuleEvent::Ai {
+                owner: event.object_id(),
+                event: kind,
+            },
+        );
+    }
+
+    /// What AI objects did and noticed since the last call, after their
+    /// rules ran: arrivals, targets seen and lost, noises heard and Simple
+    /// brain state changes. Call once per frame in `update`, after
+    /// `update_rules`, and give each to the object's script (Lua:
+    /// `on_target_seen`, `on_target_lost`, `on_noise_heard`,
+    /// `on_move_finished`, `on_ai_state_changed`).
+    pub fn take_ai_events(&mut self) -> Vec<AiEvent> {
+        std::mem::take(&mut self.ai_events)
     }
 
     /// Stores values the player changed with sliders and toggles in their
@@ -1039,6 +1130,8 @@ impl GameplayRuntime {
         self.pending_scene = None;
         self.rule_spawns.clear();
         self.destroyed.clear();
+        self.noises.clear();
+        self.ai_events.clear();
         self.scene_loads.clear();
         self.loaded_scenes.clear();
         self.loading_nodes.clear();

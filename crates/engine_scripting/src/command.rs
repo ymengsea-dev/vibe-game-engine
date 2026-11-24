@@ -9,6 +9,10 @@ pub const GAME_STATES: [&str; 4] = ["menu", "playing", "paused", "game_over"];
 /// two agree).
 pub const QUALITY_LEVELS: [&str; 3] = ["low", "medium", "high"];
 
+/// The Simple AI brain's state names, in the order
+/// `engine_scene::AiState::ALL` lists them (`engine` tests that the two agree).
+pub const AI_STATES: [&str; 4] = ["idle", "patrol", "chase", "attack"];
+
 /// A validated gameplay request for the engine to apply.
 ///
 /// Lua scripts produce these through `engine.*` calls; Rust games construct
@@ -194,6 +198,36 @@ pub enum GameCommand {
         object_id: String,
         /// Finite desired translation for this step.
         delta: [f32; 3],
+    },
+    /// Walk a scene object to a world position along the scene's nav grid
+    /// (straight there when the scene has none), with its AI settings, or
+    /// default ones.
+    MoveTo {
+        /// Stable scene object ID.
+        object_id: String,
+        /// Finite world position to walk to.
+        target: [f32; 3],
+        /// Finite walking speed, or the object's own when `None`.
+        speed: Option<f32>,
+    },
+    /// Stop a scene object walking where `MoveTo` sent it.
+    StopMoving {
+        /// Stable scene object ID.
+        object_id: String,
+    },
+    /// Make a noise that AI within its radius (and their hearing) notices.
+    MakeNoise {
+        /// Finite world position of the noise.
+        position: [f32; 3],
+        /// Finite distance it carries, at least zero.
+        radius: f32,
+    },
+    /// Put a scene object with a Simple AI brain into one of its states.
+    SetAiState {
+        /// Stable scene object ID.
+        object_id: String,
+        /// One of [`AI_STATES`].
+        state: String,
     },
     /// Make a scene camera object the one the game views through.
     SetCamera {
