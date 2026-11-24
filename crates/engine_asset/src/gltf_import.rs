@@ -225,6 +225,8 @@ pub struct ImportedMaterial {
     pub alpha_mode: &'static str,
     /// Cutoff for `"MASK"`, glTF's `alphaCutoff`. Defaults to `0.5`.
     pub alpha_cutoff: f32,
+    /// glTF's `doubleSided`: both faces of each triangle are visible.
+    pub double_sided: bool,
 }
 
 /// An embedded image, decoded to tightly-packed RGBA8 (ready for
@@ -650,6 +652,7 @@ fn convert(
                     gltf::material::AlphaMode::Blend => "BLEND",
                 },
                 alpha_cutoff: material.alpha_cutoff().unwrap_or(0.5),
+                double_sided: material.double_sided(),
             }
         })
         .collect();

@@ -558,6 +558,7 @@ pub fn material_from_imported(imported: &ImportedMaterial) -> Material {
             "BLEND" => AlphaMode::Blend,
             _ => AlphaMode::Opaque,
         },
+        double_sided: imported.double_sided,
     }
 }
 
@@ -1308,8 +1309,10 @@ mod tests {
             occlusion_strength: 1.0,
             alpha_mode: "MASK",
             alpha_cutoff: 0.4,
+            double_sided: true,
         };
         let material = material_from_imported(&imported);
+        assert!(material.double_sided);
         assert!(matches!(
             material.alpha_mode,
             AlphaMode::Mask { cutoff } if (cutoff - 0.4).abs() < 1e-6

@@ -120,8 +120,7 @@ pub(crate) fn release_entity_assets(world: &World, entity: Entity, assets: &mut 
         assets.materials.release(renderer.material);
     }
     if let Some(renderer) = world.get::<InstancedMeshRenderer>(entity) {
-        assets.meshes.release(renderer.mesh);
-        assets.materials.release(renderer.material);
+        renderer.release(assets);
     }
     if let Some(renderer) = world.get::<VegetationRenderer>(entity) {
         assets.meshes.release(renderer.mesh);

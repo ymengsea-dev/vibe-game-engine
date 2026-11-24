@@ -4,13 +4,15 @@
 //! mesh is tested in its own local space — first against its bounding box
 //! (cheap rejection), then against its actual triangles — so a tree standing
 //! inside the terrain's big bounding box is still picked over the terrain.
-//! Sprites are tested as their quad. The nearest hit wins. Disabled and
+//! Sprites are tested as their quad, and a foliage group as each of its
+//! plants (one hit selects the whole group). The nearest hit wins. Disabled and
 //! locked objects cannot be clicked, so a locked terrain is never grabbed by
 //! accident (select it in the Hierarchy instead).
 
 use engine_ecs::components::{Disabled, Lock, MeshSource, SpriteSource};
 use engine_ecs::prelude::{Entity, World};
 use engine_renderer::Vertex;
+use engine_scene::SceneFoliage;
 use glam::{Mat4, Vec2, Vec3};
 
 use crate::hierarchy::world_transform;
@@ -99,18 +101,33 @@ fn hit_triangle(ray: Ray, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
     (t >= 0.0).then_some(t)
 }
 
+/// The box around `vertices`, or `None` for no vertices.
+fn mesh_bounds(vertices: &[Vertex]) -> Option<(Vec3, Vec3)> {
+    let first = Vec3::from_array(vertices.first()?.position);
+    Some(vertices.iter().fold((first, first), |(min, max), vertex| {
+        let point = Vec3::from_array(vertex.position);
+        (min.min(point), max.max(point))
+    }))
+}
+
 /// Nearest triangle hit of `ray` (in the mesh's local space).
 fn hit_mesh(ray: Ray, vertices: &[Vertex], indices: &[u32]) -> Option<f32> {
+    hit_mesh_within(ray, vertices, indices, mesh_bounds(vertices)?)
+}
+
+/// [`hit_mesh`] with the mesh's box already known, so a foliage group
+/// measures it once rather than once per plant.
+fn hit_mesh_within(
+    ray: Ray,
+    vertices: &[Vertex],
+    indices: &[u32],
+    (min, max): (Vec3, Vec3),
+) -> Option<f32> {
     let position = |index: &u32| {
         vertices
             .get(*index as usize)
             .map(|vertex| Vec3::from_array(vertex.position))
     };
-    let first = Vec3::from_array(vertices.first()?.position);
-    let (min, max) = vertices.iter().fold((first, first), |(min, max), vertex| {
-        let point = Vec3::from_array(vertex.position);
-        (min.min(point), max.max(point))
-    });
     hit_box(ray, min, max)?;
     indices
         .as_chunks::<3>()
@@ -123,6 +140,38 @@ fn hit_mesh(ray: Ray, vertices: &[Vertex], indices: &[u32]) -> Option<f32> {
                 position(&triangle[1])?,
                 position(&triangle[2])?,
             )
+        })
+        .min_by(f32::total_cmp)
+}
+
+/// Ray parameter of the nearest plant of `foliage` that `ray` hits. Plants
+/// past the group's draw distance (as seen from the ray's start, the
+/// camera) are not drawn, so they are not hit either.
+fn hit_foliage<'a>(
+    ray: Ray,
+    foliage: &engine_scene::FoliageData,
+    mesh_geometry: &impl Fn(&MeshSource) -> Option<(&'a [Vertex], &'a [u32])>,
+) -> Option<f32> {
+    let source = MeshSource {
+        mesh: foliage.mesh.id.clone(),
+        material: foliage.material.id.clone(),
+    };
+    let (vertices, indices) = mesh_geometry(&source)?;
+    let bounds = mesh_bounds(vertices)?;
+    let draw_distance = foliage.lod.as_ref().and_then(|lod| lod.draw_distance);
+    foliage
+        .instances
+        .iter()
+        .filter_map(|pose| {
+            let pose = engine_utils::Transform::from(*pose);
+            if draw_distance.is_some_and(|limit| pose.translation.distance(ray.origin) > limit) {
+                return None;
+            }
+            let inverse = pose.to_matrix().inverse();
+            if !inverse.is_finite() {
+                return None;
+            }
+            hit_mesh_within(ray.transformed(inverse), vertices, indices, bounds)
         })
         .min_by(f32::total_cmp)
 }
@@ -186,21 +235,30 @@ pub fn pick_hit<'a>(
         Entity,
         Option<&MeshSource>,
         Option<&SpriteSource>,
+        Option<&SceneFoliage>,
         Option<&Disabled>,
         Option<&Lock>,
         Option<&engine_ecs::components::Hidden>,
     )>();
-    let candidates: Vec<(Entity, Option<MeshSource>, Option<[f32; 2]>)> = query
-        .iter(world)
-        .filter(|(.., disabled, lock, hidden)| {
-            disabled.is_none()
-                && hidden.is_none()
-                && (lock.is_none() || locked == LockedObjects::Include)
-        })
-        .filter(|(_, mesh, sprite, ..)| mesh.is_some() || sprite.is_some())
-        .map(|(entity, mesh, sprite, ..)| (entity, mesh.cloned(), sprite.map(|s| s.size)))
-        .collect();
     let mut best: Option<(Entity, f32)> = None;
+    let mut candidates: Vec<(Entity, Option<MeshSource>, Option<[f32; 2]>)> = Vec::new();
+    for (entity, mesh, sprite, foliage, disabled, lock, hidden) in query.iter(world) {
+        if disabled.is_some()
+            || hidden.is_some()
+            || (lock.is_some() && locked == LockedObjects::Skip)
+        {
+            continue;
+        }
+        if let Some(foliage) = foliage {
+            if let Some(t) = hit_foliage(ray, &foliage.0, &mesh_geometry)
+                && best.is_none_or(|(_, nearest)| t < nearest)
+            {
+                best = Some((entity, t));
+            }
+        } else if mesh.is_some() || sprite.is_some() {
+            candidates.push((entity, mesh.cloned(), sprite.map(|s| s.size)));
+        }
+    }
     for (entity, mesh, sprite) in candidates {
         let model = world_transform(world, entity).to_matrix();
         let inverse = model.inverse();
@@ -310,6 +368,32 @@ mod tests {
         world.entity_mut(high).insert(Disabled);
         assert_eq!(pick(&mut world, down_from(0.0, 0.0), geometry), Some(low));
         assert_eq!(pick(&mut world, down_from(9.0, 9.0), geometry), None);
+    }
+
+    #[test]
+    fn clicking_any_plant_selects_its_foliage_group() {
+        let (vertices, indices) = cube();
+        let mut world = World::new();
+        let mesh = engine_scene::AssetRef { id: "grass".into() };
+        let mut data = engine_scene::FoliageData::new(
+            mesh.clone(),
+            mesh,
+            [Vec3::ZERO, Vec3::new(6.0, 0.0, 0.0)]
+                .map(|at| engine_scene::TransformData::from(MathTransform::from_translation(at)))
+                .to_vec(),
+            None,
+        );
+        let group = world.spawn(SceneFoliage(data.clone())).id();
+        let geometry = |_: &MeshSource| Some((vertices.as_slice(), indices.as_slice()));
+        assert_eq!(pick(&mut world, down_from(6.0, 0.0), geometry), Some(group));
+        assert_eq!(pick(&mut world, down_from(3.0, 0.0), geometry), None);
+
+        // Past the draw distance the plant is not drawn, so it is not hit.
+        if let Some(lod) = data.lod.as_mut() {
+            lod.draw_distance = Some(10.0);
+        }
+        world.entity_mut(group).insert(SceneFoliage(data));
+        assert_eq!(pick(&mut world, down_from(6.0, 0.0), geometry), None);
     }
 
     #[test]

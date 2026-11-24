@@ -187,10 +187,11 @@ Limits: a following camera can't be inside another object. Things moved by anima
 | --- | --- |
 | **Create terrain** | Adds a flat 64 × 64 m piece of ground with a collider, so characters and physics stand on it in the game |
 | **Create water** | Adds water. Change waves in the Inspector. |
-| **Off / Sculpt / Paint** | **Sculpt**: drag on the selected terrain to shape it with **Raise**, **Lower**, **Smooth** or **Flatten**. **Paint**: drag to paint the chosen layer. A blue ring shows the brush. **Off** gives the mouse back to selecting and moving. |
-| **Radius**, **Strength** | Brush size in metres, and how much one pass changes |
+| **Off / Sculpt / Paint / Foliage** | **Sculpt**: drag on the selected terrain to shape it with **Raise**, **Lower**, **Smooth** or **Flatten**. **Paint**: drag to paint the chosen layer. **Foliage**: drag to add plants of the model selected in Project Assets; choose **Erase**, or hold Shift, to remove them (with no model selected, Erase removes every kind). A blue ring shows the brush. **Off** gives the mouse back to selecting and moving. |
+| **Radius**, **Strength** | Brush size in metres, and how much one pass changes (the Foliage brush has no Strength) |
 | **Layers** (Paint) | The selected terrain's ground textures, up to 8. Click a name to paint it. Pick a built-in texture or any image in the project, a tint, and how many metres one copy covers. **Add layer**, **Remove** |
-| **Scatter selected model** | Spreads copies of a model (trees, rocks) over the ground. **Density**, **Spacing**, **Seed** control how. |
+| **Density**, **Spacing**, **Seed** | How the Foliage brush and **Scatter** place plants: Spacing is roughly the metres between them, Density the share of spots that get one, and Seed picks a different pattern. Painting the same spot again adds nothing, and erased plants come back the same when painted again |
+| **Scatter selected model on terrain** | Fills the whole selected terrain with copies of the model selected in Project Assets. They join that model's foliage group on this terrain, if it has one |
 | **Tiles: North / East / South / West** | Adds a tile beside the one under the pointer (or the first tile). Its edge joins the ground next to it, and hills fade out across it. Brushes work across tile edges |
 | **Remove tile** | Takes the tile out of the terrain. Its file stays in the project, and ⌘Z puts it back |
 
@@ -200,7 +201,9 @@ Each tile is a `.terrain` file in `terrain/<Name>/`, with its paint in `.splat` 
 
 Terrains made by older versions of Studio are converted when the scene opens. Studio saves a copy of the scene file as `<scene>.ron.terrain-v1.bak` the first time it saves over it, and leaves the old `.gltf` model in place.
 
-Limits: textures blend smoothly, not by height. Sculpting while the game plays doesn't change its collision. If you reshape the ground after scattering, delete the copies and scatter again.
+Each model gets one **foliage group** per terrain, shown in the Hierarchy with a leaf. Click any of its plants to select the group. Plants stay on the ground while you sculpt, and ⌘Z puts the ground and the plants back together. Its Inspector shows how many plants it has, its terrain, **See-through** (cut away the clear parts of leaf images), **Two-sided** (see flat leaves from behind) and **Level of detail**, where plants switch to simpler meshes and fade out past 150 m by default (see `04_GRAPHICS_QUALITY.md`).
+
+Limits: textures blend smoothly, not by height. Sculpting while the game plays doesn't change its collision. Moving or rotating a terrain doesn't move its plants. A foliage group holds at most 20,000 plants. Plants have no wind, and grow upright rather than leaning with the slope.
 
 ## Navigation
 

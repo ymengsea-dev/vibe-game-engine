@@ -108,6 +108,8 @@ pub struct ExportMaterial {
     pub alpha_mode: ExportAlphaMode,
     /// Threshold for [`ExportAlphaMode::Mask`].
     pub alpha_cutoff: f32,
+    /// Written as glTF's `doubleSided`, so both faces draw.
+    pub double_sided: bool,
 }
 
 impl ExportMaterial {
@@ -122,6 +124,7 @@ impl ExportMaterial {
             base_color_texture: None,
             alpha_mode: ExportAlphaMode::Opaque,
             alpha_cutoff: 0.5,
+            double_sided: false,
         }
     }
 
@@ -790,6 +793,9 @@ pub fn export_gltf_scene(scene: &GltfScene<'_>) -> Result<Vec<u8>, AssetError> {
             if material.alpha_mode == ExportAlphaMode::Mask {
                 out.insert("alphaCutoff".to_string(), json!(material.alpha_cutoff));
             }
+            if material.double_sided {
+                out.insert("doubleSided".to_string(), json!(true));
+            }
             Some(Value::Object(out))
         })
         .collect();
@@ -1438,6 +1444,7 @@ mod tests {
             base_color_texture: Some(ExportTexture::Embedded(png)),
             alpha_mode: ExportAlphaMode::Mask,
             alpha_cutoff: 0.4,
+            double_sided: true,
         };
         let bytes = export_gltf(
             &[ExportMesh {
@@ -1457,6 +1464,7 @@ mod tests {
         assert_eq!(read.base_color_factor, [0.5, 1.0, 0.25, 1.0]);
         assert_eq!(read.alpha_mode, "MASK");
         assert!((read.alpha_cutoff - 0.4).abs() < 1e-6);
+        assert!(read.double_sided);
         assert_eq!(read.base_color_image, Some(0));
 
         assert_eq!(imported.images.len(), 1, "the PNG must come back decoded");

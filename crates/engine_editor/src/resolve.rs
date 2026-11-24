@@ -513,16 +513,8 @@ fn resolve_pending_foliage(world: &mut World, resolver: &mut impl SceneResolver)
         let Some(source) = world.get::<SceneFoliage>(entity) else {
             continue;
         };
-        let result = resolver
-            .resolve_mesh(&source.0.mesh, &source.0.material)
-            .map(|resolved| {
-                resolved.map(|renderer| InstancedMeshRenderer {
-                    mesh: renderer.mesh,
-                    material: renderer.material,
-                    instances: source.0.instances.iter().copied().map(Into::into).collect(),
-                })
-            });
-        match result {
+        let source = source.0.clone();
+        match engine_scene::resolve_foliage(resolver, &source) {
             Ok(Some(renderer)) => {
                 world.entity_mut(entity).insert(renderer);
                 report.resolved += 1;
@@ -635,13 +627,14 @@ mod tests {
     fn missing_foliage_model_keeps_its_authored_group_for_later_import() {
         let mut world = World::new();
         let entity = world
-            .spawn(engine_scene::SceneFoliage(engine_scene::FoliageData {
-                mesh: reference("3fa85f64-5717-4562-b3fc-2c963f66afa6"),
-                material: reference("3fa85f64-5717-4562-b3fc-2c963f66afa6"),
-                instances: vec![engine_scene::TransformData::from(
+            .spawn(engine_scene::SceneFoliage(engine_scene::FoliageData::new(
+                reference("3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+                reference("3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+                vec![engine_scene::TransformData::from(
                     engine_utils::Transform::IDENTITY,
                 )],
-            }))
+                None,
+            )))
             .id();
         let report = resolve_pending_foliage(&mut world, &mut SpriteResolver);
         assert_eq!(report.pending, 1);
@@ -680,11 +673,13 @@ mod tests {
             tint: [1.0, 0.2, 0.2],
             metallic: Some(0.5),
             roughness: None,
+            ..Default::default()
         };
         let blue = engine_scene::MaterialOverrideData {
             tint: [0.2, 0.2, 1.0],
             metallic: None,
             roughness: Some(0.8),
+            ..Default::default()
         };
 
         assert!(material_needs_refresh(Some(&red), None));

@@ -1589,6 +1589,7 @@ mod tests {
             tint: [0.25, 0.5, 1.0],
             metallic: Some(0.8),
             roughness: Some(0.3),
+            ..Default::default()
         };
         let scene = Scene {
             entities: vec![SceneEntity {
@@ -1620,15 +1621,16 @@ mod tests {
 
     #[test]
     fn foliage_instances_survive_scene_reopen_without_the_model_file() {
-        let authored = crate::FoliageData {
-            mesh: crate::AssetRef { id: MESH_ID.into() },
-            material: crate::AssetRef {
+        let authored = crate::FoliageData::new(
+            crate::AssetRef { id: MESH_ID.into() },
+            crate::AssetRef {
                 id: MATERIAL_ID.into(),
             },
-            instances: vec![crate::TransformData::from(
+            vec![crate::TransformData::from(
                 engine_utils::Transform::from_translation(glam::Vec3::new(3.0, 1.0, -2.0)),
             )],
-        };
+            Some("1f0e2d3c-4b5a-4968-8776-a5b4c3d2e1f0".into()),
+        );
         let scene = Scene {
             entities: vec![SceneEntity {
                 name: Some("Grass patch".into()),
@@ -1645,6 +1647,22 @@ mod tests {
             Scene::from_world(&mut world).entities[0].foliage,
             Some(authored)
         );
+    }
+
+    #[test]
+    fn foliage_written_before_lod_and_terrain_links_still_opens() {
+        let text = format!(
+            "(foliage: Some((mesh: (id: \"{MESH_ID}\"), material: (id: \"{MATERIAL_ID}\"), \
+             instances: [(translation: (1.0, 2.0, 3.0), rotation: (0.0, 0.0, 0.0, 1.0), \
+             scale: (1.0, 1.0, 1.0))])))"
+        );
+        let entity: SceneEntity = ron::from_str(&text).unwrap();
+        let foliage = entity.foliage.unwrap();
+        assert_eq!(foliage.instances.len(), 1);
+        assert_eq!(foliage.terrain, None);
+        assert_eq!(foliage.lod, None);
+        assert_eq!(foliage.cutout, None);
+        assert!(!foliage.two_sided);
     }
 
     #[test]

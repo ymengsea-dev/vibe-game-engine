@@ -531,6 +531,14 @@ pub struct MaterialOverrideData {
     /// Replaces the imported roughness factor when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roughness: Option<f32>,
+    /// Cuts away texels whose alpha is below this, replacing the imported
+    /// alpha mode — for leaf and grass textures exported as opaque.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cutout: Option<f32>,
+    /// Draws both faces of each triangle even when the model is exported
+    /// single-sided.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub two_sided: bool,
 }
 
 impl Default for MaterialOverrideData {
@@ -539,6 +547,8 @@ impl Default for MaterialOverrideData {
             tint: [1.0; 3],
             metallic: None,
             roughness: None,
+            cutout: None,
+            two_sided: false,
         }
     }
 }
@@ -555,6 +565,10 @@ impl MaterialOverrideData {
         if let Some(roughness) = self.roughness {
             material.roughness_factor = roughness;
         }
+        if let Some(cutoff) = self.cutout {
+            material.alpha_mode = engine_renderer::AlphaMode::Mask { cutoff };
+        }
+        material.double_sided |= self.two_sided;
         material
     }
 }
@@ -577,6 +591,64 @@ pub struct FoliageData {
     pub material: AssetRef,
     /// World-space instance transforms, in deterministic scatter order.
     pub instances: Vec<TransformData>,
+    /// Object ID of the terrain the group stands on. The editor keeps the
+    /// instances on that terrain's ground when it is sculpted. Absent in
+    /// groups made before foliage followed the ground.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terrain: Option<String>,
+    /// Detail tiers and draw distance, shared by every instance. Absent
+    /// draws the full model at any distance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lod: Option<LodData>,
+    /// Alpha below which texels are cut away, for leaf and grass textures
+    /// exported without glTF's `MASK` mode. Absent keeps the model's own
+    /// alpha mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cutout: Option<f32>,
+    /// Draw both faces of every triangle, for flat leaf cards exported as
+    /// single-sided. A model already marked double-sided is drawn so
+    /// either way.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub two_sided: bool,
+}
+
+impl FoliageData {
+    /// The draw range new groups start with, in metres.
+    pub const DEFAULT_DRAW_DISTANCE: f32 = 150.0;
+    /// The fade before [`FoliageData::DEFAULT_DRAW_DISTANCE`], in metres.
+    pub const DEFAULT_FADE_LENGTH: f32 = 10.0;
+
+    /// The material changes this group's see-through and two-sided
+    /// settings ask for, or `None` to use the model's material as is.
+    pub fn material_override(&self) -> Option<MaterialOverrideData> {
+        (self.cutout.is_some() || self.two_sided).then(|| MaterialOverrideData {
+            cutout: self.cutout,
+            two_sided: self.two_sided,
+            ..MaterialOverrideData::default()
+        })
+    }
+
+    /// A new group of `mesh` on `terrain`, with the default draw range.
+    pub fn new(
+        mesh: AssetRef,
+        material: AssetRef,
+        instances: Vec<TransformData>,
+        terrain: Option<String>,
+    ) -> Self {
+        Self {
+            mesh,
+            material,
+            instances,
+            terrain,
+            lod: Some(LodData {
+                draw_distance: Some(Self::DEFAULT_DRAW_DISTANCE),
+                fade_length: Self::DEFAULT_FADE_LENGTH,
+                ..LodData::default()
+            }),
+            cutout: None,
+            two_sided: false,
+        }
+    }
 }
 
 /// Live source data retained if the model cannot yet be resolved.
@@ -2173,6 +2245,7 @@ mod tests {
             tint: [0.5, 0.25, 1.0],
             metallic: Some(0.8),
             roughness: None,
+            ..Default::default()
         };
         let imported = engine_renderer::Material {
             base_color_factor: [0.8, 0.4, 0.2, 0.7],

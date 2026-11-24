@@ -93,7 +93,7 @@ pub use prefab_link::{
 };
 pub use resolve::{
     InstantiateReport, NullResolver, SceneResolver, SkinnedModel, animation_player_for,
-    insert_skinned_model,
+    insert_skinned_model, resolve_foliage,
 };
 pub use rules::{
     AiRuleEvent, ContactRuleKind, RuleEvent, RuleOutcome, RuleVariableError, RuleVariables, expand_variables,

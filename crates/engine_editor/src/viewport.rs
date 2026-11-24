@@ -63,13 +63,19 @@ const PLACEHOLDER_HALF_EXTENT: f32 = 0.5;
 type InstancedHandles = (
     AssetHandle<engine_renderer::Mesh>,
     AssetHandle<engine_renderer::MaterialBinding>,
+    Vec<AssetHandle<engine_renderer::Mesh>>,
 );
 
 fn instanced_handles(world: &mut World) -> HashMap<Entity, InstancedHandles> {
     world
         .query::<(Entity, &InstancedMeshRenderer)>()
         .iter(world)
-        .map(|(entity, renderer)| (entity, (renderer.mesh, renderer.material)))
+        .map(|(entity, renderer)| {
+            (
+                entity,
+                (renderer.mesh, renderer.material, renderer.lods.clone()),
+            )
+        })
         .collect()
 }
 
@@ -79,7 +85,8 @@ fn removed_instanced_handles(
 ) -> Vec<InstancedHandles> {
     before
         .iter()
-        .filter_map(|(entity, handles)| (after.get(entity) != Some(handles)).then_some(*handles))
+        .filter(|&(entity, handles)| after.get(entity) != Some(handles))
+        .map(|(_, handles)| handles.clone())
         .collect()
 }
 
@@ -439,8 +446,11 @@ impl Viewport {
     /// viewport-owned GPU handles at the deletion call site.
     pub fn sync_instanced_handles(&mut self, world: &mut World) {
         let current = instanced_handles(world);
-        for (mesh, material) in removed_instanced_handles(&self.tracked_instanced, &current) {
+        for (mesh, material, lods) in removed_instanced_handles(&self.tracked_instanced, &current) {
             self.assets.meshes.release(mesh);
+            for tier in lods {
+                self.assets.meshes.release(tier);
+            }
             self.assets.materials.release(material);
         }
         self.tracked_instanced = current;
@@ -910,19 +920,23 @@ mod tests {
                 mesh: first_mesh,
                 material: first_material,
                 instances: Vec::new(),
+                lods: Vec::new(),
+                lod: None,
             })
             .id();
         world.spawn(InstancedMeshRenderer {
             mesh: second_mesh,
             material: second_material,
             instances: Vec::new(),
+            lods: Vec::new(),
+            lod: None,
         });
         let before = super::instanced_handles(&mut world);
         world.despawn(deleted);
 
         assert_eq!(
             super::removed_instanced_handles(&before, &super::instanced_handles(&mut world)),
-            vec![(first_mesh, first_material)]
+            vec![(first_mesh, first_material, Vec::new())]
         );
     }
 

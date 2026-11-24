@@ -38,6 +38,8 @@ pub struct TerrainStroke {
     pub applied: usize,
     /// Each touched tile as it was before the stroke.
     pub before: BTreeMap<TileCoord, TerrainTile>,
+    /// A foliage stroke that removes plants (Shift held, or Erase chosen).
+    pub erase: bool,
 }
 
 impl TerrainStroke {
@@ -48,6 +50,7 @@ impl TerrainStroke {
             centers: Vec::new(),
             applied: 0,
             before: BTreeMap::new(),
+            erase: false,
         }
     }
 
@@ -116,6 +119,10 @@ impl TerrainBrushMode {
 pub struct TerrainToolState {
     /// Paint layers instead of sculpting.
     pub paint: bool,
+    /// Paint foliage instead of sculpting or painting layers.
+    pub foliage: bool,
+    /// The foliage brush removes plants instead of adding them.
+    pub foliage_erase: bool,
     /// Active sculpt operation.
     pub brush_mode: TerrainBrushMode,
     /// The layer painted in paint mode.
@@ -140,6 +147,8 @@ impl Default for TerrainToolState {
     fn default() -> Self {
         Self {
             paint: false,
+            foliage: false,
+            foliage_erase: false,
             brush_mode: TerrainBrushMode::Raise,
             paint_layer: 0,
             radius: 2.0,
@@ -190,6 +199,9 @@ impl TerrainToolState {
     /// Applies one brush dab at terrain-local `center`. Returns the nodes
     /// it changed, or `None` if nothing changed.
     pub fn apply_brush(&self, surface: &mut TerrainSurface, center: Vec2) -> Option<DirtyRect> {
+        if self.foliage {
+            return None;
+        }
         let mut state = self.clone();
         state.sanitize();
         let brush = Brush {
@@ -552,22 +564,41 @@ pub fn show_controls(
     crate::widgets::segmented(&NIGHT).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            for (label, on, paint) in [
-                ("Off", false, false),
-                ("Sculpt", true, false),
-                ("Paint", true, true),
+            for (label, on, paint, foliage) in [
+                ("Off", false, false, false),
+                ("Sculpt", true, false, false),
+                ("Paint", true, true, false),
+                ("Foliage", true, false, true),
             ] {
-                let selected = *active == on && (!on || state.paint == paint);
+                let selected =
+                    *active == on && (!on || (state.paint == paint && state.foliage == foliage));
                 if crate::widgets::segment_label(ui, &NIGHT, selected, label).clicked() && !selected
                 {
                     *active = on;
                     state.paint = paint;
+                    state.foliage = foliage;
                     response.mode_changed = true;
                 }
             }
         });
     });
-    if state.paint {
+    if state.foliage {
+        crate::widgets::segmented(&NIGHT).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (label, erase) in [("Add", false), ("Erase", true)] {
+                    let selected = state.foliage_erase == erase;
+                    if crate::widgets::segment_label(ui, &NIGHT, selected, label).clicked() {
+                        state.foliage_erase = erase;
+                    }
+                }
+            });
+        });
+        ui.label(
+            egui::RichText::new("Paints the model selected in Project Assets. Shift-drag erases.")
+                .color(NIGHT.subtle),
+        );
+    } else if state.paint {
         match terrain {
             Some(terrain) => {
                 ui.label(egui::RichText::new("Layers").color(NIGHT.muted));
@@ -594,7 +625,9 @@ pub fn show_controls(
         });
     }
     ui.add(egui::Slider::new(&mut state.radius, 0.01..=100.0).text("Radius"));
-    if state.paint {
+    if state.foliage {
+        // The foliage brush has no strength: Density sets how full it fills.
+    } else if state.paint {
         ui.add(egui::Slider::new(&mut state.strength, 0.0..=1.0).text("Strength"));
     } else {
         ui.add(egui::Slider::new(&mut state.strength, -10.0..=10.0).text("Strength"));
@@ -603,7 +636,7 @@ pub fn show_controls(
         }
     }
     ui.separator();
-    ui.label(egui::RichText::new("Foliage scatter").color(NIGHT.muted));
+    ui.label(egui::RichText::new("Foliage").color(NIGHT.muted));
     ui.add(egui::Slider::new(&mut state.scatter_density, 0.0..=1.0).text("Density"));
     ui.add(
         egui::DragValue::new(&mut state.scatter_spacing)

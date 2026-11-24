@@ -38,16 +38,23 @@ Select a model. Its **Level of detail** section has:
 
 **⋯ → Reset** puts everything back to the defaults.
 
+A foliage group has the same section, for all its plants at once. Each plant switches and fades by its own distance from the camera. New groups stop drawing at 150 m with a 10 m fade; **Reset** goes back to that.
+
+### See-through and two-sided leaves
+
+Leaf and grass images usually have clear parts. A model exported with glTF's alpha mode **MASK** has them cut away, and one marked **double-sided** shows its flat leaves from behind too. If a model wasn't exported that way, select its foliage group and tick **See-through** (with a **Cutoff**: pixels less solid than this are cut away) and **Two-sided** in the Inspector's **Foliage** section.
+
 ### Simpler versions in your model file
 
 Put each version in the same glTF file as its own mesh, named with `_LOD` and a number: `Rock_LOD0` (full detail), `Rock_LOD1`, `Rock_LOD2`. All must share the same name before `_LOD`. Studio then uses them instead of generating its own.
 
 ## Seeing it in the Scene View
 
-Turn on **Overlays → Distance detail** to see simpler models and draw ranges from the Scene View camera, at the project's quality. Off, every model is drawn in full.
+Turn on **Overlays → Distance detail** to see simpler models and draw ranges from the Scene View camera, at the project's quality. Off, every model and plant is drawn in full.
 
 ## Not available yet
 
-- Animated characters and foliage always draw in full detail and at any distance.
+- Animated characters always draw in full detail and at any distance.
+- Plants don't keep the simpler mesh a little longer when the camera hovers at the switch distance, as single models do.
 - Terrain draws far-away ground with fewer triangles on its own; the quality level's detail setting moves those distances too. Set it per terrain with **Detail** in the Inspector.
 - The Scene View's shadows do not follow the quality setting; only the game's do.

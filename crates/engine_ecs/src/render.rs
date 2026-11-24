@@ -57,6 +57,9 @@ pub struct RenderStats {
     /// Of `instances_total`, how many were inside the camera frustum and
     /// so packed into an instance buffer and drawn.
     pub instances_drawn: u32,
+    /// Of `instances_total`, how many were past their group's draw distance
+    /// and so skipped in both the scene and shadow passes.
+    pub instances_beyond_draw_distance: u32,
     /// How many instanced draws GPU batching synthesized this frame by
     /// merging visible `MeshRenderer`s that share a mesh+material.
     pub auto_batches: u32,
@@ -194,6 +197,80 @@ fn visible_instances(
         .filter(|transform| is_visible(frustum, local_bounds, &transform.to_matrix()))
         .map(InstanceRaw::from)
         .collect()
+}
+
+/// One instanced group's instances sorted by detail tier, after culling.
+#[derive(Debug, Default, PartialEq)]
+struct TieredInstances {
+    /// `tiers[t]` holds the instances drawn with tier `t`'s mesh.
+    tiers: Vec<Vec<InstanceRaw>>,
+    /// Instances inside the frustum but past the draw distance.
+    beyond_draw_distance: u32,
+}
+
+/// The `frustum`-visible subset of `instances`, each assigned a detail tier
+/// and a fade by its distance from `view` — the per-instance work an
+/// `InstancedMeshRenderer` runs each frame, factored out so it's testable
+/// without a GPU.
+///
+/// Distances are measured to each instance's own bounds centre. Tiers are
+/// picked without hysteresis (there is no per-instance memory): static
+/// foliage only crosses a boundary when the camera does. Without `view`
+/// every instance is the full mesh, fully drawn.
+fn tiered_instances(
+    frustum: &Frustum,
+    local_bounds: &Aabb,
+    instances: &[engine_utils::Transform],
+    view: Option<DistanceQuality>,
+    lod: Option<&MeshLod>,
+    tier_count: usize,
+) -> TieredInstances {
+    let tier_count = tier_count.max(1);
+    let mut out = TieredInstances {
+        tiers: vec![Vec::new(); tier_count],
+        beyond_draw_distance: 0,
+    };
+    let (switch, draw_distance, fade_length) = match lod {
+        Some(lod) => (
+            lod.switch_distances.as_slice(),
+            lod.draw_distance,
+            lod.fade_length,
+        ),
+        None => (DEFAULT_SWITCH_DISTANCES.as_slice(), None, 0.0),
+    };
+    for transform in instances {
+        let world_from_local = transform.to_matrix();
+        if !is_visible(frustum, local_bounds, &world_from_local) {
+            continue;
+        }
+        let Some(view) = view else {
+            out.tiers[0].push(InstanceRaw::from(transform));
+            continue;
+        };
+        let centre = world_from_local.transform_point3(local_bounds.center());
+        let fade = draw_distance.map_or(1.0, |limit| {
+            engine_renderer::distance_fade(
+                view.eye.distance(centre),
+                view.draw_distance(limit),
+                fade_length,
+            )
+        });
+        if fade <= 0.0 {
+            out.beyond_draw_distance += 1;
+            continue;
+        }
+        let tier = if tier_count < 2 {
+            0
+        } else {
+            engine_renderer::select_lod_tier(switch, tier_count, view.lod_distance(centre), 0)
+                .min(tier_count - 1)
+        };
+        out.tiers[tier].push(InstanceRaw::faded(
+            world_from_local.to_cols_array_2d(),
+            fade,
+        ));
+    }
+    out
 }
 
 /// Minimum group size for GPU batching. A group of visible `MeshRenderer`s
@@ -342,7 +419,9 @@ struct ShadowMesh<'a> {
 /// `instanced_pipeline` — one `draw_indexed(.., 0..N)` per entity. Each
 /// instance is frustum-culled individually and the visible ones packed
 /// into a per-frame instance buffer; [`RenderStats`] reports the
-/// total/drawn instance counts. Instanced meshes cast no shadows yet.
+/// total/drawn instance counts. Each instance also picks a detail tier
+/// and fades out by its distance from `distance`'s eye, using the entity's
+/// `lod`; instanced meshes cast shadows with the same tier and fade.
 ///
 /// **Transparent surfaces** (materials whose `AlphaMode` is `Blend`)
 /// sit out the opaque path entirely: they are never GPU-batched
@@ -773,6 +852,7 @@ pub fn extract_and_render_to(
         .collect();
 
     let mut instances_total = 0u32;
+    let mut instances_beyond_draw_distance = 0u32;
     let mut pending_instanced: Vec<PendingInstanced<'_>> = Vec::new();
     for (instanced, disabled) in instanced_query.iter(&*world) {
         if disabled && !draw_disabled {
@@ -794,29 +874,45 @@ pub fn extract_and_render_to(
         };
 
         instances_total += instanced.instances.len() as u32;
+        let tier_count = instanced.tier_count();
+        let tier_mesh = |tier: usize| assets.meshes.get(instanced.tier_mesh(tier)).unwrap_or(mesh);
         if material.casts_shadow {
-            let shadow_raws = visible_instances(
+            let shadow = tiered_instances(
                 shadow_map.light_frustum(),
                 &mesh.local_bounds,
                 &instanced.instances,
+                distance,
+                instanced.lod.as_ref(),
+                tier_count,
             );
-            if !shadow_raws.is_empty() {
-                pending_shadow.push(PendingInstanced {
-                    material,
-                    mesh,
-                    raws: shadow_raws,
-                });
+            for (tier, raws) in shadow.tiers.into_iter().enumerate() {
+                if !raws.is_empty() {
+                    pending_shadow.push(PendingInstanced {
+                        material,
+                        mesh: tier_mesh(tier),
+                        raws,
+                    });
+                }
             }
         }
 
-        let raws = visible_instances(frustum, &mesh.local_bounds, &instanced.instances);
-
-        if !raws.is_empty() {
-            pending_instanced.push(PendingInstanced {
-                material,
-                mesh,
-                raws,
-            });
+        let visible = tiered_instances(
+            frustum,
+            &mesh.local_bounds,
+            &instanced.instances,
+            distance,
+            instanced.lod.as_ref(),
+            tier_count,
+        );
+        instances_beyond_draw_distance += visible.beyond_draw_distance;
+        for (tier, raws) in visible.tiers.into_iter().enumerate() {
+            if !raws.is_empty() {
+                pending_instanced.push(PendingInstanced {
+                    material,
+                    mesh: tier_mesh(tier),
+                    raws,
+                });
+            }
         }
     }
 
@@ -976,6 +1072,7 @@ pub fn extract_and_render_to(
         skinned_drawn: skinned_drawables.len() as u32,
         instances_total,
         instances_drawn,
+        instances_beyond_draw_distance,
         auto_batches,
         auto_batched_drawn,
         vegetation_total,
@@ -1167,8 +1264,8 @@ pub fn despawn_skinned_mesh_renderer(
 }
 
 /// The [`InstancedMeshRenderer`] counterpart: despawns `entity`, first
-/// releasing its shared `mesh` and `material` handles once each (there are
-/// no per-instance GPU handles).
+/// releasing its shared `mesh`, detail tiers and `material` handles once
+/// each (there are no per-instance GPU handles).
 ///
 /// Returns whatever `World::despawn` returns.
 pub fn despawn_instanced_mesh_renderer(
@@ -1177,8 +1274,7 @@ pub fn despawn_instanced_mesh_renderer(
     assets: &mut RenderAssets,
 ) -> bool {
     if let Some(instanced) = world.get::<InstancedMeshRenderer>(entity) {
-        assets.meshes.release(instanced.mesh);
-        assets.materials.release(instanced.material);
+        instanced.release(assets);
     }
     world.despawn(entity)
 }
@@ -1496,6 +1592,58 @@ mod tests {
                 .to_matrix()
                 .to_cols_array_2d()
         );
+    }
+
+    #[test]
+    fn instances_pick_tiers_and_fade_by_their_own_distance() {
+        let at = |z: f32| engine_utils::Transform::from_translation(Vec3::new(0.0, 0.0, z));
+        // The camera sits at z = 5 looking down -z: distances 5, 35, 55, 85.
+        let instances = [at(0.0), at(-30.0), at(-50.0), at(-80.0)];
+        let lod = MeshLod {
+            switch_distances: vec![15.0, 40.0],
+            draw_distance: Some(60.0),
+            fade_length: 10.0,
+            ..MeshLod::default()
+        };
+        let view = DistanceQuality::new(
+            Vec3::new(0.0, 0.0, 5.0),
+            engine_renderer::QualityLevel::Medium,
+        );
+        let tiered = tiered_instances(
+            &view_frustum(),
+            &unit_bounds(),
+            &instances,
+            Some(view),
+            Some(&lod),
+            2,
+        );
+        assert_eq!(tiered.beyond_draw_distance, 1);
+        assert_eq!(tiered.tiers[0].len(), 1);
+        assert_eq!(tiered.tiers[0][0].fade, 1.0);
+        // Past the last switch the last tier is kept, not dropped.
+        assert_eq!(tiered.tiers[1].len(), 2);
+        assert_eq!(tiered.tiers[1][0].fade, 1.0);
+        assert!((tiered.tiers[1][1].fade - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn instances_without_a_view_are_all_full_detail() {
+        let instances = [
+            engine_utils::Transform::from_translation(Vec3::ZERO),
+            engine_utils::Transform::from_translation(Vec3::new(0.0, 0.0, -80.0)),
+            engine_utils::Transform::from_translation(Vec3::new(100.0, 0.0, 0.0)),
+        ];
+        let tiered = tiered_instances(
+            &view_frustum(),
+            &unit_bounds(),
+            &instances,
+            None,
+            Some(&MeshLod::default()),
+            3,
+        );
+        assert_eq!(tiered.tiers[0].len(), 2, "the off-screen one is culled");
+        assert!(tiered.tiers[1].is_empty() && tiered.tiers[2].is_empty());
+        assert_eq!(tiered.beyond_draw_distance, 0);
     }
 
     #[test]

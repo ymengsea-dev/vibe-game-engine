@@ -87,6 +87,10 @@ pub struct Material {
     pub occlusion_strength: f32,
     /// How this material's alpha is interpreted.
     pub alpha_mode: AlphaMode,
+    /// Draw both faces of each triangle (glTF's `doubleSided`): leaf and
+    /// grass cards stay visible from behind, lit from the side facing the
+    /// camera.
+    pub double_sided: bool,
 }
 
 impl Material {
@@ -99,6 +103,7 @@ impl Material {
         normal_scale: 1.0,
         occlusion_strength: 1.0,
         alpha_mode: AlphaMode::Opaque,
+        double_sided: false,
     };
 
     /// A cutout material for foliage and similar cards, discarding
@@ -111,6 +116,7 @@ impl Material {
         normal_scale: 1.0,
         occlusion_strength: 1.0,
         alpha_mode: AlphaMode::Mask { cutoff: 0.5 },
+        double_sided: true,
     };
 }
 
@@ -152,8 +158,12 @@ pub struct MaterialUniform {
     pub normal_scale: f32,
     /// See [`Material::occlusion_strength`].
     pub occlusion_strength: f32,
+    /// `1` when [`Material::double_sided`]. The shaders never read it —
+    /// it sits in what was padding so the CPU side can pick a pipeline
+    /// that draws both faces.
+    pub double_sided: u32,
     /// Padding only — completes the final 16-byte row.
-    pub _padding: [f32; 3],
+    pub _padding: [f32; 2],
 }
 
 impl From<Material> for MaterialUniform {
@@ -168,7 +178,8 @@ impl From<Material> for MaterialUniform {
             emissive_factor: material.emissive_factor,
             normal_scale: material.normal_scale,
             occlusion_strength: material.occlusion_strength.clamp(0.0, 1.0),
-            _padding: [0.0; 3],
+            double_sided: u32::from(material.double_sided),
+            _padding: [0.0; 2],
         }
     }
 }
@@ -183,6 +194,10 @@ impl Default for MaterialUniform {
 impl MaterialUniform {
     pub(crate) fn casts_shadow(&self) -> bool {
         self.alpha_mode != 2
+    }
+
+    pub(crate) fn is_double_sided(&self) -> bool {
+        self.double_sided != 0
     }
 }
 
@@ -286,8 +301,10 @@ mod tests {
             normal_scale: 0.75,
             occlusion_strength: 0.8,
             alpha_mode: AlphaMode::Mask { cutoff: 0.3 },
+            double_sided: true,
         };
         let uniform = MaterialUniform::from(material);
+        assert!(uniform.is_double_sided());
 
         assert_eq!(uniform.base_color_factor, [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(uniform.emissive_factor, [1.5, 0.0, 0.25]);
@@ -324,5 +341,7 @@ mod tests {
             AlphaMode::Mask { .. }
         ));
         assert!(!Material::FOLIAGE.alpha_mode.is_transparent());
+        const { assert!(Material::FOLIAGE.double_sided) };
+        assert!(!MaterialUniform::from(Material::DEFAULT).is_double_sided());
     }
 }

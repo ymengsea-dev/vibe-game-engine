@@ -297,6 +297,44 @@ impl InstantiateReport {
 ///
 /// Failed resolutions increment `unresolved` and log one warning; they
 /// never abort.
+/// Builds the live renderer for a foliage group: the model's mesh with the
+/// group's see-through and two-sided settings applied, its detail tiers
+/// (from the file, or generated when the group asks for them), and the
+/// group's draw range. `Ok(None)` while the model is not available yet.
+///
+/// # Errors
+///
+/// [`SceneError::Resolve`] if the model reference can't be resolved.
+pub fn resolve_foliage(
+    resolver: &mut (impl SceneResolver + ?Sized),
+    foliage: &crate::FoliageData,
+) -> Result<Option<InstancedMeshRenderer>, SceneError> {
+    let Some(mut renderer) = resolver.resolve_mesh_with_material(
+        &foliage.mesh,
+        &foliage.material,
+        foliage.material_override().as_ref(),
+    )?
+    else {
+        return Ok(None);
+    };
+    let auto_generate = foliage.lod.as_ref().is_some_and(|lod| lod.auto_generate);
+    if let Err(err) = resolver.resolve_mesh_lods(&foliage.mesh, &mut renderer, auto_generate) {
+        tracing::warn!(error = %err, "could not load a foliage model's detail tiers");
+    }
+    // The renderer's per-object model binding is dropped: instances carry
+    // their own matrices. Its mesh, tier and material handles move over.
+    Ok(Some(InstancedMeshRenderer {
+        mesh: renderer.mesh,
+        material: renderer.material,
+        instances: foliage.instances.iter().copied().map(Into::into).collect(),
+        lods: std::mem::take(&mut renderer.lods),
+        lod: foliage
+            .lod
+            .as_ref()
+            .map(engine_ecs::components::MeshLod::from),
+    }))
+}
+
 pub(crate) fn insert_components(
     entity_mut: &mut EntityWorldMut<'_>,
     data: &SceneEntity,
@@ -507,13 +545,9 @@ pub(crate) fn insert_components(
     }
     if let Some(foliage) = &data.foliage {
         entity_mut.insert(crate::SceneFoliage(foliage.clone()));
-        match resolver.resolve_mesh(&foliage.mesh, &foliage.material) {
+        match resolve_foliage(resolver, foliage) {
             Ok(Some(renderer)) => {
-                entity_mut.insert(InstancedMeshRenderer {
-                    mesh: renderer.mesh,
-                    material: renderer.material,
-                    instances: foliage.instances.iter().copied().map(Into::into).collect(),
-                });
+                entity_mut.insert(renderer);
             }
             Ok(None) => {}
             Err(err) => {

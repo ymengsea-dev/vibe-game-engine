@@ -77,7 +77,7 @@ fn apply_normal_map(n: vec3<f32>, world_position: vec3<f32>, uv: vec2<f32>, scal
 }
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
     // Distance fade: drop a growing share of pixels in a fixed pattern,
     // so far objects thin out instead of popping, without blending.
     if in.fade < dither_threshold(in.clip_position.xy) {
@@ -97,7 +97,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let metallic = clamp(material.metallic_factor, 0.0, 1.0);
     let roughness = clamp(material.roughness_factor, 0.045, 1.0);
 
-    let geometric_normal = normalize(in.world_normal);
+    // A double-sided material's back face is lit as seen from its own
+    // side. Single-sided pipelines cull back faces, so this never fires.
+    var geometric_normal = normalize(in.world_normal);
+    if !front_facing {
+        geometric_normal = -geometric_normal;
+    }
     let n = apply_normal_map(
         geometric_normal,
         in.world_position,

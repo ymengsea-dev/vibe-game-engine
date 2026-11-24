@@ -289,14 +289,29 @@ fn terrain_section(ui: &mut egui::Ui, world: &mut World, entity: Entity, assets:
 }
 
 fn lod_section(ui: &mut egui::Ui, world: &mut World, entity: Entity) -> bool {
-    let palette = crate::theme::NIGHT;
     let before = world.get::<MeshLod>(entity).cloned().unwrap_or_default();
-    let mut value = before.clone();
     let (tiers, source) = world
         .get::<MeshRenderer>(entity)
         .map_or((1, LodSource::None), |renderer| {
             (renderer.tier_count(), renderer.lod_source)
         });
+    match lod_controls(ui, &before, &MeshLod::default(), tiers, source) {
+        Some(value) => set_mesh_lod(world, entity, value),
+        None => false,
+    }
+}
+
+/// The "Level of detail" section's rows for `before`. Returns the new
+/// settings when the user changed them, `default` after Reset.
+fn lod_controls(
+    ui: &mut egui::Ui,
+    before: &MeshLod,
+    default: &MeshLod,
+    tiers: usize,
+    source: LodSource,
+) -> Option<MeshLod> {
+    let palette = crate::theme::NIGHT;
+    let mut value = before.clone();
     // Every level gets a row; levels past the saved distances show the
     // values the renderer would use (see `select_lod_tier`).
     while value.switch_distances.len() + 1 < tiers {
@@ -311,7 +326,7 @@ fn lod_section(ui: &mut egui::Ui, world: &mut World, entity: Entity) -> bool {
     section(
         ui,
         "Level of detail",
-        (before != MeshLod::default()).then_some(|ui: &mut egui::Ui| {
+        (before != default).then_some(|ui: &mut egui::Ui| {
             if ui.button("Reset").clicked() {
                 reset = true;
                 ui.close();
@@ -381,13 +396,136 @@ fn lod_section(ui: &mut egui::Ui, world: &mut World, entity: Entity) -> bool {
         },
     );
     if reset {
-        return set_mesh_lod(world, entity, MeshLod::default());
+        return Some(default.clone());
     }
     // Filled-in rows alone are not an edit.
-    if value == shown {
+    (value != shown).then_some(value)
+}
+
+/// The draw settings a new foliage group starts with.
+fn default_foliage_lod() -> MeshLod {
+    engine_scene::FoliageData::new(
+        engine_scene::AssetRef { id: String::new() },
+        engine_scene::AssetRef { id: String::new() },
+        Vec::new(),
+        None,
+    )
+    .lod
+    .as_ref()
+    .map(MeshLod::from)
+    .unwrap_or_default()
+}
+
+/// "Foliage": how many plants a group holds, the terrain it stands on, and
+/// its see-through and two-sided settings; then its "Level of detail".
+/// Returns whether anything changed.
+fn foliage_section(ui: &mut egui::Ui, world: &mut World, entity: Entity) -> bool {
+    let palette = crate::theme::NIGHT;
+    let Some(before) = world
+        .get::<engine_scene::SceneFoliage>(entity)
+        .map(|group| group.0.clone())
+    else {
+        return false;
+    };
+    let terrain_name = before.terrain.as_ref().and_then(|id| {
+        world
+            .query::<(&engine_scene::SceneObjectId, &engine_ecs::components::Name)>()
+            .iter(world)
+            .find(|(object, _)| &object.0 == id)
+            .map(|(_, name)| name.0.clone())
+    });
+    let mut value = before.clone();
+    section(ui, "Foliage", None::<fn(&mut egui::Ui)>, |ui| {
+        property_row(ui, "Plants", |ui| {
+            ui.label(format!("{}", before.instances.len()));
+        });
+        property_row(ui, "Stands on", |ui| {
+            let text = match (&before.terrain, &terrain_name) {
+                (Some(_), Some(name)) => name.clone(),
+                (Some(_), None) => "A terrain not in this scene".to_owned(),
+                (None, _) => "No terrain; doesn't follow sculpting".to_owned(),
+            };
+            ui.label(egui::RichText::new(text).color(palette.muted));
+        });
+        property_row(ui, "See-through", |ui| {
+            let mut cut = value.cutout.is_some();
+            if crate::widgets::checkbox(ui, &palette, &mut cut, "")
+                .on_hover_text("Cut away the clear parts of leaf and grass images")
+                .changed()
+            {
+                value.cutout = cut.then_some(0.5);
+            }
+            match value.cutout.as_mut() {
+                Some(cutoff) => {
+                    number(
+                        ui,
+                        egui::DragValue::new(cutoff)
+                            .speed(0.01)
+                            .range(0.0..=1.0)
+                            .prefix("Cutoff "),
+                    )
+                    .on_hover_text("Pixels less solid than this are cut away");
+                }
+                None => {
+                    ui.label(egui::RichText::new("As in the model").color(palette.subtle));
+                }
+            }
+        });
+        property_row(ui, "Two-sided", |ui| {
+            crate::widgets::checkbox(ui, &palette, &mut value.two_sided, "")
+                .on_hover_text("Show flat leaves from behind too");
+        });
+    });
+    let (tiers, source) = world
+        .get::<engine_ecs::components::InstancedMeshRenderer>(entity)
+        .map_or((1, LodSource::None), |renderer| {
+            let tiers = renderer.tier_count();
+            let source = match (
+                tiers,
+                value.lod.as_ref().is_some_and(|lod| lod.auto_generate),
+            ) {
+                (1, _) => LodSource::None,
+                (_, true) => LodSource::Generated,
+                (_, false) => LodSource::File,
+            };
+            (tiers, source)
+        });
+    let lod_before = value.lod.as_ref().map(MeshLod::from).unwrap_or_default();
+    if let Some(lod) = lod_controls(ui, &lod_before, &default_foliage_lod(), tiers, source) {
+        value.lod = Some(engine_scene::LodData::from(&lod));
+    }
+    set_foliage(world, entity, value)
+}
+
+/// Writes a foliage group's settings. A new draw range takes effect at
+/// once; anything that changes the model's meshes or material rebuilds
+/// the group's renderer on the next frame.
+fn set_foliage(world: &mut World, entity: Entity, value: engine_scene::FoliageData) -> bool {
+    let Some(mut group) = world.get_mut::<engine_scene::SceneFoliage>(entity) else {
+        return false;
+    };
+    if group.0 == value {
         return false;
     }
-    set_mesh_lod(world, entity, value)
+    let generated =
+        |data: &engine_scene::FoliageData| data.lod.as_ref().is_some_and(|lod| lod.auto_generate);
+    let rebuild = group.0.cutout != value.cutout
+        || group.0.two_sided != value.two_sided
+        || generated(&group.0) != generated(&value);
+    let lod = value.lod.as_ref().map(MeshLod::from);
+    group.0 = value;
+    if rebuild {
+        // The viewport releases the old renderer's GPU handles when it
+        // sees it gone, and the resolve pass builds the new one.
+        world
+            .entity_mut(entity)
+            .remove::<engine_ecs::components::InstancedMeshRenderer>();
+    } else if let Some(mut renderer) =
+        world.get_mut::<engine_ecs::components::InstancedMeshRenderer>(entity)
+    {
+        renderer.lod = lod;
+    }
+    true
 }
 
 /// One line saying which detail levels the mesh has.
@@ -3417,13 +3555,15 @@ fn show_body(
         }
     }
     terrain_section(ui, world, entity, assets);
+    foliage_section(ui, world, entity);
 
     ui.add_space(4.0);
-    // A 3D model can't also show a flat image, so only other objects
-    // offer to take one.
+    // A 3D model (or a foliage group of them) can't also show a flat
+    // image, so only other objects offer to take one.
     if world.get::<SpriteSource>(entity).is_none()
         && world.get::<Sprite>(entity).is_none()
         && world.get::<MeshSource>(entity).is_none()
+        && world.get::<engine_scene::SceneFoliage>(entity).is_none()
         && let Some(path) = image_drop_zone(
             ui,
             "Add an image",
@@ -4312,6 +4452,7 @@ mod tests {
             tint: [1.0, 0.3, 0.3],
             metallic: Some(0.25),
             roughness: Some(0.8),
+            ..Default::default()
         };
 
         assert!(!set_material_override(

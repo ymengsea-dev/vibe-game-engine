@@ -1831,6 +1831,8 @@ enum RowIcon {
     Water,
     Sprite,
     Terrain,
+    /// A foliage group: many copies of one model on a terrain.
+    Foliage,
     Model,
     /// A folder: an [`is_group`] object.
     Group,
@@ -1876,6 +1878,8 @@ fn row_icon(world: &World, entity: Entity) -> RowIcon {
             .is_some_and(|source| is_terrain_path(&source.path))
     {
         RowIcon::Terrain
+    } else if object.contains::<engine_scene::SceneFoliage>() {
+        RowIcon::Foliage
     } else if object.contains::<AssetSource>()
         || object.contains::<MeshSource>()
         || object.contains::<MeshRenderer>()
@@ -1996,6 +2000,19 @@ fn paint_entity_icon(ui: &mut egui::Ui, icon: RowIcon, linked: bool) {
         RowIcon::Terrain => {
             line(&[(1.0, 9.0), (4.5, 4.5), (7.0, 7.0), (9.5, 3.0), (13.0, 9.0)]);
             line(&[(1.0, 12.0), (13.0, 12.0)]);
+        }
+        RowIcon::Foliage => {
+            // A leaf: two arcs meeting at the tips, and its middle vein.
+            line(&[
+                (2.0, 12.0),
+                (2.5, 7.0),
+                (5.5, 3.5),
+                (12.0, 2.0),
+                (10.5, 8.5),
+                (7.0, 11.5),
+                (2.0, 12.0),
+            ]);
+            line(&[(2.0, 12.0), (8.5, 5.5)]);
         }
         RowIcon::Model => {
             line(&[
@@ -2833,6 +2850,13 @@ mod tests {
         world
             .entity_mut(model)
             .insert(AssetSource::new("props/barrel.gltf"));
+        let foliage = spawn_entity(world, "Grass Foliage", Vec3::ZERO);
+        let grass = engine_scene::AssetRef {
+            id: uuid::Uuid::new_v4().to_string(),
+        };
+        world.entity_mut(foliage).insert(engine_scene::SceneFoliage(
+            engine_scene::FoliageData::new(grass.clone(), grass, Vec::new(), None),
+        ));
         let group = spawn_entity(world, "Trees", Vec3::ZERO);
         let leaf = spawn_entity(world, "Tree", Vec3::ZERO);
         reparent(world, leaf, Some(group));
@@ -2846,6 +2870,7 @@ mod tests {
             (water, RowIcon::Water),
             (sprite, RowIcon::Sprite),
             (terrain, RowIcon::Terrain),
+            (foliage, RowIcon::Foliage),
             (model, RowIcon::Model),
             (group, RowIcon::Group),
             (object, RowIcon::Object),

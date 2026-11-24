@@ -36,6 +36,7 @@ mod diagnostics;
 mod dirty;
 #[cfg(feature = "dock-shell")]
 pub mod dock;
+pub mod foliage;
 mod error;
 pub mod game_view;
 pub mod gizmo;

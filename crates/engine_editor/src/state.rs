@@ -719,9 +719,47 @@ impl EditorState {
             }
             Ok(Some(crate::HistoryChange::Terrain { paths })) => {
                 self.terrains.invalidate_paths(&paths);
+                self.foliage_follow_all_terrains();
             }
             Ok(None) => {}
             Err(error) => self.asset_browser.operation_error = Some(error.to_string()),
+        }
+    }
+
+    /// Settles every foliage group onto its terrain's ground as the tile
+    /// files now hold it, after undoing or redoing a terrain edit. The
+    /// change is folded into that edit rather than becoming its own step.
+    fn foliage_follow_all_terrains(&mut self) {
+        let linked: std::collections::HashSet<String> = self
+            .world
+            .query::<&engine_scene::SceneFoliage>()
+            .iter(&self.world)
+            .filter_map(|group| group.0.terrain.clone())
+            .collect();
+        let terrains: Vec<Entity> = self
+            .world
+            .query::<(
+                Entity,
+                &engine_scene::SceneObjectId,
+                &engine_scene::SceneTerrain,
+            )>()
+            .iter(&self.world)
+            .filter(|(_, id, _)| linked.contains(&id.0))
+            .map(|(entity, _, _)| entity)
+            .collect();
+        let mut changed = false;
+        for terrain in terrains {
+            if self.live_terrain(terrain).is_err() {
+                continue;
+            }
+            if let Some(live) = self.terrains.get(terrain) {
+                changed |=
+                    crate::foliage::follow_ground(&mut self.world, terrain, &live.surface, None);
+            }
+        }
+        if changed {
+            self.history.absorb(&mut self.world, self.selected_entity);
+            self.mark_dirty();
         }
     }
 
@@ -2573,6 +2611,10 @@ impl EditorState {
     /// Applies the stroke's new brush samples to the live terrain and
     /// queues the chunk and paint re-uploads they need.
     pub fn apply_terrain_stroke(&mut self) {
+        if self.terrain_tools.foliage {
+            self.apply_foliage_stroke();
+            return;
+        }
         let Some(stroke) = self.terrain_stroke.as_mut() else {
             return;
         };
@@ -2598,6 +2640,153 @@ impl EditorState {
         let entity = stroke.entity;
         if let Some(rect) = changed {
             self.terrains.mark_changed(entity, rect, tools.paint);
+            // Foliage follows the ground while the brush drags.
+            if !tools.paint
+                && let Some(live) = self.terrains.get(entity)
+            {
+                let cell = Vec2::splat(live.surface.cell_size());
+                let area = (
+                    live.surface.node_position(rect.row_min, rect.col_min) - cell,
+                    live.surface.node_position(rect.row_max, rect.col_max) + cell,
+                );
+                if crate::foliage::follow_ground(&mut self.world, entity, &live.surface, Some(area))
+                {
+                    self.mark_dirty();
+                }
+            }
+        }
+    }
+
+    /// The model selected in Project Assets, as `(asset id, display name)`,
+    /// for scattering or painting foliage.
+    fn selected_foliage_model(&self) -> Result<(String, String), String> {
+        let model = self
+            .selected_asset
+            .clone()
+            .ok_or("Select a model in Project Assets first")?;
+        let model = model.as_path();
+        if crate::assets::AssetKind::from_path(model) != crate::assets::AssetKind::Mesh {
+            return Err("Select a glTF or GLB model in Project Assets".into());
+        }
+        let model_id = self
+            .asset_index
+            .id_for(model)
+            .ok_or("The selected model has not been imported yet")?;
+        let model_path = self
+            .project
+            .resolve(&Path::new("assets").join(model))
+            .map_err(|error| error.to_string())?;
+        if !model_path.is_file() {
+            return Err("The selected model file is missing".into());
+        }
+        let name = model
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Model");
+        Ok((model_id.to_string(), name.to_owned()))
+    }
+
+    /// The group of `model` on `terrain`, made (empty) if there is none.
+    fn foliage_group(&mut self, terrain: Entity, model: &(String, String)) -> Entity {
+        let terrain_id = crate::foliage::ensure_object_id(&mut self.world, terrain);
+        if let Some(group) = crate::foliage::group_for(&mut self.world, &terrain_id, &model.0) {
+            return group;
+        }
+        let reference = engine_scene::AssetRef {
+            id: model.0.clone(),
+        };
+        self.world
+            .spawn((
+                Name::new(format!("{} Foliage", model.1)),
+                engine_scene::SceneFoliage(engine_scene::FoliageData::new(
+                    reference.clone(),
+                    reference,
+                    Vec::new(),
+                    Some(terrain_id),
+                )),
+            ))
+            .id()
+    }
+
+    /// Applies the foliage brush's new dabs: adds the selected model's
+    /// plants inside each circle, or erases them.
+    fn apply_foliage_stroke(&mut self) {
+        let Some(stroke) = self.terrain_stroke.as_mut() else {
+            return;
+        };
+        let entity = stroke.entity;
+        let centers = stroke.centers[stroke.applied..].to_vec();
+        stroke.applied = stroke.centers.len();
+        let erase = stroke.erase || self.terrain_tools.foliage_erase;
+        if centers.is_empty() {
+            return;
+        }
+        let mut tools = self.terrain_tools.clone();
+        tools.sanitize();
+        let model = self.selected_foliage_model();
+        let terrain_world = hierarchy::world_transform(&self.world, entity);
+        let terrain_id = crate::foliage::ensure_object_id(&mut self.world, entity);
+        let groups = if erase {
+            match &model {
+                Ok(model) => crate::foliage::group_for(&mut self.world, &terrain_id, &model.0)
+                    .into_iter()
+                    .collect(),
+                Err(_) => crate::foliage::groups_on(&mut self.world, &terrain_id),
+            }
+        } else {
+            match &model {
+                Ok(model) => vec![self.foliage_group(entity, model)],
+                Err(error) => {
+                    self.asset_browser.operation_error = Some(error.clone());
+                    return;
+                }
+            }
+        };
+        let Some(live) = self.terrains.get(entity) else {
+            return;
+        };
+        let placement = crate::foliage::Placement {
+            spacing: tools.scatter_spacing,
+            density: tools.scatter_density,
+            seed: tools.scatter_seed,
+        };
+        let mut changed = false;
+        for group in groups {
+            let Some(mut data) = self.world.get_mut::<engine_scene::SceneFoliage>(group) else {
+                continue;
+            };
+            for &center in &centers {
+                if erase {
+                    changed |= crate::foliage::erase(
+                        &mut data.0.instances,
+                        &terrain_world,
+                        center,
+                        tools.radius,
+                    ) > 0;
+                    continue;
+                }
+                let area = crate::foliage::Area::Circle {
+                    center,
+                    radius: tools.radius,
+                };
+                match crate::foliage::add(
+                    &mut data.0.instances,
+                    &terrain_world,
+                    &live.surface,
+                    area,
+                    placement,
+                ) {
+                    Ok(added) => changed |= added > 0,
+                    Err(error) => {
+                        self.asset_browser.operation_error = Some(error.to_string());
+                        break;
+                    }
+                }
+            }
+            crate::foliage::sync_renderer(&mut self.world, group);
+        }
+        if changed {
+            self.mark_dirty();
         }
     }
 
@@ -2649,7 +2838,11 @@ impl EditorState {
         }
         let edit = crate::terrain_tools::TerrainEdit { tiles };
         match edit.write(false) {
-            Ok(()) => self.history.record_terrain(edit),
+            Ok(()) => {
+                self.history.record_terrain(edit);
+                // Foliage that moved with the ground is part of this step.
+                self.history.absorb(&mut self.world, self.selected_entity);
+            }
             Err(error) => {
                 self.asset_browser.operation_error =
                     Some(format!("Could not save terrain: {error}"));
@@ -2706,27 +2899,11 @@ impl EditorState {
             .unwrap_or(self.nav_bake)
     }
 
-    /// Bakes a selected model into one instanced group on the selected terrain.
+    /// Fills the selected terrain with the selected model: one instanced
+    /// group per model and terrain, added to when it already exists. Cells
+    /// that already hold a plant are left as they are.
     pub fn scatter_selected_mesh_on_terrain(&mut self) -> Result<usize, String> {
-        let model = self
-            .selected_asset
-            .clone()
-            .ok_or("Select a model in Project Assets first")?;
-        let model = model.as_path();
-        if crate::assets::AssetKind::from_path(model) != crate::assets::AssetKind::Mesh {
-            return Err("Select a glTF or GLB model in Project Assets".into());
-        }
-        let model_id = self
-            .asset_index
-            .id_for(model)
-            .ok_or("The selected model has not been imported yet")?;
-        let model_path = self
-            .project
-            .resolve(&Path::new("assets").join(model))
-            .map_err(|error| error.to_string())?;
-        if !model_path.is_file() {
-            return Err("The selected model file is missing".into());
-        }
+        let model = self.selected_foliage_model()?;
         let terrain = self.begin_terrain_stroke()?.entity;
         let mut controls = self.terrain_tools.clone();
         controls.sanitize();
@@ -2742,26 +2919,6 @@ impl EditorState {
                 "Foliage area is too dense; increase Spacing (maximum 20,000 cells)".into(),
             );
         }
-        let area = engine_renderer::ScatterArea::new(Vec2::splat(-size * 0.5), Vec2::splat(size));
-        // Each tile is scattered in its own space, then moved into place.
-        let mut instances = Vec::new();
-        for (coord, tile) in live.surface.tiles() {
-            let centre = live.surface.tile_center(*coord);
-            let offset =
-                engine_utils::Transform::from_translation(Vec3::new(centre.x, 0.0, centre.y));
-            for pose in controls
-                .scatter_preview(area, Some(&tile.heights))
-                .map_err(|error| error.to_string())?
-            {
-                let local = offset.mul_transform(&pose);
-                instances.push(engine_scene::TransformData::from(
-                    terrain_world.mul_transform(&local),
-                ));
-            }
-        }
-        if instances.is_empty() {
-            return Err("No foliage was placed; increase Density".into());
-        }
         // The scatter settings are kept with the first tile.
         live.tools = controls.tools_data();
         if let Some((coord, path)) = live.tile_paths.iter().next()
@@ -2771,23 +2928,35 @@ impl EditorState {
                 .map_err(|error| format!("Could not save foliage settings: {error}"))?;
         }
 
-        let count = instances.len();
-        let name = model
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("Model");
-        let id = model_id.to_string();
-        let group = self
+        let group = self.foliage_group(terrain, &model);
+        let placement = crate::foliage::Placement {
+            spacing: controls.scatter_spacing,
+            density: controls.scatter_density,
+            seed: controls.scatter_seed,
+        };
+        self.live_terrain(terrain)?;
+        let live = self
+            .terrains
+            .get(terrain)
+            .ok_or("Selected object is not a terrain")?;
+        let mut data = self
             .world
-            .spawn((
-                Name::new(format!("{name} Foliage")),
-                engine_scene::SceneFoliage(engine_scene::FoliageData {
-                    mesh: engine_scene::AssetRef { id: id.clone() },
-                    material: engine_scene::AssetRef { id },
-                    instances,
-                }),
-            ))
-            .id();
+            .get_mut::<engine_scene::SceneFoliage>(group)
+            .ok_or("The foliage group was removed")?;
+        let count = crate::foliage::add(
+            &mut data.0.instances,
+            &terrain_world,
+            &live.surface,
+            crate::foliage::Area::Everywhere,
+            placement,
+        )
+        .map_err(|error| error.to_string())?;
+        let empty = data.0.instances.is_empty();
+        crate::foliage::sync_renderer(&mut self.world, group);
+        if empty {
+            self.world.despawn(group);
+            return Err("No foliage was placed; increase Density".into());
+        }
         self.select_only(group);
         self.mark_dirty();
         Ok(count)
@@ -3489,6 +3658,119 @@ mod tests {
                 && pose.translation[1] == 0.0
                 && pose.translation[2].abs() <= 32.0
         }));
+    }
+
+    /// A terrain with the grass model selected in Project Assets.
+    fn terrain_with_grass(project: &TempProject, state: &mut EditorState) -> Entity {
+        let terrain = new_terrain(project, state);
+        let model_relative = PathBuf::from("models/grass.gltf");
+        let model_path = project.0.assets_dir().join(&model_relative);
+        std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
+        std::fs::write(&model_path, b"{}").unwrap();
+        state
+            .asset_index
+            .insert(engine_asset::AssetId::new(), model_relative.clone());
+        state.selected_asset = Some(model_relative);
+        terrain
+    }
+
+    fn foliage_heights(state: &mut EditorState) -> Vec<f32> {
+        state
+            .world
+            .query::<&engine_scene::SceneFoliage>()
+            .iter(&state.world)
+            .flat_map(|group| group.0.instances.iter().map(|pose| pose.translation[1]))
+            .collect()
+    }
+
+    fn stroke_at(state: &mut EditorState, center: glam::Vec2, erase: bool) {
+        let mut stroke = state.begin_terrain_stroke().unwrap();
+        stroke.centers.push(center);
+        stroke.erase = erase;
+        state.terrain_stroke = Some(stroke);
+        state.finish_terrain_stroke();
+    }
+
+    #[test]
+    fn sculpting_carries_foliage_with_the_ground_in_one_undo_step() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let terrain = terrain_with_grass(&project, &mut state);
+        state
+            .history
+            .begin_frame(&mut state.world, state.selected_entity);
+        state.scatter_selected_mesh_on_terrain().unwrap();
+        assert!(
+            state
+                .history
+                .settle(&mut state.world, state.selected_entity)
+        );
+        assert!(foliage_heights(&mut state).iter().all(|&y| y == 0.0));
+
+        state.select_only(terrain);
+        state.terrain_tools.radius = 6.0;
+        state.terrain_tools.strength = 2.0;
+        state
+            .history
+            .begin_frame(&mut state.world, state.selected_entity);
+        stroke_at(&mut state, glam::Vec2::ZERO, false);
+        assert!(
+            !state
+                .history
+                .settle(&mut state.world, state.selected_entity),
+            "the foliage move belongs to the terrain step"
+        );
+        let raised = foliage_heights(&mut state);
+        assert!(raised.iter().any(|&y| y > 0.5));
+        assert!(raised.contains(&0.0), "far plants stay put");
+
+        state.undo();
+        assert!(foliage_heights(&mut state).iter().all(|&y| y.abs() < 1e-4));
+        state.redo();
+        assert_eq!(foliage_heights(&mut state), raised);
+    }
+
+    #[test]
+    fn the_foliage_brush_adds_and_erases_the_selected_model() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let terrain = terrain_with_grass(&project, &mut state);
+        state.terrain_tools.foliage = true;
+        state.terrain_tools.radius = 5.0;
+        state
+            .history
+            .begin_frame(&mut state.world, state.selected_entity);
+        stroke_at(&mut state, glam::Vec2::new(10.0, 10.0), false);
+        let painted = foliage_heights(&mut state).len();
+        assert!(painted > 0);
+        assert!(state.dirty.scene());
+        assert!(
+            state
+                .history
+                .settle(&mut state.world, state.selected_entity)
+        );
+        assert_eq!(
+            state.selected_entity,
+            Some(terrain),
+            "the terrain stays selected"
+        );
+
+        // The same dab again adds nothing.
+        stroke_at(&mut state, glam::Vec2::new(10.0, 10.0), false);
+        assert_eq!(foliage_heights(&mut state).len(), painted);
+
+        state
+            .history
+            .begin_frame(&mut state.world, state.selected_entity);
+        stroke_at(&mut state, glam::Vec2::new(10.0, 10.0), true);
+        assert!(foliage_heights(&mut state).is_empty());
+        assert!(
+            state
+                .history
+                .settle(&mut state.world, state.selected_entity)
+        );
+        state.undo();
+        assert_eq!(foliage_heights(&mut state).len(), painted);
     }
 
     #[test]

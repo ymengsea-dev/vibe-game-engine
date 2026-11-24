@@ -122,11 +122,12 @@ mod tests {
     fn foliage_model_is_reported_as_a_missing_asset_dependency() {
         let id = engine_asset::AssetId::new().to_string();
         let mut world = World::new();
-        world.spawn(engine_scene::SceneFoliage(engine_scene::FoliageData {
-            mesh: AssetRef { id: id.clone() },
-            material: AssetRef { id: id.clone() },
-            instances: Vec::new(),
-        }));
+        world.spawn(engine_scene::SceneFoliage(engine_scene::FoliageData::new(
+            AssetRef { id: id.clone() },
+            AssetRef { id: id.clone() },
+            Vec::new(),
+            None,
+        )));
         let report = missing(&mut world, &AssetIndex::new());
         assert_eq!(report.len(), 1);
         assert_eq!(report[0].id, id);

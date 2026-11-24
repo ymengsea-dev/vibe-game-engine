@@ -620,6 +620,10 @@ mod tests {
             instances: vec![crate::TransformData::from(MathTransform::from_translation(
                 Vec3::new(2.0, 1.0, 3.0),
             ))],
+            terrain: Some(uuid::Uuid::new_v4().to_string()),
+            lod: Some(crate::LodData::default()),
+            cutout: Some(0.4),
+            two_sided: true,
         };
         let mut world = World::new();
         world.spawn(crate::SceneFoliage(authored.clone()));

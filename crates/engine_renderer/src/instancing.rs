@@ -86,6 +86,20 @@ impl From<Transform> for InstanceRaw {
 /// fragment stage to [`Pipeline`], only the vertex stage differs.
 pub struct InstancedPipeline {
     pub(crate) render_pipeline: wgpu::RenderPipeline,
+    /// The same pipeline without back-face culling, for double-sided
+    /// materials such as leaf and grass cards.
+    pub(crate) two_sided_pipeline: wgpu::RenderPipeline,
+}
+
+impl InstancedPipeline {
+    /// The pipeline that draws `material`'s faces.
+    pub(crate) fn for_material(&self, material: &MaterialBinding) -> &wgpu::RenderPipeline {
+        if material.double_sided {
+            &self.two_sided_pipeline
+        } else {
+            &self.render_pipeline
+        }
+    }
 }
 
 /// A GPU buffer of [`InstanceRaw`] records for one instanced draw. Thin
@@ -153,35 +167,40 @@ impl GpuContext {
             immediate_size: 0,
         });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(Vertex::layout()), Some(InstanceRaw::layout())],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(crate::pipeline::HDR_TEXTURE_FORMAT.into())],
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            // Opaque instanced geometry — same depth rules as static meshes.
-            depth_stencil: Some(crate::pipeline::opaque_depth_state()),
-            // Matches the other scene-pass pipelines — see
-            // `GpuContext::scene_multisample_state`.
-            multisample: self.scene_multisample_state(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let build = |label: &str, cull_mode| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[Some(Vertex::layout()), Some(InstanceRaw::layout())],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(crate::pipeline::HDR_TEXTURE_FORMAT.into())],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode,
+                    ..Default::default()
+                },
+                // Opaque instanced geometry — same depth rules as static meshes.
+                depth_stencil: Some(crate::pipeline::opaque_depth_state()),
+                // Matches the other scene-pass pipelines — see
+                // `GpuContext::scene_multisample_state`.
+                multisample: self.scene_multisample_state(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
 
-        InstancedPipeline { render_pipeline }
+        InstancedPipeline {
+            render_pipeline: build(label, Some(wgpu::Face::Back)),
+            two_sided_pipeline: build(&format!("{label} (two-sided)"), None),
+        }
     }
 }
 

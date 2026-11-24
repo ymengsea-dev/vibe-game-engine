@@ -113,6 +113,9 @@ pub(crate) const HDR_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::
 /// reason for more than one shader.
 pub struct Pipeline {
     render_pipeline: wgpu::RenderPipeline,
+    /// The opaque pipeline without back-face culling, for
+    /// [`MaterialBinding::double_sided`] materials.
+    two_sided_pipeline: wgpu::RenderPipeline,
     /// The same pipeline with alpha blending on and depth writes off,
     /// used for the sorted transparent pass. Built alongside the opaque
     /// one so both always agree on layouts and shader.
@@ -191,6 +194,16 @@ impl Pipeline {
     pub(crate) fn transparent(&self) -> &wgpu::RenderPipeline {
         &self.transparent_pipeline
     }
+
+    /// The opaque pipeline for `material`: back faces culled unless it is
+    /// double-sided.
+    pub(crate) fn opaque_for(&self, material: &MaterialBinding) -> &wgpu::RenderPipeline {
+        if material.double_sided {
+            &self.two_sided_pipeline
+        } else {
+            &self.render_pipeline
+        }
+    }
 }
 
 /// A camera's uniform buffer plus the bind group that exposes it to a
@@ -219,6 +232,8 @@ pub struct MaterialBinding {
     /// Whether this material contributes to the shadow map. Alpha-masked
     /// materials do; alpha-blended materials do not.
     pub casts_shadow: bool,
+    /// Whether both faces of each triangle are drawn (and cast shadows).
+    pub double_sided: bool,
     /// The GPU buffer backing the factors uniform. Kept around so callers
     /// can update it (e.g. after editing a material) via
     /// [`GpuContext::write_uniform_buffer`].
@@ -261,7 +276,29 @@ pub struct LightsBinding {
 pub struct ShadowPipeline {
     render_pipeline: wgpu::RenderPipeline,
     instanced_render_pipeline: wgpu::RenderPipeline,
+    /// Both shadow pipelines again without face culling, for
+    /// double-sided materials: a leaf card has no back face to cull.
+    two_sided_render_pipeline: wgpu::RenderPipeline,
+    two_sided_instanced_render_pipeline: wgpu::RenderPipeline,
     light_bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl ShadowPipeline {
+    fn plain_for(&self, material: &MaterialBinding) -> &wgpu::RenderPipeline {
+        if material.double_sided {
+            &self.two_sided_render_pipeline
+        } else {
+            &self.render_pipeline
+        }
+    }
+
+    fn instanced_for(&self, material: &MaterialBinding) -> &wgpu::RenderPipeline {
+        if material.double_sided {
+            &self.two_sided_instanced_render_pipeline
+        } else {
+            &self.instanced_render_pipeline
+        }
+    }
 }
 
 /// A directional light's shadow depth texture plus the resources needed
@@ -605,39 +642,42 @@ impl GpuContext {
             immediate_size: 0,
         });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(Vertex::layout())],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                // Renders into the HDR offscreen target ([`HdrTarget`]),
-                // not the swapchain directly — the tonemap pass converts
-                // that down to the swapchain's format afterward.
-                targets: &[Some(HDR_TEXTURE_FORMAT.into())],
-            }),
-            primitive: wgpu::PrimitiveState {
-                // Our built-in geometry (see `cube()`) winds each face
-                // counter-clockwise as seen from outside, matching the
-                // default front face; culling back faces gives a
-                // correct-looking convex mesh without needing a depth
-                // buffer. Revisit once concave/non-convex meshes exist.
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            // Opaque geometry: this is what makes draw order stop mattering.
-            depth_stencil: Some(opaque_depth_state()),
-            multisample: self.scene_multisample_state(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let opaque = |label: &str, cull_mode| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[Some(Vertex::layout())],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    // Renders into the HDR offscreen target ([`HdrTarget`]),
+                    // not the swapchain directly — the tonemap pass converts
+                    // that down to the swapchain's format afterward.
+                    targets: &[Some(HDR_TEXTURE_FORMAT.into())],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode,
+                    ..Default::default()
+                },
+                // Opaque geometry: this is what makes draw order stop mattering.
+                depth_stencil: Some(opaque_depth_state()),
+                multisample: self.scene_multisample_state(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        // Our built-in geometry (see `cube()`) winds each face
+        // counter-clockwise as seen from outside, matching the default
+        // front face; culling back faces gives a correct-looking convex
+        // mesh. Double-sided materials (leaf cards) draw both faces.
+        let render_pipeline = opaque(label, Some(wgpu::Face::Back));
+        let two_sided_pipeline = opaque(&format!("{label} (two-sided)"), None);
 
         // Same shader, same layouts; only the blend state and depth
         // write differ. Transparent surfaces must not write depth or
@@ -681,6 +721,7 @@ impl GpuContext {
         Pipeline {
             terrain,
             render_pipeline,
+            two_sided_pipeline,
             transparent_pipeline,
             camera_bind_group_layout,
             material_bind_group_layout,
@@ -791,6 +832,7 @@ impl GpuContext {
             // `2` is `AlphaMode::Blend`; see `MaterialUniform::alpha_mode`.
             transparent: material.alpha_mode == 2,
             casts_shadow: material.casts_shadow(),
+            double_sided: material.is_double_sided(),
         }
     }
 
@@ -888,44 +930,50 @@ impl GpuContext {
             immediate_size: 0,
         });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Some(Vertex::layout())],
+        let shadow_depth = || wgpu::DepthStencilState {
+            format: SHADOW_DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[],
-            }),
-            primitive: wgpu::PrimitiveState {
-                // Cull front faces (not back, unlike the main pipeline):
-                // writing the *back*-face depth of each occluder reduces
-                // shadow acne on lit front faces without needing an
-                // aggressive depth bias. Standard peter-panning trade-off.
-                cull_mode: Some(wgpu::Face::Front),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: SHADOW_DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
-                    clamp: 0.0,
+        };
+        let plain = |label: &str, cull_mode| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[Some(Vertex::layout())],
                 },
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode,
+                    ..Default::default()
+                },
+                depth_stencil: Some(shadow_depth()),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        // Cull front faces (not back, unlike the main pipeline): writing
+        // the *back*-face depth of each occluder reduces shadow acne on lit
+        // front faces without needing an aggressive depth bias. Standard
+        // peter-panning trade-off. A double-sided card has no back face,
+        // so it culls nothing.
+        let render_pipeline = plain(label, Some(wgpu::Face::Front));
+        let two_sided_render_pipeline = plain(&format!("{label} (two-sided)"), None);
 
         let instanced_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -936,9 +984,9 @@ impl GpuContext {
                 ],
                 immediate_size: 0,
             });
-        let instanced_render_pipeline =
+        let instanced = |label: &str, cull_mode| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(&format!("{label} instanced")),
+                label: Some(label),
                 layout: Some(&instanced_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &instanced_shader,
@@ -953,28 +1001,25 @@ impl GpuContext {
                     targets: &[],
                 }),
                 primitive: wgpu::PrimitiveState {
-                    cull_mode: Some(wgpu::Face::Front),
+                    cull_mode,
                     ..Default::default()
                 },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: SHADOW_DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState {
-                        constant: 2,
-                        slope_scale: 2.0,
-                        clamp: 0.0,
-                    },
-                }),
+                depth_stencil: Some(shadow_depth()),
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            })
+        };
+        let instanced_render_pipeline =
+            instanced(&format!("{label} instanced"), Some(wgpu::Face::Front));
+        let two_sided_instanced_render_pipeline =
+            instanced(&format!("{label} instanced (two-sided)"), None);
 
         ShadowPipeline {
             render_pipeline,
             instanced_render_pipeline,
+            two_sided_render_pipeline,
+            two_sided_instanced_render_pipeline,
             light_bind_group_layout,
         }
     }
@@ -1516,9 +1561,9 @@ impl GpuContext {
                 multiview_mask: None,
             });
 
-            shadow_pass.set_pipeline(&shadow_pipeline.render_pipeline);
             shadow_pass.set_bind_group(0, &shadow_map.light_bind_group, &[]);
             for drawable in shadow_casters {
+                shadow_pass.set_pipeline(shadow_pipeline.plain_for(drawable.material));
                 shadow_pass.set_bind_group(1, &drawable.material.bind_group, &[]);
                 shadow_pass.set_bind_group(2, &drawable.model.bind_group, &[]);
                 shadow_pass.set_vertex_buffer(0, drawable.mesh.vertex_buffer.slice(..));
@@ -1529,9 +1574,9 @@ impl GpuContext {
                 shadow_pass.draw_indexed(0..drawable.mesh.index_count, 0, 0..1);
             }
             if !instanced_shadow_casters.is_empty() {
-                shadow_pass.set_pipeline(&shadow_pipeline.instanced_render_pipeline);
                 shadow_pass.set_bind_group(0, &shadow_map.light_bind_group, &[]);
                 for drawable in instanced_shadow_casters {
+                    shadow_pass.set_pipeline(shadow_pipeline.instanced_for(drawable.material));
                     shadow_pass.set_bind_group(1, &drawable.material.bind_group, &[]);
                     shadow_pass.set_vertex_buffer(0, drawable.mesh.vertex_buffer.slice(..));
                     shadow_pass.set_vertex_buffer(1, drawable.instance_buffer.buffer.slice(..));
@@ -1598,6 +1643,7 @@ impl GpuContext {
             render_pass.set_bind_group(3, &lights.bind_group, &[]);
 
             for drawable in drawables {
+                render_pass.set_pipeline(pipeline.opaque_for(drawable.material));
                 render_pass.set_bind_group(1, &drawable.material.bind_group, &[]);
                 render_pass.set_bind_group(2, &drawable.model.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, drawable.mesh.vertex_buffer.slice(..));
@@ -1654,6 +1700,7 @@ impl GpuContext {
                 render_pass.set_bind_group(0, &camera.bind_group, &[]);
                 render_pass.set_bind_group(3, &lights.bind_group, &[]);
                 for instanced in instanced_drawables {
+                    render_pass.set_pipeline(instanced_pipeline.for_material(instanced.material));
                     render_pass.set_bind_group(1, &instanced.material.bind_group, &[]);
                     render_pass.set_vertex_buffer(0, instanced.mesh.vertex_buffer.slice(..));
                     render_pass.set_vertex_buffer(1, instanced.instance_buffer.buffer.slice(..));

@@ -630,9 +630,43 @@ pub struct InstancedMeshRenderer {
     pub material: engine_utils::AssetHandle<engine_renderer::MaterialBinding>,
     /// One world-space transform per instance.
     pub instances: Vec<engine_utils::Transform>,
+    /// Simpler versions of `mesh` for far-away instances, most detailed
+    /// first. Empty draws `mesh` at every distance.
+    pub lods: Vec<engine_utils::AssetHandle<engine_renderer::Mesh>>,
+    /// When instances switch tiers and how far away they stop being drawn.
+    /// `None` draws the full mesh at any distance.
+    pub lod: Option<MeshLod>,
 }
 
 impl InstancedMeshRenderer {
+    /// Releases every GPU handle this renderer holds (mesh, detail tiers
+    /// and material) in `assets`. Call before removing or despawning it.
+    pub fn release(&self, assets: &mut engine_renderer::RenderAssets) {
+        assets.meshes.release(self.mesh);
+        for tier in &self.lods {
+            assets.meshes.release(*tier);
+        }
+        assets.materials.release(self.material);
+    }
+
+    /// The mesh for detail tier `tier` (0 = `mesh`), clamped to the last.
+    pub fn tier_mesh(&self, tier: usize) -> engine_utils::AssetHandle<engine_renderer::Mesh> {
+        match tier.checked_sub(1) {
+            None => self.mesh,
+            Some(index) => self
+                .lods
+                .get(index)
+                .or(self.lods.last())
+                .copied()
+                .unwrap_or(self.mesh),
+        }
+    }
+
+    /// How many detail tiers this renderer has, counting `mesh`.
+    pub fn tier_count(&self) -> usize {
+        1 + self.lods.len()
+    }
+
     /// Builds an [`InstancedMeshRenderer`], uploading `mesh` and building a
     /// material binding from `texture`/`material`, then registering both as
     /// freshly owned entries (ref count `1` each) in `assets`.
@@ -650,6 +684,8 @@ impl InstancedMeshRenderer {
             mesh: assets.meshes.insert(mesh),
             material: assets.materials.insert(material_binding),
             instances,
+            lods: Vec::new(),
+            lod: None,
         }
     }
 
@@ -680,6 +716,8 @@ impl InstancedMeshRenderer {
             mesh,
             material: assets.materials.insert(material_binding),
             instances,
+            lods: Vec::new(),
+            lod: None,
         }
     }
 
@@ -696,6 +734,8 @@ impl InstancedMeshRenderer {
             mesh,
             material,
             instances,
+            lods: Vec::new(),
+            lod: None,
         }
     }
 }

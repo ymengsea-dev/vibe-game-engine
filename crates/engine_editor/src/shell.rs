@@ -2137,7 +2137,11 @@ fn handle_terrain_interaction(
     }
     if response.drag_started() {
         match state.begin_terrain_stroke() {
-            Ok(stroke) => state.terrain_stroke = Some(stroke),
+            Ok(mut stroke) => {
+                // Shift-drag erases with the foliage brush.
+                stroke.erase = response.ctx.input(|input| input.modifiers.shift);
+                state.terrain_stroke = Some(stroke);
+            }
             Err(error) => state.asset_browser.operation_error = Some(error),
         }
     }
@@ -5907,6 +5911,7 @@ mod ui_tests {
                     tint: [1.0, 1.0, 1.0],
                     metallic: None,
                     roughness: Some(0.6),
+                    ..Default::default()
                 }),
             ))
             .id();
@@ -6251,6 +6256,71 @@ mod ui_tests {
                         .inner_margin(egui::Margin::same(10)),
                 )
                 .show(ui, |ui| super::terrain_menu_controls(ui, &mut state));
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `terrain-menu-foliage.png`: the Terrain menu with the foliage
+    /// brush on. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_terrain_menu_foliage() {
+        let (root, mut state) = terrain_test_state();
+        state.terrain_sculpt_active = true;
+        state.terrain_tools.foliage = true;
+        let path = crate::ui_snapshot::snapshot_dir().join("terrain-menu-foliage.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(380.0, 520.0), 2.0, |ui| {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(crate::theme::NIGHT.raised)
+                        .inner_margin(egui::Margin::same(10)),
+                )
+                .show(ui, |ui| super::terrain_menu_controls(ui, &mut state));
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `inspector-foliage.png`: a foliage group standing on a
+    /// terrain, with see-through leaves and a draw range. Needs a GPU
+    /// adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_foliage() {
+        let (root, mut state) = terrain_test_state();
+        let terrain = state.selected_entity.expect("terrain selected");
+        let terrain_id = crate::foliage::ensure_object_id(&mut state.world, terrain);
+        let model = engine_scene::AssetRef {
+            id: uuid::Uuid::nil().to_string(),
+        };
+        let mut data = engine_scene::FoliageData::new(
+            model.clone(),
+            model,
+            vec![engine_scene::TransformData::from(engine_utils::Transform::IDENTITY); 1240],
+            Some(terrain_id),
+        );
+        data.cutout = Some(0.5);
+        data.two_sided = true;
+        let group = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Fern Foliage"),
+                engine_scene::SceneFoliage(data),
+            ))
+            .id();
+        state.select_only(group);
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-foliage.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 760.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
         })
         .expect("snapshot");
         let _ = std::fs::remove_dir_all(root);

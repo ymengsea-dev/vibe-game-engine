@@ -243,7 +243,7 @@ impl MeshRendererData {
                 .tint
                 .iter()
                 .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
-                || ![authored.metallic, authored.roughness]
+                || ![authored.metallic, authored.roughness, authored.cutout]
                     .into_iter()
                     .flatten()
                     .all(|value| value.is_finite() && (0.0..=1.0).contains(&value)))
@@ -290,6 +290,31 @@ impl FoliageData {
             transform
                 .validate()
                 .map_err(|reason| format!("instance {index}: {reason}"))?;
+        }
+        if let Some(terrain) = &self.terrain {
+            validate_object_id(terrain).map_err(|reason| format!("terrain: {reason}"))?;
+        }
+        if let Some(lod) = &self.lod {
+            lod.validate()?;
+        }
+        if let Some(cutout) = self.cutout
+            && !(0.0..=1.0).contains(&cutout)
+        {
+            return Err(format!("cutout must be between 0 and 1, got {cutout}"));
+        }
+        Ok(())
+    }
+}
+
+impl crate::LodData {
+    /// Checks that every distance is finite and not negative.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let finite = |value: f32| value.is_finite() && value >= 0.0;
+        if !self.switch_distances.iter().all(|&d| finite(d)) {
+            return Err("detail switch distances must be finite and not negative".into());
+        }
+        if self.draw_distance.is_some_and(|d| !finite(d)) || !finite(self.fade_length) {
+            return Err("draw distance and fade must be finite and not negative".into());
         }
         Ok(())
     }
@@ -912,6 +937,7 @@ mod tests {
             tint: [f32::NAN, 1.0, 1.0],
             metallic: Some(0.5),
             roughness: None,
+            ..Default::default()
         });
         assert!(mesh.validate().is_err());
         mesh.material_override.as_mut().unwrap().tint = [1.0; 3];
@@ -922,18 +948,42 @@ mod tests {
     #[test]
     fn foliage_rejects_invalid_instances_and_excessive_count() {
         let source = valid_mesh_renderer();
-        let mut foliage = crate::FoliageData {
-            mesh: source.mesh,
-            material: source.material,
-            instances: vec![crate::TransformData::from(
+        let mut foliage = crate::FoliageData::new(
+            source.mesh,
+            source.material,
+            vec![crate::TransformData::from(
                 engine_utils::Transform::IDENTITY,
             )],
-        };
+            None,
+        );
         assert!(foliage.validate().is_ok());
         foliage.instances[0].translation[0] = f32::NAN;
         assert!(foliage.validate().is_err());
         foliage.instances =
             vec![crate::TransformData::from(engine_utils::Transform::IDENTITY); 20_001];
+        assert!(foliage.validate().is_err());
+    }
+
+    #[test]
+    fn foliage_rejects_bad_terrain_link_cutout_and_draw_range() {
+        let source = valid_mesh_renderer();
+        let valid = crate::FoliageData::new(
+            source.mesh,
+            source.material,
+            Vec::new(),
+            Some(uuid::Uuid::new_v4().to_string()),
+        );
+        assert!(valid.validate().is_ok());
+        let mut foliage = valid.clone();
+        foliage.terrain = Some("not-an-id".into());
+        assert!(foliage.validate().is_err());
+        let mut foliage = valid.clone();
+        foliage.cutout = Some(1.5);
+        assert!(foliage.validate().is_err());
+        let mut foliage = valid;
+        if let Some(lod) = foliage.lod.as_mut() {
+            lod.draw_distance = Some(f32::INFINITY);
+        }
         assert!(foliage.validate().is_err());
     }
 

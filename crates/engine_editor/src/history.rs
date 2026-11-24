@@ -169,6 +169,15 @@ impl History {
         }
     }
 
+    /// Takes the world as it is now as the start of the current edit
+    /// sequence, without recording a step. For world changes that follow
+    /// from a recorded terrain edit (foliage settling onto sculpted ground):
+    /// undoing the terrain edit brings them back, so they must not become
+    /// an undo step of their own.
+    pub fn absorb(&mut self, world: &mut World, selected: Option<Entity>) {
+        self.pending = Some(Snapshot::capture(world, selected));
+    }
+
     /// Records a finished terrain stroke as one undo step.
     pub fn record_terrain(&mut self, edit: TerrainEdit) {
         self.push_new(Step::Terrain(edit));

@@ -207,6 +207,10 @@ mod tests {
             instances: vec![engine_scene::TransformData::from(
                 engine_utils::Transform::IDENTITY,
             )],
+            terrain: None,
+            lod: None,
+            cutout: None,
+            two_sided: false,
         };
         let mut world = World::new();
         let entity = world
