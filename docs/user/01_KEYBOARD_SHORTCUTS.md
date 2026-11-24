@@ -43,6 +43,7 @@ Shortcuts don't work while you type in a text box.
 | ⌫ or Delete | Delete the selected objects |
 | ⌘G | Group the selected objects |
 | ⇧⌘G | Ungroup |
+| Drag on the selected terrain (Terrain menu set to Sculpt or Paint) | Sculpt or paint under the blue brush ring. Clicks don't select while the brush is on; set the menu to Off |
 | Drag a file from Project Assets | Add it to the scene where the marker shows: on the object under the cursor, else on the ground, else in front of the camera. In the 2D view, at the cursor |
 
 ## Hierarchy
@@ -89,7 +90,7 @@ The icon at the start of a row shows what the object is:
 | Folder | A group |
 | Diamond | Anything else, such as an empty object |
 
-An object that is several things shows the first match in this list. Terrain is recognised by its place in the `terrain` folder: moved elsewhere it shows as a model, and a model placed there shows as terrain. Only the icon changes. Foliage shows the diamond for now. The scene's sun has no row, because it is a setting in the Scene View's Environment menu.
+An object that is several things shows the first match in this list. Terrain shows the ridge; so does a model in a `terrain` folder from an older Studio, until its scene is opened and converted. Foliage shows the diamond for now. The scene's sun has no row, because it is a setting in the Scene View's Environment menu.
 
 ## Inspector
 

@@ -181,6 +181,24 @@ impl AssetImporter {
             seen.insert(id);
             index.insert(id, entry.relative_path.clone());
 
+            // Terrain tiles are read straight from disk by the terrain
+            // tools; they only need their id.
+            if entry.kind == AssetKind::Terrain {
+                if let Err(err) = self.cache.confirm(&absolute) {
+                    tracing::warn!(
+                        path = %absolute.display(), error = %err,
+                        "terrain tile's sidecar could not be updated"
+                    );
+                }
+                self.records.push(ImportRecord {
+                    id: Some(id),
+                    relative_path: entry.relative_path.clone(),
+                    kind: entry.kind,
+                    outcome: ImportOutcome::Cached,
+                });
+                continue;
+            }
+
             // Re-import if the bytes changed, or if we have a warm `.meta`
             // from an earlier run but no decoded data in memory yet.
             let must_import = source_changed || !self.imported.contains_key(&id);
@@ -347,7 +365,7 @@ fn import_one(
         AssetKind::Audio => import_wav_bytes(&bytes)
             .map(|audio| ImportedAsset::Audio(Box::new(audio)))
             .map_err(|err| err.to_string()),
-        AssetKind::Scene | AssetKind::Prefab | AssetKind::Other => {
+        AssetKind::Scene | AssetKind::Prefab | AssetKind::Terrain | AssetKind::Other => {
             Err("no importer for this asset kind".to_string())
         }
     }

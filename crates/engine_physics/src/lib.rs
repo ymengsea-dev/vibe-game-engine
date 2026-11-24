@@ -43,6 +43,7 @@ mod character2d;
 mod collision2d;
 mod debug;
 mod error;
+mod heightfield;
 mod raycast;
 mod water;
 mod world;
@@ -56,6 +57,7 @@ pub use collision2d::{
 };
 pub use debug::{DebugLine, DebugRenderMode, DebugRenderStyle, debug_render_lines};
 pub use error::PhysicsError;
+pub use heightfield::heightfield_collider;
 pub use raycast::{RayHit, cast_ray, cast_ray_filtered};
 pub use water::{BuoyancySettings, WaterSample, WaterSurface, WaterWave, buoyancy_force};
 pub use world::PhysicsWorld;

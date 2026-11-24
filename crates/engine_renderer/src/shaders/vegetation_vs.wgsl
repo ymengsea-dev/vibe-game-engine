@@ -1,5 +1,5 @@
 // Wind-animated instanced vertex stage for the PBR shader. Concatenated
-// onto `pbr_common.wgsl` (which declares `camera` and `VertexOutput`) by
+// onto `PBR_COMMON_SOURCE` (which declares `camera` and `VertexOutput`) by
 // `GpuContext::create_vegetation_pipeline`.
 //
 // Like `instanced_pbr_vs.wgsl`, the per-plant model matrix comes from an

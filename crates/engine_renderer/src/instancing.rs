@@ -4,7 +4,7 @@
 //!
 //! [`InstanceRaw`] is the per-instance GPU record (a model matrix plus a
 //! distance fade);
-//! [`InstancedPipeline`] is `pbr_common.wgsl` + `instanced_pbr_vs.wgsl`
+//! [`InstancedPipeline`] is `PBR_COMMON_SOURCE` + `instanced_pbr_vs.wgsl`
 //! (model matrix from instance attributes, no `@group(2)` uniform);
 //! [`InstancedDrawable`] bundles what one instanced draw needs.
 //!
@@ -82,7 +82,7 @@ impl From<Transform> for InstanceRaw {
 }
 
 /// A compiled instancing render pipeline. Its shader is
-/// `pbr_common.wgsl` + `instanced_pbr_vs.wgsl` — identical lighting and
+/// `PBR_COMMON_SOURCE` + `instanced_pbr_vs.wgsl` — identical lighting and
 /// fragment stage to [`Pipeline`], only the vertex stage differs.
 pub struct InstancedPipeline {
     pub(crate) render_pipeline: wgpu::RenderPipeline,

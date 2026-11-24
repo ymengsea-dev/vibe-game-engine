@@ -83,6 +83,19 @@ pub fn scan(world: &mut World, index: &AssetIndex) -> Vec<AssetDependency> {
     for (entity, emitter) in world.query::<(Entity, &SceneAudioEmitter)>().iter(world) {
         add(entity, "AudioEmitter.sound", &emitter.0.sound.id);
     }
+    for (entity, terrain) in world
+        .query::<(Entity, &engine_scene::SceneTerrain)>()
+        .iter(world)
+    {
+        for tile in &terrain.0.tiles {
+            add(entity, "Terrain.tile", &tile.asset.id);
+        }
+        for layer in &terrain.0.layers {
+            if let Some(texture) = &layer.texture {
+                add(entity, "Terrain.layer", &texture.id);
+            }
+        }
+    }
     for (entity, collider) in world.query::<(Entity, &SceneCollider)>().iter(world) {
         if let ColliderShape::TriMesh { mesh } = &collider.0.shape {
             add(entity, "Collider.mesh", &mesh.id);

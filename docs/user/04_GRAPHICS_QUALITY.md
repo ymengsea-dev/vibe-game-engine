@@ -48,5 +48,6 @@ Turn on **Overlays → Distance detail** to see simpler models and draw ranges f
 
 ## Not available yet
 
-- Animated characters, foliage and terrain always draw in full detail and at any distance.
+- Animated characters and foliage always draw in full detail and at any distance.
+- Terrain draws far-away ground with fewer triangles on its own; the quality level's detail setting moves those distances too. Set it per terrain with **Detail** in the Inspector.
 - The Scene View's shadows do not follow the quality setting; only the game's do.

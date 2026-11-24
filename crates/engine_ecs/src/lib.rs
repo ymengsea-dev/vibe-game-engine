@@ -53,6 +53,7 @@ pub mod physics;
 pub mod propagate;
 pub mod render;
 pub mod stages;
+pub mod terrain;
 pub mod water;
 
 pub use animation::{
@@ -71,6 +72,7 @@ pub use render::{
     despawn_skinned_mesh_renderer, despawn_vegetation_renderer, extract_and_render,
     extract_and_render_to, extract_sprites,
 };
+pub use terrain::{TerrainChunkGpu, TerrainRenderer, TerrainTileGpu};
 pub use water::{BuoyantBody, WaterEvents, WaterInteractionEvent, WaterInteractor, update_water};
 
 /// Re-exports the `bevy_ecs` prelude, plus [`Ecs`], the core components,

@@ -53,4 +53,8 @@ pub enum PhysicsError {
         /// Rejected scalar value.
         value: f32,
     },
+
+    /// Terrain heightfield data was malformed; the reason says how.
+    #[error("invalid terrain heightfield: {0}")]
+    InvalidHeightfield(&'static str),
 }

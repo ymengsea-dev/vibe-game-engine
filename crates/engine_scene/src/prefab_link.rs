@@ -51,6 +51,7 @@ const FIELDS: &[Field] = &[
     field!(disabled),
     field!(collider),
     field!(audio_emitter),
+    field!(terrain),
     field!(water),
     field!(point_light),
     field!(ui),

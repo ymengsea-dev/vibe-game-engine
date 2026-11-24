@@ -318,6 +318,9 @@ impl Scene {
                 .map(|ui| ui.0.clone());
             let (mesh_renderer, sprite) = capture_renderables(world, *entity);
             scene_entity.mesh_renderer = mesh_renderer;
+            scene_entity.terrain = world
+                .get::<crate::terrain::SceneTerrain>(*entity)
+                .map(|carrier| carrier.0.clone());
             scene_entity.foliage = world
                 .get::<crate::SceneFoliage>(*entity)
                 .map(|source| source.0.clone());

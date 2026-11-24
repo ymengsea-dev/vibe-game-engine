@@ -11,7 +11,7 @@ use engine_renderer::{
     LightsBinding, Mesh, ModelUniform, ParticleFrame, Pipeline, PostProcessStack, RenderAssets,
     RenderTarget, RendererError, ShadowMap, ShadowPipeline, SkinnedDrawable, SkinnedPipeline,
     SkyboxBinding, SkyboxPipeline, SpriteAtlasBinding, SpriteBatch, SpriteFrame, SpriteInstance,
-    SpritePipeline, VegetationPipeline, WindBinding,
+    SpritePipeline, TerrainDrawable, VegetationPipeline, WindBinding,
 };
 use glam::Mat4;
 use std::sync::atomic::Ordering;
@@ -68,6 +68,11 @@ pub struct RenderStats {
     /// culling. `0` when [`extract_and_render`] is called without a
     /// vegetation pipeline.
     pub vegetation_total: u32,
+    /// Chunks over every `TerrainRenderer`, before culling.
+    pub terrain_chunks_total: u32,
+    /// Of `terrain_chunks_total`, how many were inside the camera frustum
+    /// and drawn.
+    pub terrain_chunks_drawn: u32,
     /// Of `vegetation_total`, how many were inside the camera frustum and
     /// so drawn through the wind-animated vegetation pipeline.
     pub vegetation_drawn: u32,
@@ -411,6 +416,7 @@ pub fn extract_and_render(
     camera: &CameraBinding,
     frustum: &Frustum,
     distance: Option<DistanceQuality>,
+    terrain_view: Option<DistanceQuality>,
     lights: &LightsBinding,
     skinned_pipeline: &SkinnedPipeline,
     instanced_pipeline: &InstancedPipeline,
@@ -437,6 +443,7 @@ pub fn extract_and_render(
         camera,
         frustum,
         distance,
+        terrain_view,
         lights,
         skinned_pipeline,
         instanced_pipeline,
@@ -488,6 +495,7 @@ pub fn extract_and_render_to(
     camera: &CameraBinding,
     frustum: &Frustum,
     distance: Option<DistanceQuality>,
+    terrain_view: Option<DistanceQuality>,
     lights: &LightsBinding,
     skinned_pipeline: &SkinnedPipeline,
     instanced_pipeline: &InstancedPipeline,
@@ -522,6 +530,11 @@ pub fn extract_and_render_to(
         world.query_filtered::<(&InstancedMeshRenderer, Has<Disabled>), DrawFilter>();
     let mut vegetation_query =
         world.query_filtered::<(&VegetationRenderer, Has<Disabled>), DrawFilter>();
+    let mut terrain_query = world.query_filtered::<(
+        &GlobalTransform,
+        &crate::terrain::TerrainRenderer,
+        Has<Disabled>,
+    ), DrawFilter>();
 
     // `visible` is the subset inside `frustum` that the scene pass draws — either individually or,
     // where several share a mesh+material, folded into one instanced draw
@@ -676,7 +689,7 @@ pub fn extract_and_render_to(
         })
         .collect();
     let shadow_plan = plan_shadow_batches(shadow_map.light_frustum(), &shadow_keys);
-    let mut shadow_casters = Vec::with_capacity(shadow_plan.individuals.len());
+    let mut shadow_casters: Vec<Drawable<'_>> = Vec::with_capacity(shadow_plan.individuals.len());
     for &index in &shadow_plan.individuals {
         let mesh = &shadow_meshes[index];
         gpu.write_uniform_buffer(
@@ -689,6 +702,57 @@ pub fn extract_and_render_to(
             mesh: mesh.mesh,
         });
     }
+    // Terrain: one tier per chunk by camera distance (full detail when the
+    // caller gives no view), drawn when inside the frustum and cast into
+    // the shadow map when inside the light's.
+    let mut terrain_chunks_total = 0u32;
+    let mut terrain_drawables: Vec<TerrainDrawable<'_>> = Vec::new();
+    for (transform, terrain, disabled) in terrain_query.iter(&*world) {
+        if disabled && !draw_disabled {
+            continue;
+        }
+        let world_from_local = transform.0.to_matrix();
+        gpu.write_uniform_buffer(
+            &terrain.model.buffer,
+            &ModelUniform::from_cols(world_from_local.to_cols_array_2d()),
+        );
+        for tile in &terrain.tiles {
+            for chunk in &tile.chunks {
+                let Some(full) = chunk.tiers.first() else {
+                    continue;
+                };
+                terrain_chunks_total += 1;
+                let tier = terrain_view.map_or(0, |view| {
+                    let centre = world_from_local.transform_point3(full.local_bounds.center());
+                    crate::terrain::pick_chunk_tier(
+                        chunk,
+                        &terrain.switch,
+                        view.lod_distance(centre),
+                    )
+                });
+                let mesh = chunk.tiers.get(tier).unwrap_or(full);
+                if is_visible(
+                    shadow_map.light_frustum(),
+                    &mesh.local_bounds,
+                    &world_from_local,
+                ) {
+                    shadow_casters.push(Drawable {
+                        model: &terrain.model,
+                        material: &terrain.shadow_material,
+                        mesh,
+                    });
+                }
+                if is_visible(frustum, &mesh.local_bounds, &world_from_local) {
+                    terrain_drawables.push(TerrainDrawable {
+                        model: &terrain.model,
+                        material: &tile.material,
+                        mesh,
+                    });
+                }
+            }
+        }
+    }
+
     let mut pending_shadow: Vec<PendingInstanced<'_>> = shadow_plan
         .batches
         .iter()
@@ -916,6 +980,8 @@ pub fn extract_and_render_to(
         auto_batched_drawn,
         vegetation_total,
         vegetation_drawn,
+        terrain_chunks_total,
+        terrain_chunks_drawn: terrain_drawables.len() as u32,
         sprites_drawn: sprite_frame.map_or(0, |frame| frame.instances.len() as u32),
         shadow_casters_visible: (shadow_casters.len()
             + instanced_shadow_casters
@@ -924,6 +990,7 @@ pub fn extract_and_render_to(
                 .sum::<usize>()) as u32,
         shadow_draws: (shadow_casters.len() + instanced_shadow_casters.len()) as u32,
         main_draws: (drawables.len()
+            + terrain_drawables.len()
             + transparent.len()
             + skinned_drawables.len()
             + instanced_drawables.len()
@@ -947,6 +1014,7 @@ pub fn extract_and_render_to(
             camera,
             lights,
             &drawables,
+            &terrain_drawables,
             &shadow_casters,
             &instanced_shadow_casters,
             &transparent,
@@ -972,6 +1040,7 @@ pub fn extract_and_render_to(
             camera,
             lights,
             &drawables,
+            &terrain_drawables,
             &shadow_casters,
             &instanced_shadow_casters,
             &transparent,

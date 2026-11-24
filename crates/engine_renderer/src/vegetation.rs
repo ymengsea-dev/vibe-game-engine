@@ -5,7 +5,7 @@
 //! Reuses the instancing path wholesale — [`crate::InstanceRaw`] /
 //! [`crate::InstancedDrawable`], the same instance buffer, the same
 //! camera/material/lights bind groups. The only additions are
-//! [`VegetationPipeline`] (`pbr_common.wgsl` + `vegetation_vs.wgsl`) and a
+//! [`VegetationPipeline`] (`PBR_COMMON_SOURCE` + `vegetation_vs.wgsl`) and a
 //! [`WindBinding`] at the `@group(2)` slot the plain instanced path leaves
 //! unbound. [`GpuContext::render_scene`] takes an optional
 //! `(&VegetationPipeline, &WindBinding, &[InstancedDrawable])` and draws it
@@ -112,7 +112,7 @@ pub struct WindUniform {
 }
 
 /// A compiled wind-animated instanced PBR pipeline. Its shader is
-/// `pbr_common.wgsl` + `vegetation_vs.wgsl` — identical lighting/fragment
+/// `PBR_COMMON_SOURCE` + `vegetation_vs.wgsl` — identical lighting/fragment
 /// stage to [`Pipeline`], a wind-bending instanced vertex stage.
 pub struct VegetationPipeline {
     pub(crate) render_pipeline: wgpu::RenderPipeline,

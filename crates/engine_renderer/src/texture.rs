@@ -63,6 +63,23 @@ pub fn decode_rgba8(bytes: &[u8]) -> Result<image::RgbaImage, RendererError> {
         .map_err(|err| RendererError::ImageDecode(err.to_string()))
 }
 
+/// Encodes tightly packed RGBA8 rows as a lossless PNG.
+///
+/// # Errors
+///
+/// Returns [`RendererError::ImageDecode`] if `rgba` isn't
+/// `width * height * 4` bytes or encoding fails.
+pub fn encode_rgba8_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, RendererError> {
+    let image = image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or_else(|| {
+        RendererError::ImageDecode("pixel buffer does not match the image size".to_owned())
+    })?;
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .map_err(|err| RendererError::ImageDecode(err.to_string()))?;
+    Ok(bytes.into_inner())
+}
+
 impl GpuContext {
     /// Decodes `bytes` and uploads it as a new [`Texture`].
     ///

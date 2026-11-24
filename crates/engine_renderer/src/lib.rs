@@ -61,7 +61,7 @@
 //!
 //! Stage 3 "GPU vertex skinning": [`SkinnedVertex`]/[`SkinnedMesh`] carry
 //! per-vertex joint indices/weights; [`SkinnedPipeline`]'s vertex shader
-//! (`pbr_common.wgsl` + `skinned_pbr_vs.wgsl`) blends a
+//! (`PBR_COMMON_SOURCE` + `skinned_pbr_vs.wgsl`) blends a
 //! [`JointMatricesUniform`] of per-joint skinning matrices — supplied by
 //! the CPU from `engine_animation::compute_skinning_matrices` — by weight
 //! to deform the mesh before the model transform. Drawn by
@@ -77,7 +77,7 @@
 //! is built at that count; shadow and tonemap stay single-sample.
 //!
 //! Stage 3 "Instancing": [`InstancedPipeline`]'s vertex shader
-//! (`pbr_common.wgsl` + `instanced_pbr_vs.wgsl`) reads each copy's model
+//! (`PBR_COMMON_SOURCE` + `instanced_pbr_vs.wgsl`) reads each copy's model
 //! matrix from an [`InstanceRaw`] instance-step vertex buffer instead of a
 //! `@group(2)` uniform, so N copies of one [`Mesh`] draw in a single
 //! `draw_indexed(.., 0..N)`. [`GpuContext::render_scene`] takes a slice of
@@ -134,7 +134,7 @@
 //! the `scatter` module.
 //!
 //! Stage 5 "Vegetation rendering": [`VegetationPipeline`]
-//! (`pbr_common.wgsl` + `vegetation_vs.wgsl`, built by
+//! (`PBR_COMMON_SOURCE` + `vegetation_vs.wgsl`, built by
 //! [`GpuContext::create_vegetation_pipeline`]) is a second instanced PBR
 //! pipeline whose vertex stage bends each blade along a global [`Wind`]
 //! ([`WindBinding`] at `@group(2)`, pivoting at object-space `y = 0`,
@@ -170,6 +170,10 @@ mod skinning;
 mod skybox;
 mod sprite;
 mod terrain;
+mod terrain_chunks;
+mod terrain_gpu;
+mod terrain_surface;
+mod terrain_textures;
 mod text;
 mod texture;
 mod ui_font;
@@ -226,11 +230,24 @@ pub use sprite::{
     SpritePipeline, TextureAtlas, UvRect,
 };
 pub use terrain::{Brush, BrushFalloff, Heightmap};
+pub use terrain_chunks::{
+    CHUNK_CELLS, ChunkKey, TIER_STRIDES, all_chunks, chunk_mesh, chunk_strides, chunk_world_size,
+    chunks_per_side, dirty_chunks, skirt_depth, terrain_chunk_tier, terrain_lod_switch_distances,
+};
+pub use terrain_gpu::{
+    TERRAIN_LAYER_TEXTURE_SIZE, TerrainDrawable, TerrainLayerImage, TerrainMaterialBinding,
+    TerrainPipeline, TerrainUniform, terrain_uniform,
+};
+pub use terrain_surface::{
+    DirtyRect, MAX_TERRAIN_LAYERS, MAX_TERRAIN_SAMPLES, MAX_TERRAIN_TILES, MergedGrid, SplatMap,
+    TerrainSurface, TerrainTile, TileCoord, union_dirty,
+};
+pub use terrain_textures::{BuiltinLayer, builtin_layer_rgba};
 pub use text::{
     GLYPH_ADVANCE, GLYPH_HEIGHT, GLYPH_WIDTH, GlyphAtlas, GlyphUv, LINE_ADVANCE, PositionedGlyph,
     TextLayout, covers, glyph_bitmap, layout_text,
 };
-pub use texture::{Texture, decode_rgba8};
+pub use texture::{Texture, decode_rgba8, encode_rgba8_png};
 pub use ui_font::{UiFont, UiGlyph, UiTextLayout};
 pub use ui_pass::{ScreenUniform, UiFrame, UiImage, UiPipeline, UiQuad, UiRun};
 pub use vegetation::{VegetationPipeline, Wind, WindBinding, WindUniform};

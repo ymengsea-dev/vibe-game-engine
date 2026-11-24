@@ -48,6 +48,10 @@ pub enum AssetKind {
     /// `.prefab`, a reusable single-entity template — see
     /// `engine_scene::Prefab`. Dropped on the Scene View to instantiate.
     Prefab,
+    /// `.terrain`, one tile of a terrain's heights — see
+    /// `engine_scene::TerrainData`. Referenced by id from the terrain
+    /// object, so it has a `.meta` sidecar.
+    Terrain,
     /// Anything else.
     Other,
 }
@@ -68,6 +72,7 @@ impl AssetKind {
             "wav" => Self::Audio,
             "ron" => Self::Scene,
             "prefab" => Self::Prefab,
+            "terrain" => Self::Terrain,
             _ => Self::Other,
         }
     }
@@ -80,6 +85,7 @@ impl AssetKind {
             Self::Audio => "Audio",
             Self::Scene => "Scene",
             Self::Prefab => "Prefab",
+            Self::Terrain => "Terrain",
             Self::Other => "Other",
         }
     }
@@ -88,7 +94,10 @@ impl AssetKind {
     /// audio) — the kinds [`resolve_ids`] gives a stable `.meta` id.
     /// Scenes and loose files are addressed by path only.
     pub fn is_referenceable(self) -> bool {
-        matches!(self, Self::Mesh | Self::Texture | Self::Audio)
+        matches!(
+            self,
+            Self::Mesh | Self::Texture | Self::Audio | Self::Terrain
+        )
     }
 }
 
@@ -159,6 +168,17 @@ impl AssetIndex {
     /// An empty index.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Every indexed `(relative path, id)`, sorted by path.
+    pub fn entries(&self) -> impl Iterator<Item = (&Path, AssetId)> {
+        let mut entries: Vec<_> = self
+            .by_path
+            .iter()
+            .map(|(path, id)| (path.as_path(), *id))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        entries.into_iter()
     }
 
     /// Records one id ↔ relative-path pair (both directions).

@@ -320,6 +320,9 @@ impl SavedEntity {
             camera_follow: None,
             mesh_renderer: self.mesh_renderer.clone(),
             foliage: self.foliage.clone(),
+            // Like the tilemap: the scene that spawned the object already
+            // built its terrain.
+            terrain: None,
             sprite: self.sprite.clone(),
             tilemap: None,
             asset_source: self.asset_source.clone(),

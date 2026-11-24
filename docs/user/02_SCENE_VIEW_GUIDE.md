@@ -185,12 +185,22 @@ Limits: a following camera can't be inside another object. Things moved by anima
 
 | Option | What it does |
 | --- | --- |
-| **Create terrain** | Adds flat ground |
+| **Create terrain** | Adds a flat 64 × 64 m piece of ground with a collider, so characters and physics stand on it in the game |
 | **Create water** | Adds water. Change waves in the Inspector. |
-| **Sculpt in Scene View** | Drag on the ground to shape it with the **Brush**: **Raise**, **Lower**, **Smooth**, **Flatten**. Set **Radius** and **Strength**. |
+| **Off / Sculpt / Paint** | **Sculpt**: drag on the selected terrain to shape it with **Raise**, **Lower**, **Smooth** or **Flatten**. **Paint**: drag to paint the chosen layer. A blue ring shows the brush. **Off** gives the mouse back to selecting and moving. |
+| **Radius**, **Strength** | Brush size in metres, and how much one pass changes |
+| **Layers** (Paint) | The selected terrain's ground textures, up to 8. Click a name to paint it. Pick a built-in texture or any image in the project, a tint, and how many metres one copy covers. **Add layer**, **Remove** |
 | **Scatter selected model** | Spreads copies of a model (trees, rocks) over the ground. **Density**, **Spacing**, **Seed** control how. |
+| **Tiles: North / East / South / West** | Adds a tile beside the one under the pointer (or the first tile). Its edge joins the ground next to it, and hills fade out across it. Brushes work across tile edges |
+| **Remove tile** | Takes the tile out of the terrain. Its file stays in the project, and ⌘Z puts it back |
 
-If you reshape the ground after scattering, delete the copies and scatter again.
+Each stroke is saved when you let go and is one ⌘Z step. The Inspector's **Terrain** section shows the tiles, the same layer list, and **Detail**: far from the camera the ground is drawn with fewer triangles, and a higher Detail keeps full detail farther away.
+
+Each tile is a `.terrain` file in `terrain/<Name>/`, with its paint in `.splat` files beside it. Rename or move tiles in Project Assets so the paint goes with them; outside Studio, move them together or the tile loses its paint.
+
+Terrains made by older versions of Studio are converted when the scene opens. Studio saves a copy of the scene file as `<scene>.ron.terrain-v1.bak` the first time it saves over it, and leaves the old `.gltf` model in place.
+
+Limits: textures blend smoothly, not by height. Sculpting while the game plays doesn't change its collision. If you reshape the ground after scattering, delete the copies and scatter again.
 
 ## Tilemap (2D view)
 

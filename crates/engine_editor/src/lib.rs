@@ -68,6 +68,7 @@ mod state;
 pub mod storage;
 #[cfg(feature = "terminal")]
 mod terminal;
+pub mod terrain_edit;
 pub mod terrain_tools;
 mod theme;
 mod tilemap;

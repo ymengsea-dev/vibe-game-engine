@@ -29,6 +29,8 @@ use serde::{Deserialize, Serialize};
 /// Colour of collider wireframes: rapier-green, the convention every
 /// physics debug view uses. Dimmed, because it is background information.
 const COLLIDER_COLOR: [f32; 4] = [0.35, 0.9, 0.45, 0.55];
+/// The terrain brush outline: the accent colour, as the active tool.
+pub(crate) const BRUSH_RING_COLOR: [f32; 4] = [0.48, 0.64, 0.97, 1.0];
 /// Colour of trigger (sensor) collider wireframes: `theme::NIGHT.purple`
 /// (#BB9AF7) at the same dimmed strength as solid colliders, so a zone that
 /// detects overlaps reads differently from one that blocks.
@@ -347,7 +349,7 @@ fn draw_colliders(world: &mut World, draw: &mut DebugDraw, selected: &[Entity], 
             // A triangle-mesh collider is the render mesh: drawing its
             // triangles as lines would bury the scene in wireframe, so
             // it gets a marker saying "there is a mesh collider here".
-            ColliderShape::TriMesh { .. } => {
+            ColliderShape::TriMesh { .. } | ColliderShape::Terrain => {
                 draw.cross(centre, LIGHT_MARKER_SIZE, color);
             }
         }

@@ -600,10 +600,32 @@ fn collider_scale(scale: glam::Vec3) -> glam::Vec3 {
     scale.abs()
 }
 
+/// One heightfield over every tile of `terrain`, scaled per axis and
+/// placed so the grid's centre lands where the tiles are.
+fn terrain_collider(
+    terrain: &engine_scene::TerrainData,
+    scale: glam::Vec3,
+    library: &engine_scene::AssetLibrary,
+) -> Result<engine_physics::ColliderBuilder, String> {
+    let surface = engine_scene::load_surface(library, terrain).map_err(|err| err.to_string())?;
+    let grid = surface
+        .merged_grid()
+        .ok_or_else(|| "the terrain has no tiles".to_owned())?;
+    let heights: Vec<f32> = grid.heights.iter().map(|h| h * scale.y).collect();
+    let cell = glam::Vec2::new(grid.cell * scale.x, grid.cell * scale.z);
+    let centre = grid.center();
+    engine_physics::heightfield_collider(&heights, grid.rows, grid.cols, cell, &grid.cell_present)
+        .map(|builder| {
+            builder.translation(glam::Vec3::new(centre.x * scale.x, 0.0, centre.y * scale.z))
+        })
+        .map_err(|err| err.to_string())
+}
+
 /// Turns authored collider data into rapier builders, or `None` (logged)
 /// when the shape cannot be built. `name` is only for log messages.
 pub(crate) fn build_collider(
     data: &engine_scene::ColliderData,
+    terrain: Option<&engine_scene::TerrainData>,
     transform: &Transform,
     library: &engine_scene::AssetLibrary,
     name: Option<&str>,
@@ -675,6 +697,24 @@ pub(crate) fn build_collider(
                     entity = name.unwrap_or("<unnamed>"),
                     error = %err,
                     "skipping collider: mesh could not be loaded"
+                );
+                None
+            }
+        },
+        ColliderShape::Terrain => match terrain {
+            Some(terrain) => terrain_collider(terrain, scale, library)
+                .map_err(|err| {
+                    tracing::warn!(
+                        entity = name.unwrap_or("<unnamed>"),
+                        error = %err,
+                        "skipping collider: terrain could not be loaded"
+                    );
+                })
+                .ok(),
+            None => {
+                tracing::warn!(
+                    entity = name.unwrap_or("<unnamed>"),
+                    "skipping collider: a Terrain shape needs the object's terrain"
                 );
                 None
             }
@@ -929,9 +969,13 @@ impl GameContext<'_> {
                 continue;
             };
             let transform = collider_world_transform(self.runtime.ecs.world(), entity);
-            let Some((body, shape)) =
-                build_collider(collider, &transform, library, scene_entity.name.as_deref())
-            else {
+            let Some((body, shape)) = build_collider(
+                collider,
+                scene_entity.terrain.as_ref(),
+                &transform,
+                library,
+                scene_entity.name.as_deref(),
+            ) else {
                 continue;
             };
 
@@ -2481,6 +2525,10 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
             runtime.camera.eye,
             runtime.quality,
         )),
+        Some(engine_renderer::DistanceQuality::new(
+            runtime.camera.eye,
+            runtime.quality,
+        )),
         &runtime.lights_binding,
         &runtime.skinned_pipeline,
         &runtime.instanced_pipeline,
@@ -2681,8 +2729,14 @@ mod tests {
 
     #[test]
     fn defaults_build_the_same_body_as_before() {
-        let (body, collider) =
-            build_collider(&cuboid_data(), &Transform::IDENTITY, &test_library(), None).unwrap();
+        let (body, collider) = build_collider(
+            &cuboid_data(),
+            None,
+            &Transform::IDENTITY,
+            &test_library(),
+            None,
+        )
+        .unwrap();
         let (body, collider) = (body.build(), collider.build());
         assert_eq!(collider.friction(), 0.5);
         assert_eq!(collider.restitution(), 0.0);
@@ -2703,7 +2757,7 @@ mod tests {
         data.gravity_scale = 0.0;
         data.lock_rotation = true;
         let (body, collider) =
-            build_collider(&data, &Transform::IDENTITY, &test_library(), None).unwrap();
+            build_collider(&data, None, &Transform::IDENTITY, &test_library(), None).unwrap();
         let (body, collider) = (body.build(), collider.build());
         assert!(collider.is_sensor());
         assert_eq!(collider.friction(), 0.9);
@@ -3213,5 +3267,188 @@ mod tests {
         let config = GameConfig::new("Test", 800, 600);
         assert!(config.gravity.y < 0.0);
         assert!(config.validate().is_ok());
+    }
+
+    /// Two tiles side by side with a bump, saved as a project would.
+    fn terrain_project(
+        tag: &str,
+    ) -> (
+        std::path::PathBuf,
+        engine_scene::TerrainData,
+        engine_renderer::TerrainSurface,
+    ) {
+        use engine_renderer::{Brush, TerrainSurface, TerrainTile};
+        let root = std::env::temp_dir().join(format!(
+            "vge-terrain-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let tiles = root.join("assets/terrain/Hills");
+        std::fs::create_dir_all(&tiles).unwrap();
+        let mut surface = TerrainSurface::new(65, 32.0).unwrap();
+        for x in 0..2 {
+            surface
+                .insert_tile((x, 0), TerrainTile::flat(65, 32.0).unwrap())
+                .unwrap();
+        }
+        surface.raise_lower(&Brush::new(glam::Vec2::new(16.0, 0.0), 6.0, 3.0));
+        let ids = [
+            "0f0e0d0c-0b0a-4909-8807-060504030201",
+            "1f1e1d1c-1b1a-4919-8817-161514131211",
+        ];
+        for (x, id) in ids.iter().enumerate() {
+            let path = tiles.join(format!("tile_{x}_0.terrain"));
+            engine_scene::save_tile_file(
+                &path,
+                surface.tile((x as i32, 0)).unwrap(),
+                &Default::default(),
+            )
+            .unwrap();
+            let meta = root.join(format!(
+                ".studio/assets/terrain/Hills/tile_{x}_0.terrain.meta"
+            ));
+            std::fs::create_dir_all(meta.parent().unwrap()).unwrap();
+            std::fs::write(&meta, format!("(id: \"{id}\", source_hash: 0)")).unwrap();
+        }
+        let data = engine_scene::TerrainData {
+            tiles: ids
+                .iter()
+                .enumerate()
+                .map(|(x, id)| engine_scene::TerrainTileData {
+                    x: x as i32,
+                    z: 0,
+                    asset: engine_scene::AssetRef {
+                        id: (*id).to_owned(),
+                    },
+                })
+                .collect(),
+            ..engine_scene::TerrainData::single(engine_scene::AssetRef {
+                id: ids[0].to_owned(),
+            })
+        };
+        (root, data, surface)
+    }
+
+    #[test]
+    fn a_terrain_collider_matches_the_tiles_under_its_transform() {
+        let (root, data, surface) = terrain_project("collider");
+        let library = engine_scene::AssetLibrary::index(&root.join("assets")).unwrap();
+        let transform = Transform {
+            translation: Vec3::new(5.0, 1.0, -3.0),
+            rotation: glam::Quat::IDENTITY,
+            scale: Vec3::new(2.0, 0.5, 1.0),
+        };
+        let collider = engine_scene::ColliderData::new(
+            engine_scene::ColliderShape::Terrain,
+            engine_scene::BodyKind::Fixed,
+        );
+        let (body, shape) =
+            build_collider(&collider, Some(&data), &transform, &library, None).unwrap();
+        let mut physics = engine_physics::PhysicsWorld::default();
+        physics.rapier.insert(body, shape);
+        physics.step(0.0).unwrap();
+        // Local points on the bump, on tile 1 and on tile 0.
+        for local in [
+            glam::Vec2::new(16.0, 0.0),
+            glam::Vec2::new(20.0, 2.0),
+            glam::Vec2::new(-10.0, 5.0),
+            glam::Vec2::new(40.0, -7.0),
+        ] {
+            let world = transform.translation + Vec3::new(local.x * 2.0, 0.0, local.y);
+            let hit = engine_physics::cast_ray(
+                &physics,
+                world + Vec3::Y * 50.0,
+                Vec3::NEG_Y,
+                100.0,
+                None,
+            )
+            .unwrap()
+            .expect("hit the terrain");
+            let expected =
+                transform.translation.y + surface.height_at(local.x, local.y).unwrap() * 0.5;
+            assert!(
+                (hit.point.y - expected).abs() < 1e-3,
+                "{local}: {} vs {expected}",
+                hit.point.y
+            );
+        }
+        // Past the last tile there is no ground.
+        let beyond = transform.translation + Vec3::new(60.0 * 2.0, 50.0, 0.0);
+        assert!(
+            engine_physics::cast_ray(&physics, beyond, Vec3::NEG_Y, 100.0, None)
+                .unwrap()
+                .is_none()
+        );
+        // Without its terrain the shape is skipped, not a panic.
+        assert!(build_collider(&collider, None, &transform, &library, None).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Builds a two-tile terrain and draws it through the real frame path on
+    /// a headless GPU: the terrain shader must compile, chunks off screen
+    /// must be culled, and visible ones must reach the shadow map.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn terrain_renders_chunks_and_casts_shadows_on_a_headless_gpu() {
+        struct TerrainGame {
+            surface: engine_renderer::TerrainSurface,
+        }
+        impl Game for TerrainGame {
+            fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+                let parts = ctx.scene_parts();
+                let layers = [engine_renderer::TerrainLayerImage::builtin(
+                    engine_renderer::BuiltinLayer::Grass,
+                    [1.0; 3],
+                    4.0,
+                )];
+                let renderer = engine_ecs::TerrainRenderer::build(
+                    parts.gpu,
+                    parts.pipeline,
+                    &self.surface,
+                    &layers,
+                    1.0,
+                )
+                .expect("terrain");
+                assert_eq!(renderer.chunk_count(), 8);
+                parts.world.spawn((
+                    engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                    engine_ecs::components::GlobalTransform::from(
+                        engine_utils::Transform::IDENTITY,
+                    ),
+                    renderer,
+                ));
+                // Looking straight down at tile (0, 0) only.
+                let camera = ctx.camera_mut();
+                camera.eye = Vec3::new(0.0, 12.0, 0.01);
+                camera.target = Vec3::ZERO;
+                Ok(())
+            }
+            fn update(&mut self, _ctx: &mut GameContext<'_>, _dt: f32) {}
+        }
+
+        let (root, _, surface) = terrain_project("render");
+        let gpu = GpuContext::headless(64, 64).expect("headless GPU");
+        let config = GameConfig::new("terrain", 64, 64);
+        let mut runner = GameRunner::new(config, TerrainGame { surface }, Rc::new(Cell::new(None)));
+        runner.start_with_gpu(gpu, 64, 64);
+        for _ in 0..3 {
+            runner.on_event(PlatformEvent::RedrawRequested);
+        }
+        assert!(runner.error_slot.take().is_none());
+        let runtime = runner.runtime.as_ref().expect("runtime");
+        let stats = runtime.render_stats;
+        assert_eq!(stats.terrain_chunks_total, 8);
+        assert!(
+            stats.terrain_chunks_drawn >= 1 && stats.terrain_chunks_drawn < 8,
+            "{stats:?}"
+        );
+        assert!(stats.shadow_casters_visible >= 1, "{stats:?}");
+        let frame = runtime.gpu.wait_for_frame().expect("a frame");
+        let centre = (32 * 64 + 32) * 4;
+        let [r, g, b, _] = [0, 1, 2, 3].map(|i| frame.rgba[centre + i]);
+        assert!(g > r && g > b, "grass at the centre, got {r} {g} {b}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

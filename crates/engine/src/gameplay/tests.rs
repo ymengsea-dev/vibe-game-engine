@@ -460,7 +460,7 @@ mod triggers {
         at: [f32; 3],
     ) -> RigidBody {
         let transform = engine_utils::Transform::from_translation(at.into());
-        let (body, collider) = crate::app::build_collider(data, &transform, &library(), Some(id))
+        let (body, collider) = crate::app::build_collider(data, None, &transform, &library(), Some(id))
             .expect("collider builds");
         let (body, collider) = RigidBody::spawn(physics, body, collider);
         world.spawn((

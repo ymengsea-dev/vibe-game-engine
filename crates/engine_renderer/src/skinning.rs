@@ -158,7 +158,7 @@ impl Default for JointMatricesUniform {
 }
 
 /// A compiled skinning render pipeline. Its shader is
-/// `pbr_common.wgsl` + `skinned_pbr_vs.wgsl` — identical lighting and
+/// `PBR_COMMON_SOURCE` + `skinned_pbr_vs.wgsl` — identical lighting and
 /// fragment stage to [`Pipeline`], only the vertex stage differs.
 pub struct SkinnedPipeline {
     pub(crate) render_pipeline: wgpu::RenderPipeline,

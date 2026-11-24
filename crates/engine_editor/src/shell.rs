@@ -2107,6 +2107,34 @@ fn handle_terrain_interaction(
     state: &mut EditorState,
     response: &egui::Response,
 ) {
+    // Where the pointer is on the terrain being brushed (or the selected
+    // one), for the ring and the stroke.
+    state.terrain_hover = None;
+    let target = state
+        .terrain_stroke
+        .as_ref()
+        .map(|stroke| stroke.entity)
+        .or(state.selected_entity);
+    if let Some(entity) = target
+        && let Some(pointer) = response.interact_pointer_pos().or(response.hover_pos())
+        && let Some(live) = state.terrains.get(entity)
+    {
+        let local = Vec2::new(
+            pointer.x - response.rect.min.x,
+            pointer.y - response.rect.min.y,
+        );
+        let size = Vec2::new(response.rect.width(), response.rect.height());
+        let model = hierarchy::world_transform(&state.world, entity).to_matrix();
+        if let Some(hit) = crate::terrain_tools::terrain_hit_from_screen(
+            viewport.view_projection_matrix(),
+            model,
+            &live.surface,
+            local,
+            size,
+        ) {
+            state.terrain_hover = Some((entity, hit));
+        }
+    }
     if response.drag_started() {
         match state.begin_terrain_stroke() {
             Ok(stroke) => state.terrain_stroke = Some(stroke),
@@ -2114,25 +2142,14 @@ fn handle_terrain_interaction(
         }
     }
     if (response.drag_started() || response.dragged())
-        && let Some(pointer) = response.interact_pointer_pos()
+        && let Some((entity, hit)) = state.terrain_hover
         && let Some(stroke) = state.terrain_stroke.as_mut()
-        && state.selected_entity == Some(stroke.entity)
+        && stroke.entity == entity
+        && state.selected_entity == Some(entity)
     {
-        let local = Vec2::new(
-            pointer.x - response.rect.min.x,
-            pointer.y - response.rect.min.y,
-        );
-        let size = Vec2::new(response.rect.width(), response.rect.height());
-        let model = hierarchy::world_transform(&state.world, stroke.entity).to_matrix();
-        if let Some(hit) = crate::terrain_tools::terrain_hit_from_screen(
-            viewport.view_projection_matrix(),
-            model,
-            &stroke.heightmap,
-            local,
-            size,
-        ) {
-            stroke.record(hit, (state.terrain_tools.radius * 0.5).max(0.01));
-        }
+        stroke.record(hit, (state.terrain_tools.radius * 0.5).max(0.01));
+        state.apply_terrain_stroke();
+        response.ctx.request_repaint();
     }
     if response.drag_stopped() {
         state.finish_terrain_stroke();
@@ -2214,8 +2231,14 @@ fn pick_scene(
         1.0 - local.y / rect.height().max(1.0) * 2.0,
     );
     let ray = crate::scene_pick::ray_from_screen(view_proj, ndc)?;
+    let terrain = crate::terrain_edit::pick_terrain(
+        &state.world,
+        &state.terrains,
+        ray,
+        locked == crate::scene_pick::LockedObjects::Include,
+    );
     let importer = &state.importer;
-    crate::scene_pick::pick_hit(
+    let mesh = crate::scene_pick::pick_hit(
         &mut state.world,
         ray,
         |source| {
@@ -2229,7 +2252,14 @@ fn pick_scene(
             }
         },
         locked,
-    )
+    );
+    // Whichever is nearer the camera.
+    let distance = |hit: &crate::scene_pick::PickHit| (hit.point - ray.origin).length();
+    match (mesh, terrain) {
+        (Some(mesh), Some(terrain)) if distance(&terrain) < distance(&mesh) => Some(terrain),
+        (Some(mesh), _) => Some(mesh),
+        (None, terrain) => terrain,
+    }
 }
 
 /// Double-click a surface to glide the camera to look at that spot. Locked
@@ -4437,16 +4467,7 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
                 MenuCommand::CreateWater.apply(state);
                 ui.close();
             }
-            if ui
-                .checkbox(&mut state.terrain_sculpt_active, "Sculpt in Scene View")
-                .changed()
-            {
-                state.terrain_stroke = None;
-                if state.terrain_sculpt_active {
-                    state.tile_paint_active = false;
-                }
-            }
-            crate::terrain_tools::show_controls(ui, &mut state.terrain_tools);
+            terrain_menu_controls(ui, state);
             let has_model = state.selected_asset.as_deref().is_some_and(|path| {
                 crate::assets::AssetKind::from_path(path) == crate::assets::AssetKind::Mesh
             });
@@ -4805,6 +4826,132 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
         false
     }
 } */
+
+/// The Terrain menu's brush switch, settings, layer list and tile buttons.
+fn terrain_menu_controls(ui: &mut egui::Ui, state: &mut EditorState) {
+    let textures: Vec<(String, String)> = state
+        .asset_index
+        .entries()
+        .filter(|(path, _)| {
+            crate::assets::AssetKind::from_path(path) == crate::assets::AssetKind::Texture
+        })
+        .map(|(path, id)| (id.to_string(), path.display().to_string()))
+        .collect();
+    let selected = state.selected_entity.filter(|entity| {
+        state
+            .world
+            .get::<engine_scene::SceneTerrain>(*entity)
+            .is_some()
+    });
+    let mut data = selected.and_then(|entity| {
+        state
+            .world
+            .get::<engine_scene::SceneTerrain>(entity)
+            .map(|terrain| terrain.0.clone())
+    });
+    let mut active = state.terrain_sculpt_active;
+    let response = crate::terrain_tools::show_controls(
+        ui,
+        &mut state.terrain_tools,
+        &mut active,
+        data.as_mut(),
+        &textures,
+    );
+    if response.mode_changed {
+        state.terrain_sculpt_active = active;
+        state.terrain_stroke = None;
+        if active {
+            state.tile_paint_active = false;
+        }
+    }
+    if response.layers_changed
+        && let (Some(entity), Some(data)) = (selected, data)
+        && let Some(mut terrain) = state.world.get_mut::<engine_scene::SceneTerrain>(entity)
+    {
+        terrain.0 = data;
+        state.mark_dirty();
+    }
+    let Some(entity) = selected else {
+        return;
+    };
+    ui.separator();
+    ui.label(egui::RichText::new("Tiles").color(crate::theme::NIGHT.muted));
+    // The tile under the pointer, else the first one.
+    let coords: Vec<(i32, i32)> = state
+        .world
+        .get::<engine_scene::SceneTerrain>(entity)
+        .map(|terrain| {
+            terrain
+                .0
+                .tiles
+                .iter()
+                .map(|tile| (tile.x, tile.z))
+                .collect()
+        })
+        .unwrap_or_default();
+    let hovered = state.terrain_hover.and_then(|(hover_entity, point)| {
+        let live = state
+            .terrains
+            .get(hover_entity)
+            .filter(|_| hover_entity == entity)?;
+        let size = live.surface.size();
+        let coord = (
+            ((point.x + size * 0.5) / size).floor() as i32,
+            ((point.y + size * 0.5) / size).floor() as i32,
+        );
+        coords.contains(&coord).then_some(coord)
+    });
+    let from = hovered
+        .or_else(|| coords.first().copied())
+        .unwrap_or((0, 0));
+    ui.label(
+        egui::RichText::new(format!(
+            "{} tiles · adding next to ({}, {})",
+            coords.len(),
+            from.0,
+            from.1
+        ))
+        .color(crate::theme::NIGHT.subtle),
+    );
+    ui.horizontal(|ui| {
+        for side in crate::terrain_tools::TileSide::ALL {
+            let free = !coords.contains(&side.of(from));
+            if crate::widgets::pill_button(
+                ui,
+                &crate::theme::NIGHT,
+                side.label(),
+                crate::theme::NIGHT.accent,
+                free,
+            )
+            .on_hover_text(format!(
+                "Add a tile {} of ({}, {})",
+                side.label().to_lowercase(),
+                from.0,
+                from.1
+            ))
+            .clicked()
+            {
+                state.terrain_tile_request =
+                    Some(crate::terrain_tools::TerrainTileRequest::Add { entity, from, side });
+            }
+        }
+    });
+    if crate::widgets::pill_button(
+        ui,
+        &crate::theme::NIGHT,
+        &format!("Remove tile ({}, {})", from.0, from.1),
+        crate::theme::NIGHT.danger,
+        coords.len() > 1,
+    )
+    .on_hover_text("Its file stays in the project")
+    .clicked()
+    {
+        state.terrain_tile_request = Some(crate::terrain_tools::TerrainTileRequest::Remove {
+            entity,
+            coord: from,
+        });
+    }
+}
 
 #[cfg(test)]
 mod ui_tests {
@@ -5995,6 +6142,79 @@ mod ui_tests {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
                 .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A terrain object with two tiles, selected.
+    fn terrain_test_state() -> (std::path::PathBuf, crate::EditorState) {
+        let (root, mut state) = menu_test_state();
+        let mut data = engine_scene::TerrainData::single(engine_scene::AssetRef {
+            id: "00000000-0000-4000-8000-0000000000a1".to_owned(),
+        });
+        data.tiles.push(engine_scene::TerrainTileData {
+            x: 1,
+            z: 0,
+            asset: engine_scene::AssetRef {
+                id: "00000000-0000-4000-8000-0000000000a2".to_owned(),
+            },
+        });
+        let terrain = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Hills"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                engine_scene::SceneTerrain(data),
+                engine_scene::SceneCollider(engine_scene::ColliderData::new(
+                    engine_scene::ColliderShape::Terrain,
+                    engine_scene::BodyKind::Fixed,
+                )),
+            ))
+            .id();
+        state.select_only(terrain);
+        (root, state)
+    }
+
+    /// Writes `inspector-terrain.png`: a terrain's tiles, detail distance
+    /// and paint layers. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_terrain() {
+        let (root, mut state) = terrain_test_state();
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-terrain.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 900.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `terrain-menu.png`: the Scene View's Terrain menu in Paint
+    /// mode with a terrain selected. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_terrain_menu() {
+        let (root, mut state) = terrain_test_state();
+        state.terrain_sculpt_active = true;
+        state.terrain_tools.paint = true;
+        state.terrain_tools.paint_layer = 1;
+        let path = crate::ui_snapshot::snapshot_dir().join("terrain-menu.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(380.0, 620.0), 2.0, |ui| {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(crate::theme::NIGHT.raised)
+                        .inner_margin(egui::Margin::same(10)),
+                )
+                .show(ui, |ui| super::terrain_menu_controls(ui, &mut state));
         })
         .expect("snapshot");
         let _ = std::fs::remove_dir_all(root);

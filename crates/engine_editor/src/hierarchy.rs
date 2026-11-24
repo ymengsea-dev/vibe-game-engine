@@ -1837,10 +1837,10 @@ enum RowIcon {
     Object,
 }
 
-/// Whether `path` looks like a terrain mesh: a `.gltf` in a `terrain` folder,
-/// where [`crate::terrain_tools::write_new_terrain`] creates them. Terrain has
-/// no component of its own, and this runs per row per frame, so the `.terrain`
-/// file beside the mesh is not checked.
+/// Whether `path` looks like an old-style terrain mesh: a `.gltf` in a
+/// `terrain` folder, where Studio used to write them before terrain had its
+/// own component. This runs per row per frame, so the `.terrain` file beside
+/// the mesh is not checked.
 fn is_terrain_path(path: &str) -> bool {
     let path = std::path::Path::new(path);
     path.extension()
@@ -1870,9 +1870,10 @@ fn row_icon(world: &World, entity: Entity) -> RowIcon {
         RowIcon::Water
     } else if object.contains::<Sprite>() || object.contains::<SpriteSource>() {
         RowIcon::Sprite
-    } else if object
-        .get::<AssetSource>()
-        .is_some_and(|source| is_terrain_path(&source.path))
+    } else if object.contains::<engine_scene::SceneTerrain>()
+        || object
+            .get::<AssetSource>()
+            .is_some_and(|source| is_terrain_path(&source.path))
     {
         RowIcon::Terrain
     } else if object.contains::<AssetSource>()

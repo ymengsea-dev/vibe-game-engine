@@ -17,10 +17,9 @@
 //! the local Y. An entity's `Transform` places the whole patch in the
 //! world.
 //!
-//! Deliberately minimal for one iteration: a single square patch (no
-//! chunking/LOD), whole-mesh regeneration per edit (no brush-local
-//! partial update), no texture splatting, no collision mesh — all tracked
-//! as future work.
+//! A [`Heightmap`] is one square patch. Several patches side by side, paint
+//! layers, chunked level of detail and the heightfield collider build on it
+//! in `terrain_surface` and `terrain_chunks`.
 
 use glam::{Vec2, Vec3};
 
@@ -175,7 +174,7 @@ impl Heightmap {
         Self::from_heights(resolution, size, heights)
     }
 
-    fn validate(resolution: u32, size: f32) -> Result<(), RendererError> {
+    pub(crate) fn validate(resolution: u32, size: f32) -> Result<(), RendererError> {
         if resolution < 2 {
             return Err(RendererError::InvalidHeightmap {
                 reason: "resolution must be at least 2",
@@ -248,6 +247,43 @@ impl Heightmap {
         let top = h00 + (h10 - h00) * tx;
         let bottom = h01 + (h11 - h01) * tx;
         top + (bottom - top) * tz
+    }
+
+    /// Height at local position `(local_x, local_z)` on the drawn triangles
+    /// (each cell split on its top-left to bottom-right diagonal, as
+    /// [`Heightmap::indices`] does), so it matches the rendered mesh and the
+    /// terrain's heightfield collider exactly. Positions outside the patch
+    /// clamp to the nearest edge.
+    pub fn surface_height_at(&self, local_x: f32, local_z: f32) -> f32 {
+        let last = (self.resolution - 1) as f32;
+        let half = self.size * 0.5;
+        let cell = self.cell_size();
+        let fx = ((local_x + half) / cell).clamp(0.0, last);
+        let fz = ((local_z + half) / cell).clamp(0.0, last);
+        // The last node row/column belongs to the cell before it.
+        let col0 = fx.floor().min(last - 1.0);
+        let row0 = fz.floor().min(last - 1.0);
+        let tx = fx - col0;
+        let tz = fz - row0;
+        let (col0, row0) = (col0 as i64, row0 as i64);
+        let top_left = self.node_height(row0, col0);
+        let top_right = self.node_height(row0, col0 + 1);
+        let bottom_left = self.node_height(row0 + 1, col0);
+        let bottom_right = self.node_height(row0 + 1, col0 + 1);
+        if tx >= tz {
+            top_left + (top_right - top_left) * tx + (bottom_right - top_right) * tz
+        } else {
+            top_left + (bottom_left - top_left) * tz + (bottom_right - bottom_left) * tx
+        }
+    }
+
+    /// Overwrites node `(row, col)`. Callers keep `row`/`col` in range and
+    /// `height` finite; out-of-range writes are ignored.
+    pub(crate) fn set_node(&mut self, row: usize, col: usize, height: f32) {
+        let resolution = self.resolution as usize;
+        if row < resolution && col < resolution {
+            self.heights[row * resolution + col] = height;
+        }
     }
 
     /// The grid-index rectangle `[col_min, col_max] x [row_min, row_max]`

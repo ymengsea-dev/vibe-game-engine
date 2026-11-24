@@ -172,6 +172,24 @@ pub trait SceneResolver {
         Ok(None)
     }
 
+    /// Builds the GPU side of a terrain: its chunk meshes and tile
+    /// materials. `Ok(None)` means "not drawn by this resolver".
+    ///
+    /// Defaulted to `Ok(None)`, so a resolver that knows nothing about
+    /// terrain still loads the scene; Studio builds terrain from its own
+    /// live copy instead.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Resolve`] if a tile is missing or can't be uploaded.
+    fn resolve_terrain(
+        &mut self,
+        terrain: &crate::terrain::TerrainData,
+    ) -> Result<Option<engine_ecs::TerrainRenderer>, SceneError> {
+        let _ = terrain;
+        Ok(None)
+    }
+
     /// Resolves an atlas reference plus a named region into the UV
     /// rectangle that region occupies.
     ///
@@ -468,6 +486,19 @@ pub(crate) fn insert_components(
                     error = %err,
                     "skipped unresolvable animated model"
                 );
+            }
+        }
+    }
+    if let Some(terrain) = &data.terrain {
+        entity_mut.insert(crate::terrain::SceneTerrain(terrain.clone()));
+        match resolver.resolve_terrain(terrain) {
+            Ok(Some(renderer)) => {
+                entity_mut.insert(renderer);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                *unresolved += 1;
+                tracing::warn!(error = %err, "skipped unresolvable terrain");
             }
         }
     }

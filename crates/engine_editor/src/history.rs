@@ -24,7 +24,7 @@ use engine_ecs::components::Name;
 use engine_ecs::prelude::{Entity, World};
 use engine_scene::Scene;
 
-use crate::terrain_tools::{TerrainEdit, write_terrain};
+use crate::terrain_tools::TerrainEdit;
 
 /// Most undo steps kept — the oldest is dropped past this.
 const DEFAULT_LIMIT: usize = 128;
@@ -37,10 +37,11 @@ const TERRAIN_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 pub enum HistoryChange {
     /// The world was replaced; entity ids changed.
     World,
-    /// A terrain's files were rewritten; its mesh must be reloaded.
+    /// Terrain tile files were rewritten; terrains reading them must be
+    /// reloaded.
     Terrain {
-        /// Absolute path of the terrain's `.gltf` model.
-        model_path: PathBuf,
+        /// The tile files written.
+        paths: Vec<PathBuf>,
     },
 }
 
@@ -233,31 +234,25 @@ impl History {
                 self.pending = None;
                 Ok(Some(HistoryChange::World))
             }
-            Step::Terrain(edit) => {
-                let target = match direction {
-                    Direction::Undo => &edit.before,
-                    Direction::Redo => &edit.after,
-                };
-                match write_terrain(&edit.model_path, target) {
-                    Ok(()) => {
-                        let change = HistoryChange::Terrain {
-                            model_path: edit.model_path.clone(),
-                        };
-                        to.push(Step::Terrain(edit));
-                        Ok(Some(change))
-                    }
-                    Err(source) => {
-                        let path = edit.model_path.clone();
-                        from.push(Step::Terrain(edit));
-                        Err(HistoryError { path, source })
-                    }
+            Step::Terrain(edit) => match edit.write(direction == Direction::Undo) {
+                Ok(()) => {
+                    let change = HistoryChange::Terrain {
+                        paths: edit.paths(),
+                    };
+                    to.push(Step::Terrain(edit));
+                    Ok(Some(change))
                 }
-            }
+                Err(source) => {
+                    let path = edit.paths().into_iter().next().unwrap_or_default();
+                    from.push(Step::Terrain(edit));
+                    Err(HistoryError { path, source })
+                }
+            },
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Direction {
     Undo,
     Redo,
@@ -400,26 +395,43 @@ mod tests {
         );
     }
 
+    /// A new terrain tile and a raise stroke on it, already saved.
     fn terrain_fixture(tag: &str) -> (PathBuf, PathBuf, TerrainEdit) {
-        use crate::terrain_tools::{TerrainToolState, sculpt_terrain, write_new_terrain};
+        use crate::terrain_tools::{TerrainToolState, TileEdit, write_new_terrain};
         let root = std::env::temp_dir().join(format!("vge-history-{tag}-{}", uuid::Uuid::new_v4()));
         let assets = root.join("assets");
         std::fs::create_dir_all(&assets).unwrap();
-        let model = write_new_terrain(&assets, &TerrainToolState::default()).unwrap();
-        let edit = sculpt_terrain(&model, &TerrainToolState::default(), &[glam::Vec2::ZERO])
-            .unwrap()
+        let path = write_new_terrain(&assets, &TerrainToolState::default()).unwrap();
+        let (before, tools) = engine_scene::load_tile_file(&path).unwrap();
+        let mut surface = engine_renderer::TerrainSurface::new(
+            before.heights.resolution(),
+            before.heights.size(),
+        )
+        .unwrap();
+        surface.insert_tile((0, 0), before.clone()).unwrap();
+        TerrainToolState::default()
+            .apply_brush(&mut surface, glam::Vec2::ZERO)
             .expect("stroke changes the terrain");
-        (root, model, edit)
+        let edit = TerrainEdit {
+            tiles: vec![TileEdit {
+                path: path.clone(),
+                before,
+                after: surface.tile((0, 0)).unwrap().clone(),
+                tools,
+            }],
+        };
+        edit.write(false).unwrap();
+        (root, path, edit)
     }
 
-    fn saved_terrain(model: &std::path::Path) -> crate::terrain_tools::TerrainAsset {
-        crate::terrain_tools::TerrainAsset::load(&model.with_extension("terrain")).unwrap()
+    fn saved_terrain(path: &std::path::Path) -> engine_renderer::TerrainTile {
+        engine_scene::load_tile_file(path).unwrap().0
     }
 
     #[test]
     fn terrain_strokes_and_world_edits_undo_in_reverse_order() {
         let (root, model, edit) = terrain_fixture("order");
-        let (before, after) = (edit.before.clone(), edit.after.clone());
+        let (before, after) = (edit.tiles[0].before.clone(), edit.tiles[0].after.clone());
         let mut history = History::new();
         let mut world = world_with("Cube", 0.0);
         let mut selected = None;
@@ -445,14 +457,14 @@ mod tests {
         assert_eq!(
             history.undo(&mut world, &mut selected).unwrap(),
             Some(HistoryChange::Terrain {
-                model_path: model.clone()
+                paths: vec![model.clone()]
             })
         );
         assert_eq!(saved_terrain(&model), before);
         assert_eq!(
             history.redo(&mut world, &mut selected).unwrap(),
             Some(HistoryChange::Terrain {
-                model_path: model.clone()
+                paths: vec![model.clone()]
             })
         );
         assert_eq!(saved_terrain(&model), after);
@@ -467,7 +479,7 @@ mod tests {
         let mut selected = None;
         history.record_terrain(edit);
         // A directory where the source file belongs makes the restore fail.
-        let source = model.with_extension("terrain");
+        let source = model.clone();
         std::fs::remove_file(&source).unwrap();
         std::fs::create_dir(&source).unwrap();
 

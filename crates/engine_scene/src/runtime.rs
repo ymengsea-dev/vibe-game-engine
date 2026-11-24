@@ -215,6 +215,12 @@ impl AssetLibrary {
         }
     }
 
+    /// The store-relative (`/`-separated) path of the asset `id` names, if
+    /// this library carries it. Works for a packed bundle too.
+    pub fn relative_path(&self, id: &str) -> Option<&str> {
+        self.by_id.get(id).map(String::as_str)
+    }
+
     /// The id of the asset at `relative` (a `/`-separated path under
     /// the assets root), if this library carries it.
     ///
@@ -680,6 +686,26 @@ impl SceneResolver for RuntimeResolver<'_> {
             &mesh.id,
             material_override,
         )
+    }
+
+    fn resolve_terrain(
+        &mut self,
+        terrain: &crate::terrain::TerrainData,
+    ) -> Result<Option<engine_ecs::TerrainRenderer>, SceneError> {
+        let surface = crate::terrain::load_surface(self.library, terrain)?;
+        let library = self.library;
+        let layers = crate::terrain::terrain_layer_images(terrain, |texture| {
+            library.read(&texture.id).ok().flatten()
+        });
+        engine_ecs::TerrainRenderer::build(
+            self.gpu,
+            self.pipeline,
+            &surface,
+            &layers,
+            terrain.detail_distance,
+        )
+        .map(Some)
+        .map_err(|err| SceneError::Resolve(err.to_string()))
     }
 
     fn resolve_sprite_uv(

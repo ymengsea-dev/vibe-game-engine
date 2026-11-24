@@ -83,7 +83,9 @@ Status: ✅ done · 🟡 partly done · ⬜ not started
 
 | Feature | What it is | What it's used for | Status |
 | --- | --- | --- | --- |
-| Terrain | Create ground and sculpt hills and valleys with a brush; every stroke can be undone and redone | Landscapes for 3D games | 🟡 no texture painting or large worlds yet |
+| Terrain | Create ground and sculpt hills and valleys with a brush; every stroke can be undone and redone. Characters and physics stand on it in the game | Landscapes for 3D games | ✅ |
+| Terrain painting | Paint up to 8 ground textures (grass, rock, dirt, sand built in, or your own images) onto the terrain with a brush; they blend where they meet | Make paths, beaches and cliffs look different | ✅ |
+| Large terrains | Add tiles beside a terrain to make the world bigger; far-away ground is drawn with less detail so big worlds stay fast | Open worlds | ✅ |
 | Foliage | Scatter trees or rocks over terrain | Fill a landscape quickly | 🟡 must be re-scattered after sculpting |
 | Water | Add a water surface with waves and currents | Lakes, seas and swimming | ✅ |
 | Lighting | Sun, ambient light and point lights; with many lights, the 16 that matter most to the camera are used | Set the mood and visibility of a scene | ✅ |

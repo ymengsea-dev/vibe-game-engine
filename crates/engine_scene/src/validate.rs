@@ -439,6 +439,8 @@ impl ColliderData {
                 .parse_id()
                 .map(|_| ())
                 .map_err(|reason| format!("mesh: {reason}")),
+            // Whether the object has a terrain is checked with the object.
+            ColliderShape::Terrain => Ok(()),
         }
     }
 }
@@ -505,6 +507,11 @@ impl SceneEntity {
                 .validate()
                 .map_err(|reason| format!("mesh_renderer: {reason}"))?;
         }
+        if let Some(terrain) = &self.terrain {
+            terrain
+                .validate()
+                .map_err(|reason| format!("terrain: {reason}"))?;
+        }
         if let Some(foliage) = &self.foliage {
             foliage
                 .validate()
@@ -524,6 +531,9 @@ impl SceneEntity {
             collider
                 .validate()
                 .map_err(|reason| format!("collider: {reason}"))?;
+            if collider.shape == ColliderShape::Terrain && self.terrain.is_none() {
+                return Err("collider: a Terrain shape needs the object's terrain".to_owned());
+            }
         }
         if let Some(emitter) = &self.audio_emitter {
             emitter

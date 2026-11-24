@@ -736,110 +736,80 @@ fn handle_terrain_request(state: &mut EditorState) {
         state.asset_browser.operation_error = Some("Terrain path is outside assets".into());
         return;
     };
-    let Some(mesh_id) = state.asset_index.id_for(relative) else {
-        state.asset_browser.operation_error =
-            Some("Terrain was written, but its mesh could not be imported".into());
-        return;
-    };
-    let entity = state.spawn_asset_entity(relative);
-    state
-        .world
-        .entity_mut(entity)
-        .insert(engine::scene::SceneCollider(
-            engine::scene::ColliderData::new(
-                engine::scene::ColliderShape::TriMesh {
-                    mesh: engine::scene::AssetRef {
-                        id: mesh_id.to_string(),
-                    },
-                },
-                engine::scene::BodyKind::Fixed,
-            ),
-        ));
-    state.select_only(entity);
-    state.selected_asset = Some(relative.to_path_buf());
-    state.mark_dirty();
-}
-
-/// Commits one completed gesture after the UI frame, never during painting.
-/// Returns whether live mesh renderers need to be rebuilt.
-fn handle_terrain_sculpt_request(state: &mut EditorState) -> Option<engine::asset::AssetId> {
-    let stroke = state.terrain_sculpt_request.take()?;
-    if stroke.centers.is_empty() {
-        return None;
-    }
-    let source_matches = state
-        .world
-        .get::<ecs_components::AssetSource>(stroke.entity)
-        .is_some_and(|source| Path::new(&source.path) == stroke.relative_model);
-    if !source_matches {
-        state.asset_browser.operation_error = Some("Terrain changed during the stroke".into());
-        return None;
-    }
-    let model = match state
-        .project
-        .resolve(&Path::new(ASSETS_DIR).join(&stroke.relative_model))
-    {
-        Ok(path) => path,
-        Err(error) => {
-            state.asset_browser.operation_error = Some(error.to_string());
-            return None;
-        }
-    };
-    if let Err(error) = state
-        .project
-        .resolve(&Path::new(ASSETS_DIR).join(stroke.relative_model.with_extension("terrain")))
-    {
-        state.asset_browser.operation_error = Some(error.to_string());
-        return None;
-    }
-    match engine_editor::terrain_tools::sculpt_terrain(
-        &model,
-        &state.terrain_tools,
-        &stroke.centers,
-    ) {
-        Ok(Some(edit)) => {
-            state.history.record_terrain(edit);
-            refresh_terrain_mesh(state, &stroke.relative_model)
-        }
-        Ok(None) => None,
-        Err(error) => {
-            state.asset_browser.operation_error =
-                Some(format!("Could not sculpt terrain: {error}"));
-            None
-        }
-    }
-}
-
-/// Re-imports a terrain rewritten by undo/redo and returns its asset id so
-/// live mesh renderers can be rebuilt.
-fn handle_terrain_refresh_request(state: &mut EditorState) -> Option<engine::asset::AssetId> {
-    let model = state.terrain_refresh_request.take()?;
-    let assets = state.project.resolve(Path::new(ASSETS_DIR)).ok()?;
-    let Ok(relative) = model.strip_prefix(&assets) else {
-        state.asset_browser.operation_error =
-            Some("Restored terrain is outside the project".into());
-        return None;
-    };
     let relative = relative.to_path_buf();
-    refresh_terrain_mesh(state, &relative)
+    match state.spawn_terrain_object(&relative) {
+        Ok(_) => state.selected_asset = Some(relative),
+        Err(error) => state.asset_browser.operation_error = Some(error),
+    }
 }
 
-/// Re-imports a terrain's regenerated `.gltf` and returns its asset id.
-fn refresh_terrain_mesh(
-    state: &mut EditorState,
-    relative_model: &Path,
-) -> Option<engine::asset::AssetId> {
-    if !rescan_assets(state) {
-        state.asset_browser.operation_error =
-            Some("Terrain changed, but its mesh could not be refreshed".into());
-        return None;
-    }
-    let Some(id) = state.asset_index.id_for(relative_model) else {
-        state.asset_browser.operation_error = Some("Terrain mesh was not imported".into());
-        return None;
+/// Adds or removes a terrain tile asked for by the Terrain menu. A new
+/// tile's file is written, the asset index refreshed so it has an id, and
+/// then it joins the terrain.
+fn handle_terrain_tile_request(state: &mut EditorState) -> bool {
+    let Some(request) = state.terrain_tile_request.take() else {
+        return false;
     };
-    state.asset_browser.operation_error = None;
-    Some(id)
+    let result = match request {
+        engine_editor::terrain_tools::TerrainTileRequest::Add { entity, from, side } => state
+            .write_terrain_tile(entity, from, side)
+            .and_then(|(coord, path)| {
+                if rescan_assets(state) {
+                    state.attach_terrain_tile(entity, coord, &path)
+                } else {
+                    Err("The tile was written, but assets could not be refreshed".into())
+                }
+            }),
+        engine_editor::terrain_tools::TerrainTileRequest::Remove { entity, coord } => {
+            state.remove_terrain_tile(entity, coord)
+        }
+    };
+    if let Err(error) = result {
+        state.asset_browser.operation_error = Some(error);
+    }
+    true
+}
+
+/// Builds and patches terrain renderers from Studio's live terrains, and
+/// places the brush ring under the pointer.
+fn sync_terrains(
+    state: &mut EditorState,
+    viewport: &mut Viewport,
+    gpu: &engine::renderer::GpuContext,
+) {
+    let EditorState {
+        world,
+        terrains,
+        asset_index,
+        project,
+        ..
+    } = state;
+    let resolve = |asset: &engine::scene::AssetRef| {
+        engine_editor::terrain_edit::asset_path(asset_index, project, asset)
+    };
+    let errors = viewport.sync_terrains(gpu, world, terrains, &resolve);
+    if let Some(error) = errors.into_iter().next() {
+        state.asset_browser.operation_error = Some(error);
+    }
+    let ring = state
+        .terrain_hover
+        .filter(|_| state.terrain_sculpt_active)
+        .and_then(|(entity, center)| {
+            let live = state.terrains.get(entity)?;
+            let model = engine_editor::hierarchy::world_transform(&state.world, entity).to_matrix();
+            Some(
+                engine_editor::terrain_tools::brush_ring(
+                    &live.surface,
+                    center,
+                    state.terrain_tools.radius,
+                )
+                .into_iter()
+                .map(|point| model.transform_point3(point))
+                .collect(),
+            )
+        })
+        .unwrap_or_default();
+    viewport.set_brush_ring(ring);
 }
 
 /// Whether `path` is an `engine_asset` `.meta` sidecar — the file the
@@ -1027,7 +997,30 @@ fn relocate_asset(project: &Project, from: &Path, to: &Path) -> Result<(), Strin
             "could not move legacy sidecar: {err}; metadata rollback: {meta_rollback:?}; source rollback: {source_rollback:?}"
         ));
     }
+    if metadata.is_file() && source.extension().is_some_and(|ext| ext == "terrain") {
+        move_terrain_paint(&source, &destination);
+    }
     Ok(())
+}
+
+/// A terrain tile's paint files travel with it. One that can't move (or
+/// would replace a file) stays put with a warning: the tile itself has
+/// moved, and loses only its paint.
+fn move_terrain_paint(source: &Path, destination: &Path) {
+    let from = engine::scene::splat_paths(source);
+    let to = engine::scene::splat_paths(destination);
+    for (old, new) in from.iter().zip(&to) {
+        if !old.is_file() {
+            continue;
+        }
+        if new.exists() {
+            tracing::warn!(path = %new.display(), "terrain paint not moved: a file is already there");
+            continue;
+        }
+        if let Err(err) = std::fs::rename(old, new) {
+            tracing::warn!(path = %old.display(), error = %err, "terrain paint could not be moved");
+        }
+    }
 }
 
 fn copy_asset_file(source: &Path, destination: &Path) -> Result<(), String> {
@@ -3013,14 +3006,10 @@ impl EditorHandler {
             if terrain_requested {
                 window.request_redraw();
             }
-            let changed_terrain = handle_terrain_sculpt_request(&mut self.state)
-                .into_iter()
-                .chain(handle_terrain_refresh_request(&mut self.state))
-                .collect::<HashSet<_>>();
-            if !changed_terrain.is_empty() {
-                viewport.invalidate_changed_assets(&mut self.state.world, &changed_terrain);
+            if handle_terrain_tile_request(&mut self.state) {
                 window.request_redraw();
             }
+            sync_terrains(&mut self.state, viewport, gpu);
             let asset_operation_requested = self.state.asset_browser.operation_request.is_some()
                 || self.state.asset_browser.reveal_request.is_some();
             handle_asset_operation(&mut self.state, &self.open_docs);
@@ -3524,6 +3513,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The heights saved in a terrain object's first tile file.
+    fn saved_tile_heights(state: &EditorState, entity: engine::ecs::prelude::Entity) -> Vec<f32> {
+        let terrain = state
+            .world
+            .get::<engine::scene::SceneTerrain>(entity)
+            .unwrap();
+        let path = state.terrain_asset_path(&terrain.0.tiles[0].asset).unwrap();
+        engine::scene::load_tile_file(&path)
+            .unwrap()
+            .0
+            .heights
+            .heights()
+            .to_vec()
+    }
+
     #[test]
     fn create_terrain_request_adds_a_saved_collidable_scene_object() {
         let root = scratch_project("create-terrain");
@@ -3534,32 +3538,31 @@ mod tests {
         handle_terrain_request(&mut state);
 
         let selected = state.selected_entity.expect("terrain is selected");
-        let source = state
+        let terrain = state
             .world
-            .get::<ecs_components::AssetSource>(selected)
-            .unwrap();
-        let mesh = state
-            .world
-            .get::<ecs_components::MeshSource>(selected)
-            .unwrap();
-        assert!(source.path.ends_with(".gltf"));
-        assert_eq!(source.id.as_deref(), Some(mesh.mesh.as_str()));
-        assert!(state.project.assets_dir().join(&source.path).is_file());
+            .get::<engine::scene::SceneTerrain>(selected)
+            .expect("a terrain object")
+            .0
+            .clone();
+        assert_eq!(terrain.tiles.len(), 1);
+        let tile = state.terrain_asset_path(&terrain.tiles[0].asset).unwrap();
+        assert!(tile.ends_with("terrain/Terrain/tile_0_0.terrain"));
+        assert!(
+            !tile.with_extension("gltf").exists(),
+            "terrain is no longer a model file"
+        );
         assert!(state.dirty.scene());
         state.save_scene().unwrap();
         let scene = Scene::load_from_file(&state.scene_path).unwrap();
         assert_eq!(scene.entities.len(), 1);
-        assert!(scene.entities[0].mesh_renderer.is_some());
+        assert!(scene.entities[0].mesh_renderer.is_none());
+        assert_eq!(scene.entities[0].terrain.as_ref(), Some(&terrain));
         let collider = scene.entities[0]
             .collider
             .as_ref()
             .expect("terrain collider");
         assert_eq!(collider.body, engine::scene::BodyKind::Fixed);
-        assert!(matches!(
-            &collider.shape,
-            engine::scene::ColliderShape::TriMesh { mesh }
-                if mesh.id == scene.entities[0].mesh_renderer.as_ref().unwrap().mesh.id
-        ));
+        assert_eq!(collider.shape, engine::scene::ColliderShape::Terrain);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3585,100 +3588,219 @@ mod tests {
     }
 
     #[test]
-    fn sculpt_request_updates_imported_mesh_after_one_finished_stroke() {
+    fn a_stroke_edits_the_live_terrain_while_dragging_and_saves_when_it_ends() {
         let root = scratch_project("sculpt-terrain");
         let project = Project::create(&root, "Terrain").unwrap();
         let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
         state.create_terrain_request = true;
         handle_terrain_request(&mut state);
         let entity = state.selected_entity.unwrap();
-        let source = state
-            .world
-            .get::<ecs_components::AssetSource>(entity)
-            .unwrap()
-            .clone();
         let mut stroke = state.begin_terrain_stroke().unwrap();
         stroke.record(glam::Vec2::ZERO, 1.0);
-        state.terrain_sculpt_request = Some(stroke);
+        state.terrain_stroke = Some(stroke);
+        state.apply_terrain_stroke();
 
-        assert!(handle_terrain_sculpt_request(&mut state).is_some());
-        assert!(state.terrain_sculpt_request.is_none());
-        assert!(state.asset_browser.operation_error.is_none());
-        let path = state.project.assets_dir().join(&source.path);
-        let saved =
-            engine_editor::terrain_tools::TerrainAsset::load(&path.with_extension("terrain"))
-                .unwrap();
-        assert!(saved.heights.iter().any(|height| *height > 0.0));
-        let imported = engine::asset::import_gltf_file(&path, &state.project.assets_dir()).unwrap();
+        let live = state.terrains.get(entity).expect("live terrain");
         assert!(
-            imported.meshes[0]
-                .vertices
-                .iter()
-                .any(|vertex| vertex.position[1] > 0.0)
+            live.surface.height_at(0.0, 0.0).unwrap() > 0.0,
+            "live copy moved"
         );
+        assert!(
+            saved_tile_heights(&state, entity).iter().all(|h| *h == 0.0),
+            "nothing written mid-stroke"
+        );
+        state.finish_terrain_stroke();
+        assert!(state.asset_browser.operation_error.is_none());
+        assert!(saved_tile_heights(&state, entity).iter().any(|h| *h > 0.0));
+        assert!(state.history.can_undo());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn undoing_a_sculpt_stroke_restores_the_terrain_and_refreshes_its_mesh() {
+    fn undoing_a_stroke_restores_the_tile_and_reloads_the_live_terrain() {
         let root = scratch_project("sculpt-undo");
         let project = Project::create(&root, "Terrain Undo").unwrap();
         let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
         state.create_terrain_request = true;
         handle_terrain_request(&mut state);
-        let source = state
-            .world
-            .get::<ecs_components::AssetSource>(state.selected_entity.unwrap())
-            .unwrap()
-            .clone();
+        let entity = state.selected_entity.unwrap();
         let mut stroke = state.begin_terrain_stroke().unwrap();
         stroke.record(glam::Vec2::ZERO, 1.0);
-        state.terrain_sculpt_request = Some(stroke);
-        let sculpted = handle_terrain_sculpt_request(&mut state).expect("sculpted");
-        let path = state.project.assets_dir().join(&source.path);
-        let heights = || {
-            engine_editor::terrain_tools::TerrainAsset::load(&path.with_extension("terrain"))
-                .unwrap()
-                .heights
-        };
+        state.terrain_stroke = Some(stroke);
+        state.finish_terrain_stroke();
 
         state.undo();
-        assert!(state.terrain_refresh_request.is_some());
-        assert_eq!(handle_terrain_refresh_request(&mut state), Some(sculpted));
         assert!(
-            heights().iter().all(|height| *height == 0.0),
+            state.terrains.get(entity).is_none(),
+            "reloaded on the next sync"
+        );
+        assert!(
+            saved_tile_heights(&state, entity).iter().all(|h| *h == 0.0),
             "stroke undone"
         );
         assert!(state.asset_browser.operation_error.is_none());
 
         state.redo();
-        assert_eq!(handle_terrain_refresh_request(&mut state), Some(sculpted));
         assert!(
-            heights().iter().any(|height| *height > 0.0),
+            saved_tile_heights(&state, entity).iter().any(|h| *h > 0.0),
             "stroke redone"
         );
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn sculpt_request_rejects_a_deleted_terrain_before_writing() {
+    fn a_paint_stroke_saves_paint_only_and_undoes() {
+        let root = scratch_project("paint-terrain");
+        let project = Project::create(&root, "Paint").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.create_terrain_request = true;
+        handle_terrain_request(&mut state);
+        let entity = state.selected_entity.unwrap();
+        let terrain = state
+            .world
+            .get::<engine::scene::SceneTerrain>(entity)
+            .unwrap()
+            .0
+            .clone();
+        let path = state.terrain_asset_path(&terrain.tiles[0].asset).unwrap();
+        let paint = engine::scene::splat_paths(&path)[0].clone();
+        let before = std::fs::read(&paint).unwrap();
+        state.terrain_tools.paint = true;
+        state.terrain_tools.paint_layer = 1;
+        state.terrain_tools.strength = 0.8;
+        let mut stroke = state.begin_terrain_stroke().unwrap();
+        stroke.record(glam::Vec2::ZERO, 1.0);
+        state.terrain_stroke = Some(stroke);
+        state.finish_terrain_stroke();
+
+        assert_ne!(std::fs::read(&paint).unwrap(), before);
+        let (tile, _) = engine::scene::load_tile_file(&path).unwrap();
+        assert!(
+            tile.heights.heights().iter().all(|h| *h == 0.0),
+            "heights untouched"
+        );
+        let middle = tile.splat.weights()[64 * 129 + 64];
+        assert!(middle[1] > middle[0], "grass painted over with rock");
+        state.undo();
+        let (undone, _) = engine::scene::load_tile_file(&path).unwrap();
+        assert!(undone.splat.weights().iter().all(|t| t[0] == 255));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_stroke_on_a_deleted_terrain_writes_nothing() {
         let root = scratch_project("sculpt-deleted-terrain");
         let project = Project::create(&root, "Terrain").unwrap();
         let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
         state.create_terrain_request = true;
         handle_terrain_request(&mut state);
+        let entity = state.selected_entity.unwrap();
+        let terrain = state
+            .world
+            .get::<engine::scene::SceneTerrain>(entity)
+            .unwrap()
+            .0
+            .clone();
+        let path = state.terrain_asset_path(&terrain.tiles[0].asset).unwrap();
         let mut stroke = state.begin_terrain_stroke().unwrap();
-        let path = state.project.assets_dir().join(&stroke.relative_model);
         stroke.record(glam::Vec2::ZERO, 1.0);
-        state.world.despawn(stroke.entity);
-        state.terrain_sculpt_request = Some(stroke);
+        state.terrain_stroke = Some(stroke);
+        state.world.despawn(entity);
+        state.finish_terrain_stroke();
 
-        assert!(handle_terrain_sculpt_request(&mut state).is_none());
         assert!(state.asset_browser.operation_error.is_some());
-        let saved =
-            engine_editor::terrain_tools::TerrainAsset::load(&path.with_extension("terrain"))
-                .unwrap();
-        assert!(saved.heights.iter().all(|height| *height == 0.0));
+        let (saved, _) = engine::scene::load_tile_file(&path).unwrap();
+        assert!(saved.heights.heights().iter().all(|height| *height == 0.0));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn adding_and_removing_a_tile_keeps_edges_and_files() {
+        use engine_editor::terrain_tools::{TerrainTileRequest, TileSide};
+        let root = scratch_project("terrain-tiles");
+        let project = Project::create(&root, "Terrain").unwrap();
+        let mut state = EditorState::new(project, World::new(), Vec::new(), ConsoleLog::new());
+        state.create_terrain_request = true;
+        handle_terrain_request(&mut state);
+        let entity = state.selected_entity.unwrap();
+        // A bump on the east edge of tile (0, 0).
+        let mut stroke = state.begin_terrain_stroke().unwrap();
+        stroke.record(glam::Vec2::new(32.0, 0.0), 1.0);
+        state.terrain_stroke = Some(stroke);
+        state.finish_terrain_stroke();
+
+        state.terrain_tile_request = Some(TerrainTileRequest::Add {
+            entity,
+            from: (0, 0),
+            side: TileSide::East,
+        });
+        assert!(handle_terrain_tile_request(&mut state));
+        assert!(
+            state.asset_browser.operation_error.is_none(),
+            "{:?}",
+            state.asset_browser.operation_error
+        );
+        let terrain = state
+            .world
+            .get::<engine::scene::SceneTerrain>(entity)
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(terrain.tiles.len(), 2);
+        let east = terrain.tile_at(1, 0).expect("east tile");
+        let east_path = state.terrain_asset_path(&east.asset).unwrap();
+        assert!(east_path.ends_with("terrain/Terrain/tile_1_0.terrain"));
+        let (west, _) = engine::scene::load_tile_file(
+            &state.terrain_asset_path(&terrain.tiles[0].asset).unwrap(),
+        )
+        .unwrap();
+        let (east_tile, _) = engine::scene::load_tile_file(&east_path).unwrap();
+        let last = i64::from(west.heights.resolution()) - 1;
+        for row in 0..=last {
+            assert_eq!(
+                west.heights.node_height(row, last),
+                east_tile.heights.node_height(row, 0)
+            );
+        }
+        assert!(west.heights.node_height(last / 2, last) > 0.0);
+
+        // A stroke across the edge changes and saves both tiles.
+        let mut stroke = state.begin_terrain_stroke().unwrap();
+        stroke.record(glam::Vec2::new(32.0, 10.0), 1.0);
+        state.terrain_stroke = Some(stroke);
+        state.finish_terrain_stroke();
+        let (west_after, _) = engine::scene::load_tile_file(
+            &state.terrain_asset_path(&terrain.tiles[0].asset).unwrap(),
+        )
+        .unwrap();
+        let (east_after, _) = engine::scene::load_tile_file(&east_path).unwrap();
+        assert_ne!(west_after, west);
+        assert_ne!(east_after, east_tile);
+        for row in 0..=last {
+            assert_eq!(
+                west_after.heights.node_height(row, last),
+                east_after.heights.node_height(row, 0)
+            );
+        }
+
+        state.terrain_tile_request = Some(TerrainTileRequest::Remove {
+            entity,
+            coord: (1, 0),
+        });
+        assert!(handle_terrain_tile_request(&mut state));
+        let terrain = state
+            .world
+            .get::<engine::scene::SceneTerrain>(entity)
+            .unwrap();
+        assert_eq!(terrain.0.tiles.len(), 1);
+        assert!(east_path.exists(), "a removed tile's file is kept");
+        // The last tile can't go.
+        state.terrain_tile_request = Some(TerrainTileRequest::Remove {
+            entity,
+            coord: (0, 0),
+        });
+        handle_terrain_tile_request(&mut state);
+        assert!(state.asset_browser.operation_error.is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4318,6 +4440,33 @@ mod tests {
             std::fs::read(root.join(".studio/assets/textures/sprite.png.meta")).unwrap(),
             b"stable id"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn renaming_a_terrain_tile_carries_its_paint() {
+        let root = scratch_project("rename-terrain-tile");
+        let project = Project::create(&root, "Rename tile").unwrap();
+        let folder = project.assets_dir().join("terrain/Hills");
+        std::fs::create_dir_all(&folder).unwrap();
+        for file in ["tile_0_0.terrain", "tile_0_0.splat", "tile_0_0.splat2"] {
+            std::fs::write(folder.join(file), file).unwrap();
+        }
+        relocate_asset(
+            &project,
+            Path::new("terrain/Hills/tile_0_0.terrain"),
+            Path::new("terrain/Hills/ground.terrain"),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(folder.join("ground.splat")).unwrap(),
+            "tile_0_0.splat"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join("ground.splat2")).unwrap(),
+            "tile_0_0.splat2"
+        );
+        assert!(!folder.join("tile_0_0.splat").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

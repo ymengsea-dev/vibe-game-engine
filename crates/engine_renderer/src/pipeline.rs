@@ -19,7 +19,16 @@ use crate::texture::Texture;
 /// file ([`PBR_VS_SOURCE`] here, or the skinned one in [`crate::skinning`])
 /// is concatenated onto it at pipeline creation — WGSL has no `#include`,
 /// and duplicating ~200 lines of BRDF per variant is worse.
-pub(crate) const PBR_COMMON_SOURCE: &str = include_str!("shaders/pbr_common.wgsl");
+/// Shared lighting (`pbr_shared.wgsl`) plus the material fragment stage
+/// (`pbr_material_fs.wgsl`): what every mesh pipeline's vertex stage is
+/// appended to.
+pub(crate) const PBR_COMMON_SOURCE: &str = concat!(
+    include_str!("shaders/pbr_shared.wgsl"),
+    "\n",
+    include_str!("shaders/pbr_material_fs.wgsl")
+);
+/// Shared lighting alone, for pipelines with their own fragment stage.
+pub(crate) const PBR_SHARED_SOURCE: &str = include_str!("shaders/pbr_shared.wgsl");
 const PBR_VS_SOURCE: &str = include_str!("shaders/pbr_vs.wgsl");
 const SHADOW_SHADER_SOURCE: &str = include_str!("shaders/shadow.wgsl");
 const INSTANCED_SHADOW_SHADER_SOURCE: &str = include_str!("shaders/instanced_shadow.wgsl");
@@ -116,6 +125,9 @@ pub struct Pipeline {
     /// rather than per material — a scene with hundreds of props would
     /// otherwise allocate hundreds of identical 1x1 textures.
     neutral: NeutralMaps,
+    /// The terrain paint-layer pipeline, built with the same camera, model
+    /// and light layouts.
+    terrain: crate::terrain_gpu::TerrainPipeline,
 }
 
 /// The optional maps a material can carry beyond its base colour.
@@ -162,6 +174,16 @@ impl Pipeline {
     /// [`crate::SkinnedPipeline`].
     pub(crate) fn lights_layout(&self) -> &wgpu::BindGroupLayout {
         &self.lights_bind_group_layout
+    }
+
+    /// The terrain pipeline built alongside this one.
+    pub(crate) fn terrain(&self) -> &crate::terrain_gpu::TerrainPipeline {
+        &self.terrain
+    }
+
+    /// A 1x1 white texture.
+    pub(crate) fn white_texture(&self) -> &Texture {
+        &self.neutral.occlusion
     }
 
     /// The alpha-blended, depth-write-off variant used by the sorted
@@ -416,7 +438,7 @@ impl GpuContext {
         }
     }
 
-    /// Compiles the PBR shader (`pbr_common.wgsl` + `pbr_vs.wgsl`) into a
+    /// Compiles the PBR shader (`PBR_COMMON_SOURCE` + `pbr_vs.wgsl`) into a
     /// [`Pipeline`] targeting this context's surface format.
     pub fn create_pbr_pipeline(&self, label: &str) -> Pipeline {
         let device = self.device();
@@ -651,7 +673,13 @@ impl GpuContext {
             cache: None,
         });
 
+        let terrain = self.create_terrain_pipeline(
+            &camera_bind_group_layout,
+            &model_bind_group_layout,
+            &lights_bind_group_layout,
+        );
         Pipeline {
+            terrain,
             render_pipeline,
             transparent_pipeline,
             camera_bind_group_layout,
@@ -1315,6 +1343,7 @@ impl GpuContext {
         camera: &CameraBinding,
         lights: &LightsBinding,
         drawables: &[Drawable<'_>],
+        terrain: &[crate::TerrainDrawable<'_>],
         shadow_casters: &[Drawable<'_>],
         instanced_shadow_casters: &[crate::InstancedDrawable<'_>],
         transparent: &[Drawable<'_>],
@@ -1351,6 +1380,7 @@ impl GpuContext {
             camera,
             lights,
             drawables,
+            terrain,
             shadow_casters,
             instanced_shadow_casters,
             transparent,
@@ -1403,6 +1433,7 @@ impl GpuContext {
         camera: &CameraBinding,
         lights: &LightsBinding,
         drawables: &[Drawable<'_>],
+        terrain: &[crate::TerrainDrawable<'_>],
         shadow_casters: &[Drawable<'_>],
         instanced_shadow_casters: &[crate::InstancedDrawable<'_>],
         transparent: &[Drawable<'_>],
@@ -1575,6 +1606,24 @@ impl GpuContext {
                     wgpu::IndexFormat::Uint32,
                 );
                 render_pass.draw_indexed(0..drawable.mesh.index_count, 0, 0..1);
+            }
+
+            // Terrain chunks: the paint-layer pipeline, same camera, model
+            // and light bind groups as the meshes above.
+            if !terrain.is_empty() {
+                render_pass.set_pipeline(&pipeline.terrain().render_pipeline);
+                render_pass.set_bind_group(0, &camera.bind_group, &[]);
+                render_pass.set_bind_group(3, &lights.bind_group, &[]);
+                for chunk in terrain {
+                    render_pass.set_bind_group(1, &chunk.material.bind_group, &[]);
+                    render_pass.set_bind_group(2, &chunk.model.bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, chunk.mesh.vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(
+                        chunk.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    render_pass.draw_indexed(0..chunk.mesh.index_count, 0, 0..1);
+                }
             }
 
             // Skinned geometry: same camera/lights, a different pipeline

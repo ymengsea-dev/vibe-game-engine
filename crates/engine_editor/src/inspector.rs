@@ -98,6 +98,7 @@ pub fn collider_shape_summary(shape: &ColliderShape) -> String {
             radius,
         } => format!("Capsule (half-height {half_height:.3}, radius {radius:.3})"),
         ColliderShape::TriMesh { .. } => "Triangle mesh".to_string(),
+        ColliderShape::Terrain => "Terrain".to_string(),
     }
 }
 
@@ -246,6 +247,45 @@ fn copy_mesh_lod(world: &mut World, from: Entity, to: Entity) {
 
 /// "Level of detail": simpler meshes far away and a draw distance.
 /// Returns whether the settings changed.
+/// A terrain's tiles, how far away it keeps its detail, and its paint
+/// layers. Sculpting and painting happen in the Scene View's Terrain menu.
+fn terrain_section(ui: &mut egui::Ui, world: &mut World, entity: Entity, assets: &AssetIndex) {
+    let Some(before) = world
+        .get::<engine_scene::SceneTerrain>(entity)
+        .map(|terrain| terrain.0.clone())
+    else {
+        return;
+    };
+    let textures: Vec<(String, String)> = assets
+        .entries()
+        .filter(|(path, _)| AssetKind::from_path(path) == AssetKind::Texture)
+        .map(|(path, id)| (id.to_string(), path.display().to_string()))
+        .collect();
+    let mut value = before.clone();
+    section(ui, "Terrain", None::<fn(&mut egui::Ui)>, |ui| {
+        property_row(ui, "Tiles", |ui| {
+            ui.label(value.tiles.len().to_string());
+        });
+        property_row(ui, "Detail", |ui| {
+            let range = engine_scene::TERRAIN_DETAIL_RANGE;
+            slider(
+                ui,
+                &mut value.detail_distance,
+                *range.start()..=*range.end(),
+            )
+        });
+        subsection(ui, "Paint layers", |ui| {
+            crate::terrain_tools::layer_list(ui, &mut value, &textures, None);
+        });
+        note(ui, "Sculpt and paint from the Scene View's Terrain menu.");
+    });
+    if value != before
+        && let Some(mut terrain) = world.get_mut::<engine_scene::SceneTerrain>(entity)
+    {
+        terrain.0 = value;
+    }
+}
+
 fn lod_section(ui: &mut egui::Ui, world: &mut World, entity: Entity) -> bool {
     let palette = crate::theme::NIGHT;
     let before = world.get::<MeshLod>(entity).cloned().unwrap_or_default();
@@ -2106,6 +2146,8 @@ const REGISTRY: &[ComponentUi] = &[
                         );
                     }
                 }
+                // Follows the object's own terrain; nothing to size.
+                ColliderShape::Terrain => {}
             }
             let body = value.0.body;
             let trigger = value.0.trigger;
@@ -3248,6 +3290,7 @@ fn show_body(
             }
         }
     }
+    terrain_section(ui, world, entity, assets);
 
     ui.add_space(4.0);
     // A 3D model can't also show a flat image, so only other objects
@@ -3624,6 +3667,7 @@ fn shape_name(shape: &ColliderShape) -> &'static str {
         ColliderShape::Cylinder { .. } => "Cylinder",
         ColliderShape::Capsule { .. } => "Capsule",
         ColliderShape::TriMesh { .. } => "Mesh",
+        ColliderShape::Terrain => "Terrain",
     }
 }
 

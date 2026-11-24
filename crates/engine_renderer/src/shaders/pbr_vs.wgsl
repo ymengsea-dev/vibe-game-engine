@@ -1,5 +1,5 @@
 // Unskinned vertex stage for the PBR shader. Concatenated onto
-// `pbr_common.wgsl` (which declares `camera` and `VertexOutput`) by
+// `PBR_COMMON_SOURCE` (which declares `camera` and `VertexOutput`) by
 // `GpuContext::create_pbr_pipeline`.
 
 struct ModelUniform {

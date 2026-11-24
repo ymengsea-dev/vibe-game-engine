@@ -19,15 +19,29 @@ pub fn within_budget(budget: Duration, operation: impl FnOnce()) -> (Duration, b
 mod tests {
     use super::*;
     use crate::terrain_tools::TerrainToolState;
-    use engine_renderer::Heightmap;
+    use engine_renderer::{TerrainSurface, TerrainTile};
     use glam::Vec2;
 
     #[test]
     fn terrain_brush_stays_within_the_editor_budget() {
-        let mut map = Heightmap::new(128, 64.0).unwrap();
+        // One dab on a new-size tile plus rebuilding every chunk it
+        // touched: the work done per pointer sample while sculpting.
+        let mut surface = TerrainSurface::new(129, 64.0).unwrap();
+        surface
+            .insert_tile((0, 0), TerrainTile::flat(129, 64.0).unwrap())
+            .unwrap();
         let state = TerrainToolState::default();
         let (_, within) = within_budget(TERRAIN_BRUSH_BUDGET, || {
-            state.apply_brush(&mut map, Vec2::ZERO);
+            if let Some(rect) = state.apply_brush(&mut surface, Vec2::ZERO) {
+                for key in engine_renderer::dirty_chunks(&surface, rect) {
+                    let skirt = engine_renderer::skirt_depth(&surface, key);
+                    for stride in engine_renderer::chunk_strides(129, key) {
+                        std::hint::black_box(engine_renderer::chunk_mesh(
+                            &surface, key, stride, skirt,
+                        ));
+                    }
+                }
+            }
         });
         assert!(within, "terrain brush exceeded {:?}", TERRAIN_BRUSH_BUDGET);
     }

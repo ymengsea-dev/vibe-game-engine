@@ -1,5 +1,5 @@
 // GPU-skinned vertex stage for the PBR shader. Concatenated onto
-// `pbr_common.wgsl` (which declares `camera` and `VertexOutput`) by
+// `PBR_COMMON_SOURCE` (which declares `camera` and `VertexOutput`) by
 // `GpuContext::create_skinned_pbr_pipeline`.
 //
 // Each vertex names up to four joints and four blend weights; the vertex

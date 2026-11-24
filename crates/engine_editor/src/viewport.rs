@@ -185,6 +185,8 @@ pub struct Viewport {
     /// The frame's debug geometry, rebuilt every frame and kept between
     /// them for its allocation.
     debug_draw: engine_renderer::DebugDraw,
+    /// The terrain brush outline, in world space; empty when no brush.
+    brush_ring: Vec<Vec3>,
     hdr_target: HdrTarget,
     post: PostProcessStack,
     camera_binding: CameraBinding,
@@ -307,6 +309,7 @@ impl Viewport {
             skybox,
             debug_line_pipeline,
             debug_draw: engine_renderer::DebugDraw::new(),
+            brush_ring: Vec::new(),
             hdr_target,
             post,
             camera_binding,
@@ -384,6 +387,23 @@ impl Viewport {
     /// The egui texture handle this viewport's panel displays.
     pub fn texture_id(&self) -> egui::TextureId {
         self.texture_id
+    }
+
+    /// Builds, rebuilds and patches the GPU side of every terrain from
+    /// Studio's live copy. Returns load and upload errors to show.
+    pub fn sync_terrains(
+        &mut self,
+        gpu: &GpuContext,
+        world: &mut World,
+        terrains: &mut crate::terrain_edit::LiveTerrains,
+        resolve: &dyn Fn(&engine_scene::AssetRef) -> Option<std::path::PathBuf>,
+    ) -> Vec<String> {
+        crate::terrain_edit::sync_gpu(gpu, &self.pipeline, world, terrains, resolve)
+    }
+
+    /// The terrain brush outline to draw this frame, in world space.
+    pub fn set_brush_ring(&mut self, ring: Vec<Vec3>) {
+        self.brush_ring = ring;
     }
 
     /// The camera's combined view-projection, for screen-space gizmo
@@ -626,6 +646,9 @@ impl Viewport {
                         .get(skinned.mesh)
                         .map(|mesh| mesh.local_bounds);
                 }
+                if let Some(terrain) = world.get::<engine_ecs::TerrainRenderer>(entity) {
+                    return terrain_bounds(terrain);
+                }
                 let renderer = world.get::<engine_ecs::components::MeshRenderer>(entity)?;
                 assets
                     .meshes
@@ -634,6 +657,10 @@ impl Viewport {
             },
             &mut self.debug_draw,
         );
+        if self.brush_ring.len() > 1 {
+            self.debug_draw
+                .polyline(&self.brush_ring, crate::overlays::BRUSH_RING_COLOR);
+        }
         let lines = self.debug_draw.vertices();
         let debug_lines = (!lines.is_empty()).then_some((&self.debug_line_pipeline, lines));
 
@@ -664,6 +691,12 @@ impl Viewport {
             overlays
                 .distance_detail
                 .then(|| engine_renderer::DistanceQuality::new(self.camera.eye, quality)),
+            // Terrain always picks chunk detail by distance; the overlay
+            // only governs meshes.
+            Some(engine_renderer::DistanceQuality::new(
+                self.camera.eye,
+                quality,
+            )),
             &self.lights_binding,
             &self.skinned_pipeline,
             &self.instanced_pipeline,
@@ -763,6 +796,18 @@ fn placeholder_positions(world: &mut World) -> Vec<Vec3> {
         .iter(world)
         .map(|global| global.0.translation)
         .collect()
+}
+
+/// Local bounds of a terrain: every chunk's full-detail mesh together.
+fn terrain_bounds(terrain: &engine_ecs::TerrainRenderer) -> Option<engine_renderer::Aabb> {
+    engine_renderer::Aabb::from_points(
+        terrain
+            .tiles
+            .iter()
+            .flat_map(|tile| &tile.chunks)
+            .filter_map(|chunk| chunk.tiers.first())
+            .flat_map(|mesh| [mesh.local_bounds.min, mesh.local_bounds.max]),
+    )
 }
 
 #[cfg(test)]

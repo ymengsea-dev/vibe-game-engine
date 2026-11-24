@@ -39,6 +39,7 @@ mod rules;
 mod runtime;
 mod save;
 mod sprite_atlas;
+mod terrain;
 mod ui;
 mod validate;
 pub use validate::{MAX_TAG_BYTES, MAX_TAGS, valid_prefab_path, valid_scene_path};
@@ -54,6 +55,12 @@ pub use camera_pose::{adopt_legacy_camera_poses, camera_world_pose, look_rotatio
 pub use capture::capture_renderables;
 pub use environment::{AmbientSound, spawn_ambient_sounds};
 pub use error::SceneError;
+pub use terrain::{
+    MAX_TERRAIN_LAYER_NAME_BYTES, SceneTerrain, TERRAIN_DETAIL_RANGE, TERRAIN_FILE_VERSION,
+    TerrainAsset, TerrainData, TerrainLayerData, TerrainTileData, TerrainToolStateData,
+    default_layers, load_surface, load_tile_file, migrate_legacy_terrains, save_tile_file, splat_paths,
+    splat_relative_paths, terrain_layer_images, tile_from_bytes,
+};
 pub use format::{
     AmbientSoundData, AppliedLod, AppliedMaterialOverride, AssetRef, AudioEmitterData, BodyKind,
     CameraData, CameraFollowData, CameraFollowMode, ColliderData, ColliderShape, EnvironmentData,

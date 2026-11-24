@@ -44,7 +44,7 @@ struct VertexOutput {
     @location(1) @interpolate(flat) fade: f32,
 };
 
-// Same 4x4 ordered dither as `pbr_common.wgsl`, so a fading object's
+// Same 4x4 ordered dither as `PBR_COMMON_SOURCE`, so a fading object's
 // shadow thins out with it.
 fn dither_threshold(position: vec2<f32>) -> f32 {
     let bayer = array<f32, 16>(

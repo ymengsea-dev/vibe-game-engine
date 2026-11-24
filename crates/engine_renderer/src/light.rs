@@ -13,7 +13,7 @@ use glam::Vec3;
 pub const MAX_DIRECTIONAL_LIGHTS: usize = 2;
 /// How many point lights are uploaded per frame. With more in the scene,
 /// [`LightSet::to_uniform_for_view`] keeps the ones that matter most to the
-/// camera. Must match `MAX_POINT_LIGHTS` in `shaders/pbr_common.wgsl`.
+/// camera. Must match `MAX_POINT_LIGHTS` in `shaders/pbr_shared.wgsl`.
 pub const MAX_POINT_LIGHTS: usize = 16;
 
 /// A light with parallel rays and no falloff (e.g. sunlight) — direction
@@ -69,7 +69,7 @@ impl PointLight {
 /// surface not hit by the sun read as near-black and was the single
 /// biggest reason scenes looked lifeless.
 ///
-/// The blend is mirrored in `pbr_common.wgsl`; see
+/// The blend is mirrored in `pbr_shared.wgsl`; see
 /// [`AmbientLight::color_for_normal`], which is the CPU-side copy the
 /// tests exercise. **The two must be kept in step** — there is no
 /// compiler check tying them together.
@@ -106,7 +106,7 @@ impl AmbientLight {
     /// colour, `-1` the full ground colour, `0` an even mix — scaled by
     /// [`AmbientLight::intensity`].
     ///
-    /// This is the CPU mirror of the WGSL in `pbr_common.wgsl`. Keep both
+    /// This is the CPU mirror of the WGSL in `pbr_shared.wgsl`. Keep both
     /// in step.
     pub fn color_for_normal(&self, normal: Vec3) -> Vec3 {
         let up_factor = (normal.normalize_or_zero().y * 0.5 + 0.5).clamp(0.0, 1.0);
@@ -443,12 +443,12 @@ mod tests {
 
     #[test]
     fn shader_point_light_capacity_matches_the_rust_constant() {
-        let shader = include_str!("shaders/pbr_common.wgsl");
+        let shader = include_str!("shaders/pbr_shared.wgsl");
         assert!(
             shader.contains(&format!(
                 "const MAX_POINT_LIGHTS: u32 = {MAX_POINT_LIGHTS}u;"
             )),
-            "pbr_common.wgsl must declare the same MAX_POINT_LIGHTS"
+            "pbr_shared.wgsl must declare the same MAX_POINT_LIGHTS"
         );
     }
 

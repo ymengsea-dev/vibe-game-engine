@@ -1,5 +1,5 @@
 // Instanced vertex stage for the PBR shader. Concatenated onto
-// `pbr_common.wgsl` (which declares `camera` and `VertexOutput`) by
+// `PBR_COMMON_SOURCE` (which declares `camera` and `VertexOutput`) by
 // `GpuContext::create_instanced_pbr_pipeline`.
 //
 // The per-object model matrix comes from an instance-step vertex buffer

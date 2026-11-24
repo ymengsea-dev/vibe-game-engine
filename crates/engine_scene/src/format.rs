@@ -1345,6 +1345,10 @@ pub enum ColliderShape {
         /// The mesh asset to collide against.
         mesh: AssetRef,
     },
+    /// The entity's own terrain ([`SceneEntity::terrain`]), as a
+    /// heightfield: every tile merged into one, cells of missing tiles
+    /// left open. Collides exactly with the drawn ground.
+    Terrain,
 }
 
 /// How a [`SceneEntity`]'s body behaves in the simulation.
@@ -1808,6 +1812,9 @@ pub struct SceneEntity {
     /// Authored instanced foliage group, absent in older scenes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foliage: Option<FoliageData>,
+    /// A terrain: tiles of heights and paint layers. Absent in older scenes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terrain: Option<crate::terrain::TerrainData>,
     /// A project-relative path to the asset file this entity was created
     /// from, if any — set by the editor's drag-an-asset-into-the-scene
     /// action, before a real import/GPU resolution exists. Additive and
