@@ -198,7 +198,7 @@ fn paint_resize_grip(ui: &egui::Ui, parent: egui::Rect, panel: egui::Rect) {
 /// Draws the grip of one resizable edge split into `edges`, one per card
 /// along it (as above the Scene workspace's bottom row, where one drag
 /// resizes both Project Assets and the Console): dots in the middle of each,
-/// or, while the edge is hovered or dragged, a line along each. `handle` is
+/// or, while the edge is hovered or dragged, one line across all of them. `handle` is
 /// the edge's own drag response when the caller has one; otherwise the
 /// pointer is checked against egui's grab zone around each edge.
 fn paint_grips(ui: &egui::Ui, edges: &[ResizeEdge], handle: Option<&egui::Response>) {
@@ -235,27 +235,37 @@ fn paint_grips(ui: &egui::Ui, edges: &[ResizeEdge], handle: Option<&egui::Respon
         }
     };
     let painter = ui.painter();
-    for edge in edges {
-        let (_, along, middle, range) = parts(edge);
-        if over {
-            let half = (range.span() / 2.0 - inset).max(0.0);
-            let color = if dragging {
-                palette.accent
-            } else {
-                palette.accent.gamma_multiply(0.55)
-            };
-            painter.line_segment(
-                [middle - along * half, middle + along * half],
-                egui::Stroke::new(2.0, color),
-            );
+    if over {
+        // One drag moves every card along the edge, so one line spans them.
+        let Some((first, rest)) = edges.split_first() else {
+            return;
+        };
+        let (_, along, start, range) = parts(first);
+        let range = rest.iter().fold(range, |range, edge| {
+            let other = parts(edge).3;
+            egui::Rangef::new(range.min.min(other.min), range.max.max(other.max))
+        });
+        let middle = start + along * (range.center() - along.dot(start.to_vec2()));
+        let half = (range.span() / 2.0 - inset).max(0.0);
+        let color = if dragging {
+            palette.accent
         } else {
-            for step in [-1.0, 0.0, 1.0] {
-                painter.circle_filled(
-                    middle + along * (step * 4.5),
-                    1.1,
-                    palette.muted.gamma_multiply(0.7),
-                );
-            }
+            palette.accent.gamma_multiply(0.55)
+        };
+        painter.line_segment(
+            [middle - along * half, middle + along * half],
+            egui::Stroke::new(2.0, color),
+        );
+        return;
+    }
+    for edge in edges {
+        let (_, along, middle, _) = parts(edge);
+        for step in [-1.0, 0.0, 1.0] {
+            painter.circle_filled(
+                middle + along * (step * 4.5),
+                1.1,
+                palette.muted.gamma_multiply(0.7),
+            );
         }
     }
 }
@@ -934,9 +944,9 @@ const SCENE_TOP_MIN: f32 = 140.0;
 const SCENE_BOTTOM_MIN: f32 = 90.0;
 
 fn scene_default_splits(width: f32, height: f32) -> (f32, f32, f32, f32) {
-    let inspector = width * 0.20;
+    let inspector = width * 0.245;
     let remaining = width - inspector;
-    (inspector, remaining * 0.20, height * 0.40, remaining * 0.38)
+    (inspector, remaining * 0.215, height * 0.40, remaining * 0.455)
 }
 
 /// The Scene prototype's four splitters belong to separate sibling panels.
@@ -5798,10 +5808,10 @@ mod ui_tests {
     fn scene_defaults_scale_with_available_space() {
         let small = super::scene_default_splits(1512.0, 790.0);
         let large = super::scene_default_splits(2016.0, 1053.0);
-        assert!((small.0 - 302.4).abs() < 0.001);
-        assert!((small.1 - 241.92).abs() < 0.001);
+        assert!((small.0 - 370.44).abs() < 0.001);
+        assert!((small.1 - 245.4354).abs() < 0.001);
         assert!((small.2 - 316.0).abs() < 0.001);
-        assert!((small.3 - 459.648).abs() < 0.001);
+        assert!((small.3 - 519.4098).abs() < 0.001);
         assert!((large.0 / small.0 - 2016.0 / 1512.0).abs() < 0.001);
         assert!((large.2 / small.2 - 1053.0 / 790.0).abs() < 0.001);
     }
