@@ -61,6 +61,15 @@ pub enum GameCommand {
         /// Finite value.
         value: f64,
     },
+    /// Set a shader graph parameter on one object's material.
+    SetMaterialValue {
+        /// Stable scene object ID of the object.
+        object_id: String,
+        /// The parameter's name in the graph, 1 to 32 bytes.
+        name: String,
+        /// Finite value; a number parameter reads the first component.
+        value: [f32; 4],
+    },
     /// Change how fast an animated model's clip plays.
     SetAnimationSpeed {
         /// Stable scene object ID of the animated model.

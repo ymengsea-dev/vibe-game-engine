@@ -192,12 +192,12 @@ impl SceneResolver for EditorResolver<'_> {
             .material
             .and_then(|index| gltf.materials.get(index));
         let importer = self.importer;
-        let (material, sources) = engine_scene::compose_material(
-            imported_material,
-            material_file(importer, material_override),
-            material_override,
-        );
-        let images = sources.images(Some(gltf), |reference| image_asset(importer, reference));
+        let file = material_file(importer, material_override);
+        let (material, sources) =
+            engine_scene::compose_material(imported_material, file, material_override);
+        let mut images = sources.images(Some(gltf), |reference| image_asset(importer, reference));
+        let graph = engine_scene::material_graph(file, material_override);
+        images.graph = graph.as_ref().map(engine_scene::MaterialGraph::shader);
 
         let renderer = MeshRenderer::from_geometry_with_maps(
             self.gpu,

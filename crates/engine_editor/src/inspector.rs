@@ -37,7 +37,19 @@ mod graph;
 mod lights;
 mod material;
 pub use material::material_file_editor;
+pub(crate) use shader_graph::show as shader_graph_window;
+#[cfg(test)]
+pub(crate) use shader_graph::starter_graph as starter_shader_graph;
+
+/// Opens the Shader Graph window of material file `key` with `node`
+/// selected.
+#[cfg(test)]
+pub(crate) fn open_shader_graph(ctx: &egui::Context, key: &str, node: u32) {
+    shader_graph::open(ctx, key);
+    shader_graph::select(ctx, key, node);
+}
 mod road;
+mod shader_graph;
 pub(crate) use road::take_apply_request as take_road_apply_request;
 mod stream_area;
 mod tilemap;

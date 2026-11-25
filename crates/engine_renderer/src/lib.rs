@@ -151,6 +151,7 @@ mod config;
 mod debug_draw;
 mod error;
 mod gpu;
+mod graph;
 mod instancing;
 mod light;
 mod lod;
@@ -190,6 +191,10 @@ pub use config::{
 };
 pub use debug_draw::DebugDraw;
 pub use error::RendererError;
+pub use graph::{
+    GRAPH_HELPERS, GRAPH_PARAM_SLOTS, GraphParamsUniform, GraphPipelines, GraphShader,
+    check_graph_source, graph_module_source,
+};
 pub use gpu::{GpuContext, REQUESTED_MSAA_SAMPLE_COUNT};
 pub use instancing::{InstanceBuffer, InstanceRaw, InstancedDrawable, InstancedPipeline};
 pub use light::{

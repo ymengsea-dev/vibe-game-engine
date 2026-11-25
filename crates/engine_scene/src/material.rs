@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SceneError;
 use crate::format::{AssetRef, MaterialOverrideData};
+use crate::shader_graph::{ShaderGraphData, compile};
 
 /// The file extension of a material file.
 pub const MATERIAL_EXTENSION: &str = "material";
@@ -114,6 +115,10 @@ pub struct MaterialData {
     /// The images.
     #[serde(default, skip_serializing_if = "MaterialImageRefs::is_empty")]
     pub images: MaterialImageRefs,
+    /// A shader graph making the surface from the images instead of the
+    /// settings above; repeat, shift, alpha and two-sided still apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<ShaderGraphData>,
 }
 
 fn white() -> [f32; 4] {
@@ -143,6 +148,7 @@ impl Default for MaterialData {
             alpha: MaterialAlpha::Opaque,
             two_sided: false,
             images: MaterialImageRefs::default(),
+            graph: None,
         }
     }
 }
@@ -191,6 +197,9 @@ impl MaterialData {
             && !unit(threshold)
         {
             return Err("cutout threshold must be between 0 and 1".into());
+        }
+        if let Some(graph) = &self.graph {
+            graph.validate()?;
         }
         self.images.validate()
     }
@@ -360,8 +369,66 @@ impl MaterialMapSources {
             emissive: image(&self.emissive),
             occlusion: image(&self.occlusion),
             metallic_roughness: image(&self.metallic_roughness),
+            graph: None,
         }
     }
+}
+
+/// A material's shader graph compiled, with each parameter's value: the
+/// graph's default, or the object's own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaterialGraph {
+    /// The graph's WGSL functions.
+    pub source: String,
+    /// The parameters' names, in slot order.
+    pub names: Vec<String>,
+    /// The parameter buffer: time, then each parameter.
+    pub values: [[f32; 4]; engine_renderer::GRAPH_PARAM_SLOTS],
+}
+
+impl MaterialGraph {
+    /// For [`MaterialImages::graph`].
+    pub fn shader(&self) -> engine_renderer::GraphShader<'_> {
+        engine_renderer::GraphShader {
+            source: &self.source,
+            values: self.values,
+            names: &self.names,
+        }
+    }
+}
+
+/// The shader graph an object draws with, if its material file has one
+/// that compiles. A graph that does not compile is logged and the object
+/// keeps the standard material.
+pub fn material_graph(
+    file: Option<&MaterialData>,
+    changes: Option<&MaterialOverrideData>,
+) -> Option<MaterialGraph> {
+    let graph = file?.graph.as_ref()?;
+    let compiled = match compile(graph) {
+        Ok(compiled) => compiled,
+        Err(error) => {
+            tracing::warn!("shader graph does not compile: {error}");
+            return None;
+        }
+    };
+    let mut values = [[0.0; 4]; engine_renderer::GRAPH_PARAM_SLOTS];
+    let mut names = Vec::new();
+    for (slot, (name, default, _)) in compiled.parameters.into_iter().enumerate() {
+        let value = changes
+            .and_then(|changes| changes.parameters.get(&name))
+            .copied()
+            .unwrap_or(default);
+        if let Some(target) = values.get_mut(slot + 1) {
+            *target = value;
+        }
+        names.push(name);
+    }
+    Some(MaterialGraph {
+        source: compiled.source,
+        names,
+        values,
+    })
 }
 
 /// What an object draws with: its model's material (`imported`), or the
@@ -450,6 +517,7 @@ mod tests {
             alpha: MaterialAlpha::Blend,
             two_sided: true,
             images: MaterialImageRefs::default(),
+            graph: None,
         };
         let material = data.to_material();
         assert_eq!(material.base_color_factor, data.base_color);

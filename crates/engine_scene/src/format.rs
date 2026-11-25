@@ -546,6 +546,10 @@ pub struct MaterialOverrideData {
     /// Images replacing the material's own, map by map.
     #[serde(default, skip_serializing_if = "crate::MaterialImageRefs::is_empty")]
     pub images: crate::MaterialImageRefs,
+    /// Shader graph parameters set for this object, by name; the rest keep
+    /// the graph's defaults. Ignored when the material is not a graph.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameters: std::collections::BTreeMap<String, [f32; 4]>,
 }
 
 impl Default for MaterialOverrideData {
@@ -558,6 +562,7 @@ impl Default for MaterialOverrideData {
             two_sided: false,
             material: None,
             images: crate::MaterialImageRefs::default(),
+            parameters: std::collections::BTreeMap::new(),
         }
     }
 }

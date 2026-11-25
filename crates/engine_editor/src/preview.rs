@@ -393,34 +393,65 @@ pub fn material_thumbnail(
     material: &engine_scene::MaterialData,
     base: Option<engine_ecs::components::RgbaImage<'_>>,
 ) -> Vec<u8> {
+    material_thumbnail_with(material, &|image| {
+        (image == engine_scene::GraphImage::Colour)
+            .then_some(base)
+            .flatten()
+    })
+}
+
+/// [`material_thumbnail`] with every image the material has: `images`
+/// gives each slot's pixels. A material with a shader graph that compiles
+/// is drawn from the graph (at time `0`, without its vertex offset).
+pub fn material_thumbnail_with<'a>(
+    material: &engine_scene::MaterialData,
+    images: &dyn Fn(engine_scene::GraphImage) -> Option<engine_ecs::components::RgbaImage<'a>>,
+) -> Vec<u8> {
     let side = MODEL_THUMBNAIL_PX;
     let light = Vec3::new(-0.5, 0.7, 0.6).normalize();
     let view = Vec3::Z;
     let half_way = (light + view).normalize();
     let to_linear = |value: u8| (f32::from(value) / 255.0).powf(2.2);
-    let sample = |u: f32, v: f32| -> [f32; 4] {
-        let Some((width, height, pixels)) = base else {
-            return [1.0; 4];
+    let sample = |image: engine_scene::GraphImage, u: f32, v: f32| -> [f32; 4] {
+        let neutral = match image {
+            engine_scene::GraphImage::Bumps => [0.5, 0.5, 1.0, 1.0],
+            engine_scene::GraphImage::Glow => [0.0, 0.0, 0.0, 1.0],
+            _ => [1.0; 4],
+        };
+        let Some((width, height, pixels)) = images(image) else {
+            return neutral;
         };
         if width == 0 || height == 0 {
-            return [1.0; 4];
+            return neutral;
         }
         let x = (u.rem_euclid(1.0) * width as f32) as usize % width as usize;
         let y = (v.rem_euclid(1.0) * height as f32) as usize % height as usize;
         let at = (y * width as usize + x) * 4;
+        let colour = matches!(
+            image,
+            engine_scene::GraphImage::Colour | engine_scene::GraphImage::Glow
+        );
+        let channel = |value: u8| {
+            if colour {
+                to_linear(value)
+            } else {
+                f32::from(value) / 255.0
+            }
+        };
         match pixels.get(at..at + 4) {
             Some(texel) => [
-                to_linear(texel[0]),
-                to_linear(texel[1]),
-                to_linear(texel[2]),
+                channel(texel[0]),
+                channel(texel[1]),
+                channel(texel[2]),
                 f32::from(texel[3]) / 255.0,
             ],
-            None => [1.0; 4],
+            None => neutral,
         }
     };
-    let metallic = material.metallic.clamp(0.0, 1.0);
-    let roughness = material.roughness.clamp(0.05, 1.0);
-    let shininess = (2.0 / roughness.powi(4) - 2.0).clamp(1.0, 4096.0);
+    let graph = material
+        .graph
+        .as_ref()
+        .and_then(|graph| engine_scene::Evaluator::new(graph).ok());
     let mut rgba = vec![0u8; side * side * 4];
     for row in 0..side {
         for column in 0..side {
@@ -430,25 +461,73 @@ pub fn material_thumbnail(
             if r2 > 1.0 {
                 continue;
             }
-            let normal = Vec3::new(x, y, (1.0 - r2).sqrt());
+            let mut normal = Vec3::new(x, y, (1.0 - r2).sqrt());
             let u = 0.5 + normal.x.atan2(normal.z) / std::f32::consts::TAU;
             let v = 0.5 - normal.y.asin() / std::f32::consts::PI;
-            let texel = sample(
+            let uv = [
                 u * material.uv_scale[0] + material.uv_offset[0],
                 v * material.uv_scale[1] + material.uv_offset[1],
-            );
-            let alpha = material.base_color[3] * texel[3];
+            ];
+            let (albedo, alpha, metallic, roughness, emissive) = match &graph {
+                Some(graph) => {
+                    let values = graph.evaluate(
+                        &engine_scene::SurfacePoint {
+                            uv,
+                            world_position: normal.to_array(),
+                            normal: normal.to_array(),
+                            view_direction: view.to_array(),
+                            time: 0.0,
+                        },
+                        &|image, at| sample(image, at[0], at[1]),
+                    );
+                    // Bend the normal with a tangent round the ball's equator.
+                    let tangent = Vec3::new(normal.z, 0.0, -normal.x).normalize_or(Vec3::X);
+                    let bitangent = normal.cross(tangent);
+                    let [tx, ty, tz] = values.normal;
+                    let bent = (tangent * tx + bitangent * ty + normal * tz).normalize_or_zero();
+                    if bent != Vec3::ZERO {
+                        normal = bent;
+                    }
+                    (
+                        Vec3::from_array(values.base_color).max(Vec3::ZERO),
+                        values.alpha,
+                        values.metallic,
+                        values.roughness,
+                        Vec3::from_array(values.emissive).max(Vec3::ZERO),
+                    )
+                }
+                None => {
+                    let texel = sample(engine_scene::GraphImage::Colour, uv[0], uv[1]);
+                    (
+                        Vec3::new(
+                            material.base_color[0] * texel[0],
+                            material.base_color[1] * texel[1],
+                            material.base_color[2] * texel[2],
+                        ),
+                        material.base_color[3] * texel[3],
+                        material.metallic,
+                        material.roughness,
+                        Vec3::from_array(material.emissive),
+                    )
+                }
+            };
             let alpha = match material.alpha {
                 engine_scene::MaterialAlpha::Opaque => 1.0,
                 engine_scene::MaterialAlpha::Cutout { threshold } if alpha < threshold => continue,
                 engine_scene::MaterialAlpha::Cutout { .. } => 1.0,
                 engine_scene::MaterialAlpha::Blend => alpha,
             };
-            let albedo = Vec3::new(
-                material.base_color[0] * texel[0],
-                material.base_color[1] * texel[1],
-                material.base_color[2] * texel[2],
-            );
+            let metallic = if metallic.is_finite() {
+                metallic.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let roughness = if roughness.is_finite() {
+                roughness.clamp(0.05, 1.0)
+            } else {
+                1.0
+            };
+            let shininess = (2.0 / roughness.powi(4) - 2.0).clamp(1.0, 4096.0);
             let lit = normal.dot(light).max(0.0);
             let f0 = Vec3::splat(0.04).lerp(albedo, metallic);
             let specular = f0
@@ -458,14 +537,23 @@ pub fn material_thumbnail(
             let colour = albedo * (1.0 - metallic) * (lit + 0.15)
                 + albedo * metallic * 0.15
                 + specular
-                + Vec3::from_array(material.emissive);
-            let to_byte =
-                |value: f32| (value.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8;
+                + emissive;
+            let to_byte = |value: f32| {
+                if value.is_finite() {
+                    (value.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8
+                } else {
+                    0
+                }
+            };
             let at = (row * side + column) * 4;
             rgba[at] = to_byte(colour.x);
             rgba[at + 1] = to_byte(colour.y);
             rgba[at + 2] = to_byte(colour.z);
-            rgba[at + 3] = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[at + 3] = if alpha.is_finite() {
+                (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
+            } else {
+                255
+            };
         }
     }
     rgba

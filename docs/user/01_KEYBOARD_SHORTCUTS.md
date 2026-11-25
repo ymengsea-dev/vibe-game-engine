@@ -154,6 +154,22 @@ Open it from the Inspector: **AI → Brain → Behaviour tree → Edit behaviour
 
 While the game plays, the window can't be changed. With **Play** in the Scene View, it shows what each node of the selected object's tree answered on the last frame: a yellow dot for still running, green for worked, red for failed. Nodes the tree didn't reach are faded. Select the object and open the window before pressing Play: the Hierarchy and Inspector are locked while playing.
 
+## Shader graph window
+
+Open it from a material file's Inspector: **Surface → Shader graph**, then **Edit graph**.
+
+| Shortcut | What it does |
+| --- | --- |
+| Click a node | Select it and show its settings below |
+| Drag a node | Move it |
+| Drag empty space | Move the view |
+| Drag from an output dot to an input dot | Join them with a wire; an input takes one wire, so a new one replaces the old |
+| Drag a wire off an input dot | Pick it up to move it to another input, or drop it on empty space to remove it |
+| Right-click empty space | Add a node there; type to search |
+| **+ Node** | Add a node in the middle of the view; type to search |
+| **Delete** or **Backspace**, or the **Delete** button | Remove the selected node (not Surface) |
+| **Reset view** | Move the view back to the start |
+
 ## Code panel
 
 | Shortcut | What it does |

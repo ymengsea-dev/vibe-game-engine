@@ -19,7 +19,7 @@ use std::sync::atomic::Ordering;
 
 use crate::components::{
     Disabled, GlobalTransform, Hidden, InstancedMeshRenderer, MeshLod, MeshRenderer,
-    SkinnedMeshRenderer, Sprite, VegetationRenderer,
+    ShaderParameterRequests, SkinnedMeshRenderer, Sprite, VegetationRenderer,
 };
 use crate::propagate::propagate_transforms;
 
@@ -623,6 +623,7 @@ pub fn extract_and_render_to(
     draw_disabled: bool,
 ) -> Result<RenderStats, RendererError> {
     propagate_transforms(world);
+    apply_shader_parameters(world, assets, gpu);
 
     // Sprites first: `extract_sprites` needs `&mut World`, and every
     // collection below borrows the world shared for the rest of the
@@ -1372,6 +1373,24 @@ pub fn despawn_vegetation_renderer(
         assets.materials.release(plants.material);
     }
     world.despawn(entity)
+}
+
+/// Writes each object's pending [`ShaderParameterRequests`] into its
+/// material and clears them.
+fn apply_shader_parameters(world: &mut World, assets: &RenderAssets, gpu: &GpuContext) {
+    let mut query = world.query::<(&MeshRenderer, &mut ShaderParameterRequests)>();
+    for (renderer, mut requests) in query.iter_mut(world) {
+        if requests.0.is_empty() {
+            continue;
+        }
+        if let Some(material) = assets.materials.get(renderer.material) {
+            for (name, value) in requests.0.drain(..) {
+                gpu.set_graph_parameter(material, &name, value);
+            }
+        } else {
+            requests.0.clear();
+        }
+    }
 }
 
 #[cfg(test)]

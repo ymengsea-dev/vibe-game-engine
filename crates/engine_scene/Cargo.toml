@@ -24,5 +24,8 @@ engine_asset.workspace = true
 engine_audio.workspace = true
 engine_ui.workspace = true
 
+[dev-dependencies]
+naga.workspace = true
+
 [lints]
 workspace = true

@@ -718,9 +718,11 @@ impl SceneResolver for RuntimeResolver<'_> {
         let (material, sources) =
             crate::compose_material(imported_material, file.as_ref(), material_override);
         let textures = self.image_assets(&sources);
-        let images = sources.images(Some(&gltf), |reference| {
+        let mut images = sources.images(Some(&gltf), |reference| {
             textures.get(&reference.id).and_then(texture_pixels)
         });
+        let graph = crate::material_graph(file.as_ref(), material_override);
+        images.graph = graph.as_ref().map(crate::MaterialGraph::shader);
 
         let renderer = MeshRenderer::from_geometry_with_maps(
             self.gpu,
@@ -1499,6 +1501,47 @@ mod tests {
         material.images.base_color = Some(AssetRef {
             id: image_id.into(),
         });
+        // A graph: the colour image tinted by a parameter, glowing with time.
+        let mut graph = crate::ShaderGraphData::new();
+        let node = |id, kind| crate::ShaderNodeData {
+            id,
+            kind,
+            position: [0.0, 0.0],
+        };
+        let wire = |from, to, to_pin| crate::ShaderWire {
+            from,
+            from_pin: 0,
+            to,
+            to_pin,
+        };
+        graph.nodes.extend([
+            node(
+                1,
+                crate::ShaderNodeKind::Texture {
+                    image: crate::GraphImage::Colour,
+                },
+            ),
+            node(
+                2,
+                crate::ShaderNodeKind::Parameter {
+                    name: "Tint".into(),
+                    default: [1.0; 4],
+                    colour: true,
+                },
+            ),
+            node(3, crate::ShaderNodeKind::Multiply),
+            node(4, crate::ShaderNodeKind::Time),
+            node(5, crate::ShaderNodeKind::Sin),
+        ]);
+        graph.wires.extend([
+            wire(1, 3, 0),
+            wire(2, 3, 1),
+            wire(3, 0, 0),
+            wire(4, 5, 0),
+            wire(5, 0, 4),
+            wire(5, 0, 6),
+        ]);
+        material.graph = Some(graph);
         let file = root.join("stone.material");
         material.save(&file).expect("material file");
         std::fs::write(
@@ -1534,6 +1577,9 @@ mod tests {
             .expect("the model is there");
         let binding = assets.materials.get(renderer.material).expect("binding");
         assert!(binding.transparent, "the material file's Blend was used");
+        assert!(binding.is_graph(), "the material file's graph was built");
+        assert!(gpu.set_graph_parameter(binding, "Tint", [1.0, 0.0, 0.0, 1.0]));
+        assert!(!gpu.set_graph_parameter(binding, "Missing", [0.0; 4]));
         let _ = std::fs::remove_dir_all(&root);
     }
 

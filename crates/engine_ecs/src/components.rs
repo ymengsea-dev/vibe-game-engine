@@ -741,6 +741,13 @@ impl SkinnedMeshRenderer {
     }
 }
 
+/// Shader graph parameter values waiting to reach an object's material,
+/// set by scripts and rules; [`crate::render::extract_and_render`] writes
+/// them into the [`MeshRenderer`]'s material and clears the list. A name
+/// the material's graph does not have is dropped.
+#[derive(bevy_ecs::component::Component, Debug, Default, Clone, PartialEq)]
+pub struct ShaderParameterRequests(pub Vec<(String, [f32; 4])>);
+
 /// An RGBA8 image: width, height and tightly packed pixels.
 pub type RgbaImage<'a> = (u32, u32, &'a [u8]);
 
@@ -758,6 +765,9 @@ pub struct MaterialImages<'a> {
     pub occlusion: Option<RgbaImage<'a>>,
     /// Roughness in green and metallic in blue, linear.
     pub metallic_roughness: Option<RgbaImage<'a>>,
+    /// A shader graph that turns these images into the surface, instead
+    /// of the standard material.
+    pub graph: Option<engine_renderer::GraphShader<'a>>,
 }
 
 impl MaterialImages<'_> {
@@ -798,6 +808,7 @@ impl MaterialImages<'_> {
                 emissive: emissive.as_ref(),
                 occlusion: occlusion.as_ref(),
                 metallic_roughness: metallic_roughness.as_ref(),
+                graph: self.graph,
             },
         )
     }

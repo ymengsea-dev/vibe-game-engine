@@ -47,6 +47,7 @@ mod import;
 pub mod inspect;
 pub mod inspector;
 mod menu;
+mod node_canvas;
 pub(crate) mod object_clipboard;
 mod output;
 pub mod nav_bake;

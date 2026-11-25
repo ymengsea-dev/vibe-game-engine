@@ -104,7 +104,7 @@ Status: ✅ done · 🟡 partly done · ⬜ not started
 | Clouds | A moving cloud layer in the sky, with cover, drift speed and colour | Skies that feel alive | ✅ |
 | Time of day | A clock that moves the sun and changes the sky and light colours, from sunrise to night. Set the start time and how long a day lasts; Lua and Rust games can read and set the time (`engine.set_time_of_day`) | Day and night cycles, evening scenes | ✅ |
 | Sky image | Use a panorama image (`.hdr`, `.exr`, `.png`, `.jpg`) as the sky. Its colours tint the scene's ambient light | Realistic skies from photos | ✅ |
-| Materials | Change a model's colour, shininess and roughness. Material files (Project Assets → New Material) hold colour, shine, glow, see-through and images (colour, bumps, metal/rough, shadowing, glow) with repeat and shift, and show a preview ball; drag one onto a model to use it. An object can also swap single images | Make imported models look different without editing them, and share one look across many models | 🟡 no shader graph yet |
+| Materials | Change a model's colour, shininess and roughness. Material files (Project Assets → New Material) hold colour, shine, glow, see-through and images (colour, bumps, metal/rough, shadowing, glow) with repeat and shift, and show a preview ball; drag one onto a model to use it. An object can also swap single images | Make imported models look different without editing them, and share one look across many models | ✅ |
 | Level of detail | Far away, a model switches to simpler versions of itself: ones named `_LOD1`, `_LOD2`… in the model file, or ones Studio builds when you tick "Generate simpler meshes" in the Inspector. You choose the distance where each one takes over. Animated characters too, with every version following the same skeleton | Big scenes with many models stay fast | ✅ |
 | Draw distance | An object stops being drawn past a distance you set in the Inspector, fading out instead of popping. The Scene View's **Distance detail** overlay shows it as the game will. A character past it also stops working out its pose | Skip far-away clutter you can't see anyway | ✅ |
 | World streaming | Split a big world into areas, each its own scene. A **World Area** object in the main scene loads its scene while the game camera is near and unloads it after, the nearest first, one per frame | Big open worlds without loading everything at once | ✅ |
@@ -161,10 +161,10 @@ Status: ✅ done · 🟡 partly done · ⬜ not started
 | Prefabs with children | Make Prefab saves an object with everything under it, and a dropped or spawned prefab brings it all back with its scripts, colliders, lights and sounds | Reuse a turret with its gun, or a house with its door | ✅ |
 | Linked prefab copies | A placed copy follows its prefab file. Change a field and it stays this copy's own; everything else updates when the prefab does. Apply to prefab sends the copy's changes to the prefab and other copies; Revert drops them. Both act on the whole copy. Apply can't be undone. Renaming the file breaks the link, and a prefab inside a prefab is saved as plain objects | Fix one crate and have them all fixed, while one keeps its own colour | ✅ |
 | Blueprint-style graph | A full visual programming graph | Bigger games without code | ⬜ |
-| Shader graph | Build visual effects from nodes | Custom looks without shader code | ⬜ |
+| Shader graph | Switch a material file to Shader graph and build its colour, shine, bumps, glow, see-through and vertex movement from nodes (images, time, maths, noise, rim light). Parameters can differ per object and be set by Lua or Rust scripts | Glowing pulses, water, dissolves and other custom looks without shader code | ✅ |
 
 ## 9. Still to do
 
 - Test the 2D and 3D starter projects in the running editor.
 - Package and test Studio on Windows and Linux, including a clean machine without Rust.
-- Blueprint-style graph and shader graph.
+- Blueprint-style graph.

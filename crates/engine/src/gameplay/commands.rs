@@ -17,6 +17,10 @@ use glam::{Quat, Vec3};
 
 use super::GameplayError;
 
+/// Most shader graph values one object may have waiting: a graph has at
+/// most seven parameters.
+const MAX_PENDING_MATERIAL_VALUES: usize = 8;
+
 /// The live entity carrying a stable scene object ID, if any.
 pub fn find_object(world: &World, object_id: &str) -> Option<Entity> {
     world
@@ -108,6 +112,33 @@ pub fn apply_world_commands(
                 name,
                 value,
             } => set_animator_value(world, object_id, name, *value),
+            GameCommand::SetMaterialValue {
+                object_id,
+                name,
+                value,
+            } => match find_object(world, object_id) {
+                Some(entity) if value.iter().all(|v| v.is_finite()) => {
+                    let mut target = world.entity_mut(entity);
+                    match target.get_mut::<engine_ecs::components::ShaderParameterRequests>() {
+                        // One pending value per name, and only a few names:
+                        // an object without a mesh never drains its list.
+                        Some(mut requests) => {
+                            requests.0.retain(|(other, _)| other != name);
+                            if requests.0.len() < MAX_PENDING_MATERIAL_VALUES {
+                                requests.0.push((name.clone(), *value));
+                            }
+                        }
+                        None => {
+                            target.insert(engine_ecs::components::ShaderParameterRequests(vec![(
+                                name.clone(),
+                                *value,
+                            )]));
+                        }
+                    }
+                }
+                Some(_) => tracing::warn!(%object_id, "requested a non-finite material value"),
+                None => tracing::warn!(%object_id, "material target is missing"),
+            },
             GameCommand::SetAnimationSpeed { object_id, speed } => {
                 match find_object(world, object_id)
                     .and_then(|entity| world.get_mut::<AnimationPlayer>(entity))

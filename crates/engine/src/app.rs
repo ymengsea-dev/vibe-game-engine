@@ -2517,6 +2517,7 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
         return;
     }
     runtime.warned_invalid_camera = false;
+    runtime.pipeline.set_shader_time(runtime.time.elapsed);
 
     // Built before the borrow-heavy render call, since it reads the UI
     // tree while that call takes the world mutably.

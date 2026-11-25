@@ -161,6 +161,10 @@ fn overlay_lines(placeholders: &[Vec3]) -> Vec<DebugLineVertex> {
 pub struct Viewport {
     /// When the last animation preview frame was drawn.
     preview_clock: Option<std::time::Instant>,
+    /// What shader graphs' Time counts from. The Scene View redraws only
+    /// when something changes, so graphs move between redraws, not
+    /// smoothly.
+    shader_clock: std::time::Instant,
     width: u32,
     height: u32,
     view: wgpu::TextureView,
@@ -306,6 +310,7 @@ impl Viewport {
 
         Ok(Self {
             preview_clock: None,
+            shader_clock: std::time::Instant::now(),
             width,
             height,
             view,
@@ -661,6 +666,8 @@ impl Viewport {
     ) -> Option<CullReport> {
         self.update_water(gpu, world);
         self.tick_animation_previews(gpu, world);
+        self.pipeline
+            .set_shader_time(self.shader_clock.elapsed().as_secs_f32());
         self.lights = editor_lights(world);
         // The Scene View shows a scene with time of day at its start hour,
         // with clouds standing still so an idle view doesn't redraw.

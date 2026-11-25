@@ -16,6 +16,7 @@ use crate::input::{ButtonState, InputSnapshot};
 
 mod ai_api;
 mod animation_api;
+mod material_api;
 mod camera_api;
 mod input_api;
 mod object_api;
@@ -975,6 +976,8 @@ impl LuaRuntime {
         camera_api::register(&lua, &engine, &commands, &scene, &active_callback)
             .map_err(ScriptError::Initialize)?;
         animation_api::register(&lua, &engine, &commands, &active_callback)
+            .map_err(ScriptError::Initialize)?;
+        material_api::register(&lua, &engine, &commands, &active_callback)
             .map_err(ScriptError::Initialize)?;
         ai_api::register(&lua, &engine, &commands, &active_callback)
             .map_err(ScriptError::Initialize)?;

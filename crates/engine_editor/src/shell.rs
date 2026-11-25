@@ -4363,7 +4363,10 @@ fn material_file_panel(ui: &mut egui::Ui, state: &mut EditorState, path: &std::p
         }
     };
     material_preview(ui, state, &edited);
-    if inspector::material_file_editor(ui, &name, &mut edited, &state.asset_index) {
+    let key = path.to_string_lossy();
+    let mut changed = inspector::material_file_editor(ui, &key, &name, &mut edited, &state.asset_index);
+    changed |= inspector::shader_graph_window(ui.ctx(), &key, &name, &mut edited);
+    if changed {
         if let Ok(data) = state.material_being_edited(path) {
             *data = edited;
         }
@@ -4389,19 +4392,24 @@ fn material_preview(ui: &mut egui::Ui, state: &EditorState, material: &engine_sc
     let texture = match cached {
         Some((_, texture)) => texture,
         None => {
-            let base = material
-                .images
-                .base_color
-                .as_ref()
-                .and_then(|image| crate::assets::parse_asset_id(&image.id))
-                .and_then(|id| match state.importer.get(id) {
+            let side = crate::preview::MATERIAL_PREVIEW_PX;
+            let pixels = crate::preview::material_thumbnail_with(material, &|image| {
+                let images = &material.images;
+                let reference = match image {
+                    engine_scene::GraphImage::Colour => &images.base_color,
+                    engine_scene::GraphImage::Bumps => &images.normal,
+                    engine_scene::GraphImage::Glow => &images.emissive,
+                    engine_scene::GraphImage::Shadowing => &images.occlusion,
+                    engine_scene::GraphImage::MetalRough => &images.metallic_roughness,
+                };
+                let id = crate::assets::parse_asset_id(&reference.as_ref()?.id)?;
+                match state.importer.get(id) {
                     Some(crate::ImportedAsset::Texture(texture)) => {
                         engine_scene::texture_pixels(texture)
                     }
                     _ => None,
-                });
-            let side = crate::preview::MATERIAL_PREVIEW_PX;
-            let pixels = crate::preview::material_thumbnail(material, base);
+                }
+            });
             let image = egui::ColorImage::from_rgba_unmultiplied([side, side], &pixels);
             let texture = ui.ctx().load_texture(
                 "inspector-material-preview",
@@ -6878,6 +6886,94 @@ mod ui_tests {
         crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 1000.0), 2.0, |ui| {
             egui::Panel::right("snapshot_inspector")
                 .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `shader-graph-window.png`: a material whose shader graph tints
+    /// its colour image with a parameter and glows at the rim, the window
+    /// open beside the Inspector with the Fresnel node selected.
+    #[test]
+    #[ignore = "renders on the GPU; run with --ignored"]
+    fn snapshot_shader_graph_window() {
+        use engine_scene::{GraphImage, ShaderNodeData, ShaderNodeKind, ShaderWire};
+        let (root, mut state) = menu_test_state();
+        let mut material = engine_scene::MaterialData::default();
+        let mut graph = crate::inspector::starter_shader_graph(&material);
+        let node = |id, kind, x, y| ShaderNodeData {
+            id,
+            kind,
+            position: [x, y],
+        };
+        graph.nodes[0].position = [560.0, 40.0];
+        for (id, at) in [(3, [300.0, 20.0]), (4, [300.0, 140.0]), (5, [300.0, 230.0])] {
+            if let Some(n) = graph.nodes.iter_mut().find(|n| n.id == id) {
+                n.position = at;
+            }
+        }
+        graph.nodes.retain(|n| n.id != 2);
+        graph.wires.retain(|w| w.from != 2);
+        graph.nodes.extend([
+            node(
+                6,
+                ShaderNodeKind::Parameter {
+                    name: "Tint".into(),
+                    default: [0.9, 0.45, 0.3, 1.0],
+                    colour: true,
+                },
+                40.0,
+                130.0,
+            ),
+            node(7, ShaderNodeKind::Fresnel, 40.0, 250.0),
+            node(
+                8,
+                ShaderNodeKind::Colour {
+                    value: [0.2, 0.6, 1.0, 1.0],
+                },
+                40.0,
+                330.0,
+            ),
+            node(9, ShaderNodeKind::Multiply, 300.0, 320.0),
+        ]);
+        let wire = |from, to, to_pin| ShaderWire {
+            from,
+            from_pin: 0,
+            to,
+            to_pin,
+        };
+        graph
+            .wires
+            .extend([wire(6, 3, 1), wire(7, 9, 0), wire(8, 9, 1), wire(9, 0, 4)]);
+        if let Some(texture) = graph.nodes.iter_mut().find(|n| n.id == 1) {
+            texture.kind = ShaderNodeKind::Texture {
+                image: GraphImage::Colour,
+            };
+        }
+        material.graph = Some(graph);
+        material
+            .save(&state.project.assets_dir().join("Glass.material"))
+            .expect("material file");
+        state.selected_asset = Some(std::path::PathBuf::from("Glass.material"));
+        let key = state
+            .inspected_material()
+            .expect("the material is inspected")
+            .to_string_lossy()
+            .into_owned();
+        let path = crate::ui_snapshot::snapshot_dir().join("shader-graph-window.png");
+        let mut first = true;
+        crate::ui_snapshot::render_png(&path, egui::vec2(1280.0, 860.0), 2.0, |ui| {
+            if std::mem::take(&mut first) {
+                crate::inspector::open_shader_graph(ui.ctx(), &key, 7);
+            }
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(400.0)
                 .frame(super::studio_panel_frame())
                 .show_separator_line(false)
                 .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));

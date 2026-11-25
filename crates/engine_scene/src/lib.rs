@@ -44,14 +44,15 @@ mod road;
 mod rules;
 mod runtime;
 mod save;
+mod shader_graph;
 mod stream_area;
 mod sprite_atlas;
 mod terrain;
 mod ui;
 mod validate;
 pub use material::{
-    MATERIAL_EXTENSION, MapSource, MaterialAlpha, MaterialData, MaterialImageRefs,
-    MaterialMapSources, compose_material,
+    MATERIAL_EXTENSION, MapSource, MaterialAlpha, MaterialData, MaterialGraph, MaterialImageRefs,
+    MaterialMapSources, compose_material, material_graph,
 };
 pub use validate::{MAX_TAG_BYTES, MAX_TAGS, MAX_TILE_LAYERS, valid_prefab_path, valid_scene_path};
 mod world;
@@ -129,6 +130,12 @@ pub use road::{
 pub use stream_area::{
     MAX_AREA_DISTANCE, PlacedArea, SceneStreamArea, StreamAreaData, StreamPlan, distance_to_area,
     plan_streaming,
+};
+pub use shader_graph::{
+    CompiledGraph, Evaluator, GraphError, GraphImage, InputPin, MAX_GRAPH_NODES,
+    MAX_GRAPH_PARAMETERS, MAX_PARAMETER_NAME, OUTPUT_PINS, ShaderGraphData, ShaderNodeData,
+    ShaderNodeKind, ShaderWire, SurfacePoint, SurfaceValues, compile as compile_shader_graph,
+    value_noise,
 };
 pub use save::{CURRENT_SAVE_VERSION, SaveGame, SavedEntity, WorldSnapshot};
 pub use sprite_atlas::{

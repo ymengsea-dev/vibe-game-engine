@@ -291,6 +291,15 @@ impl MeshRendererData {
                     .validate()
                     .map_err(|reason| format!("material image: {reason}"))?;
             }
+            if authored.parameters.len() > crate::MAX_GRAPH_PARAMETERS
+                || authored.parameters.iter().any(|(name, value)| {
+                    name.is_empty()
+                        || name.len() > crate::MAX_PARAMETER_NAME
+                        || !value.iter().all(|v| v.is_finite())
+                })
+            {
+                return Err("shader graph parameters: bad name, value or count".into());
+            }
         }
         if let Some(animation) = &self.animation {
             if !animation.speed.is_finite() || animation.speed.abs() > MAX_ANIMATION_SPEED {

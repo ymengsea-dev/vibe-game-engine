@@ -1507,6 +1507,31 @@ fn rust_and_lua_games_play_switch_and_pause_model_clips() {
 }
 
 #[test]
+fn material_values_wait_on_the_object_one_per_name() {
+    let mut world = crate::prelude::World::new();
+    let id = "00000000-0000-4000-8000-0000000000b1";
+    let lamp = world
+        .spawn((SceneObjectId(id.into()), Transform::default()))
+        .id();
+    let set = |name: &str, value: f32| GameCommand::SetMaterialValue {
+        object_id: id.into(),
+        name: name.into(),
+        value: [value; 4],
+    };
+    apply_commands(
+        &mut world,
+        vec![set("Glow", 1.0), set("Tint", 0.5), set("Glow", 2.0)],
+    );
+    let requests = world
+        .get::<engine_ecs::components::ShaderParameterRequests>(lamp)
+        .expect("waiting values");
+    assert_eq!(
+        requests.0,
+        vec![("Tint".to_owned(), [0.5; 4]), ("Glow".to_owned(), [2.0; 4])]
+    );
+}
+
+#[test]
 fn unknown_clip_leaves_the_model_playing_what_it_was() {
     let mut world = crate::prelude::World::new();
     let id = "00000000-0000-4000-8000-0000000000a2";

@@ -134,6 +134,9 @@ pub struct Pipeline {
     /// The terrain paint-layer pipeline, built with the same camera, model
     /// and light layouts.
     terrain: crate::terrain_gpu::TerrainPipeline,
+    /// Shader graph pipelines built so far, the shared layout they use,
+    /// and the shader clock.
+    pub(crate) graphs: crate::graph::GraphCache,
 }
 
 /// The optional maps a material can carry beyond its base colour.
@@ -151,6 +154,8 @@ pub struct MaterialMaps<'a> {
     /// glTF's metallic-roughness map: roughness in green, metallic in
     /// blue, each multiplying its factor.
     pub metallic_roughness: Option<&'a Texture>,
+    /// A shader graph to draw with instead of the standard surface.
+    pub graph: Option<crate::graph::GraphShader<'a>>,
 }
 
 /// The "this material has no such map" textures: a flat normal, black
@@ -196,15 +201,27 @@ impl Pipeline {
         &self.neutral.occlusion
     }
 
-    /// The alpha-blended, depth-write-off variant used by the sorted
-    /// transparent pass.
-    pub(crate) fn transparent(&self) -> &wgpu::RenderPipeline {
-        &self.transparent_pipeline
+    /// The alpha-blended, depth-write-off pipeline the sorted transparent
+    /// pass uses for `material`: its shader graph's, or the standard one.
+    pub(crate) fn transparent_for<'a>(
+        &'a self,
+        material: &'a MaterialBinding,
+    ) -> &'a wgpu::RenderPipeline {
+        match &material.graph {
+            Some(graph) => graph.pipelines.transparent(),
+            None => &self.transparent_pipeline,
+        }
     }
 
     /// The opaque pipeline for `material`: back faces culled unless it is
     /// double-sided.
-    pub(crate) fn opaque_for(&self, material: &MaterialBinding) -> &wgpu::RenderPipeline {
+    pub(crate) fn opaque_for<'a>(
+        &'a self,
+        material: &'a MaterialBinding,
+    ) -> &'a wgpu::RenderPipeline {
+        if let Some(graph) = &material.graph {
+            return graph.pipelines.opaque(material.double_sided);
+        }
         if material.double_sided {
             &self.two_sided_pipeline
         } else {
@@ -246,6 +263,8 @@ pub struct MaterialBinding {
     /// [`GpuContext::write_uniform_buffer`].
     pub buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// The shader graph, when the material is a graph that built.
+    pub(crate) graph: Option<crate::graph::GraphBinding>,
 }
 
 /// An object's model-matrix uniform buffer plus the bind group that
@@ -587,13 +606,15 @@ impl GpuContext {
                 }],
             });
 
+        // Visible to the vertex stage too: a shader graph's vertex offset
+        // may read the material's images and parameters.
         let material_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("material bind group layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
                             view_dimension: wgpu::TextureViewDimension::D2,
@@ -603,13 +624,13 @@ impl GpuContext {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -623,7 +644,7 @@ impl GpuContext {
                     // be four times the state for identical behaviour.
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
                             view_dimension: wgpu::TextureViewDimension::D2,
@@ -633,7 +654,7 @@ impl GpuContext {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
                             view_dimension: wgpu::TextureViewDimension::D2,
@@ -643,7 +664,7 @@ impl GpuContext {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 5,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
                             view_dimension: wgpu::TextureViewDimension::D2,
@@ -653,11 +674,24 @@ impl GpuContext {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 6,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Shader graph parameters (time first); see
+                    // `pbr_graph.wgsl`. Standard materials bind a shared
+                    // zero buffer here and never read it.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
                         count: None,
                     },
@@ -822,8 +856,10 @@ impl GpuContext {
             &model_bind_group_layout,
             &lights_bind_group_layout,
         );
+        let graphs = crate::graph::GraphCache::new(self, pipeline_layout);
         Pipeline {
             terrain,
+            graphs,
             render_pipeline,
             two_sided_pipeline,
             transparent_pipeline,
@@ -903,6 +939,22 @@ impl GpuContext {
         let metallic_roughness = maps
             .metallic_roughness
             .unwrap_or(&pipeline.neutral.occlusion);
+        let graph = maps.graph.and_then(|shader| {
+            let pipelines = self.graph_pipelines(pipeline, shader.source)?;
+            let params = self.create_uniform_buffer(
+                "shader graph parameters",
+                &crate::graph::GraphParamsUniform::new(shader.values),
+            );
+            Some(crate::graph::GraphBinding {
+                pipelines,
+                params,
+                names: shader.names.to_vec(),
+            })
+        });
+        let params = match &graph {
+            Some(graph) => &graph.params,
+            None => pipeline.graphs.default_params(),
+        };
         let bind_group = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material bind group"),
             layout: &pipeline.material_bind_group_layout,
@@ -937,11 +989,16 @@ impl GpuContext {
                     binding: 6,
                     resource: wgpu::BindingResource::TextureView(&metallic_roughness.view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: params.as_entire_binding(),
+                },
             ],
         });
         MaterialBinding {
             buffer,
             bind_group,
+            graph,
             // `2` is `AlphaMode::Blend`; see `MaterialUniform::alpha_mode`.
             transparent: material.alpha_mode == 2,
             casts_shadow: material.casts_shadow(),
@@ -1973,6 +2030,13 @@ impl GpuContext {
             render_pass.set_bind_group(0, &camera.bind_group, &[]);
             render_pass.set_bind_group(3, &lights.bind_group, &[]);
 
+            let time = pipeline.graphs.time();
+            for drawable in drawables.iter().chain(transparent) {
+                if let Some(graph) = &drawable.material.graph {
+                    self.queue()
+                        .write_buffer(&graph.params, 0, bytemuck::bytes_of(&time));
+                }
+            }
             for drawable in drawables {
                 render_pass.set_pipeline(pipeline.opaque_for(drawable.material));
                 render_pass.set_bind_group(1, &drawable.material.bind_group, &[]);
@@ -2110,10 +2174,10 @@ impl GpuContext {
             // depth but does not write it, so they blend over opaque
             // geometry without occluding each other.
             if !transparent.is_empty() {
-                render_pass.set_pipeline(pipeline.transparent());
                 render_pass.set_bind_group(0, &camera.bind_group, &[]);
                 render_pass.set_bind_group(3, &lights.bind_group, &[]);
                 for drawable in transparent {
+                    render_pass.set_pipeline(pipeline.transparent_for(drawable.material));
                     render_pass.set_bind_group(1, &drawable.material.bind_group, &[]);
                     render_pass.set_bind_group(2, &drawable.model.bind_group, &[]);
                     render_pass.set_vertex_buffer(0, drawable.mesh.vertex_buffer.slice(..));

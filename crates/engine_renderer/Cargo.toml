@@ -12,6 +12,7 @@ ab_glyph.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 wgpu.workspace = true
+naga.workspace = true
 pollster.workspace = true
 bytemuck.workspace = true
 glam.workspace = true

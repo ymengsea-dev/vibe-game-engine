@@ -46,6 +46,8 @@ engine_utils = { path = "crates/engine_utils", version = "0.1.0" }
 # `serde`: key and mouse-button codes travel in the Play-in-viewport protocol.
 winit = { version = "0.30", features = ["serde"] }
 wgpu = "30"
+# Shader graphs are checked with the same naga wgpu uses before they reach the GPU.
+naga = { version = "30", features = ["wgsl-in"] }
 # ECS / math
 bevy_ecs = "0.19"
 glam = "0.33"
