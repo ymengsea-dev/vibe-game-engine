@@ -1716,6 +1716,7 @@ impl EditorState {
         self.hierarchy.open = session.hierarchy_open;
         self.hierarchy.hidden = session.hierarchy_hidden;
         self.asset_browser.open_folders = session.asset_folders_open;
+        self.asset_browser.folder_order = session.asset_folder_order;
         match &session.scene_view {
             Some(view) => {
                 self.scene_cameras = crate::SceneCameras::from_saved(view);
@@ -1777,6 +1778,7 @@ impl EditorState {
             hierarchy_open: self.hierarchy.open.clone(),
             hierarchy_hidden: self.hierarchy.hidden.clone(),
             asset_folders_open: self.asset_browser.open_folders.clone(),
+            asset_folder_order: self.asset_browser.folder_order.clone(),
             scene_view: Some(self.scene_cameras.saved(self.dimension.is_2d())),
         }
     }

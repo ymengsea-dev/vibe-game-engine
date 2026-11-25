@@ -118,6 +118,7 @@ An object that is several things shows the first match in this list. Terrain sho
 | Shortcut | What it does |
 | --- | --- |
 | Drag onto a folder | Move a file |
+| Drag a folder onto the top or bottom edge of another folder | Put it before or after that folder (a line shows where). In another folder it moves there too. The bottom edge of an open folder puts it inside. The order is kept when Studio reopens; folders you haven't placed follow by name |
 | Enter / Esc | Keep / cancel a new name |
 | Right-click | More options |
 | Right-click a folder → **New Material** | Make a material file there |

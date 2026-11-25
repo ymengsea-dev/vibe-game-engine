@@ -7,7 +7,7 @@
 //! View was looking. It is saved automatically as these change, so none
 //! of it counts as an unsaved change to the game.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,11 @@ pub struct EditorSession {
     /// the `assets` root itself). Everything else starts folded. Additive.
     #[serde(default)]
     pub asset_folders_open: BTreeSet<PathBuf>,
+    /// The order the user dragged asset folders into: for each parent
+    /// folder (relative to `assets/`, empty for the root), its child folder
+    /// names first to last. Unlisted folders follow by name. Additive.
+    #[serde(default)]
+    pub asset_folder_order: BTreeMap<PathBuf, Vec<String>>,
     /// Where the Scene View was looking (3D and 2D) and which of the two
     /// was showing. Additive; `None` opens the default view.
     #[serde(default)]
@@ -96,6 +101,7 @@ impl Default for EditorSession {
             hierarchy_open: BTreeSet::new(),
             hierarchy_hidden: BTreeSet::new(),
             asset_folders_open: BTreeSet::new(),
+            asset_folder_order: BTreeMap::new(),
             scene_view: None,
         }
     }
@@ -208,6 +214,10 @@ mod tests {
             hierarchy_open: BTreeSet::from(["4ba9d28d-97bf-41b2-a670-97eaac2bc149".to_owned()]),
             hierarchy_hidden: BTreeSet::from(["0c5d7d1e-2f0a-4b57-9a11-6b1f3e0a7c42".to_owned()]),
             asset_folders_open: BTreeSet::from([PathBuf::new(), PathBuf::from("models/trees")]),
+            asset_folder_order: BTreeMap::from([(
+                PathBuf::new(),
+                vec!["scripts".to_owned(), "models".to_owned()],
+            )]),
             ..EditorSession::default()
         };
 

@@ -391,6 +391,9 @@ pub struct AssetBrowser {
     /// The folder new assets are imported into and new folders are
     /// created in, relative to the assets root. Empty is the root.
     pub target_dir: PathBuf,
+    /// Whether the assets root row was clicked. An empty `target_dir` is
+    /// also the starting state, which must not show the root as picked.
+    root_picked: bool,
     /// Directories found on disk, including empty ones.
     pub folders: Vec<PathBuf>,
     /// The half-typed name of a new folder while the prompt is open;
@@ -428,6 +431,11 @@ pub struct AssetBrowser {
     /// the `assets` root itself). Every other folder starts folded. Saved
     /// with the project's editor session.
     pub open_folders: std::collections::BTreeSet<PathBuf>,
+    /// The order the user dragged folders into, by parent folder (relative
+    /// to the assets root, empty for the root): child folder names, first
+    /// to last. Folders not listed follow, by name. Saved with the
+    /// project's editor session.
+    pub folder_order: std::collections::BTreeMap<PathBuf, Vec<String>>,
     /// The project's scenes, for the `scenes` folder. The shell fills this.
     pub scenes: Vec<SceneRow>,
     /// The groups of scenes, by name. The shell fills this.
@@ -487,7 +495,9 @@ impl Default for AssetBrowser {
         Self {
             view: AssetView::default(),
             target_dir: PathBuf::new(),
+            root_picked: false,
             folders: Vec::new(),
+            folder_order: std::collections::BTreeMap::new(),
             new_folder: None,
             new_folder_parent: PathBuf::new(),
             new_folder_needs_focus: false,
@@ -560,6 +570,74 @@ impl AssetBrowser {
                 clipboard.path = to.join(suffix);
             }
         }
+        // A moved or renamed folder keeps its place and its children's order.
+        let keys: Vec<PathBuf> = self
+            .folder_order
+            .keys()
+            .filter(|key| key.starts_with(from))
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Ok(suffix) = key.strip_prefix(from)
+                && let Some(order) = self.folder_order.remove(&key)
+            {
+                self.folder_order.insert(to.join(suffix), order);
+            }
+        }
+        if let (Some(from_parent), Some(from_name), Some(to_parent), Some(to_name)) =
+            (from.parent(), from.file_name(), to.parent(), to.file_name())
+            && let Some(order) = self.folder_order.get_mut(from_parent)
+        {
+            let from_name = from_name.to_string_lossy();
+            if from_parent == to_parent {
+                for name in order.iter_mut().filter(|name| **name == from_name) {
+                    *name = to_name.to_string_lossy().into_owned();
+                }
+            } else {
+                order.retain(|name| *name != from_name);
+            }
+        }
+    }
+
+    /// Puts the folder `moving` just before or after `target` among the
+    /// folders of `parent`, whose current order is `siblings`.
+    fn place_folder(
+        &mut self,
+        parent: &Path,
+        siblings: &[String],
+        moving: &str,
+        target: &str,
+        after: bool,
+    ) {
+        let mut order: Vec<String> = siblings
+            .iter()
+            .filter(|name| *name != moving)
+            .cloned()
+            .collect();
+        let at = order
+            .iter()
+            .position(|name| name == target)
+            .map_or(order.len(), |index| index + usize::from(after));
+        order.insert(at, moving.to_owned());
+        self.folder_order.insert(parent.to_path_buf(), order);
+    }
+}
+
+/// Sorts every folder's subfolders into the user's order (see
+/// [`AssetBrowser::folder_order`]), the rest after them by name.
+fn sort_folders(
+    folder: &mut AssetFolder,
+    order: &std::collections::BTreeMap<PathBuf, Vec<String>>,
+) {
+    let listed = order.get(&folder.path);
+    folder.folders.sort_by_cached_key(|child| {
+        let place = listed
+            .and_then(|names| names.iter().position(|name| *name == child.name))
+            .unwrap_or(usize::MAX);
+        (place, child.name.clone())
+    });
+    for child in &mut folder.folders {
+        sort_folders(child, order);
     }
 }
 
@@ -666,6 +744,7 @@ pub fn show_scene(
     if browser.new_folder.is_some() {
         root.ensure(&browser.new_folder_parent);
     }
+    sort_folders(&mut root, &browser.folder_order);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .max_height(ui.available_height().max(0.0))
@@ -680,7 +759,9 @@ pub fn show_scene(
                 Path::new(""),
                 browser.new_folder.is_some(),
             );
-            let selected_root = selected.is_none() && browser.target_dir.as_os_str().is_empty();
+            let selected_root = selected.is_none()
+                && browser.root_picked
+                && browser.target_dir.as_os_str().is_empty();
             let selection_shape = ui.painter().add(egui::Shape::Noop);
             let header = ui.horizontal(|ui| {
                 tree_disclosure(ui, &mut state);
@@ -692,9 +773,10 @@ pub fn show_scene(
                 || dropped_on_folder(ui, header.response.rect, browser.drop_position)
             {
                 browser.target_dir.clear();
+                browser.root_picked = true;
                 *selected = None;
             }
-            folder_drop_target(ui, &header.response, Path::new(""), browser);
+            folder_drop_target(ui, &header.response, Path::new(""), None, browser);
             header.inner.context_menu(|ui| {
                 crate::theme::style_context_menu(ui);
                 paste_menu_item(ui, browser, Path::new(""));
@@ -805,6 +887,7 @@ pub fn show(
                     if browser.new_folder.is_some() {
                         root.ensure(&browser.new_folder_parent);
                     }
+                    sort_folders(&mut root, &browser.folder_order);
                     show_folder_contents(ui, &root, entries, browser, selected, open_request);
                 }
                 AssetView::Kinds => show_kinds(ui, entries, browser, selected, open_request),
@@ -1118,14 +1201,92 @@ fn move_destination(from: &Path, is_dir: bool, target: &Path) -> Option<PathBuf>
     (destination != from).then_some(destination)
 }
 
+/// Where a folder dropped on a folder row's top or bottom edge goes: the
+/// row's parent folder, and the names of that parent's folders in their
+/// current order.
+struct FolderSlot<'a> {
+    parent: &'a Path,
+    siblings: &'a [String],
+    /// The row's folder is unfolded, so its bottom edge sits above its own
+    /// contents and a drop there goes inside it.
+    open: bool,
+}
+
+/// The share of a folder row's height, at its top and at its bottom, where
+/// a dragged folder is placed before or after the row instead of inside it.
+const FOLDER_EDGE_ZONE: f32 = 0.3;
+
 fn folder_drop_target(
     ui: &egui::Ui,
     response: &egui::Response,
     target: &Path,
+    slot: Option<FolderSlot<'_>>,
     browser: &mut AssetBrowser,
 ) {
     let file = response.dnd_hover_payload::<PathBuf>();
     let folder = response.dnd_hover_payload::<FolderDrag>();
+    // Near the row's top or bottom edge, a dragged folder goes before or
+    // after this one rather than into it.
+    let edge = slot.as_ref().zip(folder.as_ref()).and_then(|(slot, from)| {
+        let pointer = ui.input(|input| input.pointer.interact_pos())?;
+        let rect = response.rect;
+        let zone = rect.height() * FOLDER_EDGE_ZONE;
+        let after = if pointer.y < rect.top() + zone {
+            false
+        } else if pointer.y > rect.bottom() - zone && !slot.open {
+            true
+        } else {
+            return None;
+        };
+        // The new spot must not be the folder itself or inside it.
+        if from.0 == target || slot.parent.starts_with(&from.0) {
+            return None;
+        }
+        Some(after)
+    });
+    let (Some(after), Some(slot), Some(from)) = (edge, &slot, &folder) else {
+        // Not near an edge: dropping here moves the item inside, below.
+        return folder_drop_inside(ui, response, target, file, folder, browser);
+    };
+    let rect = response.rect;
+    let y = if after { rect.bottom() } else { rect.top() };
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.left() + 4.0, y),
+            egui::pos2(rect.right() - 4.0, y),
+        ],
+        egui::Stroke::new(2.0, crate::theme::NIGHT.accent),
+    );
+    if response.dnd_release_payload::<FolderDrag>().is_some()
+        && let (Some(moving), Some(target_name)) = (from.0.file_name(), target.file_name())
+    {
+        let destination = slot.parent.join(moving);
+        if destination != from.0 {
+            browser.operation_request = Some(AssetOperation::Relocate {
+                from: from.0.clone(),
+                to: destination,
+            });
+        }
+        browser.place_folder(
+            slot.parent,
+            slot.siblings,
+            &moving.to_string_lossy(),
+            &target_name.to_string_lossy(),
+            after,
+        );
+    }
+}
+
+/// Highlights `response`'s folder row while a file or folder dragged over
+/// it would move into `target`, and asks for that move on release.
+fn folder_drop_inside(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    target: &Path,
+    file: Option<std::sync::Arc<PathBuf>>,
+    folder: Option<std::sync::Arc<FolderDrag>>,
+    browser: &mut AssetBrowser,
+) {
     let file_destination = file
         .as_ref()
         .and_then(|from| move_destination(from, false, target));
@@ -1175,6 +1336,11 @@ fn show_folder_contents(
     selected: &mut Option<PathBuf>,
     open_request: &mut Option<PathBuf>,
 ) {
+    let siblings: Vec<String> = folder
+        .folders
+        .iter()
+        .map(|child| child.name.clone())
+        .collect();
     if browser.new_folder.is_some() && browser.new_folder_parent == folder.path {
         new_folder_prompt(ui, browser);
     }
@@ -1214,7 +1380,12 @@ fn show_folder_contents(
                 browser.target_dir = child.path.clone();
                 *selected = None;
             }
-            folder_drop_target(ui, &header.response, &child.path, browser);
+            let slot = FolderSlot {
+                parent: &folder.path,
+                siblings: &siblings,
+                open: state.is_open(),
+            };
+            folder_drop_target(ui, &header.response, &child.path, Some(slot), browser);
             header.inner.context_menu(|ui| {
                 asset_context_menu(ui, browser, &child.path);
             });
@@ -2552,6 +2723,166 @@ mod tests {
         );
     }
 
+    /// Drags the folder `from` to just above (`top`) or below the text of
+    /// the folder row `onto`, releases it, and returns the browser.
+    fn drop_folder_at_row_edge(
+        mut browser: AssetBrowser,
+        from: &str,
+        onto: &str,
+        top: bool,
+    ) -> AssetBrowser {
+        let ctx = egui::Context::default();
+        unfold_everything(&mut browser, &[]);
+        let mut selected = None;
+        let mut open_request = None;
+        let mut draw = |time, events, browser: &mut AssetBrowser| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300.0, 240.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show_scene(ui, &[], browser, &mut selected, &mut open_request),
+            )
+        };
+        let mut first = draw(0.0, Vec::new(), &mut browser);
+        let text = first
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == onto => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                }
+                _ => None,
+            })
+            .expect("target folder row");
+        first.textures_delta.clear();
+        let point = if top {
+            egui::pos2(text.center().x, text.top() - 1.0)
+        } else {
+            egui::pos2(text.center().x, text.bottom() + 1.0)
+        };
+        egui::DragAndDrop::set_payload(&ctx, FolderDrag(PathBuf::from(from)));
+        let mut hovered = draw(
+            0.1,
+            vec![
+                egui::Event::PointerMoved(point),
+                pointer_button(point, true),
+            ],
+            &mut browser,
+        );
+        hovered.textures_delta.clear();
+        let mut released = draw(0.2, vec![pointer_button(point, false)], &mut browser);
+        released.textures_delta.clear();
+        browser
+    }
+
+    #[test]
+    fn dropping_a_folder_on_a_sibling_top_edge_puts_it_before() {
+        let browser = AssetBrowser {
+            folders: vec![PathBuf::from("models"), PathBuf::from("scripts")],
+            open_folders: [PathBuf::new()].into(),
+            ..AssetBrowser::default()
+        };
+        let browser = drop_folder_at_row_edge(browser, "scripts", "models", true);
+        assert_eq!(
+            browser.operation_request, None,
+            "same folder: nothing moves on disk"
+        );
+        assert_eq!(
+            browser.folder_order.get(Path::new("")),
+            Some(&vec!["scripts".to_owned(), "models".to_owned()])
+        );
+    }
+
+    #[test]
+    fn dropping_a_folder_on_an_edge_in_another_folder_moves_it_there() {
+        let browser = AssetBrowser {
+            folders: vec![
+                PathBuf::from("art"),
+                PathBuf::from("art/models"),
+                PathBuf::from("scripts"),
+            ],
+            open_folders: [PathBuf::new(), PathBuf::from("art")].into(),
+            ..AssetBrowser::default()
+        };
+        let browser = drop_folder_at_row_edge(browser, "scripts", "models", true);
+        assert_eq!(
+            browser.operation_request,
+            Some(AssetOperation::Relocate {
+                from: PathBuf::from("scripts"),
+                to: PathBuf::from("art/scripts"),
+            })
+        );
+        assert_eq!(
+            browser.folder_order.get(Path::new("art")),
+            Some(&vec!["scripts".to_owned(), "models".to_owned()])
+        );
+    }
+
+    #[test]
+    fn an_unfolded_folders_bottom_edge_drops_inside_it() {
+        let browser = AssetBrowser {
+            folders: vec![PathBuf::from("models"), PathBuf::from("scripts")],
+            open_folders: [PathBuf::new()].into(),
+            ..AssetBrowser::default()
+        };
+        let browser = drop_folder_at_row_edge(browser, "scripts", "models", false);
+        assert_eq!(
+            browser.operation_request,
+            Some(AssetOperation::Relocate {
+                from: PathBuf::from("scripts"),
+                to: PathBuf::from("models/scripts"),
+            })
+        );
+        assert!(browser.folder_order.is_empty());
+    }
+
+    #[test]
+    fn folders_follow_the_saved_order_then_names() {
+        let mut root = AssetFolder::default();
+        for name in ["a", "b", "c", "d"] {
+            root.ensure(Path::new(name));
+        }
+        let order = std::collections::BTreeMap::from([(
+            PathBuf::new(),
+            vec!["c".to_owned(), "gone".to_owned(), "a".to_owned()],
+        )]);
+        sort_folders(&mut root, &order);
+        let names: Vec<_> = root.folders.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["c", "a", "b", "d"]);
+    }
+
+    #[test]
+    fn renaming_or_moving_a_folder_keeps_the_order() {
+        let mut browser = AssetBrowser {
+            folder_order: std::collections::BTreeMap::from([
+                (PathBuf::new(), vec!["b".to_owned(), "a".to_owned()]),
+                (PathBuf::from("a"), vec!["y".to_owned(), "x".to_owned()]),
+            ]),
+            ..AssetBrowser::default()
+        };
+        browser.asset_moved(Path::new("a"), Path::new("art"));
+        assert_eq!(
+            browser.folder_order.get(Path::new("")),
+            Some(&vec!["b".to_owned(), "art".to_owned()])
+        );
+        assert_eq!(
+            browser.folder_order.get(Path::new("art")),
+            Some(&vec!["y".to_owned(), "x".to_owned()])
+        );
+        browser.asset_moved(Path::new("art"), Path::new("b/art"));
+        assert_eq!(
+            browser.folder_order.get(Path::new("")),
+            Some(&vec!["b".to_owned()])
+        );
+        assert!(browser.folder_order.contains_key(Path::new("b/art")));
+    }
+
     #[test]
     fn folder_row_starts_a_folder_drag() {
         let ctx = egui::Context::default();
@@ -2788,6 +3119,24 @@ mod tests {
         });
         output.textures_delta.clear();
         assert!(covers_arrow, "selected fill should include the arrow");
+    }
+
+    #[test]
+    fn assets_root_is_not_highlighted_until_clicked() {
+        let ctx = egui::Context::default();
+        let mut browser = AssetBrowser::default();
+        let mut selected = None;
+        let mut open_request = None;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show_scene(ui, &[], &mut browser, &mut selected, &mut open_request);
+        });
+        let fill = ctx.style_of(egui::Theme::Dark).visuals.selection.bg_fill;
+        let highlighted = output.shapes.iter().any(|shape| match &shape.shape {
+            egui::epaint::Shape::Rect(rect) => rect.fill == fill,
+            _ => false,
+        });
+        output.textures_delta.clear();
+        assert!(!highlighted, "nothing was picked, so no row is highlighted");
     }
 
     #[test]

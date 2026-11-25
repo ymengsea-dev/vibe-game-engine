@@ -27,6 +27,7 @@ Status: ✅ done · 🟡 partly done · ⬜ not started
 | Load a scene on top | Rules, Lua and Rust can add a scene to the running game and remove it again, with its objects, scripts, rules and UI | Add an area, a boss room or a shop without leaving the level | ✅ |
 | Next scene | Rules, Lua and Rust can go to the next scene in the order | Move through levels without naming each one | ✅ |
 | Loading screen | Game UI you make in a scene called `loading` covers the game while another scene loads. There is no progress bar | Hide the wait between levels | ✅ |
+| Folder order | In Project Assets, drag a folder above or below another to put folders in your own order. Studio remembers it; new folders go after, by name | Keep the folders you use most at the top | ✅ |
 | Storage | Settings (⌘,) shows what each project keeps on disk (build caches, temp files, old engine copies, backups) with Clean buttons; optional automatic cleanup (off by default; 30 days unused, 10 GB cap). Never deletes project files, asset IDs or saves | Stop build caches from filling the disk over time | ✅ |
 
 ## 1b. Scene View (building the world)
