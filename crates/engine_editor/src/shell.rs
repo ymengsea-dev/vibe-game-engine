@@ -5832,8 +5832,8 @@ mod ui_tests {
     use super::StudioPanelExt;
     use super::{
         CameraGesture, DragButtons, ScrollIntent, ShellIcon, ShellLayout, ViewTool, camera_gesture,
-        code_webview_visible, paint_shell_icon, scene_cursor_icon,
-        scene_ui_preview_tree, scroll_intent, shell_layout, viewport_render_size,
+        code_webview_visible, paint_shell_icon, scene_cursor_icon, scene_ui_preview_tree,
+        scroll_intent, shell_layout, viewport_render_size,
     };
     use crate::chrome::Workspace;
 

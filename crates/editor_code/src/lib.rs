@@ -429,9 +429,15 @@ impl CodeEditor {
         {
             use objc2_app_kit::NSAutoresizingMaskOptions;
             use wry::WebViewExtMacOS;
-            webview
-                .webview()
-                .setAutoresizingMask(NSAutoresizingMaskOptions::empty());
+            let view = webview.webview();
+            view.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
+            // Views don't clip what they draw by default (macOS 14+). While
+            // the page repaints after a panel edge drag shrinks the webview,
+            // its old, larger frame would draw over the panels beside it.
+            view.setWantsLayer(true);
+            if let Some(layer) = view.layer() {
+                layer.setMasksToBounds(true);
+            }
         }
 
         tracing::info!(

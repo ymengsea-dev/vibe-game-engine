@@ -30,6 +30,8 @@ pub struct GpuContext {
     config: wgpu::SurfaceConfiguration,
     clear_color: wgpu::Color,
     msaa_sample_count: u32,
+    /// See [`GpuContext::present_in_step_with_native_views`].
+    present_with_native_views: bool,
 }
 
 /// Default clear color: a muted blue-grey, distinguishable from both a
@@ -158,6 +160,7 @@ impl GpuContext {
             config,
             clear_color: DEFAULT_CLEAR_COLOR,
             msaa_sample_count,
+            present_with_native_views: false,
         })
     }
 
@@ -222,6 +225,7 @@ impl GpuContext {
             config,
             clear_color: DEFAULT_CLEAR_COLOR,
             msaa_sample_count,
+            present_with_native_views: false,
         })
     }
 
@@ -350,6 +354,19 @@ impl GpuContext {
         }
     }
 
+    /// Shows each frame in step with native views placed over the window,
+    /// such as Studio's code editor webview: a frame and a move of such a
+    /// view then appear on screen together, so dragging a panel edge
+    /// doesn't leave the view a frame behind the panels drawn here. macOS
+    /// only; elsewhere this does nothing. Presenting then waits until the
+    /// GPU has scheduled the frame, so games leave it off.
+    pub fn present_in_step_with_native_views(&mut self) {
+        self.present_with_native_views = true;
+        if let Presenter::Window { surface, .. } = &self.presenter {
+            present_with_transaction(&read_surface(surface));
+        }
+    }
+
     /// Acquires the frame to draw into, or `None` if this frame should be
     /// skipped. An offscreen context always has one.
     ///
@@ -386,6 +403,9 @@ impl GpuContext {
                         return None;
                     }
                 };
+                if self.present_with_native_views {
+                    present_with_transaction(&fresh);
+                }
                 fresh.configure(&self.device, &self.config);
                 *write_surface(surface) = fresh;
                 let retry = read_surface(surface).get_current_texture();
@@ -540,6 +560,26 @@ fn finish_acquire(status: wgpu::CurrentSurfaceTexture) -> Option<wgpu::SurfaceTe
             None
         }
     }
+}
+
+/// Makes `surface` show each frame in the same Core Animation commit as
+/// changes to native views in the window (macOS only; a no-op elsewhere).
+fn present_with_transaction(surface: &wgpu::Surface<'_>) {
+    #[cfg(target_os = "macos")]
+    {
+        // The one exception to the workspace's `unsafe_code` deny: wgpu
+        // offers the Metal layer only through `as_hal`.
+        #[allow(unsafe_code)]
+        // SAFETY: the guard is only used to set a flag on the layer here
+        // and is dropped right away; the surface and its layer stay owned
+        // by wgpu, which reads the flag each time it acquires a frame.
+        let hal = unsafe { surface.as_hal::<wgpu::hal::api::Metal>() };
+        if let Some(hal) = hal {
+            hal.render_layer().lock().setPresentsWithTransaction(true);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = surface;
 }
 
 fn read_surface<'a>(

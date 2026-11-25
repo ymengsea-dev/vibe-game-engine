@@ -515,8 +515,6 @@ fn sync_code_editor(
         return;
     };
 
-    // Kept shown while a panel edge is dragged and moved every frame:
-    // hiding a WKWebView and showing it again flashes it.
     let show_webview = state.code_panel_visible;
     code.set_visible(show_webview);
     if std::mem::take(&mut state.code_save_requested) {
@@ -2701,13 +2699,15 @@ impl EditorHandler {
 impl PlatformHandler for EditorHandler {
     fn on_window_ready(&mut self, window: Arc<Window>) {
         tracing::info!("editor window ready");
-        let gpu = match GpuContext::new(Arc::clone(&window)) {
+        let mut gpu = match GpuContext::new(Arc::clone(&window)) {
             Ok(gpu) => gpu,
             Err(err) => {
                 tracing::error!(error = %err, "failed to initialize GPU context");
                 return;
             }
         };
+        // The code editor webview moves with the panels drawn here.
+        gpu.present_in_step_with_native_views();
         let Some(wake) = self.wake.clone() else {
             tracing::error!("editor window started without an event-loop wake handle");
             return;

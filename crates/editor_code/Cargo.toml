@@ -20,7 +20,9 @@ wry = { workspace = true, features = ["devtools", "transparent"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 # Clear the autoresizing mask wry puts on the child webview so our
 # per-frame `set_bounds` is authoritative. Versions match wry 0.52's.
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder"] }
+# Its layer also clips the page to the webview's frame (see `CodeEditor::new`).
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder", "objc2-quartz-core"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # wry's webview on Linux is WebKitGTK: GTK must be set up and pumped by us.
