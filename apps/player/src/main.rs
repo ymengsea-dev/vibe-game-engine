@@ -534,7 +534,8 @@ fn parse_lua_marker(bytes: &[u8]) -> Result<Option<uuid::Uuid>, ()> {
     Ok(Some(id))
 }
 
-/// The Run window quits on Esc. In Scene View Play, Esc belongs to Studio
+/// The Run window quits on Esc, unless that Esc only freed a locked mouse
+/// (the engine keeps it from the game). In Scene View Play, Esc belongs to Studio
 /// (it frees a locked mouse) and Stop or Cmd-P ends the game.
 fn exits_on_escape(embedded: bool) -> bool {
     !embedded

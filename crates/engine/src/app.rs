@@ -445,13 +445,19 @@ pub trait Game {
 }
 
 /// Bookkeeping for the mouse lock: the game's wish, whether the window has
-/// focus, and what was last applied to the OS. The effective lock is
-/// `wish && focused`, so losing focus releases the cursor and regaining it
-/// re-applies the wish.
+/// focus, whether the player freed the mouse with Esc, and what was last
+/// applied to the OS. The effective lock is `wish && focused && !freed`, so
+/// losing focus releases the cursor and regaining it re-applies the wish.
 #[derive(Debug)]
 pub(crate) struct CursorLockState {
     wish: bool,
     focused: bool,
+    /// Esc freed the mouse in the game's own window; a click locks it again.
+    freed: bool,
+    /// A press used to free or re-lock the mouse, whose release the game
+    /// must not see either.
+    swallowed_key: Option<engine_platform::KeyCode>,
+    swallowed_button: Option<engine_platform::MouseButton>,
     applied: std::cell::Cell<bool>,
 }
 
@@ -462,6 +468,9 @@ impl Default for CursorLockState {
             // The runner delivers the window's real focus as its first
             // `FocusChanged` event.
             focused: true,
+            freed: false,
+            swallowed_key: None,
+            swallowed_button: None,
             applied: std::cell::Cell::new(false),
         }
     }
@@ -469,6 +478,10 @@ impl Default for CursorLockState {
 
 impl CursorLockState {
     pub(crate) fn set_wish(&mut self, locked: bool) {
+        // A fresh lock request wins over an earlier Esc.
+        if locked && !self.wish {
+            self.freed = false;
+        }
         self.wish = locked;
     }
 
@@ -482,8 +495,58 @@ impl CursorLockState {
 
     /// `Some(effective)` when the OS lock should change, else `None`.
     pub(crate) fn take_change(&self) -> Option<bool> {
-        let effective = self.wish && self.focused;
+        let effective = self.wish && self.focused && !self.freed;
         (effective != self.applied.replace(effective)).then_some(effective)
+    }
+
+    /// In the game's own window, Esc frees a locked mouse and the next click
+    /// locks it again. Returns `true` when `event` was used for that and must
+    /// not reach the game. Mouse motion while freed is held back too, so a
+    /// look camera stays still while the cursor moves.
+    pub(crate) fn takes_input(&mut self, event: &PlatformEvent) -> bool {
+        use engine_platform::KeyCode;
+        match *event {
+            PlatformEvent::KeyboardInput {
+                key: KeyCode::Escape,
+                pressed: true,
+                ..
+            } if self.wish && self.focused && !self.freed => {
+                self.freed = true;
+                self.swallowed_key = Some(KeyCode::Escape);
+                true
+            }
+            PlatformEvent::KeyboardInput {
+                key,
+                pressed: false,
+                ..
+            } if self.swallowed_key == Some(key) => {
+                self.swallowed_key = None;
+                true
+            }
+            // Held Esc keeps repeating; none of it should close the game.
+            PlatformEvent::KeyboardInput {
+                key,
+                pressed: true,
+                repeat: true,
+            } if self.swallowed_key == Some(key) => true,
+            PlatformEvent::MouseButtonInput {
+                button,
+                pressed: true,
+            } if self.wish && self.focused && self.freed => {
+                self.freed = false;
+                self.swallowed_button = Some(button);
+                true
+            }
+            PlatformEvent::MouseButtonInput {
+                button,
+                pressed: false,
+            } if self.swallowed_button == Some(button) => {
+                self.swallowed_button = None;
+                true
+            }
+            PlatformEvent::MouseMotion { .. } => self.wish && self.freed,
+            _ => false,
+        }
     }
 }
 
@@ -1873,6 +1936,10 @@ impl<G: Game> PlatformHandler for GameRunner<G> {
                 if let PlatformEvent::FocusChanged { focused } = other {
                     runtime.cursor_lock.focus(focused);
                 }
+                // Inside Studio, Esc and the re-lock click belong to Studio.
+                if !runtime.embedded && runtime.cursor_lock.takes_input(&other) {
+                    return;
+                }
                 runtime.input.apply_event(&other);
                 self.game.on_event(
                     &mut GameContext {
@@ -2921,6 +2988,82 @@ mod tests {
         assert_eq!(lock.take_change(), Some(true));
         lock.set_wish(true);
         assert_eq!(lock.take_change(), None);
+    }
+
+    #[test]
+    fn escape_frees_the_mouse_and_a_click_locks_it_again() {
+        use engine_platform::{KeyCode, MouseButton};
+        let key = |pressed, repeat| PlatformEvent::KeyboardInput {
+            key: KeyCode::Escape,
+            pressed,
+            repeat,
+        };
+        let click = |pressed| PlatformEvent::MouseButtonInput {
+            button: MouseButton::Left,
+            pressed,
+        };
+        let motion = PlatformEvent::MouseMotion {
+            delta_x: 3.0,
+            delta_y: 1.0,
+        };
+        let mut lock = CursorLockState::default();
+        lock.set_wish(true);
+        assert_eq!(lock.take_change(), Some(true));
+        assert!(!lock.takes_input(&motion));
+
+        // Esc frees the mouse; neither the press, its repeats nor its
+        // release reach the game, and look motion stops.
+        assert!(lock.takes_input(&key(true, false)));
+        assert!(lock.takes_input(&key(true, true)));
+        assert!(lock.takes_input(&key(false, false)));
+        assert_eq!(lock.take_change(), Some(false));
+        assert!(lock.takes_input(&motion));
+        assert!(lock.wish());
+
+        // A second Esc, with the mouse already free, goes to the game.
+        assert!(!lock.takes_input(&key(true, false)));
+        assert!(!lock.takes_input(&key(false, false)));
+
+        // A click locks it again and is not a click in the game.
+        assert!(lock.takes_input(&click(true)));
+        assert!(lock.takes_input(&click(false)));
+        assert_eq!(lock.take_change(), Some(true));
+        assert!(!lock.takes_input(&click(true)));
+        assert!(!lock.takes_input(&motion));
+    }
+
+    #[test]
+    fn a_new_lock_request_wins_over_an_earlier_escape() {
+        let mut lock = CursorLockState::default();
+        lock.set_wish(true);
+        assert_eq!(lock.take_change(), Some(true));
+        assert!(lock.takes_input(&PlatformEvent::KeyboardInput {
+            key: engine_platform::KeyCode::Escape,
+            pressed: true,
+            repeat: false,
+        }));
+        assert_eq!(lock.take_change(), Some(false));
+        // Asking again every frame keeps the mouse free...
+        lock.set_wish(true);
+        assert_eq!(lock.take_change(), None);
+        // ...but unlocking and locking again takes it back.
+        lock.set_wish(false);
+        lock.set_wish(true);
+        assert_eq!(lock.take_change(), Some(true));
+    }
+
+    #[test]
+    fn escape_without_a_lock_is_left_to_the_game() {
+        let mut lock = CursorLockState::default();
+        assert!(!lock.takes_input(&PlatformEvent::KeyboardInput {
+            key: engine_platform::KeyCode::Escape,
+            pressed: true,
+            repeat: false,
+        }));
+        assert!(!lock.takes_input(&PlatformEvent::MouseButtonInput {
+            button: engine_platform::MouseButton::Left,
+            pressed: true,
+        }));
     }
 
     #[test]

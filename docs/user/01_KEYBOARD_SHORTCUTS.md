@@ -235,7 +235,7 @@ Moving the camera here moves the Scene View's camera too. Objects can't be click
 | ⌥⌘P | When paused: move one frame ahead |
 | Click the game | Give the game the keyboard and mouse |
 | Esc | Free the mouse if the game holds it (the game keeps running); click the game to lock it again (that click does not count as a click in the game) |
-| Esc (game in its own window) | Close the game |
+| Esc (game in its own window) | Free the mouse if the game holds it (the game keeps running); click the game to lock it again (that click does not count as a click in the game). Esc with the mouse free closes the game |
 
 While the game is paused in the Scene View, the usual Scene View moves look around the frozen game with a free camera. It starts where the game's camera was:
 
