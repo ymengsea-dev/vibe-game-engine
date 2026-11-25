@@ -49,7 +49,6 @@ cargo test -p engine_scripting --features lua <name>
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 cargo deny check                          # licenses/advisories (deny.toml)
-# CI: .github/workflows/ci.yml builds, lints and tests on macOS, Windows and Linux, then stages a Studio package per OS
 RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo build -p editor -p player --release && cargo run -p studio_packager -- target/release target/<new-dir>   # the packager refuses binaries holding the home folder path
 ```
 
