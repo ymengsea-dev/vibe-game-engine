@@ -8,6 +8,7 @@ Documentation for people building Studio and the engine.
 | [02_ENGINE_FEATURES.md](02_ENGINE_FEATURES.md) | Code-verified inventory of the engine runtime (renderer, ECS, physics, audio and more), as of 2026-10-13 |
 | [03_UI_PROTOTYPE.html](03_UI_PROTOTYPE.html) | Early HTML prototype of the editor layout (panel arrangement only; the look is now defined by 04_UI_STYLE.md) |
 | [04_UI_STYLE.md](04_UI_STYLE.md) | UI style rules: palette, type, shapes, shared controls, writing, and how to check a UI change |
+| [05_PACKAGING.md](05_PACKAGING.md) | Building a Studio package: staging, `.dmg`/`.zip`/`.tar.gz` archives, signing and notarizing |
 
 Design specs and implementation plans live in `.superpowers/` at the repository root (managed by the superpowers skill, not versioned).
 

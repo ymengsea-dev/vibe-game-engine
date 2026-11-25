@@ -81,7 +81,7 @@ Status: ✅ done · 🟡 partly done · ⬜ not started
 | Export | **File → Build & Export…** makes the game into something players start without Studio: on macOS a `.app` with the game's name and icon, on Windows a folder with `<Name>.exe`, on Linux a folder with the program. It replaces only an earlier export of the same project, and progress shows in the Output tab | Share the finished game with players | 🟡 Windows and Linux written but not yet built or tried on those systems |
 | Game settings | **Settings → Project → Game**: the game's name, version, macOS bundle ID, icon, window size, full screen and resizable window. Run and every export use them, Lua and Rust alike | Make the game look finished: its own name, icon and window | ✅ |
 | Build and Run | ⌘B (File → Build and Run) exports the selected configuration into the project's `Builds` folder and starts it, with its messages in the Output tab | Try the real exported game in one step | ✅ |
-| Studio package | Bundles Studio with everything it needs (player, code editor, Lua helper) | Install Studio on a machine without Rust | 🟡 macOS only, not a signed installer |
+| Studio package | Bundles Studio with everything it needs (player, code editor, Lua helper) for macOS, Windows or Linux, packed as a disk image, zip or tarball. Signed for the building Mac only, unless a Developer ID (and notarization) or a Windows certificate is given | Install Studio on a machine without Rust | ✅ |
 
 ## 5. Building 3D worlds
 

@@ -1,7 +1,15 @@
 //! Packages the editor, Lua player, and code editor resources together.
+//!
+//! After staging, the package is signed (macOS: ad-hoc unless
+//! `--sign-identity` names a Developer ID; Windows: only with
+//! `--windows-cert`) and, with `--archive`, packed into one file beside the
+//! output folder: a `.dmg` on macOS (notarized with `--notarize-profile`),
+//! a `.zip` on Windows and a `.tar.gz` on Linux. `--dry-run` prints those
+//! signing and archive commands instead of running them.
 
+use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use sha2::{Digest, Sha256};
@@ -236,10 +244,336 @@ fn stage_distribution(
     Ok(())
 }
 
+/// What to do once the package is staged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Options {
+    /// Pack the package into one file beside the output folder.
+    archive: bool,
+    /// macOS: a Developer ID to sign with (hardened runtime); ad-hoc when
+    /// `None`.
+    sign_identity: Option<String>,
+    /// macOS: a `notarytool` keychain profile to notarize the `.dmg` with.
+    notarize_profile: Option<String>,
+    /// Windows: a `.pfx` certificate for `signtool`; unsigned when `None`.
+    windows_cert: Option<String>,
+    /// Print the signing and archive commands instead of running them.
+    dry_run: bool,
+}
+
+/// One command to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Step {
+    program: String,
+    args: Vec<OsString>,
+    /// Arguments to show as `***` when printed (passwords).
+    secret: Vec<usize>,
+}
+
+impl Step {
+    fn new(program: &str, args: impl IntoIterator<Item = impl Into<OsString>>) -> Self {
+        Self {
+            program: program.to_owned(),
+            args: args.into_iter().map(Into::into).collect(),
+            secret: Vec::new(),
+        }
+    }
+
+    /// The command as a shell line, secrets hidden.
+    fn display(&self) -> String {
+        let quote = |text: &str| {
+            if text.is_empty() || text.contains([' ', '"', '\'', '$']) {
+                format!("'{}'", text.replace('\'', "'\\''"))
+            } else {
+                text.to_owned()
+            }
+        };
+        let mut line = quote(&self.program);
+        for (index, arg) in self.args.iter().enumerate() {
+            line.push(' ');
+            if self.secret.contains(&index) {
+                line.push_str("***");
+            } else {
+                line.push_str(&quote(&arg.to_string_lossy()));
+            }
+        }
+        line
+    }
+
+    fn run(&self) -> Result<(), String> {
+        let output = Command::new(&self.program)
+            .args(&self.args)
+            .output()
+            .map_err(|err| format!("cannot run {}: {err}", self.program))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} failed: {}",
+                self.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    }
+}
+
+/// The macOS app bundle's name inside the output folder.
+const APP_NAME: &str = "RustyEngine Studio.app";
+
+/// The archive `--archive` makes for `output` on `os`.
+fn archive_path(os: &str, output: &Path) -> PathBuf {
+    let extension = match os {
+        "macos" => "dmg",
+        "windows" => "zip",
+        _ => "tar.gz",
+    };
+    let mut name = output.file_name().map(OsString::from).unwrap_or_default();
+    name.push(format!(".{extension}"));
+    output.with_file_name(name)
+}
+
+/// The signing, archive and notarization commands for a package staged in
+/// `output` on `os`, in order. `password` is the Windows certificate's.
+fn finishing_steps(
+    os: &str,
+    output: &Path,
+    options: &Options,
+    password: Option<&str>,
+) -> Result<Vec<Step>, String> {
+    if options.notarize_profile.is_some() {
+        if os != "macos" {
+            return Err("--notarize-profile works on macOS only".into());
+        }
+        if options.sign_identity.is_none() || !options.archive {
+            return Err("--notarize-profile needs --sign-identity and --archive".into());
+        }
+    }
+    if options.sign_identity.is_some() && os != "macos" {
+        return Err("--sign-identity works on macOS only; use --windows-cert on Windows".into());
+    }
+    if options.windows_cert.is_some() && os != "windows" {
+        return Err("--windows-cert works on Windows only".into());
+    }
+    let mut steps = Vec::new();
+    let archive = archive_path(os, output);
+    match os {
+        "macos" => {
+            let app = output.join(APP_NAME);
+            let contents = app.join("Contents");
+            match &options.sign_identity {
+                // Inside out: helpers first, the bundle last.
+                Some(identity) => {
+                    for path in [
+                        contents.join("Resources/lua-language-server/bin/lua-language-server"),
+                        contents.join("MacOS/player"),
+                        contents.join("MacOS/editor"),
+                        app.clone(),
+                    ] {
+                        steps.push(Step::new(
+                            "codesign",
+                            [
+                                OsString::from("--force"),
+                                "--options".into(),
+                                "runtime".into(),
+                                "--timestamp".into(),
+                                "--sign".into(),
+                                identity.into(),
+                                path.into_os_string(),
+                            ],
+                        ));
+                    }
+                }
+                None => steps.push(Step::new(
+                    "codesign",
+                    [
+                        OsString::from("--force"),
+                        "--deep".into(),
+                        "--sign".into(),
+                        "-".into(),
+                        app.into_os_string(),
+                    ],
+                )),
+            }
+            if options.archive {
+                // Drag the app onto this link to install it.
+                steps.push(Step::new(
+                    "ln",
+                    [
+                        OsString::from("-s"),
+                        "/Applications".into(),
+                        output.join("Applications").into_os_string(),
+                    ],
+                ));
+                steps.push(Step::new(
+                    "hdiutil",
+                    [
+                        OsString::from("create"),
+                        "-volname".into(),
+                        "RustyEngine Studio".into(),
+                        "-srcfolder".into(),
+                        output.as_os_str().to_owned(),
+                        "-format".into(),
+                        "UDZO".into(),
+                        archive.clone().into_os_string(),
+                    ],
+                ));
+                if let Some(identity) = &options.sign_identity {
+                    steps.push(Step::new(
+                        "codesign",
+                        [
+                            OsString::from("--force"),
+                            "--timestamp".into(),
+                            "--sign".into(),
+                            identity.into(),
+                            archive.clone().into_os_string(),
+                        ],
+                    ));
+                }
+                if let Some(profile) = &options.notarize_profile {
+                    steps.push(Step::new(
+                        "xcrun",
+                        [
+                            OsString::from("notarytool"),
+                            "submit".into(),
+                            archive.clone().into_os_string(),
+                            "--keychain-profile".into(),
+                            profile.into(),
+                            "--wait".into(),
+                        ],
+                    ));
+                    steps.push(Step::new(
+                        "xcrun",
+                        [
+                            OsString::from("stapler"),
+                            "staple".into(),
+                            archive.clone().into_os_string(),
+                        ],
+                    ));
+                }
+            }
+        }
+        "windows" => {
+            if let Some(cert) = &options.windows_cert {
+                for path in [
+                    output.join("editor.exe"),
+                    output.join("player.exe"),
+                    output.join("lua-language-server/bin/lua-language-server.exe"),
+                ] {
+                    let mut args: Vec<OsString> = vec!["sign".into(), "/f".into(), cert.into()];
+                    let mut secret = Vec::new();
+                    if let Some(password) = password {
+                        args.push("/p".into());
+                        secret.push(args.len());
+                        args.push(password.into());
+                    }
+                    args.extend([
+                        OsString::from("/fd"),
+                        "SHA256".into(),
+                        "/tr".into(),
+                        "http://timestamp.digicert.com".into(),
+                        "/td".into(),
+                        "SHA256".into(),
+                        path.into_os_string(),
+                    ]);
+                    steps.push(Step {
+                        program: "signtool".into(),
+                        args,
+                        secret,
+                    });
+                }
+            }
+            if options.archive {
+                steps.push(archive_step("-a", output, &archive)?);
+            }
+        }
+        _ => {
+            if options.archive {
+                steps.push(archive_step("-z", output, &archive)?);
+            }
+        }
+    }
+    Ok(steps)
+}
+
+/// `tar` packing `output`'s folder (by name, from its parent) into
+/// `archive`: `-a` picks zip from the name, `-z` gzips.
+fn archive_step(format: &str, output: &Path, archive: &Path) -> Result<Step, String> {
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = output
+        .file_name()
+        .ok_or_else(|| format!("output has no folder name: {}", output.display()))?;
+    Ok(Step::new(
+        "tar",
+        [
+            OsString::from(format!("{format}cf")),
+            archive.as_os_str().to_owned(),
+            "-C".into(),
+            parent.as_os_str().to_owned(),
+            name.to_owned(),
+        ],
+    ))
+}
+
+/// Splits the command line into positional arguments and [`Options`].
+fn parse_args(
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<(Vec<OsString>, Options), String> {
+    let mut positional = Vec::new();
+    let mut options = Options::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let mut value = |flag: &str| {
+            args.next()
+                .and_then(|value| value.into_string().ok())
+                .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                .ok_or_else(|| format!("{flag} needs a value"))
+        };
+        match arg.to_str() {
+            Some("--archive") => options.archive = true,
+            Some("--dry-run") => options.dry_run = true,
+            Some("--sign-identity") => options.sign_identity = Some(value("--sign-identity")?),
+            Some("--notarize-profile") => {
+                options.notarize_profile = Some(value("--notarize-profile")?);
+            }
+            Some("--windows-cert") => options.windows_cert = Some(value("--windows-cert")?),
+            Some(flag) if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
+            _ => positional.push(arg),
+        }
+    }
+    Ok((positional, options))
+}
+
+/// Signs and packs the staged `output`, or prints how with `--dry-run`.
+fn finish(output: &Path, options: &Options) -> Result<(), String> {
+    let os = std::env::consts::OS;
+    if options.archive && fs::symlink_metadata(archive_path(os, output)).is_ok() {
+        return Err(format!(
+            "refusing to replace existing archive: {}",
+            archive_path(os, output).display()
+        ));
+    }
+    let password = std::env::var("STUDIO_CERT_PASSWORD").ok();
+    for step in finishing_steps(os, output, options, password.as_deref())? {
+        if options.dry_run {
+            use std::io::Write as _;
+            writeln!(std::io::stdout().lock(), "{}", step.display())
+                .map_err(|err| format!("cannot print: {err}"))?;
+        } else {
+            step.run()?;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(1);
-    let usage = "usage: studio_packager <built-binaries-directory> <new-output-directory> [extracted-luals-directory]";
+    let usage = "usage: studio_packager <built-binaries-directory> <new-output-directory> [extracted-luals-directory] [--archive] [--sign-identity <id>] [--notarize-profile <name>] [--windows-cert <file.pfx>] [--dry-run]";
     let result = (|| {
+        let (positional, options) = parse_args(std::env::args_os().skip(1))?;
+        // Catch bad combinations before the slow staging.
+        finishing_steps(std::env::consts::OS, Path::new("check"), &options, None)?;
+        let mut args = positional.into_iter();
         let binaries = args.next().ok_or(usage)?;
         let output = args.next().ok_or(usage)?;
         let supplied_luals = args.next();
@@ -255,12 +589,13 @@ fn main() -> ExitCode {
         let monaco =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/editor_code/vendor/monaco");
         if let Some(luals) = supplied_luals {
-            return stage_distribution(
+            stage_distribution(
                 Path::new(&binaries),
                 &monaco,
                 Path::new(&luals),
                 Path::new(&output),
-            );
+            )?;
+            return finish(Path::new(&output), &options);
         }
         let temporary = std::env::temp_dir().join(format!(
             "vge-luals-package-{}-{}",
@@ -285,7 +620,7 @@ fn main() -> ExitCode {
             eprintln!("warning: cannot remove {}: {err}", temporary.display());
         }
         staged?;
-        Ok::<(), String>(())
+        finish(Path::new(&output), &options)
     })();
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -301,7 +636,160 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{stage_distribution, verify_archive};
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use super::{
+        Options, archive_path, finishing_steps, parse_args, stage_distribution, verify_archive,
+    };
+
+    fn lines(os: &str, options: &Options, password: Option<&str>) -> Vec<String> {
+        finishing_steps(os, Path::new("out/Studio"), options, password)
+            .expect("steps")
+            .iter()
+            .map(super::Step::display)
+            .collect()
+    }
+
+    #[test]
+    fn options_parse_anywhere_and_refuse_unknown_flags() {
+        let args = [
+            "bin",
+            "--archive",
+            "out",
+            "--sign-identity",
+            "Developer ID",
+            "--dry-run",
+        ]
+        .map(OsString::from);
+        let (positional, options) = parse_args(args).expect("parses");
+        assert_eq!(
+            positional,
+            vec![OsString::from("bin"), OsString::from("out")]
+        );
+        assert!(options.archive && options.dry_run);
+        assert_eq!(options.sign_identity.as_deref(), Some("Developer ID"));
+        assert!(parse_args(["--sign".into()]).is_err());
+        assert!(
+            parse_args(["--sign-identity".into()]).is_err(),
+            "needs a value"
+        );
+        assert!(parse_args(["--windows-cert".into(), "--archive".into()]).is_err());
+    }
+
+    #[test]
+    fn archives_sit_beside_the_output_folder() {
+        let output = Path::new("target/Studio");
+        assert_eq!(
+            archive_path("macos", output),
+            PathBuf::from("target/Studio.dmg")
+        );
+        assert_eq!(
+            archive_path("windows", output),
+            PathBuf::from("target/Studio.zip")
+        );
+        assert_eq!(
+            archive_path("linux", output),
+            PathBuf::from("target/Studio.tar.gz")
+        );
+    }
+
+    #[test]
+    fn macos_signs_ad_hoc_by_default_and_packs_a_dmg() {
+        let options = Options {
+            archive: true,
+            ..Options::default()
+        };
+        assert_eq!(
+            lines("macos", &options, None),
+            vec![
+                "codesign --force --deep --sign - 'out/Studio/RustyEngine Studio.app'",
+                "ln -s /Applications out/Studio/Applications",
+                "hdiutil create -volname 'RustyEngine Studio' -srcfolder out/Studio -format UDZO out/Studio.dmg",
+            ]
+        );
+        assert_eq!(
+            lines("macos", &Options::default(), None).len(),
+            1,
+            "no archive"
+        );
+    }
+
+    #[test]
+    fn macos_signs_inside_out_then_notarizes_and_staples_the_dmg() {
+        let options = Options {
+            archive: true,
+            sign_identity: Some("Developer ID Application: Me".into()),
+            notarize_profile: Some("studio".into()),
+            ..Options::default()
+        };
+        let lines = lines("macos", &options, None);
+        assert_eq!(lines.len(), 9, "{lines:#?}");
+        assert!(lines[0].contains("lua-language-server/bin/lua-language-server"));
+        assert!(lines[0].contains("--options runtime --timestamp"));
+        assert!(lines[2].ends_with("Contents/MacOS/editor'"), "{}", lines[2]);
+        assert!(
+            lines[3].ends_with("RustyEngine Studio.app'"),
+            "{}",
+            lines[3]
+        );
+        assert!(lines[4].starts_with("ln -s /Applications"));
+        assert!(lines[5].starts_with("hdiutil create"));
+        assert!(lines[6].starts_with("codesign --force --timestamp --sign"));
+        assert_eq!(
+            lines[7],
+            "xcrun notarytool submit out/Studio.dmg --keychain-profile studio --wait"
+        );
+        assert_eq!(lines[8], "xcrun stapler staple out/Studio.dmg");
+    }
+
+    #[test]
+    fn windows_signs_with_signtool_hiding_the_password_and_zips() {
+        let options = Options {
+            archive: true,
+            windows_cert: Some("cert.pfx".into()),
+            ..Options::default()
+        };
+        let lines = lines("windows", &options, Some("hunter2"));
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].starts_with("signtool sign /f cert.pfx /p *** /fd SHA256"));
+        assert!(lines.iter().all(|line| !line.contains("hunter2")));
+        assert!(lines[2].ends_with("lua-language-server.exe"));
+        assert_eq!(lines[3], "tar -acf out/Studio.zip -C out Studio");
+        assert!(
+            super::finishing_steps("windows", Path::new("Studio"), &Options::default(), None)
+                .expect("steps")
+                .is_empty(),
+            "unsigned and not archived"
+        );
+    }
+
+    #[test]
+    fn linux_packs_a_tarball_and_signing_flags_stay_on_their_own_os() {
+        let options = Options {
+            archive: true,
+            ..Options::default()
+        };
+        assert_eq!(
+            lines("linux", &options, None),
+            vec!["tar -zcf out/Studio.tar.gz -C out Studio"]
+        );
+        let mac_only = Options {
+            sign_identity: Some("x".into()),
+            ..Options::default()
+        };
+        assert!(finishing_steps("linux", Path::new("o"), &mac_only, None).is_err());
+        let windows_only = Options {
+            windows_cert: Some("x".into()),
+            ..Options::default()
+        };
+        assert!(finishing_steps("macos", Path::new("o"), &windows_only, None).is_err());
+        let notarize_alone = Options {
+            notarize_profile: Some("p".into()),
+            ..Options::default()
+        };
+        assert!(finishing_steps("macos", Path::new("o"), &notarize_alone, None).is_err());
+    }
 
     #[test]
     fn output_inside_monaco_source_is_rejected_before_copying() {

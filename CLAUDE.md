@@ -51,7 +51,7 @@ cargo test -p engine_scripting --features lua <name>
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 cargo deny check                          # licenses/advisories (deny.toml)
-RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo build -p editor -p player --release && cargo run -p studio_packager -- target/release target/<new-dir>   # the packager refuses binaries holding the home folder path
+RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo build -p editor -p player --release && cargo run -p studio_packager -- target/release target/<new-dir> [--archive] [--sign-identity <id> --notarize-profile <name>] [--windows-cert <pfx>] [--dry-run]   # refuses binaries holding the home folder path; see docs/dev/05_PACKAGING.md
 ```
 
 zsh note: don't `echo ======` (zsh `=` expansion errors); use `echo '---'`.

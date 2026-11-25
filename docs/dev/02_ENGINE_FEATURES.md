@@ -188,4 +188,4 @@ Primary sources: `crates/editor_ai/src/lib.rs`, `crates/editor_tools/src/lib.rs`
 
 ## Verification Surface
 
-The workspace contains 1,275 `#[test]` annotations across runtime, editor, player, and Island sources. CI runs formatting, Clippy with warnings denied, all-feature workspace tests and doctests, documentation, dependency policy checks, Windows checks, Linux builds/tests, and release packaging. The relevant local commands are documented in `AGENTS.md`.
+The workspace contains 1,275 `#[test]` annotations across runtime, editor, player, and Island sources. There is no CI (the GitHub workflow was removed on 2026-11-25); formatting, Clippy with warnings denied, workspace tests and dependency checks run locally with the commands in `AGENTS.md` and `CLAUDE.md`.

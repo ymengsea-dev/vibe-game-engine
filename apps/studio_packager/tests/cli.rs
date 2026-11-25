@@ -103,3 +103,68 @@ fn command_refuses_to_replace_an_existing_distribution() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn dry_run_prints_the_signing_and_archive_commands_without_running_them() {
+    let root = std::env::temp_dir().join(format!(
+        "vge-studio-package-dry-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let binaries = root.join("binaries");
+    let luals = root.join("luals");
+    let output = root.join("Studio");
+    fs::create_dir_all(&binaries).expect("binaries");
+    fs::create_dir_all(luals.join("bin")).expect("LuaLS");
+    fs::write(luals.join("main.lua"), b"return true").expect("LuaLS main");
+    fs::write(luals.join("LICENSE"), b"MIT License").expect("LuaLS license");
+    let suffix = std::env::consts::EXE_SUFFIX;
+    fs::write(
+        luals.join(format!("bin/lua-language-server{suffix}")),
+        b"LuaLS",
+    )
+    .expect("LuaLS");
+    fs::write(binaries.join(format!("editor{suffix}")), b"editor").expect("editor");
+    fs::write(binaries.join(format!("player{suffix}")), b"player").expect("player");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_studio_packager"))
+        .arg(&binaries)
+        .arg("--archive")
+        .arg(&output)
+        .arg(&luals)
+        .arg("--dry-run")
+        .output()
+        .expect("packager process");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let printed = String::from_utf8_lossy(&result.stdout);
+    let (tool, archive) = match std::env::consts::OS {
+        "macos" => ("hdiutil create", "Studio.dmg"),
+        "windows" => ("tar -acf", "Studio.zip"),
+        _ => ("tar -zcf", "Studio.tar.gz"),
+    };
+    assert!(printed.contains(tool), "{printed}");
+    assert!(printed.contains(archive), "{printed}");
+    assert!(!root.join(archive).exists(), "a dry run makes no archive");
+    assert!(output.is_dir(), "the package itself is staged");
+
+    let refused = Command::new(env!("CARGO_BIN_EXE_studio_packager"))
+        .arg(&binaries)
+        .arg(root.join("Other"))
+        .arg(&luals)
+        .args(["--notarize-profile", "studio"])
+        .output()
+        .expect("packager process");
+    assert!(
+        !refused.status.success(),
+        "notarizing needs signing and an archive"
+    );
+    assert!(!root.join("Other").exists(), "refused before staging");
+    let _ = fs::remove_dir_all(root);
+}
