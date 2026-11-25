@@ -410,6 +410,33 @@ impl MeshRenderer {
         Ok(Self::new(gpu, pipeline, assets, mesh, &texture, material))
     }
 
+    /// [`MeshRenderer::from_geometry`] with every map a material can carry,
+    /// each an RGBA8 `(width, height, pixels)` image.
+    ///
+    /// # Errors
+    ///
+    /// [`engine_renderer::RendererError`] if the geometry cannot be uploaded.
+    pub fn from_geometry_with_maps(
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        assets: &mut engine_renderer::RenderAssets,
+        vertices: &[engine_renderer::Vertex],
+        indices: &[u32],
+        images: MaterialImages<'_>,
+        material: engine_renderer::Material,
+    ) -> Result<Self, engine_renderer::RendererError> {
+        const LABEL: &str = "scene mesh";
+        let mesh = gpu.create_mesh(LABEL, vertices, indices)?;
+        let material_binding = images.binding(gpu, pipeline, LABEL, material);
+        let model_binding =
+            gpu.create_model_binding(pipeline, &engine_renderer::ModelUniform::IDENTITY);
+        Ok(Self::with_handles(
+            assets.meshes.insert(mesh),
+            assets.materials.insert(material_binding),
+            model_binding,
+        ))
+    }
+
     /// Builds a [`MeshRenderer`], uploading `mesh` and building a material
     /// binding from `texture`/`material`, then registering both as freshly
     /// owned entries (ref count `1` each) in `assets`.
@@ -634,6 +661,44 @@ impl SkinnedMeshRenderer {
         }
     }
 
+    /// The skinned twin of [`MeshRenderer::from_geometry_with_maps`].
+    ///
+    /// # Errors
+    ///
+    /// [`engine_renderer::RendererError`] if the geometry cannot be uploaded.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors MeshRenderer::from_geometry_with_maps plus the skinned pipeline"
+    )]
+    pub fn from_geometry_with_maps(
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        skinned_pipeline: &engine_renderer::SkinnedPipeline,
+        assets: &mut engine_renderer::RenderAssets,
+        vertices: &[engine_renderer::SkinnedVertex],
+        indices: &[u32],
+        images: MaterialImages<'_>,
+        material: engine_renderer::Material,
+    ) -> Result<Self, engine_renderer::RendererError> {
+        const LABEL: &str = "scene skinned mesh";
+        let mesh = gpu.create_skinned_mesh(LABEL, vertices, indices)?;
+        let material_binding = images.binding(gpu, pipeline, LABEL, material);
+        let skin = gpu.create_skinned_binding(
+            skinned_pipeline,
+            &engine_renderer::ModelUniform::IDENTITY,
+            &engine_renderer::JointMatricesUniform::IDENTITY,
+        );
+        Ok(Self {
+            mesh: assets.skinned_meshes.insert(mesh),
+            material: assets.materials.insert(material_binding),
+            skin,
+            lods: Vec::new(),
+            lod_source: LodSource::None,
+            lod_tier: std::sync::atomic::AtomicU8::new(0),
+            beyond_draw_distance: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
     /// Uploads `vertices`/`indices` and an optional base-colour image
     /// (`(width, height, rgba8)`; white when `None`) and builds a
     /// [`SkinnedMeshRenderer`] — the skinned twin of
@@ -673,6 +738,68 @@ impl SkinnedMeshRenderer {
             &texture,
             material,
         ))
+    }
+}
+
+/// An RGBA8 image: width, height and tightly packed pixels.
+pub type RgbaImage<'a> = (u32, u32, &'a [u8]);
+
+/// The images for each map a material can carry. A map left `None` has no
+/// effect (white for base colour).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MaterialImages<'a> {
+    /// Base colour, sRGB.
+    pub base_color: Option<RgbaImage<'a>>,
+    /// Tangent-space normal map, linear.
+    pub normal: Option<RgbaImage<'a>>,
+    /// Emitted colour, sRGB.
+    pub emissive: Option<RgbaImage<'a>>,
+    /// Ambient occlusion in red, linear.
+    pub occlusion: Option<RgbaImage<'a>>,
+    /// Roughness in green and metallic in blue, linear.
+    pub metallic_roughness: Option<RgbaImage<'a>>,
+}
+
+impl MaterialImages<'_> {
+    /// Uploads the images and builds a material binding with them. All
+    /// repeat across texture coordinates past `0..1`.
+    pub fn binding(
+        &self,
+        gpu: &engine_renderer::GpuContext,
+        pipeline: &engine_renderer::Pipeline,
+        label: &str,
+        material: engine_renderer::Material,
+    ) -> engine_renderer::MaterialBinding {
+        let colour = |image: Option<RgbaImage<'_>>| {
+            image.map(|(width, height, rgba)| {
+                gpu.create_texture_from_rgba_tiled(label, width, height, rgba)
+            })
+        };
+        let data = |image: Option<RgbaImage<'_>>| {
+            image.map(|(width, height, rgba)| {
+                gpu.create_data_texture_from_rgba_tiled(label, width, height, rgba)
+            })
+        };
+        let base = colour(self.base_color).unwrap_or_else(|| {
+            gpu.create_texture_from_rgba_tiled(label, 1, 1, &[255, 255, 255, 255])
+        });
+        let (normal, emissive, occlusion, metallic_roughness) = (
+            data(self.normal),
+            colour(self.emissive),
+            data(self.occlusion),
+            data(self.metallic_roughness),
+        );
+        gpu.create_material_binding_with(
+            pipeline,
+            &base,
+            &material.into(),
+            engine_renderer::MaterialMaps {
+                normal: normal.as_ref(),
+                emissive: emissive.as_ref(),
+                occlusion: occlusion.as_ref(),
+                metallic_roughness: metallic_roughness.as_ref(),
+            },
+        )
     }
 }
 

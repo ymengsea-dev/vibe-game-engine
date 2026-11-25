@@ -143,6 +143,26 @@ impl GpuContext {
         )
     }
 
+    /// [`GpuContext::create_data_texture_from_rgba`] with repeat addressing,
+    /// for material maps (normal, occlusion, metallic-roughness) whose
+    /// texture coordinates may run past `0..1`.
+    pub fn create_data_texture_from_rgba_tiled(
+        &self,
+        label: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Texture {
+        self.upload_rgba(
+            label,
+            width,
+            height,
+            rgba,
+            Wrap::Tile,
+            wgpu::TextureFormat::Rgba8Unorm,
+        )
+    }
+
     fn create_texture_from_rgba_with_wrap(
         &self,
         label: &str,

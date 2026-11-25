@@ -213,6 +213,9 @@ pub struct ImportedMaterial {
     pub normal_scale: f32,
     /// Index into [`ImportedGltf::images`] for the occlusion map.
     pub occlusion_image: Option<usize>,
+    /// Index into [`ImportedGltf::images`] for the metallic-roughness map
+    /// (roughness in green, metallic in blue).
+    pub metallic_roughness_image: Option<usize>,
     /// Occlusion strength, glTF's `occlusionTexture.strength`. `1.0` when
     /// the material has no occlusion map.
     pub occlusion_strength: f32,
@@ -645,6 +648,9 @@ fn convert(
                 normal_image: normal.as_ref().map(|n| n.texture().source().index()),
                 normal_scale: normal.as_ref().map_or(1.0, |n| n.scale()),
                 occlusion_image: occlusion.as_ref().map(|o| o.texture().source().index()),
+                metallic_roughness_image: pbr
+                    .metallic_roughness_texture()
+                    .map(|info| info.texture().source().index()),
                 occlusion_strength: occlusion.as_ref().map_or(1.0, |o| o.strength()),
                 alpha_mode: match material.alpha_mode() {
                     gltf::material::AlphaMode::Opaque => "OPAQUE",

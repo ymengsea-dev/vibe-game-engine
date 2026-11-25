@@ -993,7 +993,7 @@ mod tests {
             &mut assets,
             &gltf,
             "character",
-            None,
+            &crate::MaterialSetup::plain(),
         )
         .expect("uploads")
         .expect("the character is skinned");

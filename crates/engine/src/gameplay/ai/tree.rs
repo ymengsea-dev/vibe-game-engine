@@ -19,7 +19,7 @@ use engine_scene::{
 use engine_scripting::GameCommand;
 use glam::Vec3;
 
-use super::nav::{self, flat};
+use super::nav;
 use super::{AiMemory, AiTick};
 
 /// How often "Move to target" works out a new route to a moving target.
@@ -176,7 +176,7 @@ impl Run<'_> {
             BtNodeKind::TargetWithin { distance } => {
                 let here = super::position(self.world, self.entity);
                 check(match (here, self.target_position()) {
-                    (Some(here), Some(at)) => flat(here).distance(flat(at)) <= distance,
+                    (Some(here), Some(at)) => nav::plane_distance(self.world, here, at) <= distance,
                     _ => false,
                 })
             }
@@ -313,7 +313,7 @@ impl Run<'_> {
         ) else {
             return Status::Failure;
         };
-        if flat(here).distance(flat(at)) <= self.agent.stopping_distance.max(0.1) {
+        if nav::plane_distance(self.world, here, at) <= self.agent.stopping_distance.max(0.1) {
             nav::stop(self.world, self.entity);
             return Status::Success;
         }

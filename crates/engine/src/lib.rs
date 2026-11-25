@@ -47,8 +47,9 @@ pub mod prelude {
         GameplayError, GameplayQueries, GameplayRuntime, SceneSource, SpawnedObject,
     };
     pub use engine_ai::{
-        GridCoord, NavError, NavGrid, find_path, find_path_world, find_route, follow_path,
-        line_of_sight, smooth_path,
+        Clearance, GridCoord, NavError, NavGrid, NavNode, Solid, Span, find_layered_route,
+        find_node_path, find_path, find_path_world, find_route, follow_path, line_of_sight,
+        node_line_of_sight, smooth_node_path, smooth_path,
     };
     pub use engine_animation::{
         AnimationState, BlendMotion, StateMachine, StateMachineError, Transition,
@@ -125,6 +126,7 @@ pub mod prelude {
         CURRENT_SCENE_VERSION, CameraData, ColliderData, ColliderShape, ContactRuleKind,
         EXPORT_SCENE_FILE, EnvironmentData, ExportContent, GameState, GameStateName,
         InstantiateReport, LoadedSkinnedMesh, MeshRendererData, ModelAnimationData, NavGridData,
+        NavPlane, NavSpanData,
         NullResolver, Prefab, ProjectionData, RuleAction, RuleCompare, RuleCondition, RuleData,
         RuleEvent, RuleOutcome, RuleTrigger, RuleVariables, RuntimeResolver, SaveGame, SavedEntity,
         Scene, SceneAudioEmitter, SceneCollider, SceneEntity, SceneError, SceneModelAnimation,

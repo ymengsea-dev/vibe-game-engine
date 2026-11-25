@@ -32,12 +32,11 @@ use engine_ecs::components::{
 };
 use engine_ecs::prelude::{Entity, World};
 use engine_renderer::{
-    GpuContext, Material, MaterialBinding, Mesh, Pipeline, RenderAssets, SkinnedPipeline, UvRect,
+    GpuContext, MaterialBinding, Mesh, Pipeline, RenderAssets, SkinnedPipeline, UvRect,
 };
 use engine_scene::{
     AppliedLod, AppliedMaterialOverride, AssetRef, LodCache, MaterialOverrideData, SceneError,
     SceneFoliage, SceneMaterialOverride, SceneModelAnimation, SceneResolver, SkinnedModel,
-    material_from_imported,
 };
 use engine_utils::AssetHandle;
 
@@ -106,6 +105,29 @@ fn asset_id(reference: &AssetRef) -> Result<AssetId, SceneError> {
     Ok(AssetId::from_uuid(uuid))
 }
 
+/// The imported material file `changes` names, if it names one.
+fn material_file<'i>(
+    importer: &'i AssetImporter,
+    changes: Option<&MaterialOverrideData>,
+) -> Option<&'i engine_scene::MaterialData> {
+    let reference = changes?.material.as_ref()?;
+    match importer.get(asset_id(reference).ok()?)? {
+        ImportedAsset::Material(data) => Some(data),
+        _ => None,
+    }
+}
+
+/// The pixels of the imported image `reference` names.
+fn image_asset<'i>(
+    importer: &'i AssetImporter,
+    reference: &AssetRef,
+) -> Option<engine_ecs::components::RgbaImage<'i>> {
+    match importer.get(asset_id(reference).ok()?)? {
+        ImportedAsset::Texture(texture) => engine_scene::texture_pixels(texture),
+        _ => None,
+    }
+}
+
 impl SceneResolver for EditorResolver<'_> {
     fn resolve_mesh(
         &mut self,
@@ -169,20 +191,21 @@ impl SceneResolver for EditorResolver<'_> {
         let imported_material = primitive
             .material
             .and_then(|index| gltf.materials.get(index));
-        let base_color = imported_material
-            .and_then(|material| material.base_color_image)
-            .and_then(|index| gltf.images.get(index))
-            .map(|image| (image.width, image.height, image.rgba8.as_slice()));
-        let material = imported_material.map_or(Material::DEFAULT, material_from_imported);
-        let material = material_override.map_or(material, |value| value.apply(material));
+        let importer = self.importer;
+        let (material, sources) = engine_scene::compose_material(
+            imported_material,
+            material_file(importer, material_override),
+            material_override,
+        );
+        let images = sources.images(Some(gltf), |reference| image_asset(importer, reference));
 
-        let renderer = MeshRenderer::from_geometry(
+        let renderer = MeshRenderer::from_geometry_with_maps(
             self.gpu,
             self.pipeline,
             self.assets,
             &primitive.vertices,
             &primitive.indices,
-            base_color,
+            images,
             material,
         )
         .map_err(|err| SceneError::Resolve(err.to_string()))?;
@@ -263,6 +286,8 @@ impl SceneResolver for EditorResolver<'_> {
         let Some(ImportedAsset::Mesh(gltf)) = self.importer.get(id) else {
             return Ok(None);
         };
+        let importer = self.importer;
+        let images = |reference: &AssetRef| image_asset(importer, reference);
         engine_scene::upload_skinned_model(
             self.gpu,
             self.pipeline,
@@ -270,7 +295,11 @@ impl SceneResolver for EditorResolver<'_> {
             self.assets,
             gltf,
             &mesh.id,
-            material_override,
+            &engine_scene::MaterialSetup {
+                changes: material_override,
+                file: material_file(importer, material_override),
+                images: &images,
+            },
         )
     }
 
@@ -298,6 +327,29 @@ impl SceneResolver for EditorResolver<'_> {
     }
 }
 
+/// The import pass an object's material files and images were last read
+/// from. A later pass may have changed them, so the object is drawn again.
+#[derive(bevy_ecs::component::Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterialImportPass(pub u64);
+
+/// Whether an object's material reads material files or image assets, which
+/// change when they are imported again.
+fn uses_material_assets(authored: Option<&MaterialOverrideData>) -> bool {
+    authored.is_some_and(|value| value.material.is_some() || !value.images.is_empty())
+}
+
+/// Whether an object's drawn material is out of date: its settings changed,
+/// or the files they read were imported again since.
+fn material_stale(
+    authored: Option<&MaterialOverrideData>,
+    applied: Option<&AppliedMaterialOverride>,
+    pass: Option<&MaterialImportPass>,
+    current: u64,
+) -> bool {
+    material_needs_refresh(authored, applied)
+        || (uses_material_assets(authored) && pass.is_none_or(|pass| pass.0 != current))
+}
+
 /// Turns every not-yet-resolved renderable reference in `world` into a
 /// live component, and reports how many failed.
 ///
@@ -323,6 +375,7 @@ pub fn resolve_pending(
     skinned_pipeline: &SkinnedPipeline,
     assets: &mut RenderAssets,
 ) -> ResolveReport {
+    let current_pass = importer.pass_id();
     // An animated model whose material changed is rebuilt from scratch:
     // its renderer is released here and it rejoins the pending list.
     let stale_skinned: Vec<Entity> = world
@@ -331,10 +384,16 @@ pub fn resolve_pending(
             &SkinnedMeshRenderer,
             Option<&SceneMaterialOverride>,
             Option<&AppliedMaterialOverride>,
+            Option<&MaterialImportPass>,
         )>()
         .iter(world)
-        .filter(|(_, _, authored, applied)| {
-            material_needs_refresh(authored.map(|value| &value.0), *applied)
+        .filter(|(_, _, authored, applied, pass)| {
+            material_stale(
+                authored.map(|value| &value.0),
+                *applied,
+                *pass,
+                current_pass,
+            )
         })
         .map(|(entity, ..)| entity)
         .collect();
@@ -358,12 +417,18 @@ pub fn resolve_pending(
             &MeshRenderer,
             Option<&SceneMaterialOverride>,
             Option<&AppliedMaterialOverride>,
+            Option<&MaterialImportPass>,
         )>()
         .iter(world)
-        .filter(|(_, _, _, authored, applied)| {
-            material_needs_refresh(authored.map(|value| &value.0), *applied)
+        .filter(|(_, _, _, authored, applied, pass)| {
+            material_stale(
+                authored.map(|value| &value.0),
+                *applied,
+                *pass,
+                current_pass,
+            )
         })
-        .map(|(entity, source, _, authored, _)| {
+        .map(|(entity, source, _, authored, ..)| {
             (
                 entity,
                 source.clone(),
@@ -399,7 +464,7 @@ pub fn resolve_pending(
                 let mut entity_mut = world.entity_mut(entity);
                 entity_mut.remove::<MeshRenderer>();
                 engine_scene::insert_skinned_model(&mut entity_mut, model, settings, authored);
-                entity_mut.insert(AppliedLod(auto_generate));
+                entity_mut.insert((AppliedLod(auto_generate), MaterialImportPass(current_pass)));
                 if let Some(mut player) = entity_mut.get_mut::<engine_ecs::AnimationPlayer>() {
                     // Studio plays a clip only when asked to (Preview).
                     player.playing = false;
@@ -434,6 +499,7 @@ pub fn resolve_pending(
                     renderer,
                     AppliedMaterialOverride(authored),
                     AppliedLod(auto_generate),
+                    MaterialImportPass(current_pass),
                 ));
                 report.resolved += 1;
             }

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use engine_ecs::components::{
     AssetSource, Disabled, MeshSource, Name, Sprite, SpriteSource, Transform as TransformComponent,
 };
-use engine_ecs::prelude::{ChildOf, Children, Entity, Without, World};
+use engine_ecs::prelude::{ChildOf, Entity, Without, World};
 use engine_project::Project;
 use engine_scene::{Scene, SceneError, write_atomic};
 use glam::{Vec2, Vec3};
@@ -90,6 +90,20 @@ pub const BUILDS_DIR: &str = engine_project::storage::GAME_BUILDS_DIR;
 /// Where the editor's "Save Scene" / "Open Scene" actions read and write,
 /// relative to the editor's working directory.
 pub const DEFAULT_SCENE_PATH: &str = "scene.ron";
+
+/// What the Inspector shows: the selected object, or a material file
+/// picked in Project Assets after it.
+#[derive(Debug, Default)]
+pub struct InspectorFocus {
+    /// The Project Assets selection last seen.
+    asset: Option<PathBuf>,
+    /// The object selection last seen.
+    entity: Option<Entity>,
+    /// The material file shown, if one was picked last.
+    material: Option<PathBuf>,
+    /// The material file's settings as edited, read once.
+    editing: Option<(PathBuf, engine_scene::MaterialData)>,
+}
 
 /// Owned by the editor binary (`editor/src/main.rs`), passed to
 /// [`crate::EditorShell::run_frame`] by mutable reference each frame —
@@ -388,6 +402,9 @@ pub struct EditorState {
     pub dropped_files: Vec<std::path::PathBuf>,
     /// Set when the user picked `Assets ▸ Refresh`.
     pub rescan_request: bool,
+    /// What the Inspector shows: a material file picked in Project Assets
+    /// after the last object, or the selected object.
+    pub inspector_focus: InspectorFocus,
     /// Set at startup when unsaved scene edits were recovered from a
     /// previous session's autosave (see
     /// [`EditorState::recover_from_autosave`]). Purely informational —
@@ -669,6 +686,7 @@ impl EditorState {
             import_request: false,
             dropped_files: Vec::new(),
             rescan_request: false,
+            inspector_focus: InspectorFocus::default(),
             recovered_from_autosave: false,
         }
     }
@@ -1977,6 +1995,104 @@ impl EditorState {
         Ok(())
     }
 
+    /// The material file the Inspector edits, if a material was picked in
+    /// Project Assets after the last object was selected.
+    pub fn inspected_material(&mut self) -> Option<PathBuf> {
+        let focus = &mut self.inspector_focus;
+        if focus.asset != self.selected_asset {
+            focus.asset.clone_from(&self.selected_asset);
+            focus.material = self.selected_asset.clone().filter(|path| {
+                crate::assets::AssetKind::from_path(path) == crate::assets::AssetKind::Material
+            });
+        }
+        if focus.entity != self.selected_entity {
+            focus.entity = self.selected_entity;
+            if self.selected_entity.is_some() {
+                focus.material = None;
+            }
+        }
+        if focus.material.is_none() {
+            focus.editing = None;
+        }
+        focus.material.clone()
+    }
+
+    /// The material file `path` (relative to the assets root) as the
+    /// Inspector edits it, read from disk the first time.
+    pub fn material_being_edited(
+        &mut self,
+        path: &Path,
+    ) -> Result<&mut engine_scene::MaterialData, String> {
+        let stale = self
+            .inspector_focus
+            .editing
+            .as_ref()
+            .is_none_or(|(editing, _)| editing != path);
+        if stale {
+            let data = engine_scene::MaterialData::load(&self.project.assets_dir().join(path))
+                .map_err(|error| error.to_string())?;
+            self.inspector_focus.editing = Some((path.to_path_buf(), data));
+        }
+        match self.inspector_focus.editing.as_mut() {
+            Some((_, data)) => Ok(data),
+            None => Err("The material could not be read".into()),
+        }
+    }
+
+    /// Writes the material file the Inspector edits back to disk.
+    pub fn save_edited_material(&mut self) -> Result<(), String> {
+        let Some((path, data)) = &self.inspector_focus.editing else {
+            return Ok(());
+        };
+        data.save(&self.project.assets_dir().join(path))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Creates a new material file in the assets folder `folder` (relative
+    /// to the assets root, empty for the root), named "New Material" with a
+    /// number when that is taken, selects it and asks for a rescan so it
+    /// gets its ID. Returns its path relative to the assets root.
+    pub fn create_material_file(&mut self, folder: &Path) -> Result<PathBuf, String> {
+        use std::io::Write as _;
+        if !folder
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err("That folder is outside the project's assets".into());
+        }
+        let directory = self.project.assets_dir().join(folder);
+        if !directory.is_dir() {
+            return Err("That folder no longer exists".into());
+        }
+        let text = engine_scene::MaterialData::default()
+            .to_ron()
+            .map_err(|error| error.to_string())?;
+        for number in 1..1000 {
+            let name = if number == 1 {
+                format!("New Material.{}", engine_scene::MATERIAL_EXTENSION)
+            } else {
+                format!("New Material {number}.{}", engine_scene::MATERIAL_EXTENSION)
+            };
+            let file = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.join(&name))
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("Could not create the material: {error}")),
+            };
+            let mut file = file;
+            file.write_all(text.as_bytes())
+                .map_err(|error| format!("Could not write the material: {error}"))?;
+            let relative = folder.join(name);
+            self.selected_asset = Some(relative.clone());
+            self.rescan_request = true;
+            return Ok(relative);
+        }
+        Err("Too many materials named New Material here".into())
+    }
+
     /// Creates a sparse tilemap from the selected imported image.
     pub fn create_tilemap_from_selected_image(&mut self) -> Result<Entity, String> {
         let image = self
@@ -1992,6 +2108,7 @@ impl EditorState {
             .insert(engine_scene::SceneTilemap(engine_scene::TilemapData::new(
                 engine_scene::AssetRef { id: id.to_string() },
             )));
+        crate::tilemap::ensure_layers(&mut self.world, parent)?;
         self.select_only(parent);
         self.dimension = EditorDimension::Mode2D;
         self.terrain_sculpt_active = false;
@@ -2001,8 +2118,11 @@ impl EditorState {
         Ok(parent)
     }
 
-    /// Paints or erases one cell of the selected tilemap. Repeating the same
-    /// brush on the same cell is a no-op, so a drag does not spawn duplicates.
+    /// Paints or erases one cell of the selected tilemap's active layer,
+    /// giving the map its layers first if it has none. Repeating the same
+    /// brush on the same cell is a no-op, so a drag does not spawn
+    /// duplicates. With a rule-tile brush the cell and its neighbours pick
+    /// their tiles from the cells round them.
     pub fn paint_tile_cell(&mut self, x: i32, y: i32, erase: bool) -> Result<bool, String> {
         let parent = self.selected_entity.ok_or("Select a tilemap first")?;
         if self
@@ -2012,17 +2132,42 @@ impl EditorState {
         {
             return Err("This tilemap is locked. Unlock it to paint.".to_owned());
         }
+        if x.unsigned_abs() > 10_000 || y.unsigned_abs() > 10_000 {
+            return Err("Tile position is outside the supported editing area".into());
+        }
+        self.world
+            .get::<engine_scene::SceneTilemap>(parent)
+            .ok_or("Select a tilemap first")?
+            .0
+            .validate()
+            .map_err(|error| format!("Tilemap settings are invalid: {error}"))?;
+        let mut changed = crate::tilemap::ensure_layers(&mut self.world, parent)?;
         let map = self
             .world
             .get::<engine_scene::SceneTilemap>(parent)
             .ok_or("Select a tilemap first")?
             .0
             .clone();
-        if x.unsigned_abs() > 10_000 || y.unsigned_abs() > 10_000 {
-            return Err("Tile position is outside the supported editing area".into());
+        let layer = map
+            .layers
+            .get(map.active_layer as usize)
+            .ok_or("The tilemap has no layer to paint")?
+            .clone();
+        let holder = crate::tilemap::layer_group(&self.world, parent, &layer)
+            .ok_or("The layer's object is missing")?;
+        if self
+            .world
+            .get::<engine_ecs::components::Lock>(holder)
+            .is_some()
+        {
+            return Err(format!(
+                "Layer {} is locked. Unlock it to paint.",
+                layer.name
+            ));
         }
-        map.validate()
-            .map_err(|error| format!("Tilemap settings are invalid: {error}"))?;
+        if self.hierarchy.hidden.contains(&layer.object) {
+            return Err(format!("Layer {} is hidden. Show it to paint.", layer.name));
+        }
         let center = Vec3::new(
             (x as f32 + 0.5) * map.cell_size[0],
             (y as f32 + 0.5) * map.cell_size[1],
@@ -2031,25 +2176,23 @@ impl EditorState {
         if !center.is_finite() {
             return Err("Tile position is not finite".into());
         }
-        let existing = self.world.get::<Children>(parent).and_then(|children| {
-            children
-                .iter()
-                .find(|&&child| {
-                    self.world.get::<SpriteSource>(child).is_some()
-                        && self
-                            .world
-                            .get::<TransformComponent>(child)
-                            .is_some_and(|transform| transform.0.translation == center)
-                })
-                .copied()
-        });
+        let existing = crate::tilemap::cells(&self.world, holder)
+            .into_iter()
+            .find(|&child| {
+                self.world
+                    .get::<TransformComponent>(child)
+                    .is_some_and(|transform| transform.0.translation == center)
+            });
         if erase {
             if let Some(existing) = existing {
                 self.world.despawn(existing);
-                self.mark_dirty();
-                return Ok(true);
+                crate::tilemap::retile_around(&mut self.world, holder, &map, x, y);
+                changed = true;
             }
-            return Ok(false);
+            if changed {
+                self.mark_dirty();
+            }
+            return Ok(changed);
         }
         let region = engine_scene::GridRegion {
             columns: map.columns,
@@ -2059,71 +2202,84 @@ impl EditorState {
         }
         .name();
         let brush_collider = crate::tilemap::brush_collider(map.cell_size);
+        let solid = map.brush_collision || layer.solid;
         if let Some(existing) = existing {
-            let mut changed = false;
             {
                 let Some(mut source) = self.world.get_mut::<SpriteSource>(existing) else {
                     return Err("Tile no longer has an image".into());
                 };
-                if source.region != region || source.atlas != map.atlas.id {
+                // A rule-tile cell keeps the tile its neighbours picked.
+                let auto_kept = map.brush_auto.is_some()
+                    && source.atlas == map.atlas.id
+                    && engine_scene::GridRegion::parse(&source.region).is_some_and(|current| {
+                        let (columns, rows) = map
+                            .brush_auto
+                            .map_or((1, 1), engine_scene::AutoTileLayout::block);
+                        current.columns == map.columns
+                            && current.rows == map.rows
+                            && (map.brush_column..map.brush_column + columns)
+                                .contains(&current.column)
+                            && (map.brush_row..map.brush_row + rows).contains(&current.row)
+                    });
+                if !auto_kept && (source.region != region || source.atlas != map.atlas.id) {
                     source.region = region;
-                    source.atlas = map.atlas.id;
+                    source.atlas = map.atlas.id.clone();
                     changed = true;
                 }
             }
             let current = self.world.get::<engine_scene::SceneCollider>(existing);
-            if map.brush_collision && current.is_none() {
+            if solid && current.is_none() {
                 self.world
                     .entity_mut(existing)
                     .insert(engine_scene::SceneCollider(brush_collider));
                 changed = true;
-            } else if !map.brush_collision
-                && current.is_some_and(|collider| collider.0 == brush_collider)
-            {
+            } else if !solid && current.is_some_and(|collider| collider.0 == brush_collider) {
                 self.world
                     .entity_mut(existing)
                     .remove::<engine_scene::SceneCollider>();
                 changed = true;
             }
+            changed |= crate::tilemap::retile_around(&mut self.world, holder, &map, x, y);
             if changed {
                 self.mark_dirty();
             }
             return Ok(changed);
         }
-        if self
-            .world
-            .get::<Children>(parent)
-            .is_some_and(|children| children.len() >= 20_000)
-        {
+        if crate::tilemap::all_cells(&self.world, parent).len() >= 20_000 {
             return Err("Tilemap has reached the 20,000-cell editing limit".into());
         }
+        let color = [1.0, 1.0, 1.0, layer.opacity];
+        let mut sprite = Sprite::new(
+            Vec2::from_array(map.cell_size),
+            engine_renderer::UvRect {
+                min: [0.0; 2],
+                max: [1.0; 2],
+            },
+        );
+        sprite.color = color;
+        sprite.z_order = layer.draw_order;
         let tile = self
             .world
             .spawn((
                 Name::new(format!("Tile ({x}, {y})")),
                 TransformComponent::from(engine_utils::Transform::from_translation(center)),
-                ChildOf(parent),
+                ChildOf(holder),
                 SpriteSource {
-                    atlas: map.atlas.id,
+                    atlas: map.atlas.id.clone(),
                     region,
                     size: map.cell_size,
-                    color: [1.0; 4],
-                    z_order: 0.0,
+                    color,
+                    z_order: layer.draw_order,
                 },
-                Sprite::new(
-                    Vec2::from_array(map.cell_size),
-                    engine_renderer::UvRect {
-                        min: [0.0; 2],
-                        max: [1.0; 2],
-                    },
-                ),
+                sprite,
             ))
             .id();
-        if map.brush_collision {
+        if solid {
             self.world
                 .entity_mut(tile)
                 .insert(engine_scene::SceneCollider(brush_collider));
         }
+        crate::tilemap::retile_around(&mut self.world, holder, &map, x, y);
         self.mark_dirty();
         Ok(true)
     }
@@ -2348,6 +2504,41 @@ impl EditorState {
         Ok(())
     }
 
+    /// Draws `entity` with the material file `path` (relative to the assets
+    /// root), keeping its other material changes, and selects it.
+    pub fn apply_material_file(&mut self, entity: Entity, path: &Path) -> Result<(), String> {
+        if self
+            .world
+            .get::<engine_ecs::components::MeshSource>(entity)
+            .is_none()
+        {
+            return Err("Drop a material on a model".into());
+        }
+        if self
+            .world
+            .get::<engine_ecs::components::Lock>(entity)
+            .is_some()
+        {
+            return Err("This object is locked. Unlock it to change its material.".into());
+        }
+        let id = self
+            .asset_index
+            .id_for(path)
+            .ok_or("The material has no asset ID yet. Try again in a moment.")?;
+        let mut changes = self
+            .world
+            .get::<engine_scene::SceneMaterialOverride>(entity)
+            .map(|current| current.0.clone())
+            .unwrap_or_default();
+        changes.material = Some(engine_scene::AssetRef { id: id.to_string() });
+        self.world
+            .entity_mut(entity)
+            .insert(engine_scene::SceneMaterialOverride(changes));
+        self.select_only(entity);
+        self.mark_dirty();
+        Ok(())
+    }
+
     /// Adds the file `path` (relative to the assets root) to the scene, as a
     /// drag from Project Assets does, and selects the new object. It goes at
     /// `position`, keeping a prefab's rotation and scale, or at `parent` as
@@ -2368,6 +2559,20 @@ impl EditorState {
                     .filter(|row| row.code.as_deref() != Some(crate::diagnostics::ASSET_DROP_CODE))
                     .collect(),
             );
+        }
+        // A material isn't an object: it goes on the model it is dropped on.
+        if crate::assets::AssetKind::from_path(path) == crate::assets::AssetKind::Material {
+            let result = match parent {
+                Some(target) => self.apply_material_file(target, path).map(|()| target),
+                None => Err("Drop a material on a model".to_owned()),
+            };
+            return match result {
+                Ok(target) => Some(target),
+                Err(error) => {
+                    self.asset_browser.operation_error = Some(error);
+                    None
+                }
+            };
         }
         let is_prefab = path
             .extension()
@@ -3554,9 +3759,11 @@ impl EditorState {
 
     /// Bakes the scene's walkable area into its nav grid with the settings
     /// the menu shows, and turns the Nav grid overlay on so the result is
-    /// visible. Undo restores the previous grid.
+    /// visible. Undo restores the previous grid. In 2D the grid lies on the
+    /// screen (XY).
     ///
-    /// `mesh_bounds` gives an entity's local mesh bounds, for mesh colliders.
+    /// Mesh colliders block by their imported triangles; `mesh_bounds` gives
+    /// an entity's local mesh bounds for one whose model is not imported.
     pub fn bake_nav_grid(
         &mut self,
         mesh_bounds: &dyn Fn(&World, Entity) -> Option<engine_renderer::Aabb>,
@@ -3572,9 +3779,45 @@ impl EditorState {
             .into_iter()
             .map(|entity| (entity, self.terrain_tile_heightmaps(entity)))
             .collect();
-        let inputs = crate::nav_bake::collect(&mut self.world, mesh_bounds, &|_, entity| {
-            tiles.get(&entity).cloned().unwrap_or_default()
-        });
+        let plane = if self.dimension.is_2d() {
+            engine_scene::NavPlane::Screen
+        } else {
+            engine_scene::NavPlane::Ground
+        };
+        let importer = &self.importer;
+        let mesh_triangles = |world: &World, entity: Entity| {
+            let collider = world.get::<engine_scene::SceneCollider>(entity)?;
+            let engine_scene::ColliderShape::TriMesh { mesh } = &collider.0.shape else {
+                return None;
+            };
+            let id = uuid::Uuid::parse_str(&mesh.id).ok()?;
+            let crate::ImportedAsset::Mesh(gltf) =
+                importer.get(engine_asset::AssetId::from_uuid(id))?
+            else {
+                return None;
+            };
+            let primitive = engine_scene::base_mesh(gltf).or(gltf.meshes.first())?;
+            let corner = |index: &u32| {
+                primitive
+                    .vertices
+                    .get(*index as usize)
+                    .map(|vertex| glam::Vec3::from_array(vertex.position))
+            };
+            primitive
+                .indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|[a, b, c]| Some([corner(a)?, corner(b)?, corner(c)?]))
+                .collect::<Option<Vec<_>>>()
+        };
+        let inputs = crate::nav_bake::collect(
+            &mut self.world,
+            plane,
+            &mesh_triangles,
+            mesh_bounds,
+            &|_, entity| tiles.get(&entity).cloned().unwrap_or_default(),
+        );
         let settings = self.nav_bake_settings();
         let grid = crate::nav_bake::bake(&inputs, settings)?;
         self.world.insert_resource(engine_scene::SceneNavGrid(grid));
@@ -4072,7 +4315,6 @@ mod tests {
 
     #[test]
     fn solid_tile_brush_saves_a_fixed_cell_collider() {
-        use engine_ecs::prelude::Children;
         use engine_scene::{
             AssetRef, BodyKind, ColliderShape, SceneCollider, SceneTilemap, TilemapData,
         };
@@ -4089,14 +4331,7 @@ mod tests {
         state.select_only(parent);
 
         assert!(state.paint_tile_cell(2, -1, false).unwrap());
-        let tile = state
-            .world
-            .get::<Children>(parent)
-            .unwrap()
-            .iter()
-            .next()
-            .copied()
-            .unwrap();
+        let tile = crate::tilemap::all_cells(&state.world, parent)[0];
         let collider = state.world.get::<SceneCollider>(tile).unwrap().0.clone();
         assert_eq!(collider.body, BodyKind::Fixed);
         assert_eq!(
@@ -4117,8 +4352,75 @@ mod tests {
     }
 
     #[test]
+    fn rule_tiles_pick_their_tiles_from_their_neighbours_and_layers_guard_painting() {
+        use engine_ecs::components::SpriteSource;
+        use engine_scene::{AssetRef, AutoTileLayout, SceneTilemap, TilemapData};
+
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let parent = hierarchy::spawn_entity(&mut state.world, "Tilemap", Vec3::ZERO);
+        let mut map = TilemapData::new(AssetRef {
+            id: uuid::Uuid::new_v4().to_string(),
+        });
+        map.columns = 8;
+        map.rows = 8;
+        map.brush_column = 4;
+        map.brush_auto = Some(AutoTileLayout::Edges16);
+        state.world.entity_mut(parent).insert(SceneTilemap(map));
+        state.select_only(parent);
+
+        for x in 0..3 {
+            assert!(state.paint_tile_cell(x, 0, false).unwrap());
+        }
+        let region_at = |state: &EditorState, x: i32| {
+            crate::tilemap::all_cells(&state.world, parent)
+                .into_iter()
+                .find(|cell| {
+                    crate::tilemap::cell_of(&state.world, *cell, [1.0, 1.0]) == Some((x, 0))
+                })
+                .and_then(|cell| state.world.get::<SpriteSource>(cell))
+                .map(|source| source.region.clone())
+        };
+        // Block from column 4: left end has a right neighbour (2), the
+        // middle both (2 + 8), the right end a left neighbour (8).
+        assert_eq!(region_at(&state, 0).as_deref(), Some("grid:8,8:6,0"));
+        assert_eq!(region_at(&state, 1).as_deref(), Some("grid:8,8:6,2"));
+        assert_eq!(region_at(&state, 2).as_deref(), Some("grid:8,8:4,2"));
+        assert!(
+            !state.paint_tile_cell(1, 0, false).unwrap(),
+            "repainting is a no-op"
+        );
+
+        assert!(state.paint_tile_cell(1, 0, true).unwrap());
+        assert_eq!(
+            region_at(&state, 0).as_deref(),
+            Some("grid:8,8:4,0"),
+            "alone"
+        );
+        assert_eq!(region_at(&state, 2).as_deref(), Some("grid:8,8:4,0"));
+
+        // Painting goes to the active layer (Ground), drawn at its order.
+        let map = state.world.get::<SceneTilemap>(parent).unwrap().0.clone();
+        let ground = crate::tilemap::layer_group(&state.world, parent, &map.layers[1]).unwrap();
+        assert_eq!(crate::tilemap::cells(&state.world, ground).len(), 2);
+
+        state
+            .world
+            .entity_mut(ground)
+            .insert(engine_ecs::components::Lock);
+        let error = state.paint_tile_cell(5, 5, false).unwrap_err();
+        assert!(error.contains("locked"), "{error}");
+        state
+            .world
+            .entity_mut(ground)
+            .remove::<engine_ecs::components::Lock>();
+        state.hierarchy.hidden.insert(map.layers[1].object.clone());
+        let error = state.paint_tile_cell(5, 5, false).unwrap_err();
+        assert!(error.contains("hidden"), "{error}");
+    }
+
+    #[test]
     fn repainting_a_tile_changes_its_solid_state_without_duplicating_it() {
-        use engine_ecs::prelude::Children;
         use engine_scene::{AssetRef, SceneCollider, SceneTilemap, TilemapData};
 
         let project = temp_project();
@@ -4131,14 +4433,7 @@ mod tests {
         state.world.entity_mut(parent).insert(SceneTilemap(map));
         state.select_only(parent);
         assert!(state.paint_tile_cell(0, 0, false).unwrap());
-        let tile = state
-            .world
-            .get::<Children>(parent)
-            .unwrap()
-            .iter()
-            .next()
-            .copied()
-            .unwrap();
+        let tile = crate::tilemap::all_cells(&state.world, parent)[0];
 
         state
             .world
@@ -4148,7 +4443,7 @@ mod tests {
             .brush_collision = false;
         assert!(state.paint_tile_cell(0, 0, false).unwrap());
         assert!(state.world.get::<SceneCollider>(tile).is_none());
-        assert_eq!(state.world.get::<Children>(parent).unwrap().len(), 1);
+        assert_eq!(crate::tilemap::all_cells(&state.world, parent).len(), 1);
 
         state
             .world
@@ -4158,7 +4453,7 @@ mod tests {
             .brush_collision = true;
         assert!(state.paint_tile_cell(0, 0, false).unwrap());
         assert!(state.world.get::<SceneCollider>(tile).is_some());
-        assert_eq!(state.world.get::<Children>(parent).unwrap().len(), 1);
+        assert_eq!(crate::tilemap::all_cells(&state.world, parent).len(), 1);
 
         let custom = SceneCollider(engine_scene::ColliderData::new(
             engine_scene::ColliderShape::Ball { radius: 0.4 },

@@ -1364,6 +1364,11 @@ fn handle_asset_requests(state: &mut EditorState) {
         .take()
         .is_some_and(|relative| create_asset_folder(state, &relative));
 
+    if let Some(folder) = state.asset_browser.new_material_request.take()
+        && let Err(error) = state.create_material_file(&folder)
+    {
+        state.asset_browser.operation_error = Some(error);
+    }
     let dropped = std::mem::take(&mut state.dropped_files);
     let import_requested = std::mem::take(&mut state.import_request);
     let explicit_rescan = std::mem::take(&mut state.rescan_request);

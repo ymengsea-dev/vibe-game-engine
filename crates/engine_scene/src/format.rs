@@ -539,6 +539,13 @@ pub struct MaterialOverrideData {
     /// single-sided.
     #[serde(default, skip_serializing_if = "is_false")]
     pub two_sided: bool,
+    /// A material file drawn with instead of the model's own material; the
+    /// settings above still apply on top.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<AssetRef>,
+    /// Images replacing the material's own, map by map.
+    #[serde(default, skip_serializing_if = "crate::MaterialImageRefs::is_empty")]
+    pub images: crate::MaterialImageRefs,
 }
 
 impl Default for MaterialOverrideData {
@@ -549,6 +556,8 @@ impl Default for MaterialOverrideData {
             roughness: None,
             cutout: None,
             two_sided: false,
+            material: None,
+            images: crate::MaterialImageRefs::default(),
         }
     }
 }
@@ -818,6 +827,23 @@ pub struct TilemapData {
     /// Whether painting a cell adds fixed collision to that cell.
     #[serde(default)]
     pub brush_collision: bool,
+    /// The map's layers, drawn in their draw order. Each is a child object
+    /// holding its painted cells. Empty on maps from before layers: their
+    /// cells sit straight under the map and count as one layer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<TileLayerData>,
+    /// The layer painting goes to, an index into `layers`.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub active_layer: u32,
+    /// Paint with a rule tile: the brush cell is the top-left of a block of
+    /// tiles laid out as this, and each painted cell picks its tile from
+    /// its neighbours. `None` paints the brush cell itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brush_auto: Option<AutoTileLayout>,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 impl TilemapData {
@@ -831,6 +857,52 @@ impl TilemapData {
             brush_column: 0,
             brush_row: 0,
             brush_collision: false,
+            layers: Vec::new(),
+            active_layer: 0,
+            brush_auto: None,
+        }
+    }
+}
+
+/// One layer of a tilemap.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TileLayerData {
+    /// What the layer is called, shown in the layer list.
+    pub name: String,
+    /// The object ID of the child object that holds the layer's cells.
+    pub object: String,
+    /// Sprite layer for its cells: higher draws on top.
+    #[serde(default)]
+    pub draw_order: f32,
+    /// How see-through its cells are, `0` to `1`.
+    #[serde(default = "full_opacity")]
+    pub opacity: f32,
+    /// Whether every cell of the layer is solid.
+    #[serde(default)]
+    pub solid: bool,
+}
+
+fn full_opacity() -> f32 {
+    1.0
+}
+
+/// How a rule tile's block is laid out on the sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutoTileLayout {
+    /// 16 tiles, 4 across and 4 down: one per set of filled side
+    /// neighbours (up 1, right 2, down 4, left 8), in that number's order.
+    Edges16,
+    /// 47 tiles, 8 across and 6 down: one per shape of filled side and
+    /// corner neighbours, a corner counting only with both its sides.
+    Blob47,
+}
+
+impl AutoTileLayout {
+    /// The block's columns and rows on the sheet.
+    pub fn block(self) -> (u32, u32) {
+        match self {
+            AutoTileLayout::Edges16 => (4, 4),
+            AutoTileLayout::Blob47 => (8, 6),
         }
     }
 }
@@ -1498,6 +1570,11 @@ pub struct ColliderData {
     /// Keep the body upright; collisions cannot turn it.
     #[serde(default)]
     pub lock_rotation: bool,
+    /// While the game runs, walking characters route round this body
+    /// wherever it is. Only Dynamic and Kinematic bodies use it: fixed
+    /// ones are part of the baked walkable area already.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocks_walking: bool,
 }
 
 impl ColliderData {
@@ -1512,6 +1589,7 @@ impl ColliderData {
             bounciness: 0.0,
             gravity_scale: default_gravity_scale(),
             lock_rotation: false,
+            blocks_walking: false,
         }
     }
 }
@@ -1622,6 +1700,48 @@ pub struct NavGridData {
     /// them. Absent on a grid that was never baked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bake: Option<crate::ai::NavBakeSettings>,
+    /// Floors above each cell's lowest one (a bridge over the ground, an
+    /// upper storey), sorted by cell and then height, at most three per
+    /// cell. `blocked` and `heights` describe the lowest floor.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upper: Vec<NavSpanData>,
+    /// The most a step between neighbouring cells may rise or drop, or
+    /// `None` to ignore heights (hand-made grids and older bakes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub climb: Option<f32>,
+    /// The plane characters walk on.
+    #[serde(default, skip_serializing_if = "NavPlane::is_ground")]
+    pub plane: NavPlane,
+}
+
+/// A floor above a nav grid cell's lowest one.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct NavSpanData {
+    /// The cell, row-major.
+    pub cell: u32,
+    /// The floor's height.
+    pub height: f32,
+    /// Whether characters cannot stand there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
+}
+
+/// The plane a nav grid lies on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NavPlane {
+    /// The ground of a 3D world: the grid's rows run along Z, heights along Y.
+    #[default]
+    Ground,
+    /// A 2D world seen from the front: the grid lies on X and Y, and
+    /// characters keep their depth.
+    Screen,
+}
+
+impl NavPlane {
+    /// Whether this is [`NavPlane::Ground`].
+    pub fn is_ground(&self) -> bool {
+        *self == NavPlane::Ground
+    }
 }
 
 impl NavGridData {
@@ -1635,6 +1755,9 @@ impl NavGridData {
             blocked: vec![false; (width as usize) * (height as usize)],
             heights: Vec::new(),
             bake: None,
+            upper: Vec::new(),
+            climb: None,
+            plane: NavPlane::Ground,
         }
     }
 
@@ -2487,6 +2610,7 @@ mod tests {
             bounciness: 0.3,
             gravity_scale: -0.5,
             lock_rotation: true,
+            blocks_walking: true,
         };
         let text = ron::to_string(&data).unwrap();
         let back: ColliderData = ron::from_str(&text).unwrap();

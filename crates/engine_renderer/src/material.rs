@@ -91,6 +91,10 @@ pub struct Material {
     /// grass cards stay visible from behind, lit from the side facing the
     /// camera.
     pub double_sided: bool,
+    /// How many times the textures repeat across the surface, per axis.
+    pub uv_scale: [f32; 2],
+    /// How far the textures are shifted, in texture widths, after scaling.
+    pub uv_offset: [f32; 2],
 }
 
 impl Material {
@@ -104,6 +108,8 @@ impl Material {
         occlusion_strength: 1.0,
         alpha_mode: AlphaMode::Opaque,
         double_sided: false,
+        uv_scale: [1.0, 1.0],
+        uv_offset: [0.0, 0.0],
     };
 
     /// A cutout material for foliage and similar cards, discarding
@@ -117,6 +123,8 @@ impl Material {
         occlusion_strength: 1.0,
         alpha_mode: AlphaMode::Mask { cutoff: 0.5 },
         double_sided: true,
+        uv_scale: [1.0, 1.0],
+        uv_offset: [0.0, 0.0],
     };
 }
 
@@ -129,7 +137,7 @@ impl Default for Material {
 
 /// GPU-layout material uniform, ready to write into a uniform buffer.
 ///
-/// Four 16-byte rows, so the struct as a whole satisfies WGSL's uniform
+/// Five 16-byte rows (the fifth is the texture scale and offset), so the struct as a whole satisfies WGSL's uniform
 /// address-space alignment rules — matching
 /// [`crate::CameraUniform`]/[`crate::ModelUniform`]'s `Pod`/`Zeroable`
 /// pattern. Fields are grouped to fill each row rather than in the order
@@ -162,8 +170,11 @@ pub struct MaterialUniform {
     /// it sits in what was padding so the CPU side can pick a pipeline
     /// that draws both faces.
     pub double_sided: u32,
-    /// Padding only — completes the final 16-byte row.
+    /// Padding only — completes the fourth 16-byte row.
     pub _padding: [f32; 2],
+    /// Texture coordinates are `uv * xy + zw`: [`Material::uv_scale`] then
+    /// [`Material::uv_offset`].
+    pub uv_transform: [f32; 4],
 }
 
 impl From<Material> for MaterialUniform {
@@ -180,6 +191,12 @@ impl From<Material> for MaterialUniform {
             occlusion_strength: material.occlusion_strength.clamp(0.0, 1.0),
             double_sided: u32::from(material.double_sided),
             _padding: [0.0; 2],
+            uv_transform: [
+                material.uv_scale[0],
+                material.uv_scale[1],
+                material.uv_offset[0],
+                material.uv_offset[1],
+            ],
         }
     }
 }
@@ -238,15 +255,16 @@ mod tests {
     #[test]
     fn uniform_size_is_a_multiple_of_16_bytes() {
         assert_eq!(size_of::<MaterialUniform>() % 16, 0);
-        // Four 16-byte rows since T-15 added emissive, normal scale,
-        // occlusion and the alpha mode/cutoff pair. Was 32.
-        assert_eq!(size_of::<MaterialUniform>(), 64);
+        // Five 16-byte rows since the texture scale and offset. Four
+        // before (emissive, normal scale, occlusion, alpha); 32 at first.
+        assert_eq!(size_of::<MaterialUniform>(), 80);
     }
 
     #[test]
     fn uniform_bytes_match_expected_size() {
         let uniform = MaterialUniform::default();
-        assert_eq!(bytemuck::bytes_of(&uniform).len(), 64);
+        assert_eq!(bytemuck::bytes_of(&uniform).len(), 80);
+        assert_eq!(uniform.uv_transform, [1.0, 1.0, 0.0, 0.0]);
     }
 
     // --- T-15: alpha modes and the extended uniform ----------------
@@ -302,6 +320,8 @@ mod tests {
             occlusion_strength: 0.8,
             alpha_mode: AlphaMode::Mask { cutoff: 0.3 },
             double_sided: true,
+            uv_scale: [2.0, 3.0],
+            uv_offset: [0.5, 0.25],
         };
         let uniform = MaterialUniform::from(material);
         assert!(uniform.is_double_sided());

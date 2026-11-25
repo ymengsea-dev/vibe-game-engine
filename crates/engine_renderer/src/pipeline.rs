@@ -148,11 +148,15 @@ pub struct MaterialMaps<'a> {
     pub emissive: Option<&'a Texture>,
     /// Ambient occlusion, read from the red channel.
     pub occlusion: Option<&'a Texture>,
+    /// glTF's metallic-roughness map: roughness in green, metallic in
+    /// blue, each multiplying its factor.
+    pub metallic_roughness: Option<&'a Texture>,
 }
 
 /// The "this material has no such map" textures: a flat normal, black
-/// emissive, and full-white occlusion. Sampling these leaves the
-/// corresponding material factor untouched.
+/// emissive, and full-white occlusion (which also serves as the neutral
+/// metallic-roughness map). Sampling these leaves the corresponding
+/// material factor untouched.
 struct NeutralMaps {
     normal: Texture,
     emissive: Texture,
@@ -647,6 +651,16 @@ impl GpuContext {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -886,6 +900,9 @@ impl GpuContext {
         let normal = maps.normal.unwrap_or(&pipeline.neutral.normal);
         let emissive = maps.emissive.unwrap_or(&pipeline.neutral.emissive);
         let occlusion = maps.occlusion.unwrap_or(&pipeline.neutral.occlusion);
+        let metallic_roughness = maps
+            .metallic_roughness
+            .unwrap_or(&pipeline.neutral.occlusion);
         let bind_group = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material bind group"),
             layout: &pipeline.material_bind_group_layout,
@@ -915,6 +932,10 @@ impl GpuContext {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(&occlusion.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&metallic_roughness.view),
                 },
             ],
         });

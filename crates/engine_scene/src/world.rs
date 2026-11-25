@@ -1309,6 +1309,12 @@ mod tests {
         grid.blocked[6] = true;
         grid.heights = (0..12).map(|cell| cell as f32 * 0.25).collect();
         grid.bake = Some(crate::NavBakeSettings::default());
+        grid.upper = vec![crate::NavSpanData {
+            cell: 5,
+            height: 4.0,
+            blocked: false,
+        }];
+        grid.climb = Some(0.8);
 
         let scene = Scene {
             version: crate::CURRENT_SCENE_VERSION,
@@ -1327,6 +1333,62 @@ mod tests {
             Some(grid),
             "a level's walkability is the level's, and has to survive a save"
         );
+    }
+
+    #[test]
+    fn nav_floors_and_plane_are_checked_and_left_out_when_unused() {
+        use crate::format::NavGridData;
+
+        let plain = NavGridData::new(2, 1, 1.0, [0.0, 0.0]);
+        let text = ron::to_string(&plain).expect("writes");
+        assert!(
+            !text.contains("upper") && !text.contains("climb") && !text.contains("plane"),
+            "older Studios keep reading grids that use none of them: {text}"
+        );
+        let mut screen = plain.clone();
+        screen.plane = crate::NavPlane::Screen;
+        let back: NavGridData =
+            ron::from_str(&ron::to_string(&screen).expect("writes")).expect("reads");
+        assert_eq!(back.plane, crate::NavPlane::Screen);
+
+        let span = |cell, height| crate::NavSpanData {
+            cell,
+            height,
+            blocked: false,
+        };
+        let bad = |upper: Vec<crate::NavSpanData>, climb: Option<f32>| {
+            let mut grid = plain.clone();
+            grid.upper = upper;
+            grid.climb = climb;
+            grid.validate().is_err()
+        };
+        assert!(bad(vec![span(2, 1.0)], None));
+        assert!(bad(vec![span(0, f32::NAN)], None));
+        assert!(bad(vec![span(1, 1.0), span(0, 1.0)], None));
+        assert!(bad(vec![span(0, 2.0), span(0, 1.0)], None));
+        assert!(bad((1..=4).map(|h| span(0, h as f32)).collect(), None));
+        assert!(bad(Vec::new(), Some(-1.0)));
+        assert!(!bad(
+            vec![span(0, 1.0), span(0, 2.0), span(1, 1.0)],
+            Some(0.5)
+        ));
+    }
+
+    #[test]
+    fn blocks_walking_is_saved_only_when_on() {
+        let mut collider = crate::ColliderData::new(
+            crate::ColliderShape::Ball { radius: 1.0 },
+            crate::BodyKind::Dynamic,
+        );
+        assert!(
+            !ron::to_string(&collider)
+                .expect("writes")
+                .contains("blocks_walking")
+        );
+        collider.blocks_walking = true;
+        let back: crate::ColliderData =
+            ron::from_str(&ron::to_string(&collider).expect("writes")).expect("reads");
+        assert!(back.blocks_walking);
     }
 
     #[test]

@@ -1,25 +1,39 @@
 //! Baking the scene's walkable area: a nav grid built from the ground and
 //! the solid objects standing on it.
 //!
-//! The grid has one layer. For each cell Studio finds the lowest ground
-//! under it (terrain, or the top of a fixed box collider) and marks the cell
-//! blocked when:
-//! - there is ground somewhere in the scene but none under this cell;
-//! - the ground is steeper than the bake's maximum slope;
-//! - a fixed, solid collider fills the space a character needs above the
-//!   ground (from the step height up to the agent's height), grown by the
-//!   agent's radius so characters keep clear of walls.
+//! Each cell holds up to four floors, found by looking straight down
+//! through it: terrain, and the tops of fixed boxes, cylinders and mesh
+//! colliders (a bridge over the ground, an upper storey, a ramp). A floor
+//! is blocked when:
+//! - it is steeper than the bake's maximum slope;
+//! - a fixed, solid collider fills the space a character needs above it
+//!   (from the step height up to the agent's height), grown by the agent's
+//!   radius so characters keep clear of walls.
+//!
+//! A cell with no floor is blocked when the scene has ground somewhere.
+//! Neighbouring floors connect when the height between them is within the
+//! climb: the step height plus what the steepest slope rises across a
+//! cell.
+//!
+//! Colliders block by their real shape: balls and capsules are round,
+//! turned boxes are turned, meshes block by their triangles and inside.
+//! Cylinders count by the smaller of their box and capsule.
 //!
 //! Moving bodies (dynamic and kinematic), triggers, disabled objects and
-//! objects with AI never block: they are not part of the level. Without
-//! any ground, the grid is flat at `0` and spans the solid objects.
+//! objects with AI are not part of the level; moving bodies with Blocks
+//! paths on block while the game runs instead. Without any ground, the
+//! grid is flat at `0` and spans the solid objects.
 //!
-//! Colliders count by the box around them, so a round or mesh collider
-//! blocks a little more than its shape.
+//! A 2D scene bakes on the XY plane: every fixed solid collider (sprites,
+//! solid tilemap cells) blocks the cells it covers, at any depth.
 
+use engine_ai::{Clearance, MAX_LAYERS, Solid};
 use engine_ecs::prelude::{Entity, World};
 use engine_renderer::{Aabb, Heightmap};
-use engine_scene::{BodyKind, ColliderShape, NavBakeSettings, NavGridData, SceneCollider};
+use engine_scene::{
+    BodyKind, ColliderMesh, ColliderShape, NavBakeSettings, NavGridData, NavPlane, NavSpanData,
+    SCREEN_TO_GRID, SceneCollider, collider_solid,
+};
 use glam::{Mat4, Vec2, Vec3};
 
 /// The most cells one bake may make. A grid this size is a few megabytes in
@@ -27,6 +41,10 @@ use glam::{Mat4, Vec2, Vec3};
 pub const MAX_BAKE_CELLS: u64 = 250_000;
 /// How far past the solid objects a grid with no ground reaches.
 const NO_GROUND_MARGIN: f32 = 5.0;
+/// Floors closer than this in one cell are the same floor.
+const SAME_FLOOR: f32 = 0.05;
+/// How far in front of and behind the screen a 2D bake looks.
+const SCREEN_DEPTH: f32 = 10_000.0;
 
 /// Something characters can stand on.
 #[derive(Debug, Clone)]
@@ -117,22 +135,44 @@ impl Ground {
     }
 }
 
-/// A solid box characters cannot walk through, in world space.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A fixed solid object, in grid space (the world, for a 3D bake).
+#[derive(Debug, Clone, PartialEq)]
 pub struct Obstacle {
-    /// Lowest corner.
-    pub min: Vec3,
-    /// Highest corner.
-    pub max: Vec3,
+    /// Its shape.
+    pub solid: Solid,
+    /// Whether characters can stand on its top.
+    pub floor: bool,
+}
+
+impl Obstacle {
+    /// A box from `min` to `max`, with a floor on top.
+    pub fn aabb(min: Vec3, max: Vec3) -> Self {
+        Self {
+            solid: Solid::aabb(min, max),
+            floor: true,
+        }
+    }
 }
 
 /// What a bake reads from the scene.
 #[derive(Debug, Clone, Default)]
 pub struct BakeInputs {
-    /// Everything characters can stand on.
+    /// Terrain characters can stand on.
     pub grounds: Vec<Ground>,
-    /// Everything that blocks them.
+    /// Everything solid: it blocks, and boxes, cylinders and meshes are
+    /// floors too.
     pub obstacles: Vec<Obstacle>,
+    /// The plane the grid lies on.
+    pub plane: NavPlane,
+}
+
+/// One floor found in a cell.
+#[derive(Debug, Clone, Copy)]
+struct Floor {
+    height: f32,
+    steep: bool,
+    /// The obstacle whose top it is, if any.
+    source: Option<usize>,
 }
 
 /// Builds the grid from `inputs`.
@@ -157,63 +197,200 @@ pub fn bake(inputs: &BakeInputs, settings: NavBakeSettings) -> Result<NavGridDat
     }
     let (width, height) = (width as u32, height as u32);
     let mut grid = NavGridData::new(width, height, cell, [min.x, min.y]);
-    let mut heights = vec![0.0; grid.cell_count()];
-    let has_ground = !inputs.grounds.is_empty();
-    let half = Vec2::splat(cell * 0.5);
-    let grow = Vec2::splat(settings.agent_radius);
+    grid.plane = inputs.plane;
+    let screen = inputs.plane == NavPlane::Screen;
+    let clearance = Clearance {
+        radius: settings.agent_radius,
+        step: if screen { 0.0 } else { settings.step_height },
+        height: if screen {
+            2.0 * SCREEN_DEPTH
+        } else {
+            settings.agent_height
+        },
+    };
+    let walkable_cos = settings.max_slope_degrees.to_radians().cos();
+    let has_ground =
+        !screen && (!inputs.grounds.is_empty() || inputs.obstacles.iter().any(|o| o.floor));
+    let floors = if has_ground {
+        find_floors(inputs, &grid, settings)
+    } else {
+        let level = if screen { -SCREEN_DEPTH } else { 0.0 };
+        let floor = Floor {
+            height: level,
+            steep: false,
+            source: None,
+        };
+        vec![vec![floor]; grid.cell_count()]
+    };
 
-    for row in 0..height {
-        for column in 0..width {
-            let index = (row * width + column) as usize;
-            let centre = min + Vec2::new(column as f32 + 0.5, row as f32 + 0.5) * cell;
-            let ground = inputs
-                .grounds
-                .iter()
-                .filter_map(|ground| ground.height_at(centre).map(|h| (h, ground)))
-                .min_by(|a, b| a.0.total_cmp(&b.0));
-            let floor = match ground {
-                Some((floor, ground)) => {
-                    heights[index] = floor;
-                    if ground.slope_at(centre, cell * 0.5) > settings.max_slope_degrees {
-                        grid.blocked[index] = true;
-                        continue;
-                    }
-                    floor
-                }
-                None if has_ground => {
-                    grid.blocked[index] = true;
+    let mut blocked: Vec<Vec<bool>> = floors
+        .iter()
+        .map(|cell| cell.iter().map(|floor| floor.steep).collect())
+        .collect();
+    let half = Vec2::splat(cell * 0.5);
+    let grow = Vec2::splat(settings.agent_radius.max(0.0));
+    for (index, obstacle) in inputs.obstacles.iter().enumerate() {
+        let (lo, hi) = obstacle.solid.bounds();
+        let (lo, hi) = (Vec2::new(lo.x, lo.z) - grow, Vec2::new(hi.x, hi.z) + grow);
+        for (cell_index, centre) in cells_in(&grid, lo, hi) {
+            let (cell_min, cell_max) = (centre - half, centre + half);
+            for (layer, floor) in floors[cell_index].iter().enumerate() {
+                if blocked[cell_index][layer] {
                     continue;
                 }
-                None => 0.0,
-            };
-            let band = (floor + settings.step_height, floor + settings.agent_height);
-            let (cell_min, cell_max) = (centre - half, centre + half);
-            grid.blocked[index] = inputs.obstacles.iter().any(|obstacle| {
-                let low = Vec2::new(obstacle.min.x, obstacle.min.z) - grow;
-                let high = Vec2::new(obstacle.max.x, obstacle.max.z) + grow;
-                cell_min.cmplt(high).all()
-                    && cell_max.cmpgt(low).all()
-                    && obstacle.min.y < band.1
-                    && obstacle.max.y > band.0
+                blocked[cell_index][layer] = if floor.source == Some(index) {
+                    obstacle.solid.blocks_own_floor(
+                        cell_min,
+                        cell_max,
+                        floor.height,
+                        &clearance,
+                        walkable_cos,
+                    )
+                } else {
+                    obstacle
+                        .solid
+                        .blocks_floor(cell_min, cell_max, floor.height, &clearance)
+                };
+            }
+        }
+    }
+
+    let mut heights = vec![0.0; grid.cell_count()];
+    for (index, cell_floors) in floors.iter().enumerate() {
+        match cell_floors.first() {
+            Some(floor) => {
+                if !screen {
+                    heights[index] = floor.height;
+                }
+                grid.blocked[index] = blocked[index][0];
+            }
+            None => grid.blocked[index] = true,
+        }
+        for (layer, floor) in cell_floors.iter().enumerate().skip(1) {
+            grid.upper.push(NavSpanData {
+                cell: index as u32,
+                height: floor.height,
+                blocked: blocked[index][layer],
             });
         }
     }
     if heights.iter().any(|height| *height != 0.0) {
         grid.heights = heights;
     }
+    if has_ground {
+        let rise = cell * std::f32::consts::SQRT_2 * settings.max_slope_degrees.to_radians().tan();
+        grid.climb = Some(settings.step_height + rise);
+    }
     grid.bake = Some(settings);
     Ok(grid)
 }
 
-/// The world `(x, z)` rectangle the grid covers: the ground, or without
-/// any, the solid objects plus a margin.
+/// Every floor of every cell, lowest first, at most [`MAX_LAYERS`].
+fn find_floors(
+    inputs: &BakeInputs,
+    grid: &NavGridData,
+    settings: NavBakeSettings,
+) -> Vec<Vec<Floor>> {
+    let cell = grid.cell_size;
+    let walkable_cos = settings.max_slope_degrees.to_radians().cos();
+    let origin = Vec2::from_array(grid.origin);
+    let mut floors = vec![Vec::new(); grid.cell_count()];
+    for row in 0..grid.height {
+        for column in 0..grid.width {
+            let index = (row * grid.width + column) as usize;
+            let centre = origin + Vec2::new(column as f32 + 0.5, row as f32 + 0.5) * cell;
+            for ground in &inputs.grounds {
+                if let Some(height) = ground.height_at(centre) {
+                    floors[index].push(Floor {
+                        height,
+                        steep: ground.slope_at(centre, cell * 0.5) > settings.max_slope_degrees,
+                        source: None,
+                    });
+                }
+            }
+        }
+    }
+    for (index, obstacle) in inputs.obstacles.iter().enumerate() {
+        if !obstacle.floor {
+            continue;
+        }
+        let (lo, hi) = obstacle.solid.bounds();
+        for (cell_index, centre) in cells_in(grid, Vec2::new(lo.x, lo.z), Vec2::new(hi.x, hi.z)) {
+            for (height, normal) in obstacle.solid.tops(centre) {
+                floors[cell_index].push(Floor {
+                    height,
+                    steep: normal.y < walkable_cos - 1e-4,
+                    source: Some(index),
+                });
+            }
+        }
+    }
+    for cell_floors in &mut floors {
+        cell_floors.sort_by(|a, b| a.height.total_cmp(&b.height));
+        let mut merged: Vec<Floor> = Vec::with_capacity(cell_floors.len());
+        for floor in cell_floors.drain(..) {
+            match merged.last_mut() {
+                // Flush surfaces are one floor: the higher top, walkable if
+                // either is, owned by the object on top.
+                Some(last) if floor.height - last.height < SAME_FLOOR => {
+                    last.height = floor.height;
+                    last.steep &= floor.steep;
+                    last.source = floor.source.or(last.source);
+                }
+                _ => merged.push(floor),
+            }
+        }
+        merged.truncate(MAX_LAYERS);
+        *cell_floors = merged;
+    }
+    floors
+}
+
+/// The index and centre of every cell of `grid` overlapping the `(x, z)`
+/// rectangle from `lo` to `hi`.
+fn cells_in(grid: &NavGridData, lo: Vec2, hi: Vec2) -> impl Iterator<Item = (usize, Vec2)> {
+    let origin = Vec2::from_array(grid.origin);
+    let cell = grid.cell_size;
+    let far = origin + Vec2::new(grid.width as f32, grid.height as f32) * cell;
+    let reaches = hi.x >= origin.x && hi.y >= origin.y && lo.x <= far.x && lo.y <= far.y;
+    let to_cell = |value: f32, start: f32, count: u32| {
+        ((value - start) / cell)
+            .floor()
+            .clamp(0.0, count as f32 - 1.0) as u32
+    };
+    let (x0, x1) = (
+        to_cell(lo.x, origin.x, grid.width),
+        to_cell(hi.x, origin.x, grid.width),
+    );
+    let (y0, y1) = (
+        to_cell(lo.y, origin.y, grid.height),
+        to_cell(hi.y, origin.y, grid.height),
+    );
+    let width = grid.width;
+    (y0..=y1).filter(move |_| reaches).flat_map(move |row| {
+        (x0..=x1).map(move |column| {
+            (
+                (row * width + column) as usize,
+                origin + Vec2::new(column as f32 + 0.5, row as f32 + 0.5) * cell,
+            )
+        })
+    })
+}
+
+/// The `(x, z)` rectangle the grid covers: the ground and the objects
+/// characters stand on, or without any, the solid objects plus a margin.
 fn area(inputs: &BakeInputs) -> (Vec2, Vec2) {
     let mut min = Vec2::splat(f32::MAX);
     let mut max = Vec2::splat(f32::MIN);
-    if inputs.grounds.is_empty() {
+    let flat = |point: Vec3| Vec2::new(point.x, point.z);
+    let screen = inputs.plane == NavPlane::Screen;
+    let has_ground =
+        !screen && (!inputs.grounds.is_empty() || inputs.obstacles.iter().any(|o| o.floor));
+    if !has_ground {
         for obstacle in &inputs.obstacles {
-            min = min.min(Vec2::new(obstacle.min.x, obstacle.min.z));
-            max = max.max(Vec2::new(obstacle.max.x, obstacle.max.z));
+            let (lo, hi) = obstacle.solid.bounds();
+            min = min.min(flat(lo));
+            max = max.max(flat(hi));
         }
         if min.x > max.x {
             return (Vec2::splat(-10.0), Vec2::splat(10.0));
@@ -228,11 +405,18 @@ fn area(inputs: &BakeInputs) -> (Vec2, Vec2) {
         min = min.min(low);
         max = max.max(high);
     }
+    for obstacle in inputs.obstacles.iter().filter(|o| o.floor) {
+        let (lo, hi) = obstacle.solid.bounds();
+        min = min.min(flat(lo));
+        max = max.max(flat(hi));
+    }
     (min, max)
 }
 
-/// The bake settings as menu fields. Returns whether any changed.
-pub fn show_controls(ui: &mut egui::Ui, settings: &mut NavBakeSettings) -> bool {
+/// The bake settings as menu fields. Returns whether any changed. A 2D
+/// bake (`screen`) has no heights, so it shows only the cell size and
+/// character radius.
+pub fn show_controls(ui: &mut egui::Ui, settings: &mut NavBakeSettings, screen: bool) -> bool {
     let mut changed = false;
     let mut field = |ui: &mut egui::Ui, value: &mut f32, label: &str, range, hint: &str| {
         changed |= ui
@@ -259,6 +443,9 @@ pub fn show_controls(ui: &mut egui::Ui, settings: &mut NavBakeSettings) -> bool 
         0.0..=100.0,
         "How far characters keep from walls",
     );
+    if screen {
+        return changed;
+    }
     field(
         ui,
         &mut settings.agent_height,
@@ -287,17 +474,33 @@ pub fn show_controls(ui: &mut egui::Ui, settings: &mut NavBakeSettings) -> bool 
 /// to the terrain object's.
 pub type TileSource<'a> = dyn Fn(&World, Entity) -> Vec<(Heightmap, Mat4)> + 'a;
 
-/// Reads the ground and obstacles from the editor's world.
+/// A mesh collider's triangles, in the object's own space.
+pub type TriangleSource<'a> = dyn Fn(&World, Entity) -> Option<Vec<[Vec3; 3]>> + 'a;
+
+/// Reads the ground and obstacles from the editor's world, for a grid on
+/// `plane`.
 ///
-/// `mesh_bounds` gives an entity's local mesh bounds, for mesh colliders.
-/// `tiles` gives a terrain's tiles, each with the matrix from the tile's own
-/// space to the terrain object's.
+/// `mesh_triangles` gives a mesh collider's triangles; when it has none,
+/// `mesh_bounds` gives the box around the object's mesh instead. `tiles`
+/// gives a terrain's tiles, each with the matrix from the tile's own space
+/// to the terrain object's. A 2D bake leaves terrain out.
 pub fn collect(
     world: &mut World,
+    plane: NavPlane,
+    mesh_triangles: &TriangleSource<'_>,
     mesh_bounds: &dyn Fn(&World, Entity) -> Option<Aabb>,
     tiles: &TileSource<'_>,
 ) -> BakeInputs {
-    let mut inputs = BakeInputs::default();
+    let mut inputs = BakeInputs {
+        plane,
+        ..BakeInputs::default()
+    };
+    let screen = plane == NavPlane::Screen;
+    let to_grid = if screen {
+        SCREEN_TO_GRID
+    } else {
+        Mat4::IDENTITY
+    };
     let colliders: Vec<(Entity, engine_scene::ColliderData)> = world
         .query::<(Entity, &SceneCollider)>()
         .iter(world)
@@ -315,85 +518,39 @@ pub fn collect(
         }
         let to_world = crate::hierarchy::world_transform(world, entity).to_matrix();
         if let ColliderShape::Terrain = collider.shape {
-            for (heightmap, tile) in tiles(world, entity) {
-                inputs.grounds.push(Ground::Terrain {
-                    heightmap,
-                    to_world: to_world * tile,
-                });
+            if !screen {
+                for (heightmap, tile) in tiles(world, entity) {
+                    inputs.grounds.push(Ground::Terrain {
+                        heightmap,
+                        to_world: to_world * tile,
+                    });
+                }
             }
             continue;
         }
-        let local = match &collider.shape {
-            ColliderShape::Ball { radius } => Some(Vec3::splat(*radius)),
-            ColliderShape::Cuboid { half_extents } => Some(Vec3::from_array(*half_extents)),
-            ColliderShape::Cylinder {
-                half_height,
-                radius,
-            } => Some(Vec3::new(*radius, *half_height, *radius)),
-            ColliderShape::Capsule {
-                half_height,
-                radius,
-            } => Some(Vec3::new(*radius, half_height + radius, *radius)),
-            ColliderShape::TriMesh { .. } | ColliderShape::Terrain => None,
+        let Some(solid) =
+            collider_solid(&collider.shape, to_world, to_grid, || match mesh_triangles(
+                world, entity,
+            ) {
+                Some(triangles) => Some(ColliderMesh::Triangles(triangles)),
+                None => mesh_bounds(world, entity).map(|bounds| ColliderMesh::Bounds {
+                    min: bounds.min,
+                    max: bounds.max,
+                }),
+            })
+        else {
+            continue;
         };
-        let bounds = match local {
-            Some(half) => Aabb {
-                min: -half,
-                max: half,
-            },
-            None => match mesh_bounds(world, entity) {
-                Some(bounds) => bounds,
-                None => continue,
-            },
-        };
-        let obstacle = world_box(to_world, bounds);
-        if matches!(collider.shape, ColliderShape::Cuboid { .. }) && is_upright(to_world) {
-            inputs.grounds.push(Ground::Flat {
-                min: Vec2::new(obstacle.min.x, obstacle.min.z),
-                max: Vec2::new(obstacle.max.x, obstacle.max.z),
-                top: obstacle.max.y,
-            });
-        }
-        inputs.obstacles.push(obstacle);
+        let floor = !screen
+            && matches!(
+                collider.shape,
+                ColliderShape::Cuboid { .. }
+                    | ColliderShape::Cylinder { .. }
+                    | ColliderShape::TriMesh { .. }
+            );
+        inputs.obstacles.push(Obstacle { solid, floor });
     }
     inputs
-}
-
-/// Whether a box with this world matrix still has a flat top.
-fn is_upright(to_world: Mat4) -> bool {
-    to_world
-        .transform_vector3(Vec3::Y)
-        .try_normalize()
-        .is_some_and(|up| up.y > 0.999)
-}
-
-/// The world box around local `bounds`.
-fn world_box(to_world: Mat4, bounds: Aabb) -> Obstacle {
-    let mut min = Vec3::splat(f32::MAX);
-    let mut max = Vec3::splat(f32::MIN);
-    for corner in 0..8 {
-        let local = Vec3::new(
-            if corner & 1 == 0 {
-                bounds.min.x
-            } else {
-                bounds.max.x
-            },
-            if corner & 2 == 0 {
-                bounds.min.y
-            } else {
-                bounds.max.y
-            },
-            if corner & 4 == 0 {
-                bounds.min.z
-            } else {
-                bounds.max.z
-            },
-        );
-        let point = to_world.transform_point3(local);
-        min = min.min(point);
-        max = max.max(point);
-    }
-    Obstacle { min, max }
 }
 
 #[cfg(test)]
@@ -424,13 +581,11 @@ mod tests {
 
     #[test]
     fn a_box_on_the_floor_blocks_its_footprint_and_the_radius_around_it() {
-        let crate_box = Obstacle {
-            min: Vec3::new(1.0, 0.0, 1.0),
-            max: Vec3::new(2.0, 1.0, 2.0),
-        };
+        let crate_box = Obstacle::aabb(Vec3::new(1.0, 0.0, 1.0), Vec3::new(2.0, 1.0, 2.0));
         let inputs = BakeInputs {
             grounds: vec![floor(10.0)],
             obstacles: vec![crate_box],
+            ..BakeInputs::default()
         };
         let grid = bake(&inputs, settings(0.5)).expect("bakes");
         assert_eq!((grid.width, grid.height), (20, 20));
@@ -453,17 +608,12 @@ mod tests {
 
     #[test]
     fn low_steps_and_high_overhangs_do_not_block() {
-        let step = Obstacle {
-            min: Vec3::new(1.0, 0.0, 1.0),
-            max: Vec3::new(2.0, 0.2, 2.0),
-        };
-        let sign = Obstacle {
-            min: Vec3::new(3.0, 2.5, 3.0),
-            max: Vec3::new(4.0, 3.0, 4.0),
-        };
+        let step = Obstacle::aabb(Vec3::new(1.0, 0.0, 1.0), Vec3::new(2.0, 0.2, 2.0));
+        let sign = Obstacle::aabb(Vec3::new(3.0, 2.5, 3.0), Vec3::new(4.0, 3.0, 4.0));
         let inputs = BakeInputs {
             grounds: vec![floor(10.0)],
             obstacles: vec![step, sign],
+            ..BakeInputs::default()
         };
         let grid = bake(&inputs, settings(0.5)).expect("bakes");
         assert!(!blocked_at(&grid, 1.5, 1.5));
@@ -483,6 +633,7 @@ mod tests {
                 to_world: Mat4::IDENTITY,
             }],
             obstacles: Vec::new(),
+            ..BakeInputs::default()
         };
         let grid = bake(&steep, settings(1.0)).expect("bakes");
         assert!(grid.blocked.iter().all(|blocked| *blocked));
@@ -493,6 +644,7 @@ mod tests {
                 to_world: Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0)),
             }],
             obstacles: Vec::new(),
+            ..BakeInputs::default()
         };
         let grid = bake(&ramp, settings(1.0)).expect("bakes");
         assert!(grid.blocked.iter().all(|blocked| !*blocked));
@@ -515,6 +667,7 @@ mod tests {
                 },
             ],
             obstacles: Vec::new(),
+            ..BakeInputs::default()
         };
         let grid = bake(&inputs, settings(1.0)).expect("bakes");
         assert!(!blocked_at(&grid, 0.5, 0.5));
@@ -527,9 +680,10 @@ mod tests {
         let inputs = BakeInputs {
             grounds: Vec::new(),
             obstacles: vec![Obstacle {
-                min: Vec3::new(0.0, 0.0, 0.0),
-                max: Vec3::new(1.0, 1.0, 1.0),
+                floor: false,
+                ..Obstacle::aabb(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0))
             }],
+            ..BakeInputs::default()
         };
         let grid = bake(&inputs, settings(1.0)).expect("bakes");
         assert_eq!(grid.origin, [-5.0, -5.0]);
@@ -539,10 +693,144 @@ mod tests {
     }
 
     #[test]
+    fn a_bridge_is_a_second_floor_over_the_ground() {
+        let deck = Obstacle::aabb(Vec3::new(-1.0, 2.8, -5.0), Vec3::new(1.0, 3.0, 5.0));
+        let inputs = BakeInputs {
+            grounds: vec![floor(10.0)],
+            obstacles: vec![deck],
+            ..BakeInputs::default()
+        };
+        let grid = bake(&inputs, settings(0.5)).expect("bakes");
+        assert!(
+            !blocked_at(&grid, 0.25, 0.25),
+            "the ground under the deck is open"
+        );
+        let column = ((0.25 - grid.origin[0]) / grid.cell_size) as u32;
+        let row = ((0.25 - grid.origin[1]) / grid.cell_size) as u32;
+        let cell = row * grid.width + column;
+        let on_deck: Vec<_> = grid.upper.iter().filter(|span| span.cell == cell).collect();
+        assert_eq!(on_deck.len(), 1);
+        assert!((on_deck[0].height - 3.0).abs() < 1e-4);
+        assert!(!on_deck[0].blocked);
+        assert!(grid.climb.is_some_and(|climb| climb > 0.4));
+
+        // Lower the deck into the space a character needs: the ground under
+        // it is blocked, the deck still walkable.
+        let low = Obstacle::aabb(Vec3::new(-1.0, 1.0, -5.0), Vec3::new(1.0, 1.2, 5.0));
+        let inputs = BakeInputs {
+            obstacles: vec![low],
+            ..inputs
+        };
+        let grid = bake(&inputs, settings(0.5)).expect("bakes");
+        assert!(blocked_at(&grid, 0.25, 0.25));
+        assert!(
+            grid.upper
+                .iter()
+                .any(|span| span.cell == cell && !span.blocked)
+        );
+    }
+
+    #[test]
+    fn a_ball_blocks_by_its_round_shape() {
+        let ball = Obstacle {
+            solid: Solid::sphere(Vec3::new(0.0, 0.5, 0.0), 1.0),
+            floor: false,
+        };
+        let inputs = BakeInputs {
+            grounds: vec![floor(10.0)],
+            obstacles: vec![ball],
+            ..BakeInputs::default()
+        };
+        let grid = bake(&inputs, settings(0.25)).expect("bakes");
+        assert!(blocked_at(&grid, 0.1, 0.1));
+        assert!(
+            !blocked_at(&grid, 0.85, 0.85),
+            "the corner of the box round the ball stays open"
+        );
+    }
+
+    #[test]
+    fn a_2d_bake_lies_on_the_screen_and_blocks_at_any_depth() {
+        use engine_ecs::prelude::Transform;
+        use engine_scene::ColliderData;
+
+        let mut world = World::new();
+        // A wall tile at x 2, y 1, well in front of the screen.
+        world.spawn((
+            Transform::from(engine_utils::Transform::from_translation(Vec3::new(
+                2.0, 1.0, 5.0,
+            ))),
+            SceneCollider(ColliderData::new(
+                ColliderShape::Cuboid {
+                    half_extents: [0.5, 0.5, 0.05],
+                },
+                BodyKind::Fixed,
+            )),
+        ));
+        let inputs = collect(
+            &mut world,
+            NavPlane::Screen,
+            &|_, _| None,
+            &|_, _| None,
+            &|_, _| Vec::new(),
+        );
+        assert!(!inputs.obstacles[0].floor, "2D objects are never floors");
+        let grid = bake(&inputs, settings(0.5)).expect("bakes");
+        assert_eq!(grid.plane, NavPlane::Screen);
+        assert!(grid.heights.is_empty() && grid.upper.is_empty());
+        assert_eq!(grid.climb, None);
+        // Grid rows run along world Y.
+        assert!(blocked_at(&grid, 2.0, 1.0));
+        assert!(!blocked_at(&grid, 2.0, -1.0));
+        assert!(!blocked_at(&grid, 0.0, 1.0));
+    }
+
+    #[test]
+    fn a_mesh_collider_blocks_by_its_triangles() {
+        use engine_ecs::prelude::Transform;
+        use engine_scene::{AssetRef, ColliderData};
+
+        let mut world = World::new();
+        // A thin diagonal wall: its box would cover the whole square.
+        let wall = world
+            .spawn((
+                Transform::default(),
+                SceneCollider(ColliderData::new(
+                    ColliderShape::TriMesh {
+                        mesh: AssetRef {
+                            id: uuid::Uuid::nil().to_string(),
+                        },
+                    },
+                    BodyKind::Fixed,
+                )),
+            ))
+            .id();
+        let triangles = move |_: &World, entity: Entity| {
+            (entity == wall).then(|| {
+                let (a, b) = (Vec3::new(-2.0, 0.0, -2.0), Vec3::new(2.0, 0.0, 2.0));
+                let up = Vec3::Y * 2.0;
+                vec![[a, b, b + up], [a, b + up, a + up]]
+            })
+        };
+        let mut inputs = collect(
+            &mut world,
+            NavPlane::Ground,
+            &triangles,
+            &|_, _| None,
+            &|_, _| Vec::new(),
+        );
+        inputs.grounds.push(floor(8.0));
+        let grid = bake(&inputs, settings(0.5)).expect("bakes");
+        assert!(blocked_at(&grid, 0.1, 0.1), "on the wall");
+        assert!(!blocked_at(&grid, 1.5, -1.5), "beside it, inside its box");
+    }
+
+    #[test]
     fn a_huge_area_asks_for_bigger_cells() {
         let inputs = BakeInputs {
             grounds: vec![floor(1_000.0)],
             obstacles: Vec::new(),
+            ..BakeInputs::default()
         };
         let error = bake(&inputs, settings(0.5)).expect_err("too many cells");
         assert!(error.contains("Raise Cell size"), "{error}");
@@ -571,7 +859,13 @@ mod tests {
                 .map(|x| (flat.clone(), Mat4::from_translation(Vec3::new(x, 0.0, 0.0))))
                 .to_vec()
         };
-        let inputs = collect(&mut world, &|_, _| None, &tiles);
+        let inputs = collect(
+            &mut world,
+            NavPlane::Ground,
+            &|_, _| None,
+            &|_, _| None,
+            &tiles,
+        );
         assert_eq!(inputs.grounds.len(), 2);
         assert!(
             inputs.obstacles.is_empty(),
@@ -618,10 +912,17 @@ mod tests {
             engine_scene::SceneAi(engine_scene::AiData::default()),
         ));
 
-        let inputs = collect(&mut world, &|_, _| None, &|_, _| Vec::new());
+        let inputs = collect(
+            &mut world,
+            NavPlane::Ground,
+            &|_, _| None,
+            &|_, _| None,
+            &|_, _| Vec::new(),
+        );
         assert_eq!(inputs.obstacles.len(), 1);
-        assert_eq!(inputs.obstacles[0].min, Vec3::new(-0.5, 0.0, -0.5));
-        assert_eq!(inputs.obstacles[0].max, Vec3::new(0.5, 1.0, 0.5));
-        assert_eq!(inputs.grounds.len(), 1, "an upright box is also ground");
+        let (min, max) = inputs.obstacles[0].solid.bounds();
+        assert!(min.distance(Vec3::new(-0.5, 0.0, -0.5)) < 1e-5);
+        assert!(max.distance(Vec3::new(0.5, 1.0, 0.5)) < 1e-5);
+        assert!(inputs.obstacles[0].floor, "a box is also ground");
     }
 }

@@ -387,7 +387,9 @@ fn draw_audio_emitters(world: &mut World, draw: &mut DebugDraw) {
 /// Walkable cells are drawn as an outline and blocked ones crossed out,
 /// rather than every cell as a box: a 64x64 grid is 4096 cells, and the
 /// overlay has to stay readable as well as cheap. A big grid draws every
-/// few lines and crosses so the line count stays bounded.
+/// few lines and crosses so the line count stays bounded. Floors above a
+/// cell's lowest (bridges, upper storeys) are drawn cell by cell at their
+/// own height. A 2D grid lies on the screen, just in front of it.
 fn draw_nav_grid(world: &mut World, draw: &mut DebugDraw) {
     let Some(grid) = world
         .get_resource::<SceneNavGrid>()
@@ -406,12 +408,30 @@ fn draw_nav_grid(world: &mut World, draw: &mut DebugDraw) {
         let z = z.min(grid.height as usize - 1);
         grid.heights.get(z * width + x).copied().unwrap_or(0.0) + NAV_LIFT
     };
+    let screen = grid.plane == engine_scene::NavPlane::Screen;
+    // A grid corner at `height` above its floor, in the world.
     let corner = |x: usize, z: usize, y: f32| {
-        Vec3::new(
+        let (gx, gz) = (
             grid.origin[0] + x as f32 * cell,
-            y,
             grid.origin[1] + z as f32 * cell,
-        )
+        );
+        if screen {
+            Vec3::new(gx, gz, y)
+        } else {
+            Vec3::new(gx, y, gz)
+        }
+    };
+    let cross = |draw: &mut DebugDraw, x: usize, z: usize, y: f32, span: usize| {
+        draw.line(
+            corner(x, z, y),
+            corner(x + span, z + span, y),
+            NAV_BLOCKED_COLOR,
+        );
+        draw.line(
+            corner(x + span, z, y),
+            corner(x, z + span, y),
+            NAV_BLOCKED_COLOR,
+        );
     };
     let stride = ((grid.cell_count() as f32 / NAV_MAX_DRAWN_CELLS as f32)
         .sqrt()
@@ -459,15 +479,29 @@ fn draw_nav_grid(world: &mut World, draw: &mut DebugDraw) {
         if !blocked || x % stride != 0 || z % stride != 0 {
             continue;
         }
-        let y = height_of(x, z);
-        let span = cell * stride as f32;
-        let min = corner(x, z, y);
-        draw.line(min, min + Vec3::new(span, 0.0, span), NAV_BLOCKED_COLOR);
-        draw.line(
-            min + Vec3::new(span, 0.0, 0.0),
-            min + Vec3::new(0.0, 0.0, span),
-            NAV_BLOCKED_COLOR,
-        );
+        cross(draw, x, z, height_of(x, z), stride);
+    }
+
+    for span in &grid.upper {
+        let index = span.cell as usize;
+        let (x, z) = (index % width, index / width);
+        if x % stride != 0 || z % stride != 0 || z >= grid.height as usize {
+            continue;
+        }
+        let y = span.height + NAV_LIFT;
+        if span.blocked {
+            cross(draw, x, z, y, stride);
+            continue;
+        }
+        let corners = [
+            corner(x, z, y),
+            corner(x + stride, z, y),
+            corner(x + stride, z + stride, y),
+            corner(x, z + stride, y),
+        ];
+        for side in 0..4 {
+            draw.line(corners[side], corners[(side + 1) % 4], NAV_WALKABLE_COLOR);
+        }
     }
 }
 
@@ -1084,6 +1118,53 @@ mod tests {
         assert_eq!(draw_for(&mut world, &[]), 0, "only while selected");
         let shown = draw_for(&mut world, &[guard]);
         assert!(shown > 100, "view arc, hearing ring and route: {shown}");
+    }
+
+    #[test]
+    fn upper_floors_are_drawn_at_their_height() {
+        use engine_scene::{NavGridData, NavSpanData};
+
+        let mut world = World::new();
+        let mut grid = NavGridData::new(2, 1, 1.0, [0.0, 0.0]);
+        grid.upper = vec![
+            NavSpanData {
+                cell: 0,
+                height: 3.0,
+                blocked: false,
+            },
+            NavSpanData {
+                cell: 1,
+                height: 5.0,
+                blocked: true,
+            },
+        ];
+        world.insert_resource(SceneNavGrid(grid));
+        let draw = nav_lines(&mut world);
+        let at = |y: f32, color| {
+            draw.vertices()
+                .iter()
+                .filter(|v| v.position[1] == y + NAV_LIFT && v.color == color)
+                .count()
+        };
+        assert_eq!(at(3.0, NAV_WALKABLE_COLOR), 8, "an outline on the deck");
+        assert_eq!(
+            at(5.0, NAV_BLOCKED_COLOR),
+            4,
+            "a cross on the blocked floor"
+        );
+    }
+
+    #[test]
+    fn a_2d_nav_grid_lies_on_the_screen() {
+        use engine_scene::{NavGridData, NavPlane};
+
+        let mut world = World::new();
+        let mut grid = NavGridData::new(2, 3, 1.0, [0.0, 0.0]);
+        grid.plane = NavPlane::Screen;
+        world.insert_resource(SceneNavGrid(grid));
+        let draw = nav_lines(&mut world);
+        assert!(draw.vertices().iter().all(|v| v.position[2] == NAV_LIFT));
+        assert!(draw.vertices().iter().any(|v| v.position[1] == 3.0));
     }
 
     #[test]

@@ -1546,6 +1546,29 @@ fn handle_asset_drop(
     let Some(pointer) = ui.input(|input| input.pointer.latest_pos()) else {
         return;
     };
+    // A material goes on the model under the pointer.
+    if crate::assets::AssetKind::from_path(&path) == crate::assets::AssetKind::Material {
+        if released.is_some() {
+            let rect = response.rect;
+            let local = Vec2::new(pointer.x - rect.min.x, pointer.y - rect.min.y);
+            let target = pick_scene(
+                state,
+                viewport.view_projection_matrix(),
+                rect,
+                local,
+                crate::scene_pick::LockedObjects::Skip,
+            )
+            .map(|hit| hit.entity);
+            let result = match target {
+                Some(entity) => state.apply_material_file(entity, &path),
+                None => Err("Drop a material on a model".to_owned()),
+            };
+            if let Err(error) = result {
+                state.asset_browser.operation_error = Some(error);
+            }
+        }
+        return;
+    }
     let point = drop_point(viewport, state, response.rect, pointer);
     if released.is_some() {
         state.drop_asset(&path, Some(point), None);
@@ -4323,6 +4346,78 @@ fn terminal_tab(ui: &mut egui::Ui, state: &mut EditorState) {
 }
 
 /// The right-side Inspector. The unimplemented Lighting tab stays hidden.
+/// The Inspector for a material file picked in Project Assets: a preview
+/// ball and its settings, saved as they change.
+fn material_file_panel(ui: &mut egui::Ui, state: &mut EditorState, path: &std::path::Path) {
+    let palette = crate::theme::NIGHT;
+    let name = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Material")
+        .to_owned();
+    let mut edited = match state.material_being_edited(path) {
+        Ok(data) => data.clone(),
+        Err(error) => {
+            ui.colored_label(palette.danger, error);
+            return;
+        }
+    };
+    material_preview(ui, state, &edited);
+    if inspector::material_file_editor(ui, &name, &mut edited, &state.asset_index) {
+        if let Ok(data) = state.material_being_edited(path) {
+            *data = edited;
+        }
+        if let Err(error) = state.save_edited_material() {
+            state.asset_browser.operation_error = Some(error);
+        }
+    }
+}
+
+/// A lit ball wearing `material`, redrawn only when the material or the
+/// imported images change.
+fn material_preview(ui: &mut egui::Ui, state: &EditorState, material: &engine_scene::MaterialData) {
+    let key = format!(
+        "{}#{}",
+        material.to_ron().unwrap_or_default(),
+        state.importer.pass_id()
+    );
+    let id = egui::Id::new("inspector-material-preview");
+    let cached = ui
+        .ctx()
+        .data(|data| data.get_temp::<(String, egui::TextureHandle)>(id))
+        .filter(|(built_for, _)| *built_for == key);
+    let texture = match cached {
+        Some((_, texture)) => texture,
+        None => {
+            let base = material
+                .images
+                .base_color
+                .as_ref()
+                .and_then(|image| crate::assets::parse_asset_id(&image.id))
+                .and_then(|id| match state.importer.get(id) {
+                    Some(crate::ImportedAsset::Texture(texture)) => {
+                        engine_scene::texture_pixels(texture)
+                    }
+                    _ => None,
+                });
+            let side = crate::preview::MATERIAL_PREVIEW_PX;
+            let pixels = crate::preview::material_thumbnail(material, base);
+            let image = egui::ColorImage::from_rgba_unmultiplied([side, side], &pixels);
+            let texture = ui.ctx().load_texture(
+                "inspector-material-preview",
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(id, (key, texture.clone())));
+            texture
+        }
+    };
+    ui.vertical_centered(|ui| {
+        ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::vec2(120.0, 120.0)));
+    });
+}
+
 fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
     lock_while_previewing(ui, state);
     panel_title(ui, ShellIcon::Inspector, "Inspector");
@@ -4361,6 +4456,10 @@ fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
                     } else {
                         state.world.remove_resource::<inspector::PlayingTrees>();
                     }
+                    if let Some(path) = state.inspected_material() {
+                        material_file_panel(ui, state, &path);
+                        return;
+                    }
                     inspector::show(
                         ui,
                         &mut state.world,
@@ -4374,6 +4473,11 @@ fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
                         && let Err(error) = state.apply_road_to_terrain(road)
                     {
                         state.asset_browser.operation_error = Some(error);
+                    }
+                    if let Some(object) = inspector::take_tilemap_hide_request(ui.ctx())
+                        && !state.hierarchy.hidden.remove(&object)
+                    {
+                        state.hierarchy.hidden.insert(object);
                     }
                 });
             ui.advance_cursor_after_rect(rect);
@@ -4884,7 +4988,8 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
         });
         ui.menu_button("Navigation", |ui| {
             let mut settings = state.nav_bake_settings();
-            if crate::nav_bake::show_controls(ui, &mut settings) {
+            let screen = state.dimension.is_2d();
+            if crate::nav_bake::show_controls(ui, &mut settings, screen) {
                 // A baked grid keeps its settings in the scene file.
                 match state.world.get_resource_mut::<engine_scene::SceneNavGrid>() {
                     Some(mut grid) if grid.0.bake.is_some() => {
@@ -4897,9 +5002,11 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
             ui.separator();
             if ui
                 .button("Bake walkable area")
-                .on_hover_text(
-                    "Work out where characters can walk, from the ground and solid objects",
-                )
+                .on_hover_text(if screen {
+                    "Work out where characters can walk on the screen, round solid objects"
+                } else {
+                    "Work out where characters can walk, from the ground and solid objects"
+                })
                 .clicked()
             {
                 state.nav_bake_request = true;
@@ -6737,6 +6844,86 @@ mod ui_tests {
         state.select_only(spawn);
         let path = crate::ui_snapshot::snapshot_dir().join("inspector-empty.png");
         crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 520.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `inspector-material.png`: a material file picked in Project
+    /// Assets, with its preview ball and settings.
+    #[test]
+    #[ignore = "renders on the GPU; run with --ignored"]
+    fn snapshot_inspector_material() {
+        let (root, mut state) = menu_test_state();
+        let material = engine_scene::MaterialData {
+            base_color: [0.8, 0.35, 0.2, 1.0],
+            metallic: 0.2,
+            roughness: 0.35,
+            alpha: engine_scene::MaterialAlpha::Cutout { threshold: 0.5 },
+            ..engine_scene::MaterialData::default()
+        };
+        material
+            .save(&state.project.assets_dir().join("Clay.material"))
+            .expect("material file");
+        state.selected_asset = Some(std::path::PathBuf::from("Clay.material"));
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-material.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 1000.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `inspector-tilemap.png`: a tilemap with its three layers, a
+    /// rule-tile brush and the Front layer locked.
+    #[test]
+    #[ignore = "renders on the GPU; run with --ignored"]
+    fn snapshot_inspector_tilemap() {
+        let (root, mut state) = menu_test_state();
+        let mut map = engine_scene::TilemapData::new(engine_scene::AssetRef {
+            id: uuid::Uuid::nil().to_string(),
+        });
+        map.columns = 8;
+        map.rows = 8;
+        map.brush_auto = Some(engine_scene::AutoTileLayout::Edges16);
+        let parent = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Level"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                engine_scene::SceneTilemap(map),
+            ))
+            .id();
+        crate::tilemap::ensure_layers(&mut state.world, parent).expect("layers");
+        let front = state
+            .world
+            .get::<engine_scene::SceneTilemap>(parent)
+            .map(|map| map.0.layers[2].clone())
+            .expect("front");
+        if let Some(group) = crate::tilemap::layer_group(&state.world, parent, &front) {
+            state
+                .world
+                .entity_mut(group)
+                .insert(engine_ecs::components::Lock);
+        }
+        state.select_only(parent);
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-tilemap.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 1000.0), 2.0, |ui| {
             egui::Panel::right("snapshot_inspector")
                 .exact_size(420.0)
                 .frame(super::studio_panel_frame())

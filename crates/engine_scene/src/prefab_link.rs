@@ -82,6 +82,11 @@ pub fn remap_object_references(entity: &mut SceneEntity, map: &HashMap<String, S
     if let Some(painted) = &mut entity.painted {
         remap(&mut painted.terrain);
     }
+    if let Some(tilemap) = &mut entity.tilemap {
+        for layer in &mut tilemap.layers {
+            remap(&mut layer.object);
+        }
+    }
     for rule in &mut entity.rules {
         match &mut rule.action {
             RuleAction::SetUiText { target, .. }
@@ -837,5 +842,24 @@ mod tests {
         let kid_id = find(&scene, "Kid").object_id.clone().unwrap();
         assert_eq!(copy_root_of(&scene, &kid_id, &mut load(&base)), Some(0));
         assert_eq!(copy_root_of(&scene, "nobody", &mut load(&base)), None);
+    }
+
+    #[test]
+    fn a_copied_tilemap_points_at_its_copied_layers() {
+        let mut map = crate::TilemapData::new(crate::AssetRef {
+            id: "00000000-0000-4000-8000-0000000000aa".into(),
+        });
+        map.layers.push(crate::TileLayerData {
+            name: "Ground".into(),
+            object: KID.into(),
+            draw_order: 0.0,
+            opacity: 1.0,
+            solid: false,
+        });
+        let mut entity = named("Map", TOP, 0.0, None);
+        entity.tilemap = Some(map);
+        let ids = HashMap::from([(KID.to_owned(), "new-layer".to_owned())]);
+        remap_object_references(&mut entity, &ids);
+        assert_eq!(entity.tilemap.unwrap().layers[0].object, "new-layer");
     }
 }

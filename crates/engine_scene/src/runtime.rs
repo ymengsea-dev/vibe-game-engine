@@ -574,6 +574,51 @@ impl<'a> RuntimeResolver<'a> {
         self.uploaded.len()
     }
 
+    /// The material file `changes` names, if it names one the project
+    /// carries and it is valid. A broken one is reported and left out.
+    fn material_file(&self, changes: Option<&MaterialOverrideData>) -> Option<crate::MaterialData> {
+        let reference = changes?.material.as_ref()?;
+        let text = match self.library.read(&reference.id) {
+            Ok(Some(bytes)) => String::from_utf8(bytes).ok()?,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(%error, "could not read a material file");
+                return None;
+            }
+        };
+        match crate::MaterialData::from_ron(&text) {
+            Ok(data) => Some(data),
+            Err(error) => {
+                tracing::warn!(%error, "material file is not valid");
+                None
+            }
+        }
+    }
+
+    /// Every image asset `sources` uses that the project carries, decoded.
+    fn image_assets(
+        &self,
+        sources: &crate::MaterialMapSources,
+    ) -> HashMap<String, engine_asset::ImportedTexture> {
+        let mut found = HashMap::new();
+        for reference in sources.assets() {
+            if found.contains_key(&reference.id) {
+                continue;
+            }
+            match self.library.read(&reference.id) {
+                Ok(Some(bytes)) => match import_texture_bytes(&bytes) {
+                    Ok(texture) => {
+                        found.insert(reference.id.clone(), texture);
+                    }
+                    Err(error) => tracing::warn!(%error, "material image is not an image"),
+                },
+                Ok(None) => {}
+                Err(error) => tracing::warn!(%error, "could not read a material image"),
+            }
+        }
+        found
+    }
+
     /// The imported file for `mesh`, read once per load.
     fn import(
         &mut self,
@@ -613,6 +658,7 @@ pub fn material_from_imported(imported: &ImportedMaterial) -> Material {
             _ => AlphaMode::Opaque,
         },
         double_sided: imported.double_sided,
+        ..Material::DEFAULT
     }
 }
 
@@ -668,20 +714,21 @@ impl SceneResolver for RuntimeResolver<'_> {
         let imported_material = primitive
             .material
             .and_then(|index| gltf.materials.get(index));
-        let base_color = imported_material
-            .and_then(|material| material.base_color_image)
-            .and_then(|index| gltf.images.get(index))
-            .map(|image| (image.width, image.height, image.rgba8.as_slice()));
-        let material = imported_material.map_or(Material::DEFAULT, material_from_imported);
-        let material = material_override.map_or(material, |value| value.apply(material));
+        let file = self.material_file(material_override);
+        let (material, sources) =
+            crate::compose_material(imported_material, file.as_ref(), material_override);
+        let textures = self.image_assets(&sources);
+        let images = sources.images(Some(&gltf), |reference| {
+            textures.get(&reference.id).and_then(texture_pixels)
+        });
 
-        let renderer = MeshRenderer::from_geometry(
+        let renderer = MeshRenderer::from_geometry_with_maps(
             self.gpu,
             self.pipeline,
             self.assets,
             &primitive.vertices,
             &primitive.indices,
-            base_color,
+            images,
             material,
         )
         .map_err(|err| SceneError::Resolve(err.to_string()))?;
@@ -732,6 +779,16 @@ impl SceneResolver for RuntimeResolver<'_> {
         let Some(gltf) = self.import(mesh, id)? else {
             return Ok(None);
         };
+        let file = self.material_file(material_override);
+        let imported_material = gltf
+            .meshes
+            .first()
+            .and_then(|primitive| primitive.material)
+            .and_then(|index| gltf.materials.get(index));
+        let (_, sources) =
+            crate::compose_material(imported_material, file.as_ref(), material_override);
+        let textures = self.image_assets(&sources);
+        let images = |reference: &AssetRef| textures.get(&reference.id).and_then(texture_pixels);
         upload_skinned_model(
             self.gpu,
             self.pipeline,
@@ -739,7 +796,11 @@ impl SceneResolver for RuntimeResolver<'_> {
             self.assets,
             &gltf,
             &mesh.id,
-            material_override,
+            &MaterialSetup {
+                changes: material_override,
+                file: file.as_ref(),
+                images: &images,
+            },
         )
     }
 
@@ -1056,6 +1117,39 @@ pub fn attach_skinned_lod_tiers(
     Ok(())
 }
 
+/// How an object's material is set up beyond its model: the object's own
+/// changes, the material file they name (already read), and where image
+/// assets are found.
+pub struct MaterialSetup<'a> {
+    /// The object's own changes.
+    pub changes: Option<&'a MaterialOverrideData>,
+    /// The material file in place of the model's material.
+    pub file: Option<&'a crate::MaterialData>,
+    /// An image asset's pixels, if it is loaded.
+    pub images: &'a dyn Fn(&AssetRef) -> Option<engine_ecs::components::RgbaImage<'a>>,
+}
+
+impl MaterialSetup<'_> {
+    /// No changes and no images: the model's own material.
+    pub fn plain() -> MaterialSetup<'static> {
+        MaterialSetup {
+            changes: None,
+            file: None,
+            images: &|_| None,
+        }
+    }
+}
+
+/// The pixels of an imported image's full-size level.
+pub fn texture_pixels(
+    texture: &engine_asset::ImportedTexture,
+) -> Option<engine_ecs::components::RgbaImage<'_>> {
+    texture
+        .mip_levels
+        .first()
+        .map(|base| (texture.width, texture.height, base.as_slice()))
+}
+
 /// Uploads an imported file as an animated model, or `None` when it is a
 /// still model. Shared by the game's and Studio's resolvers so both show
 /// a character the same way.
@@ -1075,7 +1169,7 @@ pub fn upload_skinned_model(
     assets: &mut RenderAssets,
     gltf: &engine_asset::ImportedGltf,
     label: &str,
-    material_override: Option<&MaterialOverrideData>,
+    look: &MaterialSetup<'_>,
 ) -> Result<Option<crate::SkinnedModel>, SceneError> {
     let Some(parts) = skinned_parts(gltf, label)? else {
         return Ok(None);
@@ -1085,20 +1179,16 @@ pub fn upload_skinned_model(
         .first()
         .and_then(|mesh| mesh.material)
         .and_then(|index| gltf.materials.get(index));
-    let base_color = imported_material
-        .and_then(|material| material.base_color_image)
-        .and_then(|index| gltf.images.get(index))
-        .map(|image| (image.width, image.height, image.rgba8.as_slice()));
-    let material = imported_material.map_or(Material::DEFAULT, material_from_imported);
-    let material = material_override.map_or(material, |value| value.apply(material));
-    let renderer = engine_ecs::components::SkinnedMeshRenderer::from_geometry(
+    let (material, sources) = crate::compose_material(imported_material, look.file, look.changes);
+    let images = sources.images(Some(gltf), |reference| (look.images)(reference));
+    let renderer = engine_ecs::components::SkinnedMeshRenderer::from_geometry_with_maps(
         gpu,
         pipeline,
         skinned_pipeline,
         assets,
         &parts.vertices,
         &parts.indices,
-        base_color,
+        images,
         material,
     )
     .map_err(|err| SceneError::Resolve(format!("asset {label}: {err}")))?;
@@ -1378,6 +1468,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn a_material_file_with_its_image_reaches_the_drawn_model() {
+        let root = temp_project("material-file");
+        let island =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/island/assets");
+        std::fs::create_dir_all(root.join("textures")).expect("textures dir");
+        let model = root.join("models/rock_01.gltf");
+        let image = root.join("textures/stone.png");
+        std::fs::copy(island.join("models/rock_01.gltf"), &model).expect("model");
+        std::fs::copy(island.join("textures/stone.png"), &image).expect("image");
+        let (model_id, image_id, material_id) = (
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa7",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa8",
+        );
+        for (path, id) in [(&model, model_id), (&image, image_id)] {
+            std::fs::write(
+                AssetMeta::sidecar_path(path),
+                format!("(id: \"{id}\", source_hash: 0)"),
+            )
+            .expect("sidecar");
+        }
+        let mut material = crate::MaterialData {
+            alpha: crate::MaterialAlpha::Blend,
+            uv_scale: [4.0, 4.0],
+            ..crate::MaterialData::default()
+        };
+        material.images.base_color = Some(AssetRef {
+            id: image_id.into(),
+        });
+        let file = root.join("stone.material");
+        material.save(&file).expect("material file");
+        std::fs::write(
+            AssetMeta::sidecar_path(&file),
+            format!("(id: \"{material_id}\", source_hash: 0)"),
+        )
+        .expect("sidecar");
+
+        let library = AssetLibrary::index(&root).expect("index");
+        let gpu = GpuContext::headless(4, 4).expect("headless GPU");
+        let pipeline = gpu.create_pbr_pipeline("test pbr");
+        let mut assets = RenderAssets::default();
+        let mut resolver = RuntimeResolver::new(&library, &gpu, &pipeline, &mut assets);
+        let mesh = AssetRef {
+            id: model_id.into(),
+        };
+        let changes = MaterialOverrideData {
+            material: Some(AssetRef {
+                id: material_id.into(),
+            }),
+            ..MaterialOverrideData::default()
+        };
+        assert_eq!(
+            resolver
+                .image_assets(&crate::compose_material(None, Some(&material), None).1)
+                .len(),
+            1,
+            "the material's image is read from the project"
+        );
+        let renderer = resolver
+            .resolve_mesh_with_material(&mesh, &mesh, Some(&changes))
+            .expect("resolves")
+            .expect("the model is there");
+        let binding = assets.materials.get(renderer.material).expect("binding");
+        assert!(binding.transparent, "the material file's Blend was used");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn write_asset(dir: &Path, name: &str, id: &str) {
         let path = dir.join(name);
         std::fs::write(&path, b"not really a model").expect("write asset");
@@ -1572,6 +1731,7 @@ mod tests {
             normal_image: None,
             normal_scale: 1.0,
             occlusion_image: None,
+            metallic_roughness_image: None,
             occlusion_strength: 1.0,
             alpha_mode: "MASK",
             alpha_cutoff: 0.4,

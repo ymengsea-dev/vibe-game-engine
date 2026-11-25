@@ -8,11 +8,22 @@
 //! cell is walkable until blocked ([`NavGrid::set_blocked`],
 //! [`NavGrid::block_aabb`], [`NavGrid::block_circle`]); coordinates
 //! outside the grid count as blocked.
+//!
+//! A cell can hold more than one floor ("layers"): the ground, a bridge
+//! over it, an upper storey. Layer `0` is the lowest; [`NavNode`] names
+//! one floor of one cell. Neighbouring floors connect when the height
+//! change between them is within the grid's climb. The plain
+//! [`GridCoord`] functions work on layer `0`.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use glam::Vec2;
+use glam::{Vec2, Vec3};
+
+use crate::shapes::{Clearance, Solid};
+
+/// Most floors one cell holds.
+pub const MAX_LAYERS: usize = 4;
 
 /// Cost of an orthogonal (N/S/E/W) step between adjacent cells.
 const ORTHOGONAL_COST: f32 = 1.0;
@@ -70,6 +81,13 @@ pub enum NavError {
         /// Cells in the grid.
         cells: usize,
     },
+    /// The floors above the first were not one sorted list of up to
+    /// [`MAX_LAYERS`]` - 1` per cell with finite heights.
+    #[error("navigation grid layers are malformed: {reason}")]
+    InvalidLayers {
+        /// What was wrong.
+        reason: &'static str,
+    },
     /// `width * height` exceeded the internal cell-count limit.
     #[error("navigation grid too large: {cells} cells exceeds the {max} limit")]
     GridTooLarge {
@@ -97,6 +115,33 @@ impl GridCoord {
     }
 }
 
+/// One floor of one cell: layer `0` is the lowest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NavNode {
+    /// The cell.
+    pub coord: GridCoord,
+    /// Which of its floors, from the bottom.
+    pub layer: u8,
+}
+
+impl NavNode {
+    /// The lowest floor of `coord`.
+    pub fn ground(coord: GridCoord) -> Self {
+        Self { coord, layer: 0 }
+    }
+}
+
+/// A floor above a cell's lowest one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Span {
+    /// The cell, row-major.
+    pub cell: u32,
+    /// Its height.
+    pub height: f32,
+    /// Whether characters cannot stand there.
+    pub blocked: bool,
+}
+
 /// A uniform grid of walkable / blocked cells over the world's XZ plane.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NavGrid {
@@ -108,6 +153,17 @@ pub struct NavGrid {
     blocked: Vec<bool>,
     /// Row-major ground height per cell, or empty for a flat grid at `0`.
     heights: Vec<f32>,
+    /// Floors above each cell's lowest, all cells' in order: cell `i` owns
+    /// `upper[upper_start[i]..upper_start[i + 1]]`. Both empty on a grid
+    /// with one floor.
+    upper: Vec<Span>,
+    upper_start: Vec<u32>,
+    /// The most a step to a neighbouring floor may rise or drop, or `None`
+    /// to ignore heights.
+    climb: Option<f32>,
+    /// Floors something moving stands on for now, by node index (cells
+    /// first, then `upper`). Empty when nothing does.
+    moving: Vec<bool>,
 }
 
 impl NavGrid {
@@ -145,7 +201,58 @@ impl NavGrid {
             origin,
             blocked: vec![false; cells as usize],
             heights: Vec::new(),
+            upper: Vec::new(),
+            upper_start: Vec::new(),
+            climb: None,
+            moving: Vec::new(),
         })
+    }
+
+    /// This grid with floors above the lowest one in some cells, and the
+    /// most a step between neighbouring floors may rise or drop (`None`
+    /// connects every neighbour, as on a grid with one floor).
+    ///
+    /// `upper` is sorted by cell, then by height, and
+    /// a cell has at most [`MAX_LAYERS`]` - 1` of them.
+    ///
+    /// # Errors
+    ///
+    /// [`NavError::InvalidLayers`] when `upper` breaks those rules or
+    /// `climb` is negative or not finite.
+    pub fn with_layers(mut self, upper: Vec<Span>, climb: Option<f32>) -> Result<Self, NavError> {
+        let bad = |reason| Err(NavError::InvalidLayers { reason });
+        if climb.is_some_and(|climb| !climb.is_finite() || climb < 0.0) {
+            return bad("the climb is not a finite, non-negative height");
+        }
+        let cells = self.blocked.len();
+        let mut start = vec![0u32; cells + 1];
+        for (index, span) in upper.iter().enumerate() {
+            let cell = span.cell as usize;
+            if cell >= cells {
+                return bad("a floor is outside the grid");
+            }
+            if !span.height.is_finite() {
+                return bad("a floor height is not finite");
+            }
+            if let Some(previous) = index.checked_sub(1).and_then(|i| upper.get(i))
+                && (previous.cell > span.cell
+                    || (previous.cell == span.cell && previous.height >= span.height))
+            {
+                return bad("floors are not sorted by cell and height");
+            }
+            start[cell + 1] += 1;
+            if start[cell + 1] as usize >= MAX_LAYERS {
+                return bad("a cell has too many floors");
+            }
+        }
+        for cell in 0..cells {
+            start[cell + 1] += start[cell];
+        }
+        self.upper_start = if upper.is_empty() { Vec::new() } else { start };
+        self.upper = upper;
+        self.climb = climb;
+        self.moving.clear();
+        Ok(self)
     }
 
     /// This grid with a ground height per cell (row-major), so agents
@@ -234,16 +341,14 @@ impl NavGrid {
     /// Whether `coord` is blocked. **Out-of-bounds coordinates count as
     /// blocked** — pathfinding never needs to reason about "off the grid"
     /// as a distinct state.
+    /// Something moving standing on the lowest floor blocks it too.
     pub fn is_blocked(&self, coord: GridCoord) -> bool {
-        match self.index(coord) {
-            Some(index) => self.blocked[index],
-            None => true,
-        }
+        !self.is_walkable(coord)
     }
 
-    /// Whether `coord` is in bounds and not blocked.
+    /// Whether `coord` is in bounds and its lowest floor is not blocked.
     pub fn is_walkable(&self, coord: GridCoord) -> bool {
-        self.index(coord).is_some_and(|index| !self.blocked[index])
+        self.is_node_walkable(NavNode::ground(coord))
     }
 
     /// Sets `coord`'s blocked state. Out-of-bounds coordinates are
@@ -372,6 +477,244 @@ impl NavGrid {
     }
 }
 
+impl NavGrid {
+    /// Whether the grid has heights: hills, or more than one floor.
+    pub fn has_heights(&self) -> bool {
+        !self.heights.is_empty() || !self.upper.is_empty()
+    }
+
+    /// Whether some cell has more than one floor.
+    pub fn has_layers(&self) -> bool {
+        !self.upper.is_empty()
+    }
+
+    /// The most a step between neighbouring floors may rise or drop, or
+    /// `None` when heights are ignored.
+    pub fn climb(&self) -> Option<f32> {
+        self.climb
+    }
+
+    /// How many floors `coord` has: `0` outside the grid.
+    pub fn layer_count(&self, coord: GridCoord) -> u8 {
+        let Some(cell) = self.index(coord) else {
+            return 0;
+        };
+        let above = match (self.upper_start.get(cell), self.upper_start.get(cell + 1)) {
+            (Some(start), Some(end)) => end - start,
+            _ => 0,
+        };
+        1 + above as u8
+    }
+
+    /// The node's index: cells first, then the floors above them.
+    fn node_index(&self, node: NavNode) -> Option<usize> {
+        let cell = self.index(node.coord)?;
+        if node.layer == 0 {
+            return Some(cell);
+        }
+        let start = *self.upper_start.get(cell)? as usize;
+        let end = *self.upper_start.get(cell + 1)? as usize;
+        let at = start + node.layer as usize - 1;
+        (at < end).then_some(self.blocked.len() + at)
+    }
+
+    /// The floor's height and whether it is blocked (by the bake, or by
+    /// something moving).
+    fn span(&self, node: NavNode) -> Option<(f32, bool)> {
+        let index = self.node_index(node)?;
+        let moving = self.moving.get(index).copied().unwrap_or(false);
+        if index < self.blocked.len() {
+            let height = self.heights.get(index).copied().unwrap_or(0.0);
+            Some((height, self.blocked[index] || moving))
+        } else {
+            let span = self.upper.get(index - self.blocked.len())?;
+            Some((span.height, span.blocked || moving))
+        }
+    }
+
+    /// The height of `node`'s floor, if it exists.
+    pub fn node_height(&self, node: NavNode) -> Option<f32> {
+        self.span(node).map(|(height, _)| height)
+    }
+
+    /// Whether `node` exists and characters can stand there.
+    pub fn is_node_walkable(&self, node: NavNode) -> bool {
+        self.span(node).is_some_and(|(_, blocked)| !blocked)
+    }
+
+    /// Whether a step between floors at heights `a` and `b` is allowed.
+    fn connects(&self, a: f32, b: f32) -> bool {
+        self.climb.is_none_or(|climb| (a - b).abs() <= climb + 1e-4)
+    }
+
+    /// The walkable floor of `to` reached by a step from a floor at
+    /// `from_height`: the one closest in height, if any is within the
+    /// climb.
+    fn step_to(&self, from_height: f32, to: GridCoord) -> Option<(NavNode, f32)> {
+        (0..self.layer_count(to))
+            .map(|layer| NavNode { coord: to, layer })
+            .filter_map(|node| match self.span(node) {
+                Some((height, false)) if self.connects(from_height, height) => Some((node, height)),
+                _ => None,
+            })
+            .min_by(|a, b| {
+                (a.1 - from_height)
+                    .abs()
+                    .total_cmp(&(b.1 - from_height).abs())
+            })
+    }
+
+    /// How far below a floor something may be and still count as standing
+    /// on it.
+    fn stand_reach(&self) -> f32 {
+        self.climb.unwrap_or(0.0).max(0.5)
+    }
+
+    /// The floor of the cell holding `xz` that something at `height`
+    /// stands on: the highest one not far above it, or the lowest.
+    pub fn node_at(&self, xz: Vec2, height: f32) -> NavNode {
+        let coord = self.world_to_coord(xz);
+        let reach = self.stand_reach();
+        let layer = (0..self.layer_count(coord))
+            .rev()
+            .find(|layer| {
+                self.node_height(NavNode {
+                    coord,
+                    layer: *layer,
+                })
+                .is_some_and(|floor| floor <= height + reach)
+            })
+            .unwrap_or(0);
+        NavNode { coord, layer }
+    }
+
+    /// The height of the floor something at `xz` and `height` stands on,
+    /// clamped to the nearest edge cell like [`NavGrid::height_at`].
+    pub fn floor_height(&self, xz: Vec2, height: f32) -> f32 {
+        if !self.has_layers() {
+            return self.height_at(xz);
+        }
+        let coord = self.world_to_coord(xz);
+        let clamped = GridCoord::new(
+            coord.x.clamp(0, self.width as i32 - 1),
+            coord.y.clamp(0, self.height as i32 - 1),
+        );
+        let node = self.node_at(self.coord_to_world_center(clamped), height);
+        self.node_height(node).unwrap_or(0.0)
+    }
+
+    /// The walkable floor closest to `xz` at `height`, within `max_rings`
+    /// rings of cells: the floor stood on first, then the nearest one on
+    /// the same level.
+    pub fn nearest_walkable_node(&self, xz: Vec2, height: f32, max_rings: i32) -> Option<NavNode> {
+        let start = self.node_at(xz, height);
+        if self.is_node_walkable(start) {
+            return Some(start);
+        }
+        let level = self.node_height(start).unwrap_or(height);
+        let climb = self.stand_reach();
+        let coord = start.coord;
+        for ring in 1..=max_rings.max(0) {
+            let reach = climb * (ring as f32 + 1.0);
+            let mut best: Option<(f32, NavNode)> = None;
+            for dy in -ring..=ring {
+                for dx in -ring..=ring {
+                    if dx.abs() != ring && dy.abs() != ring {
+                        continue;
+                    }
+                    let cell = GridCoord::new(coord.x + dx, coord.y + dy);
+                    for layer in 0..self.layer_count(cell) {
+                        let node = NavNode { coord: cell, layer };
+                        let Some((floor, false)) = self.span(node) else {
+                            continue;
+                        };
+                        let rise = (floor - level).abs();
+                        if self.climb.is_some() && rise > reach {
+                            continue;
+                        }
+                        let score = (dx * dx + dy * dy) as f32 + rise * 1e-3;
+                        if best.is_none_or(|(s, _)| score < s) {
+                            best = Some((score, node));
+                        }
+                    }
+                }
+            }
+            if let Some((_, found)) = best {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Every floor of every cell: its node, height and whether it is
+    /// blocked.
+    pub fn floors(&self) -> impl Iterator<Item = (NavNode, f32, bool)> + '_ {
+        (0..self.height as i32).flat_map(move |y| {
+            (0..self.width as i32).flat_map(move |x| {
+                let coord = GridCoord::new(x, y);
+                (0..self.layer_count(coord)).filter_map(move |layer| {
+                    let node = NavNode { coord, layer };
+                    self.span(node)
+                        .map(|(height, blocked)| (node, height, blocked))
+                })
+            })
+        })
+    }
+
+    /// Marks the floors the moving `solids` stand in as blocked, clearing
+    /// the ones they left. `clearance` is the space a character needs.
+    /// Returns whether any floor changed.
+    pub fn block_moving(&mut self, solids: &[Solid], clearance: &Clearance) -> bool {
+        let nodes = self.blocked.len() + self.upper.len();
+        let mut next = vec![false; nodes];
+        let half = Vec2::splat(self.cell_size * 0.5);
+        for solid in solids {
+            let (lo, hi) = solid.bounds();
+            let grow = Vec2::splat(clearance.radius.max(0.0));
+            let (x0, x1, y0, y1) =
+                self.clamped_cell_range(Vec2::new(lo.x, lo.z) - grow, Vec2::new(hi.x, hi.z) + grow);
+            if !self.box_reaches_grid(Vec2::new(lo.x, lo.z) - grow, Vec2::new(hi.x, hi.z) + grow) {
+                continue;
+            }
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let coord = GridCoord::new(x, y);
+                    let centre = self.coord_to_world_center(coord);
+                    for layer in 0..self.layer_count(coord) {
+                        let node = NavNode { coord, layer };
+                        let (Some(index), Some(floor)) =
+                            (self.node_index(node), self.node_height(node))
+                        else {
+                            continue;
+                        };
+                        if !next[index]
+                            && solid.blocks_floor(centre - half, centre + half, floor, clearance)
+                        {
+                            next[index] = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !next.iter().any(|blocked| *blocked) {
+            next.clear();
+        }
+        let changed = next != self.moving;
+        self.moving = next;
+        changed
+    }
+
+    /// Whether the `(x, z)` box from `lo` to `hi` reaches the grid.
+    fn box_reaches_grid(&self, lo: Vec2, hi: Vec2) -> bool {
+        let grid_max = self.origin
+            + Vec2::new(
+                self.width as f32 * self.cell_size,
+                self.height as f32 * self.cell_size,
+            );
+        !(hi.x < self.origin.x || lo.x > grid_max.x || hi.y < self.origin.y || lo.y > grid_max.y)
+    }
+}
+
 /// Octile heuristic: the exact cost of the cheapest obstacle-free 8-way
 /// path between two cells (diagonal moves as far as possible, then
 /// straight). Admissible and consistent for [`find_path`]'s cost model.
@@ -383,12 +726,13 @@ fn octile_heuristic(a: GridCoord, b: GridCoord) -> f32 {
     DIAGONAL_COST * diagonal + ORTHOGONAL_COST * straight
 }
 
-/// A cell on the A* open set, ordered so a [`BinaryHeap`] (a max-heap)
+/// A floor on the A* open set, ordered so a [`BinaryHeap`] (a max-heap)
 /// yields the **lowest** `f_score` first.
 #[derive(Debug, Clone, Copy)]
 struct Frontier {
     f_score: f32,
-    coord: GridCoord,
+    node: NavNode,
+    height: f32,
 }
 
 impl PartialEq for Frontier {
@@ -412,10 +756,7 @@ impl PartialOrd for Frontier {
     }
 }
 
-fn reconstruct(
-    came_from: &HashMap<GridCoord, GridCoord>,
-    mut current: GridCoord,
-) -> Vec<GridCoord> {
+fn reconstruct(came_from: &HashMap<NavNode, NavNode>, mut current: NavNode) -> Vec<NavNode> {
     let mut path = vec![current];
     while let Some(&previous) = came_from.get(&current) {
         path.push(previous);
@@ -432,53 +773,47 @@ fn reconstruct(
 ///
 /// Returns the cell sequence from `start` to `goal` inclusive, or `None`
 /// if either endpoint is unwalkable or no route exists. `start == goal`
-/// (and walkable) returns `[start]`.
+/// (and walkable) returns `[start]`. Starts and ends on the lowest floor;
+/// see [`find_node_path`] for the others.
 pub fn find_path(grid: &NavGrid, start: GridCoord, goal: GridCoord) -> Option<Vec<GridCoord>> {
-    if !grid.is_walkable(start) || !grid.is_walkable(goal) {
+    let path = find_node_path(grid, NavNode::ground(start), NavNode::ground(goal))?;
+    Some(path.into_iter().map(|node| node.coord).collect())
+}
+
+/// [`find_path`] between two floors. A step to a neighbouring cell lands
+/// on its floor closest in height, within the grid's climb.
+pub fn find_node_path(grid: &NavGrid, start: NavNode, goal: NavNode) -> Option<Vec<NavNode>> {
+    if !grid.is_node_walkable(start) || !grid.is_node_walkable(goal) {
         return None;
     }
     if start == goal {
         return Some(vec![start]);
     }
+    let start_height = grid.node_height(start)?;
 
     let mut open = BinaryHeap::new();
-    let mut g_score: HashMap<GridCoord, f32> = HashMap::new();
-    let mut came_from: HashMap<GridCoord, GridCoord> = HashMap::new();
+    let mut g_score: HashMap<NavNode, f32> = HashMap::new();
+    let mut came_from: HashMap<NavNode, NavNode> = HashMap::new();
 
     g_score.insert(start, 0.0);
     open.push(Frontier {
-        f_score: octile_heuristic(start, goal),
-        coord: start,
+        f_score: octile_heuristic(start.coord, goal.coord),
+        node: start,
+        height: start_height,
     });
 
-    while let Some(Frontier { coord: current, .. }) = open.pop() {
+    while let Some(Frontier {
+        node: current,
+        height,
+        ..
+    }) = open.pop()
+    {
         if current == goal {
             return Some(reconstruct(&came_from, current));
         }
         let current_g = g_score.get(&current).copied().unwrap_or(f32::INFINITY);
 
-        for (i, &(dx, dy)) in NEIGHBOR_OFFSETS.iter().enumerate() {
-            let next = GridCoord {
-                x: current.x + dx,
-                y: current.y + dy,
-            };
-            if !grid.is_walkable(next) {
-                continue;
-            }
-            let diagonal = i >= 4;
-            if diagonal {
-                let side_a = GridCoord {
-                    x: current.x + dx,
-                    y: current.y,
-                };
-                let side_b = GridCoord {
-                    x: current.x,
-                    y: current.y + dy,
-                };
-                if grid.is_blocked(side_a) || grid.is_blocked(side_b) {
-                    continue;
-                }
-            }
+        for (next, next_height, diagonal) in neighbours(grid, current.coord, height) {
             let step_cost = if diagonal {
                 DIAGONAL_COST
             } else {
@@ -489,13 +824,42 @@ pub fn find_path(grid: &NavGrid, start: GridCoord, goal: GridCoord) -> Option<Ve
                 came_from.insert(next, current);
                 g_score.insert(next, tentative_g);
                 open.push(Frontier {
-                    f_score: tentative_g + octile_heuristic(next, goal),
-                    coord: next,
+                    f_score: tentative_g + octile_heuristic(next.coord, goal.coord),
+                    node: next,
+                    height: next_height,
                 });
             }
         }
     }
     None
+}
+
+/// The floors reachable in one step from a floor of `coord` at `height`,
+/// with their heights and whether the step is diagonal.
+fn neighbours(
+    grid: &NavGrid,
+    coord: GridCoord,
+    height: f32,
+) -> impl Iterator<Item = (NavNode, f32, bool)> + '_ {
+    NEIGHBOR_OFFSETS
+        .iter()
+        .enumerate()
+        .filter_map(move |(i, &(dx, dy))| {
+            let (next, next_height) =
+                grid.step_to(height, GridCoord::new(coord.x + dx, coord.y + dy))?;
+            let diagonal = i >= 4;
+            if diagonal
+                && (grid
+                    .step_to(height, GridCoord::new(coord.x + dx, coord.y))
+                    .is_none()
+                    || grid
+                        .step_to(height, GridCoord::new(coord.x, coord.y + dy))
+                        .is_none())
+            {
+                return None;
+            }
+            Some((next, next_height, diagonal))
+        })
 }
 
 /// [`find_path`] between two world positions, returning the route as
@@ -520,21 +884,32 @@ const ROUTE_SNAP_RINGS: i32 = 4;
 /// An endpoint in a blocked cell snaps to the nearest walkable cell a few
 /// cells away; past that, or with no route at all, the result is `None`.
 /// When the goal snapped, the route ends at that cell's centre instead,
-/// since `goal` itself is not reachable.
+/// since `goal` itself is not reachable. Both ends stand on the floor
+/// under them; see [`find_layered_route`] to give their heights.
 pub fn find_route(grid: &NavGrid, start: Vec2, goal: Vec2) -> Option<Vec<Vec2>> {
-    let start_cell = grid.nearest_walkable(grid.world_to_coord(start), ROUTE_SNAP_RINGS)?;
-    let goal_coord = grid.world_to_coord(goal);
-    let goal_cell = grid.nearest_walkable(goal_coord, ROUTE_SNAP_RINGS)?;
-    let cells = smooth_path(grid, &find_path(grid, start_cell, goal_cell)?);
-    let mut route: Vec<Vec2> = cells
-        .iter()
-        .skip(1)
-        .map(|&coord| grid.coord_to_world_center(coord))
-        .collect();
-    let end = if goal_cell == goal_coord {
+    let lift = |at: Vec2| Vec3::new(at.x, grid.height_at(at), at.y);
+    let route = find_layered_route(grid, lift(start), lift(goal))?;
+    Some(route.into_iter().map(|p| Vec2::new(p.x, p.z)).collect())
+}
+
+/// [`find_route`] between two points given as `(x, height, z)`: each end
+/// stands on the floor of its cell at its height, and the route's corners
+/// carry the height of the floor they are on.
+pub fn find_layered_route(grid: &NavGrid, start: Vec3, goal: Vec3) -> Option<Vec<Vec3>> {
+    let flat = |p: Vec3| Vec2::new(p.x, p.z);
+    let start_node = grid.nearest_walkable_node(flat(start), start.y, ROUTE_SNAP_RINGS)?;
+    let goal_at = grid.node_at(flat(goal), goal.y);
+    let goal_node = grid.nearest_walkable_node(flat(goal), goal.y, ROUTE_SNAP_RINGS)?;
+    let nodes = smooth_node_path(grid, &find_node_path(grid, start_node, goal_node)?);
+    let corner = |node: NavNode| {
+        let centre = grid.coord_to_world_center(node.coord);
+        Vec3::new(centre.x, grid.node_height(node).unwrap_or(0.0), centre.y)
+    };
+    let mut route: Vec<Vec3> = nodes.iter().skip(1).map(|&node| corner(node)).collect();
+    let end = if goal_node == goal_at {
         goal
     } else {
-        grid.coord_to_world_center(goal_cell)
+        corner(goal_node)
     };
     match route.last_mut() {
         Some(last) => *last = end,
@@ -546,30 +921,41 @@ pub fn find_route(grid: &NavGrid, start: Vec2, goal: Vec2) -> Option<Vec<Vec2>> 
 /// Whether every cell the straight segment from `a` to `b` passes through
 /// is walkable. A diagonal step that would squeeze between two
 /// diagonally-touching blocked cells counts as no line of sight.
-/// Symmetric in `a` and `b`.
+/// Symmetric in `a` and `b`. Both ends are on the lowest floor.
 pub fn line_of_sight(grid: &NavGrid, a: GridCoord, b: GridCoord) -> bool {
-    let mut x = a.x;
-    let mut y = a.y;
-    let dx = (b.x - a.x).abs();
-    let dy = (b.y - a.y).abs();
-    let step_x = if a.x < b.x { 1 } else { -1 };
-    let step_y = if a.y < b.y { 1 } else { -1 };
+    node_line_of_sight(grid, NavNode::ground(a), NavNode::ground(b))
+}
+
+/// [`line_of_sight`] between two floors: the segment walks from floor to
+/// floor within the grid's climb and must arrive on `b`'s.
+pub fn node_line_of_sight(grid: &NavGrid, a: NavNode, b: NavNode) -> bool {
+    let Some((mut height, false)) = grid.span(a) else {
+        return false;
+    };
+    let mut current = a;
+    let mut x = a.coord.x;
+    let mut y = a.coord.y;
+    let dx = (b.coord.x - a.coord.x).abs();
+    let dy = (b.coord.y - a.coord.y).abs();
+    let step_x = if a.coord.x < b.coord.x { 1 } else { -1 };
+    let step_y = if a.coord.y < b.coord.y { 1 } else { -1 };
     let mut error = dx - dy;
 
     loop {
-        if grid.is_blocked(GridCoord { x, y }) {
-            return false;
-        }
-        if x == b.x && y == b.y {
-            return true;
+        if x == b.coord.x && y == b.coord.y {
+            return current == b;
         }
         let double_error = 2 * error;
         let advance_x = double_error > -dy;
         let advance_y = double_error < dx;
         if advance_x && advance_y {
             // Diagonal move — reject if it clips a blocked corner.
-            if grid.is_blocked(GridCoord { x: x + step_x, y })
-                || grid.is_blocked(GridCoord { x, y: y + step_y })
+            if grid
+                .step_to(height, GridCoord::new(x + step_x, y))
+                .is_none()
+                || grid
+                    .step_to(height, GridCoord::new(x, y + step_y))
+                    .is_none()
             {
                 return false;
             }
@@ -583,6 +969,13 @@ pub fn line_of_sight(grid: &NavGrid, a: GridCoord, b: GridCoord) -> bool {
             error += dx;
             y += step_y;
         }
+        match grid.step_to(height, GridCoord::new(x, y)) {
+            Some((node, next_height)) => {
+                current = node;
+                height = next_height;
+            }
+            None => return false,
+        }
     }
 }
 
@@ -591,13 +984,22 @@ pub fn line_of_sight(grid: &NavGrid, a: GridCoord, b: GridCoord) -> bool {
 /// after it. The endpoints are always kept; a path of two or fewer cells
 /// is returned unchanged.
 pub fn smooth_path(grid: &NavGrid, path: &[GridCoord]) -> Vec<GridCoord> {
+    let nodes: Vec<NavNode> = path.iter().map(|coord| NavNode::ground(*coord)).collect();
+    smooth_node_path(grid, &nodes)
+        .into_iter()
+        .map(|node| node.coord)
+        .collect()
+}
+
+/// [`smooth_path`] for a [`find_node_path`] result.
+pub fn smooth_node_path(grid: &NavGrid, path: &[NavNode]) -> Vec<NavNode> {
     if path.len() <= 2 {
         return path.to_vec();
     }
     let mut result = vec![path[0]];
     let mut anchor = 0usize;
     for i in 1..path.len() - 1 {
-        if !line_of_sight(grid, path[anchor], path[i + 1]) {
+        if !node_line_of_sight(grid, path[anchor], path[i + 1]) {
             result.push(path[i]);
             anchor = i;
         }
@@ -1003,6 +1405,138 @@ mod tests {
         grid.set_blocked(GridCoord::new(5, 0), true);
         let route = find_route(&grid, Vec2::new(0.5, 0.5), Vec2::new(5.5, 0.5)).expect("route");
         assert_eq!(route.last().copied(), Some(Vec2::new(4.5, 0.5)));
+    }
+
+    /// A 9x3 grid of ground at 0 with a gap in columns 3..=5 (blocked), and
+    /// a bridge at height 2 over columns 2..=6 of the middle row, reached by
+    /// ramps of 1 per cell from columns 0 and 8... built as floors above
+    /// the ground where both exist.
+    fn bridge_grid() -> NavGrid {
+        let mut grid = NavGrid::new(9, 3, 1.0, Vec2::ZERO).expect("grid");
+        let mut heights = vec![0.0; 27];
+        for row in 0..3 {
+            for column in 3..=5 {
+                grid.set_blocked(GridCoord::new(column, row), true);
+            }
+        }
+        // The middle row climbs 0, 1, 2 and holds 2 across the gap.
+        let deck = [0.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0, 0.0];
+        let mut upper = Vec::new();
+        for (column, height) in deck.iter().enumerate() {
+            let cell = (9 + column) as u32;
+            if (3..=5).contains(&column) {
+                // No ground under the deck: the deck is the cell's only floor.
+                grid.set_blocked(GridCoord::new(column as i32, 1), false);
+                heights[9 + column] = *height;
+            } else if *height > 0.0 {
+                // Ground under the ramp, blocked by it; the ramp above.
+                grid.set_blocked(GridCoord::new(column as i32, 1), true);
+                upper.push(Span {
+                    cell,
+                    height: *height,
+                    blocked: false,
+                });
+            }
+        }
+        grid.with_heights(heights)
+            .and_then(|grid| grid.with_layers(upper, Some(1.0)))
+            .expect("valid layers")
+    }
+
+    #[test]
+    fn a_route_crosses_a_bridge_on_its_upper_floor() {
+        let grid = bridge_grid();
+        assert_eq!(grid.layer_count(GridCoord::new(1, 1)), 2);
+        let path = find_node_path(
+            &grid,
+            NavNode::ground(GridCoord::new(0, 0)),
+            NavNode::ground(GridCoord::new(8, 0)),
+        )
+        .expect("over the bridge");
+        assert!(path.iter().any(|node| node.coord == GridCoord::new(4, 1)));
+        assert!(
+            path.iter()
+                .any(|node| node.coord == GridCoord::new(1, 1) && node.layer == 1),
+            "climbs the ramp on its upper floor: {path:?}"
+        );
+        let route = find_layered_route(&grid, Vec3::new(0.5, 0.0, 0.5), Vec3::new(8.5, 0.0, 0.5))
+            .expect("route");
+        assert_eq!(route.last().copied(), Some(Vec3::new(8.5, 0.0, 0.5)));
+        let (from, to) = (route[route.len() - 2], route[route.len() - 1]);
+        let a = grid.node_at(Vec2::new(from.x, from.z), from.y);
+        let b = grid.node_at(Vec2::new(to.x, to.z), to.y);
+        assert!(
+            node_line_of_sight(&grid, a, b),
+            "each leg is walkable: {route:?}"
+        );
+    }
+
+    #[test]
+    fn floors_too_far_apart_do_not_connect() {
+        let mut grid = NavGrid::new(3, 1, 1.0, Vec2::ZERO)
+            .and_then(|grid| grid.with_heights(vec![0.0, 3.0, 0.0]))
+            .and_then(|grid| grid.with_layers(Vec::new(), Some(0.5)))
+            .expect("grid");
+        assert!(find_path(&grid, GridCoord::new(0, 0), GridCoord::new(2, 0)).is_none());
+        grid = grid.with_layers(Vec::new(), None).expect("grid");
+        assert!(
+            find_path(&grid, GridCoord::new(0, 0), GridCoord::new(2, 0)).is_some(),
+            "without a climb heights are ignored"
+        );
+    }
+
+    #[test]
+    fn node_at_picks_the_floor_stood_on() {
+        let grid = bridge_grid();
+        let ramp = Vec2::new(2.5, 1.5);
+        assert_eq!(grid.node_at(ramp, 0.0).layer, 0, "under the ramp");
+        assert_eq!(grid.node_at(ramp, 2.0).layer, 1, "on the ramp");
+        assert_eq!(grid.floor_height(ramp, 2.1), 2.0);
+        assert_eq!(grid.floor_height(ramp, 0.0), 0.0);
+    }
+
+    #[test]
+    fn with_layers_rejects_bad_floors() {
+        let base = || NavGrid::new(2, 1, 1.0, Vec2::ZERO).expect("grid");
+        let span = |cell, height| Span {
+            cell,
+            height,
+            blocked: false,
+        };
+        assert!(base().with_layers(vec![span(2, 1.0)], None).is_err());
+        assert!(base().with_layers(vec![span(0, f32::NAN)], None).is_err());
+        assert!(
+            base()
+                .with_layers(vec![span(1, 1.0), span(0, 1.0)], None)
+                .is_err()
+        );
+        let crowded = (1..=MAX_LAYERS).map(|h| span(0, h as f32)).collect();
+        assert!(base().with_layers(crowded, None).is_err());
+        assert!(base().with_layers(Vec::new(), Some(-1.0)).is_err());
+        let fine = vec![span(0, 1.0), span(0, 2.0), span(1, 5.0)];
+        let grid = base().with_layers(fine, Some(1.0)).expect("valid");
+        assert_eq!(grid.layer_count(GridCoord::new(0, 0)), 3);
+        assert_eq!(grid.floors().count(), 5);
+    }
+
+    #[test]
+    fn moving_solids_block_floors_until_they_leave() {
+        let mut grid = grid(6, 1);
+        let clearance = Clearance {
+            radius: 0.0,
+            step: 0.2,
+            height: 1.8,
+        };
+        let crate_at = |x: f32| Solid::aabb(Vec3::new(x, 0.0, 0.1), Vec3::new(x + 0.8, 1.0, 0.9));
+        assert!(grid.block_moving(&[crate_at(2.1)], &clearance));
+        assert!(grid.is_blocked(GridCoord::new(2, 0)));
+        assert!(find_path(&grid, GridCoord::new(0, 0), GridCoord::new(5, 0)).is_none());
+        assert!(
+            !grid.block_moving(&[crate_at(2.1)], &clearance),
+            "unchanged"
+        );
+        assert!(grid.block_moving(&[], &clearance));
+        assert!(find_path(&grid, GridCoord::new(0, 0), GridCoord::new(5, 0)).is_some());
     }
 
     #[test]

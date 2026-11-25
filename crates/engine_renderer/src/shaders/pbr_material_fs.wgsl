@@ -22,11 +22,10 @@ struct MaterialUniform {
     emissive_factor: vec3<f32>,
     normal_scale: f32,
     occlusion_strength: f32,
-    // No trailing padding field here on purpose. WGSL aligns `vec3` to
-    // 16 bytes, so a `_padding: vec3<f32>` would start a fifth row and
-    // make the struct 80 bytes against Rust's 64. Omitting it lets WGSL
-    // round the struct up to 64, matching `MaterialUniform` exactly —
-    // whose own `_padding: [f32; 3]` is what fills those last 12 bytes.
+    // `uv * xy + zw`. A `vec4` aligns to 16 bytes, so it starts the fifth
+    // row at byte 64 by itself, skipping the 12 bytes Rust's
+    // `MaterialUniform` fills with `double_sided` and padding.
+    uv_transform: vec4<f32>,
 };
 
 @group(1) @binding(2)
@@ -42,6 +41,9 @@ var normal_map: texture_2d<f32>;
 var emissive_map: texture_2d<f32>;
 @group(1) @binding(5)
 var occlusion_map: texture_2d<f32>;
+// glTF's metallic-roughness map: roughness in green, metallic in blue.
+@group(1) @binding(6)
+var metallic_roughness_map: texture_2d<f32>;
 
 // Perturbs `n` by a tangent-space normal map sample.
 //
@@ -85,7 +87,8 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
         discard;
     }
 
-    let tex_color = textureSample(base_color_texture, base_color_sampler, in.uv);
+    let uv = in.uv * material.uv_transform.xy + material.uv_transform.zw;
+    let tex_color = textureSample(base_color_texture, base_color_sampler, uv);
     let base_color = tex_color * material.base_color_factor;
 
     // Cutout: kill the fragment before doing any lighting work for it.
@@ -95,8 +98,9 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     }
 
     let albedo = base_color.rgb;
-    let metallic = clamp(material.metallic_factor, 0.0, 1.0);
-    let roughness = clamp(material.roughness_factor, 0.045, 1.0);
+    let metal_rough = textureSample(metallic_roughness_map, base_color_sampler, uv);
+    let metallic = clamp(material.metallic_factor * metal_rough.b, 0.0, 1.0);
+    let roughness = clamp(material.roughness_factor * metal_rough.g, 0.045, 1.0);
 
     // A double-sided material's back face is lit as seen from its own
     // side. Single-sided pipelines cull back faces, so this never fires.
@@ -107,17 +111,17 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     let n = apply_normal_map(
         geometric_normal,
         in.world_position,
-        in.uv,
+        uv,
         material.normal_scale,
     );
 
-    let occlusion_sample = textureSample(occlusion_map, base_color_sampler, in.uv).r;
+    let occlusion_sample = textureSample(occlusion_map, base_color_sampler, uv).r;
     let occlusion = mix(1.0, occlusion_sample, clamp(material.occlusion_strength, 0.0, 1.0));
     let lit = shade_surface(albedo, metallic, roughness, n, in.world_position, occlusion);
 
     // Emission is added last: it is light leaving the surface, so it is
     // affected by neither shadowing nor occlusion.
-    let emissive = textureSample(emissive_map, base_color_sampler, in.uv).rgb
+    let emissive = textureSample(emissive_map, base_color_sampler, uv).rgb
         * material.emissive_factor;
 
     // A masked fragment that survived the cutoff is fully opaque; only

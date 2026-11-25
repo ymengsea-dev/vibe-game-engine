@@ -1560,6 +1560,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "egui_dock",
+ "engine_ai",
  "engine_asset",
  "engine_audio",
  "engine_ecs",
@@ -1657,6 +1658,7 @@ name = "engine_scene"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "engine_ai",
  "engine_asset",
  "engine_audio",
  "engine_ecs",

@@ -139,6 +139,7 @@ pub(super) fn tick(
     senses::update(world, physics, noises, dt, &mut out);
     simple::update(world, dt, &mut out);
     tree::update(world, dt, rng, &mut out);
+    nav::update_moving_blockers(world);
     nav::walk(world, physics, dt, &mut out);
     out
 }

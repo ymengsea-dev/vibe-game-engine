@@ -618,3 +618,126 @@ fn walkers_steer_round_each_other_and_still_arrive() {
     let (closest, _, _) = head_on(false);
     assert!(closest < 0.2, "kept to the path: {closest}");
 }
+
+/// A 9x3 grid: open ground at 0, except a gap in columns 3 to 5 that only a
+/// bridge at height 2 crosses, on the middle row, with ramps up to it.
+fn bridge_grid(world: &mut World) {
+    let mut grid = NavGridData::new(9, 3, 1.0, [0.0, 0.0]);
+    grid.heights = vec![0.0; 27];
+    for row in 0..3 {
+        for column in 3..=5 {
+            grid.blocked[row * 9 + column] = true;
+        }
+    }
+    let deck = [0.0, 0.5, 1.0, 2.0, 2.0, 2.0, 1.0, 0.5, 0.0];
+    for (column, height) in deck.iter().enumerate() {
+        let cell = 9 + column;
+        if (3..=5).contains(&column) {
+            grid.blocked[cell] = false;
+            grid.heights[cell] = *height;
+        } else if *height > 0.0 {
+            // Under the ramp is blocked; the ramp is a floor above it.
+            grid.blocked[cell] = true;
+            grid.upper.push(engine_scene::NavSpanData {
+                cell: cell as u32,
+                height: *height,
+                blocked: false,
+            });
+        }
+    }
+    grid.climb = Some(1.0);
+    world.insert_resource(SceneNavGrid(grid));
+}
+
+#[test]
+fn a_walker_crosses_a_bridge_at_its_height() {
+    let mut world = World::new();
+    let physics = PhysicsWorld::default();
+    bridge_grid(&mut world);
+    let entity = guard(&mut world, Vec3::new(0.5, 0.0, 0.5), AiData::default());
+    walk_to(&mut world, Vec3::new(8.5, 0.0, 0.5));
+    let mut highest: f32 = 0.0;
+    for _ in 0..900 {
+        step(&mut world, &physics, &[]);
+        let here = at(&world, entity);
+        if (3.0..6.0).contains(&here.x) {
+            assert!(here.z > 1.0 && here.z < 2.0, "off the bridge at {here}");
+            highest = highest.max(here.y);
+        }
+        if !nav::is_walking(&world, entity) {
+            break;
+        }
+    }
+    assert!(!nav::is_walking(&world, entity), "arrived");
+    assert!(
+        (highest - 2.0).abs() < 1e-3,
+        "walked on the deck: {highest}"
+    );
+    assert!(at(&world, entity).x > 8.0);
+}
+
+#[test]
+fn a_2d_walker_moves_on_the_screen_and_keeps_its_depth() {
+    let mut world = World::new();
+    let physics = PhysicsWorld::default();
+    // The wall along x = 5 now stands in the XY plane.
+    walled_grid(&mut world);
+    if let Some(mut grid) = world.get_resource_mut::<SceneNavGrid>() {
+        grid.0.plane = engine_scene::NavPlane::Screen;
+    }
+    let entity = guard(&mut world, Vec3::new(1.5, 1.5, 3.0), AiData::default());
+    walk_to(&mut world, Vec3::new(8.5, 1.5, 3.0));
+    for _ in 0..900 {
+        step(&mut world, &physics, &[]);
+        let here = at(&world, entity);
+        assert_eq!(here.z, 3.0, "kept its depth");
+        assert!(
+            !(here.x > 5.05 && here.x < 5.95 && here.y < 7.95),
+            "walked through the wall at {here}"
+        );
+        if !nav::is_walking(&world, entity) {
+            break;
+        }
+    }
+    let here = at(&world, entity);
+    assert!(here.distance(Vec3::new(8.5, 1.5, 3.0)) < 0.3, "{here}");
+}
+
+#[test]
+fn a_moving_blocker_sends_walkers_round_it() {
+    use engine_scene::{BodyKind, ColliderData, ColliderShape, SceneCollider};
+
+    let mut world = World::new();
+    let physics = PhysicsWorld::default();
+    world.insert_resource(SceneNavGrid(NavGridData::new(10, 10, 1.0, [0.0, 0.0])));
+    let entity = guard(&mut world, Vec3::new(1.5, 0.0, 4.5), AiData::default());
+    walk_to(&mut world, Vec3::new(8.5, 0.0, 4.5));
+    // A crate slides into the straight line once the walk has started.
+    let mut data = ColliderData::new(
+        ColliderShape::Cuboid {
+            half_extents: [0.5, 0.5, 2.0],
+        },
+        BodyKind::Kinematic,
+    );
+    data.blocks_walking = true;
+    let crate_box = spawn(&mut world, "crate", Vec3::new(5.0, 0.5, 20.0));
+    world.entity_mut(crate_box).insert(SceneCollider(data));
+    step(&mut world, &physics, &[]);
+    place(&mut world, crate_box, Vec3::new(5.0, 0.5, 4.5));
+    let mut detoured = false;
+    for _ in 0..900 {
+        step(&mut world, &physics, &[]);
+        let here = at(&world, entity);
+        assert!(
+            !(here.x > 4.0 && here.x < 6.0 && (here.z - 4.5).abs() < 2.4),
+            "walked through the crate at {here}"
+        );
+        detoured |= (here.z - 4.5).abs() > 2.0;
+        if !nav::is_walking(&world, entity) {
+            break;
+        }
+    }
+    let here = at(&world, entity);
+    assert!(detoured, "{here}");
+    assert!(here.distance(Vec3::new(8.5, 0.0, 4.5)) < 0.3, "{here}");
+}

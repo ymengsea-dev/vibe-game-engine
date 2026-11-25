@@ -35,9 +35,13 @@ mod animator_graph;
 mod behaviour_tree_graph;
 mod graph;
 mod lights;
+mod material;
+pub use material::material_file_editor;
 mod road;
 pub(crate) use road::take_apply_request as take_road_apply_request;
 mod stream_area;
+mod tilemap;
+pub(crate) use tilemap::take_hide_request as take_tilemap_hide_request;
 
 #[cfg(test)]
 mod prototype_style_tests {
@@ -2527,6 +2531,18 @@ const REGISTRY: &[ComponentUi] = &[
                     .changed();
                 });
             }
+            if value.0.body != engine_scene::BodyKind::Fixed && !trigger {
+                property_row(ui, "Blocks paths", |ui| {
+                    changed |= crate::widgets::checkbox(
+                        ui,
+                        &crate::theme::NIGHT,
+                        &mut value.0.blocks_walking,
+                        "",
+                    )
+                    .on_hover_text("Characters walking a route go round it while the game runs")
+                    .changed();
+                });
+            }
             let (mut fit_box, mut fit_circle) = (false, false);
             if has_sprite {
                 ui.horizontal_wrapped(|ui| {
@@ -3171,6 +3187,16 @@ fn image_drop_zone(
     text: &str,
     hint: Option<&str>,
 ) -> Option<std::path::PathBuf> {
+    asset_drop_zone(ui, text, hint, AssetKind::Texture)
+}
+
+/// [`image_drop_zone`] for any kind of asset.
+fn asset_drop_zone(
+    ui: &mut egui::Ui,
+    text: &str,
+    hint: Option<&str>,
+    kind: AssetKind,
+) -> Option<std::path::PathBuf> {
     let palette = crate::theme::NIGHT;
     let height = if hint.is_some() { 48.0 } else { 30.0 };
     let (rect, response) = ui.allocate_exact_size(
@@ -3207,7 +3233,7 @@ fn image_drop_zone(
     }
     response
         .dnd_release_payload::<std::path::PathBuf>()
-        .filter(|path| AssetKind::from_path(path) == AssetKind::Texture)
+        .filter(|path| AssetKind::from_path(path) == kind)
         .map(|path| (*path).clone())
 }
 
@@ -3320,61 +3346,9 @@ fn show_body(
         }
     }
 
-    if let Some(mut data) = world
-        .get::<SceneTilemap>(entity)
-        .map(|source| source.0.clone())
-    {
+    if world.get::<SceneTilemap>(entity).is_some() {
         section(ui, "Tilemap", None::<fn(&mut egui::Ui)>, |ui| {
-            let image = crate::assets::parse_asset_id(&data.atlas.id)
-                .and_then(|id| assets.path_for(id))
-                .and_then(|path| path.file_name())
-                .and_then(|name| name.to_str())
-                .unwrap_or("Missing image");
-            property_row(ui, "Image", |ui| {
-                ui.add(egui::Label::new(image).truncate());
-            });
-            note(ui, "Paint or erase from Viewport → Tilemap in 2D mode.");
-            property_row(ui, "Columns", |ui| {
-                number(ui, egui::DragValue::new(&mut data.columns).range(1..=4096));
-            });
-            property_row(ui, "Rows", |ui| {
-                number(ui, egui::DragValue::new(&mut data.rows).range(1..=4096));
-            });
-            data.brush_column = data.brush_column.min(data.columns - 1);
-            data.brush_row = data.brush_row.min(data.rows - 1);
-            property_row(ui, "Tile size", |ui| {
-                for value in &mut data.cell_size {
-                    number(ui, egui::DragValue::new(value).range(0.01..=10_000.0));
-                }
-            });
-            property_row(ui, "Brush cell", |ui| {
-                number(
-                    ui,
-                    egui::DragValue::new(&mut data.brush_column)
-                        .range(0..=data.columns - 1)
-                        .prefix("X "),
-                );
-                number(
-                    ui,
-                    egui::DragValue::new(&mut data.brush_row)
-                        .range(0..=data.rows - 1)
-                        .prefix("Y "),
-                );
-            });
-            property_row(ui, "Solid", |ui| {
-                crate::widgets::checkbox(
-                    ui,
-                    &palette,
-                    &mut data.brush_collision,
-                    "Paint solid tiles",
-                )
-                .on_hover_text(
-                    "Add fixed collision to painted cells; repaint with this off to clear it",
-                );
-            });
-            if let Err(error) = crate::tilemap::update_settings(world, entity, data.clone()) {
-                ui.colored_label(palette.danger, error);
-            }
+            tilemap::show(ui, world, entity, assets);
         });
     }
 
@@ -3581,6 +3555,7 @@ fn show_body(
                             }
                         });
                     }
+                    edited |= material::object_rows(ui, &mut value, assets);
                     if edited {
                         changed = set_material_override(world, entity, Some(value));
                     }

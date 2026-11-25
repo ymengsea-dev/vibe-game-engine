@@ -17,8 +17,9 @@
 //!
 //! - Mesh thumbnails are static, fixed-angle previews, not orbitable viewports.
 //! - Audio playback is deliberately limited to Play/Stop (no seek or volume).
-//! - No standalone material / prefab preview — those file formats don't
-//!   exist yet; glTF materials appear in the mesh summary.
+//! - Materials preview as a lit ball drawn on the CPU with their base
+//!   colour image; normal, glow and other maps are not drawn on it.
+//! - No prefab preview; glTF materials appear in the mesh summary.
 //! - Only the selected row previews; no thumbnail grid or hover
 //!   previews.
 
@@ -36,6 +37,8 @@ use crate::import::{AssetImporter, ImportOutcome, ImportedAsset};
 /// egui.
 const THUMBNAIL_MAX_PX: u32 = 256;
 const MODEL_THUMBNAIL_PX: usize = 160;
+/// Side, in pixels, of a material's preview ball.
+pub const MATERIAL_PREVIEW_PX: usize = MODEL_THUMBNAIL_PX;
 const MODEL_MAX_TRIANGLES: usize = 10_000;
 const MODEL_MAX_PIXEL_VISITS: usize = 2_000_000;
 /// Longest side, in points, the thumbnail is drawn at.
@@ -195,8 +198,28 @@ impl PreviewCache {
             ImportedAsset::Audio(audio) => {
                 self.waveform = waveform_bins(&audio.samples, audio.channels, WAVEFORM_COLUMNS);
             }
+            ImportedAsset::Material(material) => {
+                self.rebuild_material(ctx, key, material, None);
+                return;
+            }
         }
 
+        self.key = Some(key.clone());
+    }
+
+    /// [`PreviewCache::rebuild`] for a material, with its base colour image.
+    fn rebuild_material(
+        &mut self,
+        ctx: &egui::Context,
+        key: &(PathBuf, u64),
+        material: &engine_scene::MaterialData,
+        base: Option<engine_ecs::components::RgbaImage<'_>>,
+    ) {
+        self.texture = None;
+        self.source_dims = None;
+        self.waveform.clear();
+        let side = MODEL_THUMBNAIL_PX as u32;
+        self.load_thumbnail(ctx, key, &material_thumbnail(material, base), side, side);
         self.key = Some(key.clone());
     }
 
@@ -296,7 +319,23 @@ pub fn show(
 
     let key = (entry.relative_path.clone(), importer.pass_id());
     if cache.key.as_ref() != Some(&key) {
-        cache.rebuild(ui.ctx(), &key, imported);
+        match imported {
+            ImportedAsset::Material(material) => {
+                let base = material
+                    .images
+                    .base_color
+                    .as_ref()
+                    .and_then(|image| crate::assets::parse_asset_id(&image.id))
+                    .and_then(|id| match importer.get(id) {
+                        Some(ImportedAsset::Texture(texture)) => {
+                            engine_scene::texture_pixels(texture)
+                        }
+                        _ => None,
+                    });
+                cache.rebuild_material(ui.ctx(), &key, material, base);
+            }
+            _ => cache.rebuild(ui.ctx(), &key, imported),
+        }
     }
 
     ui.vertical_centered(|ui| match imported {
@@ -334,7 +373,102 @@ pub fn show(
             ));
         }
         ImportedAsset::Audio(_) => {}
+        ImportedAsset::Material(material) => {
+            if let (Some(handle), Some((w, h))) = (&cache.texture, cache.source_dims) {
+                show_thumbnail(ui, handle, (w, h));
+            }
+            let images = material.images.iter().flatten().count();
+            ui.weak(format!(
+                "Metallic {:.2} \u{b7} Roughness {:.2} \u{b7} {} images",
+                material.metallic, material.roughness, images
+            ));
+        }
     });
+}
+
+/// A lit ball wearing `material`, [`MODEL_THUMBNAIL_PX`] square, as RGBA8
+/// with a see-through background. `base` is its base colour image, wrapped
+/// round the ball and repeated by the material's texture scale.
+pub fn material_thumbnail(
+    material: &engine_scene::MaterialData,
+    base: Option<engine_ecs::components::RgbaImage<'_>>,
+) -> Vec<u8> {
+    let side = MODEL_THUMBNAIL_PX;
+    let light = Vec3::new(-0.5, 0.7, 0.6).normalize();
+    let view = Vec3::Z;
+    let half_way = (light + view).normalize();
+    let to_linear = |value: u8| (f32::from(value) / 255.0).powf(2.2);
+    let sample = |u: f32, v: f32| -> [f32; 4] {
+        let Some((width, height, pixels)) = base else {
+            return [1.0; 4];
+        };
+        if width == 0 || height == 0 {
+            return [1.0; 4];
+        }
+        let x = (u.rem_euclid(1.0) * width as f32) as usize % width as usize;
+        let y = (v.rem_euclid(1.0) * height as f32) as usize % height as usize;
+        let at = (y * width as usize + x) * 4;
+        match pixels.get(at..at + 4) {
+            Some(texel) => [
+                to_linear(texel[0]),
+                to_linear(texel[1]),
+                to_linear(texel[2]),
+                f32::from(texel[3]) / 255.0,
+            ],
+            None => [1.0; 4],
+        }
+    };
+    let metallic = material.metallic.clamp(0.0, 1.0);
+    let roughness = material.roughness.clamp(0.05, 1.0);
+    let shininess = (2.0 / roughness.powi(4) - 2.0).clamp(1.0, 4096.0);
+    let mut rgba = vec![0u8; side * side * 4];
+    for row in 0..side {
+        for column in 0..side {
+            let x = (column as f32 + 0.5) / side as f32 * 2.0 - 1.0;
+            let y = 1.0 - (row as f32 + 0.5) / side as f32 * 2.0;
+            let r2 = x * x + y * y;
+            if r2 > 1.0 {
+                continue;
+            }
+            let normal = Vec3::new(x, y, (1.0 - r2).sqrt());
+            let u = 0.5 + normal.x.atan2(normal.z) / std::f32::consts::TAU;
+            let v = 0.5 - normal.y.asin() / std::f32::consts::PI;
+            let texel = sample(
+                u * material.uv_scale[0] + material.uv_offset[0],
+                v * material.uv_scale[1] + material.uv_offset[1],
+            );
+            let alpha = material.base_color[3] * texel[3];
+            let alpha = match material.alpha {
+                engine_scene::MaterialAlpha::Opaque => 1.0,
+                engine_scene::MaterialAlpha::Cutout { threshold } if alpha < threshold => continue,
+                engine_scene::MaterialAlpha::Cutout { .. } => 1.0,
+                engine_scene::MaterialAlpha::Blend => alpha,
+            };
+            let albedo = Vec3::new(
+                material.base_color[0] * texel[0],
+                material.base_color[1] * texel[1],
+                material.base_color[2] * texel[2],
+            );
+            let lit = normal.dot(light).max(0.0);
+            let f0 = Vec3::splat(0.04).lerp(albedo, metallic);
+            let specular = f0
+                * normal.dot(half_way).max(0.0).powf(shininess)
+                * ((shininess + 8.0) / (8.0 * std::f32::consts::PI))
+                * lit;
+            let colour = albedo * (1.0 - metallic) * (lit + 0.15)
+                + albedo * metallic * 0.15
+                + specular
+                + Vec3::from_array(material.emissive);
+            let to_byte =
+                |value: f32| (value.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0).round() as u8;
+            let at = (row * side + column) * 4;
+            rgba[at] = to_byte(colour.x);
+            rgba[at + 1] = to_byte(colour.y);
+            rgba[at + 2] = to_byte(colour.z);
+            rgba[at + 3] = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+    rgba
 }
 
 fn show_thumbnail(
@@ -971,5 +1105,30 @@ mod tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(2048), "2.0 KiB");
         assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MiB");
+    }
+
+    #[test]
+    fn a_material_thumbnail_is_a_ball_in_its_colour() {
+        let red = engine_scene::MaterialData {
+            base_color: [1.0, 0.0, 0.0, 1.0],
+            ..engine_scene::MaterialData::default()
+        };
+        let side = MODEL_THUMBNAIL_PX;
+        let pixels = material_thumbnail(&red, None);
+        assert_eq!(pixels.len(), side * side * 4);
+        assert_eq!(pixels[3], 0, "the corner is outside the ball");
+        let centre = (side / 2 * side + side / 2) * 4;
+        assert_eq!(pixels[centre + 3], 255);
+        assert!(
+            pixels[centre] > 100 && pixels[centre + 1] < 40,
+            "red: {:?}",
+            &pixels[centre..centre + 4]
+        );
+
+        // A green image tints it green.
+        let green = [0u8, 255, 0, 255];
+        let white = engine_scene::MaterialData::default();
+        let pixels = material_thumbnail(&white, Some((1, 1, &green)));
+        assert!(pixels[centre + 1] > 100 && pixels[centre] < 40);
     }
 }

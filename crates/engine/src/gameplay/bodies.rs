@@ -260,7 +260,7 @@ impl ScriptQueries for GameplayQueries<'_> {
         }
         let built;
         let grid = match self.world.get_resource::<super::ai::ActiveNavGrid>() {
-            Some(active) => Some(&active.0),
+            Some(active) => Some(active),
             None => {
                 built = self
                     .world

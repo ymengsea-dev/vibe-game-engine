@@ -120,6 +120,8 @@ An object that is several things shows the first match in this list. Terrain sho
 | Drag onto a folder | Move a file |
 | Enter / Esc | Keep / cancel a new name |
 | Right-click | More options |
+| Right-click a folder → **New Material** | Make a material file there |
+| Drag a material onto a model in the Scene View or the Hierarchy | Draw the model with that material ([Materials](06_MATERIALS.md)) |
 
 ## Console
 

@@ -179,7 +179,7 @@ Helper drawings. The game never shows them.
 | **Cameras** | What each game camera sees |
 | **Ground grid** | 1 m squares on the floor |
 | **Audio emitters** | Each sound and how far it can be heard |
-| **Nav grid** | The walkable area: where characters can walk, lying on the ground (red cross = blocked). Big areas draw every few cells |
+| **Nav grid** | The walkable area: where characters can walk, lying on the ground and on every floor above it, or on the screen in 2D (red cross = blocked). Big areas draw every few cells |
 | **World areas** | Every world area's box, and fainter, the box where its scene starts loading |
 | **Roads** | Every road's centre line, its edges and, fainter, where its soft edge ends. A selected road always shows them |
 | **Distance detail** | Draws models as the game will from the Scene View camera: simpler versions far away, and nothing past each object's draw distance, at the project's graphics quality. Off shows every model in full |
@@ -275,14 +275,20 @@ Characters with AI find their way around walls along the scene's **walkable area
 | --- | --- |
 | **Cell size** | Size of one square of the area. Smaller finds narrower gaps but makes a bigger area (at most 250,000 squares) |
 | **Character radius** | How far characters keep from walls |
-| **Character height** | Anything lower overhead blocks the way |
-| **Step height** | Ledges up to this high can be stepped over |
-| **Steepest slope °** | Ground steeper than this is not walkable |
-| **Bake walkable area** | Works out the area from the ground (terrain, or the top of a fixed box collider) and the fixed solid colliders standing on it, then shows it. ⌘Z undoes it |
+| **Character height** | Anything lower overhead blocks the way (3D only) |
+| **Step height** | Ledges up to this high can be stepped over (3D only) |
+| **Steepest slope °** | Ground steeper than this is not walkable (3D only) |
+| **Bake walkable area** | Works out the area from the ground (terrain, and the tops of fixed box, cylinder and mesh colliders) and the fixed solid colliders standing on it, then shows it. ⌘Z undoes it |
 | **Clear walkable area** | Removes it; characters then walk straight to where they are sent |
 | **Show walkable area** | The same as the **Nav grid** overlay |
 
-What counts: only **Fixed** colliders that are not triggers block, by the box around them. Moving bodies, triggers, disabled objects and objects with AI never block. Without any ground the area is flat at height 0 around the solid objects. The area has one floor: a bridge or an upper storey is not walkable.
+What counts: **Fixed** colliders that are not triggers block by their real shape: balls and capsules are round, turned boxes are turned, and mesh colliders block by their triangles. Cylinders block a little more than their shape when tilted. A mesh collider whose model isn't imported blocks by the box around it. Triggers, disabled objects and objects with AI never block. Without any ground the area is flat at height 0 around the solid objects.
+
+**Several floors.** Each square can hold up to four floors on top of each other: the ground under a bridge and the bridge itself, or the storeys of a building. Characters walk from one floor to the next square's floor when the height between them is no more than the step height plus what the steepest slope rises across a square, so ramps and stairs work and drops don't. The overlay draws each floor at its own height.
+
+**Moving objects.** A Dynamic or Kinematic collider with **Blocks paths** on (Inspector → Collider) is not baked. While the game runs, characters walking a route go round it wherever it is, and pick a new route when it moves into their way. Moving mesh colliders don't block.
+
+**2D.** In 2D the area lies on the screen (X and Y). Every fixed solid collider blocks the squares it covers, at any depth: sprite colliders and solid tilemap cells. Only **Cell size** and **Character radius** apply. 2D characters walk on X and Y, keep their depth and don't turn to face where they walk.
 
 Bake again after moving walls or reshaping the ground; the area does not follow by itself.
 
@@ -299,6 +305,36 @@ Select an object with an **AI** section to see, in yellow, what it can see (its 
 | **Erase cells** | Painting removes tiles |
 
 Tick **Paint solid tiles** in the Inspector to make tiles block movement.
+
+### Layers
+
+A tile map has layers, listed in the Inspector's **Tilemap** section with the top one first. A new map has **Background**, **Ground** and **Front**; a map made before layers gets one **Ground** layer holding its tiles the first time you paint. Each layer is an object under the map in the Hierarchy, holding its tiles.
+
+| Control | What it does |
+| --- | --- |
+| Click a layer's name | Paint on that layer |
+| **Hide / Show** | Hides the layer in the Scene View only; the game still shows it. The same as the Hierarchy eye |
+| **Lock / Unlock** | A locked layer can't be painted |
+| **Add layer** | A new layer on top (at most 16) |
+| **Move up / Move down** | Draws the painted layer above or below its neighbour |
+| **Name** | Renames the painted layer |
+| **Opacity** | How see-through the layer's tiles are |
+| **Solid → Every cell** | Gives every tile of the layer collision; untick to take it off again |
+
+Layers higher in the list draw over lower ones.
+
+### Rule tiles
+
+Set **Brush → Paints** to **Rule tile** to paint ground, walls or water that join up by themselves: each painted tile picks its picture from the tiles round it, and its neighbours change too. Erasing updates the neighbours as well. Only tiles of the same block on the same layer count as neighbours.
+
+The tiles come from a block on the sheet whose top-left cell is **Block corner**. Pick its **Layout**:
+
+| Layout | Block | Which tile is where |
+| --- | --- | --- |
+| **16 tiles (4 × 4)** | 4 across, 4 down | Add up the filled sides: up 1, right 2, down 4, left 8. Tile *n* is in column *n* mod 4, row *n* ÷ 4. So the lone tile is first, and the tile with all four sides filled is last |
+| **47 tiles (8 × 6)** | 8 across, 6 down | Also counts corners, each only when both its sides are filled. Add up: up 1, up-right 2, right 4, down-right 8, down 16, down-left 32, left 64, up-left 128. The 47 sums that can happen, from smallest to largest, fill the block row by row (the 48th cell is unused) |
+
+The block must fit on the sheet.
 
 ## Playing in the Scene View
 

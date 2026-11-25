@@ -18,6 +18,7 @@ wgpu.workspace = true
 bytemuck.workspace = true
 glam.workspace = true
 thiserror.workspace = true
+engine_ai.workspace = true
 engine_asset.workspace = true
 engine_audio.workspace = true
 kira.workspace = true

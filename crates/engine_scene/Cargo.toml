@@ -16,6 +16,7 @@ glam.workspace = true
 uuid.workspace = true
 bevy_ecs.workspace = true
 engine_utils.workspace = true
+engine_ai.workspace = true
 engine_renderer.workspace = true
 engine_ecs.workspace = true
 engine_physics.workspace = true

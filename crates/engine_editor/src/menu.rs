@@ -569,8 +569,6 @@ mod water_tests {
 
     #[test]
     fn tile_painting_and_visual_rule_edits_are_undoable() {
-        use engine_ecs::prelude::Children;
-
         let root = std::env::temp_dir().join(format!("vge-tile-undo-{}", uuid::Uuid::new_v4()));
         let project = engine_project::Project::create(&root, "Tile Undo").unwrap();
         let mut state = EditorState::new(
@@ -590,7 +588,7 @@ mod water_tests {
                 .world
                 .iter_entities()
                 .find(|entity| entity.get::<engine_scene::SceneTilemap>().is_some())
-                .and_then(|map| map.get::<Children>().map(|children| children.len()))
+                .map(|map| crate::tilemap::all_cells(&state.world, map.id()).len())
                 .unwrap_or(0)
         };
 
@@ -671,8 +669,6 @@ mod water_tests {
 
     #[test]
     fn tilemap_paint_replace_erase_and_reopen_keep_one_cell() {
-        use engine_ecs::prelude::Children;
-
         let root = std::env::temp_dir().join(format!("vge-tilemap-{}", uuid::Uuid::new_v4()));
         let project = engine_project::Project::create(&root, "Tilemap").unwrap();
         let mut state = EditorState::new(
@@ -709,13 +705,14 @@ mod water_tests {
         assert!(state.paint_tile_cell(0, 0, false).unwrap());
         assert!(state.paint_tile_cell(-1, 2, false).unwrap());
         assert!(state.paint_tile_cell(0, 0, true).unwrap());
-        assert_eq!(state.world.get::<Children>(parent).unwrap().len(), 1);
+        assert_eq!(crate::tilemap::all_cells(&state.world, parent).len(), 1);
         assert!(state.paint_tile_cell(10_001, 0, false).is_err());
-        assert_eq!(state.world.get::<Children>(parent).unwrap().len(), 1);
+        assert_eq!(crate::tilemap::all_cells(&state.world, parent).len(), 1);
 
         state.save_scene().unwrap();
         let saved = engine_scene::Scene::load_from_file(&state.scene_path).unwrap();
-        assert_eq!(saved.entities.len(), 2);
+        // The map, its three layers and one cell.
+        assert_eq!(saved.entities.len(), 5);
         assert!(saved.entities.iter().any(|entity| {
             entity
                 .tilemap

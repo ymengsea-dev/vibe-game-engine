@@ -19,13 +19,21 @@
 //! bakes grids from colliders and terrain slope; `engine::gameplay` walks
 //! agents along them, and [`avoid`] steers walking agents round each
 //! other. Polygon navmeshes are future work.
+//!
+//! A cell can hold several floors (a bridge over the ground, an upper
+//! storey): [`NavNode`] names one, and [`find_layered_route`] routes
+//! between points given with their heights. [`shapes`] holds the exact
+//! solid tests a bake and moving blockers use.
 
 pub mod avoid;
 pub mod nav;
+pub mod shapes;
 
 pub use avoid::{AVOID_HORIZON, AvoidAgent, avoid};
 
 pub use nav::{
-    GridCoord, NavError, NavGrid, find_path, find_path_world, find_route, follow_path,
-    line_of_sight, smooth_path,
+    GridCoord, MAX_LAYERS, NavError, NavGrid, NavNode, Span, find_layered_route, find_node_path,
+    find_path, find_path_world, find_route, follow_path, line_of_sight, node_line_of_sight,
+    smooth_node_path, smooth_path,
 };
+pub use shapes::{Clearance, Solid, TriangleMesh};

@@ -31,9 +31,40 @@ impl TilemapData {
         {
             return Err("tilemap cell size must be between 0.01 and 10,000".into());
         }
+        if self.layers.len() > MAX_TILE_LAYERS {
+            return Err(format!("a tilemap has at most {MAX_TILE_LAYERS} layers"));
+        }
+        for layer in &self.layers {
+            if layer.name.trim().is_empty() || layer.name.len() > 64 {
+                return Err("tilemap layer names must have 1–64 bytes".into());
+            }
+            if layer.object.is_empty() || layer.object.len() > 64 {
+                return Err("tilemap layer object IDs must have 1–64 bytes".into());
+            }
+            if !layer.draw_order.is_finite() || !(0.0..=1.0).contains(&layer.opacity) {
+                return Err(format!(
+                    "tilemap layer {:?} has a bad draw order or opacity",
+                    layer.name
+                ));
+            }
+        }
+        if !self.layers.is_empty() && self.active_layer as usize >= self.layers.len() {
+            return Err("tilemap active layer is not one of its layers".into());
+        }
+        if let Some(layout) = self.brush_auto {
+            let (columns, rows) = layout.block();
+            if self.brush_column + columns > self.columns || self.brush_row + rows > self.rows {
+                return Err(format!(
+                    "a rule tile needs {columns}x{rows} sheet cells from the brush cell"
+                ));
+            }
+        }
         Ok(())
     }
 }
+
+/// Most layers one tilemap has.
+pub const MAX_TILE_LAYERS: usize = 16;
 
 impl TransformData {
     /// Checks that every component is finite and that `rotation` is (to
@@ -249,6 +280,17 @@ impl MeshRendererData {
                     .all(|value| value.is_finite() && (0.0..=1.0).contains(&value)))
         {
             return Err("material override factors must be finite and in [0, 1]".into());
+        }
+        if let Some(authored) = &self.material_override {
+            if let Some(file) = &authored.material {
+                file.validate()
+                    .map_err(|reason| format!("material file: {reason}"))?;
+            }
+            for image in authored.images.iter().flatten() {
+                image
+                    .validate()
+                    .map_err(|reason| format!("material image: {reason}"))?;
+            }
         }
         if let Some(animation) = &self.animation {
             if !animation.speed.is_finite() || animation.speed.abs() > MAX_ANIMATION_SPEED {
@@ -951,9 +993,44 @@ impl crate::format::NavGridData {
         if let Some(bake) = &self.bake {
             bake.validate()?;
         }
+        if self
+            .climb
+            .is_some_and(|climb| !climb.is_finite() || climb < 0.0)
+        {
+            return Err(format!("climb is not a usable height: {:?}", self.climb));
+        }
+        let mut per_cell = 0usize;
+        for (index, span) in self.upper.iter().enumerate() {
+            if span.cell as usize >= self.cell_count() || !span.height.is_finite() {
+                return Err(format!(
+                    "upper floor {index} is outside the grid or not finite"
+                ));
+            }
+            match index.checked_sub(1).and_then(|i| self.upper.get(i)) {
+                Some(previous) if previous.cell == span.cell => {
+                    if previous.height >= span.height {
+                        return Err(format!("upper floor {index} is not above the one before"));
+                    }
+                    per_cell += 1;
+                }
+                Some(previous) if previous.cell > span.cell => {
+                    return Err(format!("upper floor {index} is out of cell order"));
+                }
+                _ => per_cell = 1,
+            }
+            if per_cell > MAX_UPPER_FLOORS {
+                return Err(format!(
+                    "cell {} has more than {MAX_UPPER_FLOORS} upper floors",
+                    span.cell
+                ));
+            }
+        }
         Ok(())
     }
 }
+
+/// Most floors above a nav grid cell's lowest one.
+const MAX_UPPER_FLOORS: usize = 3;
 
 #[cfg(test)]
 mod tests {
@@ -994,6 +1071,11 @@ mod tests {
         assert!(mesh.validate().is_err());
         mesh.material_override.as_mut().unwrap().tint = [1.0; 3];
         mesh.material_override.as_mut().unwrap().metallic = Some(1.2);
+        assert!(mesh.validate().is_err());
+        mesh.material_override.as_mut().unwrap().metallic = None;
+        mesh.material_override.as_mut().unwrap().images.normal = Some(crate::AssetRef {
+            id: "not an id".into(),
+        });
         assert!(mesh.validate().is_err());
     }
 

@@ -63,6 +63,8 @@ pub enum ImportedAsset {
     Texture(Box<ImportedTexture>),
     /// A `.wav` import (`engine_asset::import_wav_bytes`).
     Audio(Box<ImportedAudio>),
+    /// A `.material` file (`engine_scene::MaterialData`).
+    Material(Box<engine_scene::MaterialData>),
 }
 
 /// The result of importing (or skipping) one asset file in a pass.
@@ -365,6 +367,12 @@ fn import_one(
         AssetKind::Audio => import_wav_bytes(&bytes)
             .map(|audio| ImportedAsset::Audio(Box::new(audio)))
             .map_err(|err| err.to_string()),
+        AssetKind::Material => std::str::from_utf8(&bytes)
+            .map_err(|err| err.to_string())
+            .and_then(|text| {
+                engine_scene::MaterialData::from_ron(text).map_err(|err| err.to_string())
+            })
+            .map(|material| ImportedAsset::Material(Box::new(material))),
         AssetKind::Scene | AssetKind::Prefab | AssetKind::Terrain | AssetKind::Other => {
             Err("no importer for this asset kind".to_string())
         }

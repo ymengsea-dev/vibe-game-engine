@@ -29,6 +29,7 @@ struct MaterialUniform {
     emissive_factor: vec3<f32>,
     normal_scale: f32,
     occlusion_strength: f32,
+    uv_transform: vec4<f32>,
 };
 
 @group(1) @binding(2)
@@ -73,7 +74,11 @@ fn fs_main(in: VertexOutput) {
     if in.fade < dither_threshold(in.position.xy) {
         discard;
     }
-    let base_color = textureSample(base_color_texture, base_color_sampler, in.uv)
+    let base_color = textureSample(
+        base_color_texture,
+        base_color_sampler,
+        in.uv * material.uv_transform.xy + material.uv_transform.zw,
+    )
         * material.base_color_factor;
     if material.alpha_mode == 1u && base_color.a < material.alpha_cutoff {
         discard;

@@ -34,6 +34,7 @@ mod error;
 mod format;
 mod game_state;
 mod io;
+mod material;
 mod migration;
 mod painted;
 mod prefab;
@@ -48,13 +49,17 @@ mod sprite_atlas;
 mod terrain;
 mod ui;
 mod validate;
-pub use validate::{MAX_TAG_BYTES, MAX_TAGS, valid_prefab_path, valid_scene_path};
+pub use material::{
+    MATERIAL_EXTENSION, MapSource, MaterialAlpha, MaterialData, MaterialImageRefs,
+    MaterialMapSources, compose_material,
+};
+pub use validate::{MAX_TAG_BYTES, MAX_TAGS, MAX_TILE_LAYERS, valid_prefab_path, valid_scene_path};
 mod world;
 
 pub use ai::{
-    AiBrainData, AiClips, AiData, AiState, MAX_AGENT_RADIUS, MAX_AI_DISTANCE, MAX_AI_NAME_BYTES,
-    MAX_PATROL_POINTS,
-    NavAgentData, NavBakeSettings, SceneAi, SensesData, SimpleBrainData,
+    AiBrainData, AiClips, AiData, AiState, ColliderMesh, MAX_AGENT_RADIUS, MAX_AI_DISTANCE,
+    MAX_AI_NAME_BYTES, MAX_PATROL_POINTS, NavAgentData, NavBakeSettings, SCREEN_TO_GRID, SceneAi,
+    SensesData, SimpleBrainData, collider_solid,
 };
 pub use behaviour_tree::{
     BehaviourTreeData, BtNodeData, BtNodeKind, BtNodeRun, BtTrace, MAX_BT_CHILDREN, MAX_BT_NODES,
@@ -80,7 +85,7 @@ pub use format::{
     AmbientSoundData, AppliedLod, AppliedMaterialOverride, AssetRef, AudioEmitterData, BodyKind,
     CameraData, CameraFollowData, CameraFollowMode, ColliderData, ColliderShape, EnvironmentData,
     FoliageData, KeepBetweenScenes, LightingData, LodData, MAX_RULE_CONDITIONS,
-    MaterialOverrideData, MeshRendererData, ModelAnimationData, NavGridData, OrbitInput,
+    MaterialOverrideData, MeshRendererData, ModelAnimationData, NavGridData, NavPlane, NavSpanData, OrbitInput,
     PointLightData, PrefabLink, ProjectionData, RuleAction, RuleCompare, RuleCondition, RuleData,
     RuleMatch, RuleTrigger, Scene, SceneAudioEmitter, SceneCollider, SceneEntity, SceneEnvironment,
     SceneFileOwner, SceneFoliage, SceneLighting, SceneMaterialOverride, SceneModelAnimation,
@@ -89,6 +94,7 @@ pub use format::{
     TimeOfDayData, MAX_DAY_MINUTES,
     SceneSpriteAnimation, SceneSpriteClips, SceneTags, SceneTilemap, SceneUi, SiblingOrder,
     SpawnAt, SpriteAnimationData, SpriteClipData, SpriteClipPlayback, SpriteData, TilemapData,
+    TileLayerData, AutoTileLayout,
     TransformData, UiAnchor, UiElementData, UiKind, UiLayoutDirection, WaterData,
 };
 pub use game_state::{GameState, GameStateName};
@@ -114,7 +120,7 @@ pub use runtime::{
     MeshGeometry, RuntimeResolver, SkinnedGeometry, attach_lod_tiers, attach_skinned_lod_tiers,
     base_mesh, executable_dir, load_mesh_geometry, skinned_lod_tier_geometry,
     load_skinned_mesh, lod_tier_geometry, material_from_imported, open_export, skinned_parts,
-    upload_skinned_model,
+    upload_skinned_model, MaterialSetup, texture_pixels,
 };
 pub use painted::{PaintedGroupData, ScenePaintedGroup};
 pub use road::{

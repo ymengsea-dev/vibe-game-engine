@@ -6,7 +6,7 @@ use engine_scene::{AiBrainData, AiState, SimpleBrainData};
 use engine_scripting::GameCommand;
 use glam::Vec3;
 
-use super::nav::{self, flat};
+use super::nav;
 use super::{AiEvent, AiMemory, AiTick};
 
 /// How often a chase works out a new route to a moving target, in seconds.
@@ -43,7 +43,8 @@ pub(super) fn update(world: &mut World, dt: f32, out: &mut AiTick) {
             .take()
             .unwrap_or_else(|| match (&memory.target, target_at) {
                 (Some(_), Some(at))
-                    if in_contact && flat(at).distance(flat(position)) <= brain.attack_range =>
+                    if in_contact
+                        && nav::plane_distance(world, at, position) <= brain.attack_range =>
                 {
                     AiState::Attack
                 }

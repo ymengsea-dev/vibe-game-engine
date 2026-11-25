@@ -52,6 +52,9 @@ pub enum AssetKind {
     /// `engine_scene::TerrainData`. Referenced by id from the terrain
     /// object, so it has a `.meta` sidecar.
     Terrain,
+    /// `.material`, a material file — see `engine_scene::MaterialData`.
+    /// Referenced by id from the objects drawn with it.
+    Material,
     /// Anything else.
     Other,
 }
@@ -73,6 +76,7 @@ impl AssetKind {
             "ron" => Self::Scene,
             "prefab" => Self::Prefab,
             "terrain" => Self::Terrain,
+            "material" => Self::Material,
             _ => Self::Other,
         }
     }
@@ -86,6 +90,7 @@ impl AssetKind {
             Self::Scene => "Scene",
             Self::Prefab => "Prefab",
             Self::Terrain => "Terrain",
+            Self::Material => "Material",
             Self::Other => "Other",
         }
     }
@@ -96,7 +101,7 @@ impl AssetKind {
     pub fn is_referenceable(self) -> bool {
         matches!(
             self,
-            Self::Mesh | Self::Texture | Self::Audio | Self::Terrain
+            Self::Mesh | Self::Texture | Self::Audio | Self::Terrain | Self::Material
         )
     }
 }
@@ -393,6 +398,9 @@ pub struct AssetBrowser {
     /// A folder the host should create, relative to the assets root.
     /// Taken by the host, which validates it before touching the disk.
     pub new_folder_request: Option<PathBuf>,
+    /// A folder to create a new material file in, relative to the assets
+    /// root; taken by the host.
+    pub new_material_request: Option<PathBuf>,
     /// Window-local logical pointer position supplied with an OS file drop.
     pub drop_position: Option<(i32, i32)>,
     /// File operation requested by the tree; the host validates and performs it.
@@ -476,6 +484,7 @@ impl Default for AssetBrowser {
             new_folder_parent: PathBuf::new(),
             new_folder_needs_focus: false,
             new_folder_request: None,
+            new_material_request: None,
             drop_position: None,
             operation_request: None,
             operation_error: None,
@@ -685,6 +694,14 @@ pub fn show_scene(
                     browser.new_folder = Some(String::new());
                     browser.new_folder_parent.clear();
                     browser.new_folder_needs_focus = true;
+                    ui.close();
+                }
+                if ui
+                    .button("New Material")
+                    .on_hover_text("A material file: colour, images and shine, shared by objects")
+                    .clicked()
+                {
+                    browser.new_material_request = Some(PathBuf::new());
                     ui.close();
                 }
             });
@@ -951,6 +968,10 @@ fn asset_context_menu(ui: &mut egui::Ui, browser: &mut AssetBrowser, path: &Path
     }
     if browser.folders.iter().any(|folder| folder == path) {
         paste_menu_item(ui, browser, path);
+        if ui.button("New Material").clicked() {
+            browser.new_material_request = Some(path.to_path_buf());
+            ui.close();
+        }
     }
     if ui.button("Rename").clicked() {
         begin_rename(browser, path);

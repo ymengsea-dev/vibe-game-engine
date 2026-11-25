@@ -6,6 +6,8 @@
 //! object. `engine::gameplay` runs it; this module is the format, its
 //! limits and its checks.
 
+use engine_ai::{Solid, TriangleMesh};
+use glam::{Mat4, Vec3, Vec4};
 use serde::{Deserialize, Serialize};
 
 /// The most patrol points one brain may have.
@@ -72,6 +74,93 @@ impl NavBakeSettings {
         in_range("step height", self.step_height, 0.0, 100.0)?;
         in_range("max slope", self.max_slope_degrees, 0.0, 89.0)
     }
+}
+
+/// World to grid space for a nav grid on [`crate::NavPlane::Screen`]: world
+/// Y runs along the grid's rows and world Z (depth) is up.
+pub const SCREEN_TO_GRID: Mat4 = Mat4::from_cols(
+    Vec4::new(1.0, 0.0, 0.0, 0.0),
+    Vec4::new(0.0, 0.0, 1.0, 0.0),
+    Vec4::new(0.0, 1.0, 0.0, 0.0),
+    Vec4::new(0.0, 0.0, 0.0, 1.0),
+);
+
+/// What is known of a mesh collider's shape.
+pub enum ColliderMesh {
+    /// Its triangles, in the object's own space.
+    Triangles(Vec<[Vec3; 3]>),
+    /// Only the box around it, in the object's own space.
+    Bounds {
+        /// Lowest corner.
+        min: Vec3,
+        /// Highest corner.
+        max: Vec3,
+    },
+}
+
+/// The solid a collider of `shape` makes with world matrix `to_world`, in
+/// the grid space `to_grid` maps the world into. Sizes follow the physics
+/// body: balls, capsules and cylinders take their radius from the largest
+/// scale. `mesh` is asked for a mesh collider's shape; `None` without one.
+pub fn collider_solid(
+    shape: &crate::ColliderShape,
+    to_world: Mat4,
+    to_grid: Mat4,
+    mesh: impl FnOnce() -> Option<ColliderMesh>,
+) -> Option<Solid> {
+    let (scale, rotation, translation) = to_world.to_scale_rotation_translation();
+    let placed = to_grid * Mat4::from_rotation_translation(rotation, translation);
+    let uniform = scale.abs().max_element();
+    Some(match shape {
+        crate::ColliderShape::Ball { radius } => {
+            Solid::sphere(placed.transform_point3(Vec3::ZERO), radius * uniform)
+        }
+        crate::ColliderShape::Capsule {
+            half_height,
+            radius,
+        } => {
+            let up = Vec3::new(0.0, half_height * scale.y.abs(), 0.0);
+            Solid::Capsule {
+                a: placed.transform_point3(-up),
+                b: placed.transform_point3(up),
+                radius: radius * uniform,
+            }
+        }
+        crate::ColliderShape::Cylinder {
+            half_height,
+            radius,
+        } => Solid::Cylinder {
+            to_world: placed
+                * Mat4::from_scale(Vec3::new(
+                    radius * uniform,
+                    half_height * scale.y.abs(),
+                    radius * uniform,
+                )),
+        },
+        crate::ColliderShape::Cuboid { half_extents } => Solid::Box {
+            to_world: to_grid * to_world * Mat4::from_scale(Vec3::from_array(*half_extents)),
+        },
+        crate::ColliderShape::TriMesh { .. } => {
+            let to_grid_world = to_grid * to_world;
+            match mesh()? {
+                ColliderMesh::Triangles(triangles) => Solid::Mesh(TriangleMesh::new(
+                    triangles
+                        .into_iter()
+                        .map(|t| t.map(|p| to_grid_world.transform_point3(p)))
+                        .collect(),
+                )),
+                ColliderMesh::Bounds { min, max } => {
+                    let half = (max - min) * 0.5;
+                    Solid::Box {
+                        to_world: to_grid_world
+                            * Mat4::from_translation(min + half)
+                            * Mat4::from_scale(half.max(Vec3::splat(1e-6))),
+                    }
+                }
+            }
+        }
+        crate::ColliderShape::Terrain => return None,
+    })
 }
 
 /// Everything AI on one object.
