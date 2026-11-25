@@ -113,6 +113,18 @@ impl Workspace {
     }
 }
 
+/// A key pressed in the Code screen's file search box, for the code
+/// editor's file list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeFileStep {
+    /// Highlight the next matching file (↓).
+    Next,
+    /// Highlight the previous matching file (↑).
+    Previous,
+    /// Open the highlighted file (Enter).
+    Open,
+}
+
 /// Which of the studio's toggleable panels are currently shown.
 ///
 /// The Scene/Game viewport and the menu/tool/status bars are always

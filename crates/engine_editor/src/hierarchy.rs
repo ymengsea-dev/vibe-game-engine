@@ -409,7 +409,7 @@ fn scene_group_row(ui: &mut egui::Ui, group: &str, state: &mut HierarchyState) {
             if folded { 0.0 } else { 1.0 },
             palette.muted,
         );
-        crate::assets::folder_icon(ui);
+        crate::assets::folder_icon_open(ui, !folded);
         ui.add(egui::Label::new(egui::RichText::new(group).color(palette.text)).selectable(false));
     });
     let response = ui.interact(
@@ -1596,7 +1596,7 @@ fn show_entity(
         let row = ui.horizontal(|ui| {
             ui.set_min_width(ui.available_width());
             ui.add_space(22.0);
-            entity_row(ui, world, entity, selected, secondary, state);
+            entity_row(ui, world, entity, selected, secondary, state, false);
         });
         let drop_into = entity_drop_target(
             ui,
@@ -1642,7 +1642,8 @@ fn show_entity(
         ui.set_min_width(ui.available_width());
         ui.add_space(4.0);
         crate::assets::tree_disclosure(ui, &mut collapsing);
-        entity_row(ui, world, entity, selected, secondary, state);
+        let open = collapsing.is_open();
+        entity_row(ui, world, entity, selected, secondary, state, open);
     });
     if !searching && let Some(key) = key {
         if collapsing.is_open() {
@@ -1944,7 +1945,8 @@ fn ungroup_selection(
     }
 }
 
-fn paint_entity_icon(ui: &mut egui::Ui, icon: RowIcon, linked: bool) {
+/// `open` draws a group's folder open, for a row showing its children.
+fn paint_entity_icon(ui: &mut egui::Ui, icon: RowIcon, linked: bool, open: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
     let at = |x: f32, y: f32| rect.min + egui::vec2(x, y);
     // A linked prefab copy shows in the accent colour.
@@ -2056,18 +2058,7 @@ fn paint_entity_icon(ui: &mut egui::Ui, icon: RowIcon, linked: bool) {
             line(&[(13.0, 4.0), (7.0, 7.0)]);
             line(&[(7.0, 7.0), (7.0, 13.0)]);
         }
-        RowIcon::Group => {
-            line(&[
-                (1.0, 3.0),
-                (5.5, 3.0),
-                (7.0, 4.5),
-                (13.0, 4.5),
-                (13.0, 12.0),
-                (1.0, 12.0),
-                (1.0, 3.0),
-            ]);
-            line(&[(1.0, 6.5), (13.0, 6.5)]);
-        }
+        RowIcon::Group => crate::assets::paint_folder(painter, rect.min, open),
         RowIcon::Object => {
             line(&[(7.0, 3.5), (10.5, 7.0), (7.0, 10.5), (3.5, 7.0), (7.0, 3.5)]);
         }
@@ -2162,6 +2153,7 @@ fn entity_row(
     selected: &mut Option<Entity>,
     secondary: &mut Vec<Entity>,
     state: &mut HierarchyState,
+    open: bool,
 ) {
     if state.renaming.as_ref().map(|r| r.entity) == Some(entity) {
         let Some(mut renaming) = state.renaming.take() else {
@@ -2219,7 +2211,7 @@ fn entity_row(
             egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 27.0));
         ui.horizontal(|ui| {
             let linked = world.get::<engine_scene::ScenePrefabLink>(entity).is_some();
-            paint_entity_icon(ui, row_icon(world, entity), linked);
+            paint_entity_icon(ui, row_icon(world, entity), linked, open);
             let kept = world
                 .get::<engine_scene::KeepBetweenScenes>(entity)
                 .is_some()

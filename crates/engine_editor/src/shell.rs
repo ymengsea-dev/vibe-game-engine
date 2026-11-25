@@ -482,7 +482,6 @@ impl EditorShell {
 
             state.code_panel_rect = None;
             state.code_panel_visible = false;
-            state.code_panel_resizing = false;
             state.viewport_size_request = None;
             match shell_layout(state.workspace) {
                 ShellLayout::Code => show_code_workspace(ui, viewport, state),
@@ -591,14 +590,11 @@ impl EditorShell {
                         .frame(studio_panel_frame())
                         .show_separator_line(false)
                         .show_studio_collapsible(ui, &mut code_open, |ui| {
-                            code_panel_body(ui, &mut close_code)
+                            code_panel_body(ui, Some(&mut close_code))
                         });
                     state.panels.code = code_open && !close_code;
-                    state.code_panel_rect = code_shown.map(|inner| {
-                        let r = inner.response.rect;
-                        let top = r.min.y + CODE_HEADER_HEIGHT;
-                        [r.min.x, top, r.width(), (r.max.y - top).max(1.0)]
-                    });
+                    state.code_panel_rect =
+                        code_shown.map(|inner| code_webview_rect(inner.response.rect));
                     // The Monaco webview floats over this rect; hidden when the
                     // panel is collapsed or a modal is up (egui can't draw over a
                     // native view).
@@ -607,17 +603,6 @@ impl EditorShell {
                         state.pending_action.is_some() || state.sdk_upgrade_message.is_some(),
                         ui.ctx().any_popup_open(),
                     );
-
-                    // Drag-resize detection: the rect moved this frame while a
-                    // pointer button is held. The host hides the webview for that
-                    // frame so the native view doesn't lag/overhang the edge.
-                    let pointer_down = ui.input(|i| i.pointer.any_down());
-                    state.code_panel_resizing = code_panel_is_resizing(
-                        state.prev_code_panel_rect,
-                        state.code_panel_rect,
-                        pointer_down,
-                    );
-                    state.prev_code_panel_rect = state.code_panel_rect;
 
                     egui::CentralPanel::default()
                         .frame(studio_panel_frame())
@@ -850,6 +835,7 @@ fn studio_header_contents(
     new_project: &mut Option<NewProjectDialog>,
     show_window_menus: bool,
 ) {
+    let bar = ui.max_rect();
     ui.horizontal_centered(|ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             paint_brand_mark(ui);
@@ -875,9 +861,90 @@ fn studio_header_contents(
                 menu_assets(ui, state);
                 menu_window(ui, state);
             }
-            toolbar(ui, state);
+            let left_end = ui.cursor().min.x;
+            let tools = toolbar(ui, state);
+            if shell_layout(state.workspace) == ShellLayout::Code {
+                let bar = bar.translate(egui::vec2(0.0, tools.center().y - bar.center().y));
+                code_file_search(ui, state, bar, left_end, tools.left());
+            }
         });
     });
+}
+
+/// Widest the Code screen's file search box grows.
+const CODE_SEARCH_WIDTH: f32 = 560.0;
+
+/// Where the Code screen's file search box goes in a top bar spanning
+/// `bar`, between the left items (ending at `left_end`) and the toolbar
+/// (starting at `right_start`): centred on the bar when it fits, up to
+/// [`CODE_SEARCH_WIDTH`] wide. `None` when the gap is too small for it.
+fn code_search_rect(bar: egui::Rect, left_end: f32, right_start: f32) -> Option<egui::Rect> {
+    const GAP: f32 = 16.0;
+    let (min, max) = (left_end + GAP, right_start - GAP);
+    let width = CODE_SEARCH_WIDTH.min(max - min);
+    if width < 160.0 {
+        return None;
+    }
+    let center = bar.center().x.clamp(min + width / 2.0, max - width / 2.0);
+    Some(egui::Rect::from_center_size(
+        egui::pos2(center, bar.center().y),
+        egui::vec2(width, 26.0),
+    ))
+}
+
+/// The Code screen's file search box in the top bar, as VS Code puts its
+/// search: typing narrows the code editor's file list, ↑ ↓ pick a match,
+/// Enter opens it and Esc clears the box.
+fn code_file_search(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    bar: egui::Rect,
+    left_end: f32,
+    right_start: f32,
+) {
+    use crate::chrome::CodeFileStep;
+    let Some(rect) = code_search_rect(bar, left_end, right_start) else {
+        return;
+    };
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let response = crate::widgets::search_field(
+        &mut child,
+        &crate::theme::NIGHT,
+        &mut state.code_file_query,
+        "Find a file",
+        rect.width(),
+    );
+    state.code_file_query_changed |= response.changed();
+    if response.has_focus() {
+        let (down, up) = ui.input(|input| {
+            (
+                input.key_pressed(egui::Key::ArrowDown),
+                input.key_pressed(egui::Key::ArrowUp),
+            )
+        });
+        if down {
+            state.code_file_step = Some(CodeFileStep::Next);
+        } else if up {
+            state.code_file_step = Some(CodeFileStep::Previous);
+        }
+    } else if response.lost_focus() {
+        let (enter, escape) = ui.input(|input| {
+            (
+                input.key_pressed(egui::Key::Enter),
+                input.key_pressed(egui::Key::Escape),
+            )
+        });
+        if enter && !state.code_file_query.trim().is_empty() {
+            state.code_file_step = Some(CodeFileStep::Open);
+        } else if escape {
+            state.code_file_query.clear();
+            state.code_file_query_changed = true;
+        }
+    }
 }
 
 fn scene_panel_toggle_button(ui: &mut egui::Ui, state: &mut EditorState, panel: Panel) {
@@ -951,7 +1018,6 @@ fn scene_default_splits(width: f32, height: f32) -> (f32, f32, f32, f32) {
 
 /// The Scene prototype's four splitters belong to separate sibling panels.
 fn show_scene_workspace(ui: &mut egui::Ui, viewport: &Viewport, state: &mut EditorState) {
-    state.prev_code_panel_rect = None;
     let width = ui.available_width();
     let (inspector_width, hierarchy_width, bottom_height, assets_width) =
         scene_default_splits(width, ui.available_height());
@@ -1668,7 +1734,7 @@ fn handle_scene_view_input(
     image_response: &egui::Response,
 ) {
     handle_view_tool_keys(ui, state, image_response);
-    let camera_gesture = handle_camera_navigation(ui, state, image_response);
+    let camera_gesture = handle_camera_navigation(ui, state, image_response, false);
     let icons = crate::scene_icons::project(
         &crate::scene_icons::collect(&mut state.world),
         viewport.view_projection_matrix(),
@@ -1812,10 +1878,14 @@ fn handle_view_tool_keys(ui: &egui::Ui, state: &mut EditorState, response: &egui
 
 /// Orbit, pan, zoom, fly and frame-selected for the Scene View camera.
 /// Returns the drag gesture in progress, if the camera owns this drag.
+///
+/// `left_drag_turns` makes a plain left-drag orbit (pan in 2D), for views
+/// with nothing to select or move, such as the Code screen's Viewport.
 fn handle_camera_navigation(
     ui: &egui::Ui,
     state: &mut EditorState,
     response: &egui::Response,
+    left_drag_turns: bool,
 ) -> Option<CameraGesture> {
     let two_d = state.dimension.is_2d();
     let tool = state.active_view_tool();
@@ -1823,7 +1893,22 @@ fn handle_camera_navigation(
     let (dt, frame) =
         ui.input(|input| (input.stable_dt, !typing && input.key_pressed(egui::Key::F)));
     let camera = state.scene_cameras.active_mut(two_d);
-    let steer = steer_camera(ui, response, camera, two_d, tool);
+    let mut steer = steer_camera(ui, response, camera, two_d, tool);
+    if left_drag_turns
+        && steer.gesture.is_none()
+        && response.dragged_by(egui::PointerButton::Primary)
+    {
+        let drag = response.drag_delta();
+        let before = *camera;
+        steer.gesture = Some(if two_d {
+            camera.pan(Vec2::new(drag.x, drag.y), two_d, response.rect.height());
+            CameraGesture::Pan
+        } else {
+            camera.orbit(Vec2::new(drag.x, drag.y));
+            CameraGesture::Orbit
+        });
+        steer.moved |= *camera != before;
+    }
     if steer.moved {
         // The user took control; a glide in progress would fight them.
         state.scene_cameras.stop_glide(two_d);
@@ -4199,7 +4284,8 @@ fn chrome_tab(ui: &mut egui::Ui, selected: bool, label: impl Into<String>) -> eg
 }
 
 /// Play and mode controls share the prototype's single top bar.
-fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
+/// Draws the right-hand toolbar and returns the rect its items cover.
+fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) -> egui::Rect {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         // A segmented track; the bar is the darkest surface, so the track
         // is one step lighter.
@@ -4255,7 +4341,9 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
             };
             ui.colored_label(tint, text);
         }
-    });
+        ui.min_rect()
+    })
+    .inner
 }
 
 /// The bottom status strip: cursor position (placeholder until the code
@@ -4593,26 +4681,43 @@ fn panel_title(ui: &mut egui::Ui, icon: ShellIcon, title: &str) {
 #[cfg_attr(feature = "dock-shell", allow(dead_code))]
 const CODE_HEADER_HEIGHT: f32 = PANEL_HEADER_HEIGHT;
 
+/// Where the Monaco webview floats in a Code panel laid out at `panel`
+/// (its rect with the outer margin), as `[x, y, width, height]`: below the
+/// header and inside the card's border. A native view draws over egui, so
+/// covering the gap would hide the gap and the resize grips in it.
+#[cfg_attr(feature = "dock-shell", allow(dead_code))]
+fn code_webview_rect(panel: egui::Rect) -> [f32; 4] {
+    let inset = f32::from(PANEL_GAP_HALF) + 1.0;
+    let top = panel.min.y + f32::from(PANEL_GAP_HALF) + CODE_HEADER_HEIGHT;
+    let left = panel.min.x + inset;
+    let right = panel.max.x - inset;
+    let bottom = panel.max.y - inset;
+    [left, top, (right - left).max(1.0), (bottom - top).max(1.0)]
+}
+
 /// Draws the Code panel's egui header — a faux file tab and a close
 /// button — then claims the rest of the panel so it holds its
 /// `default_size` (an [`egui::Panel`] otherwise shrinks to its content,
 /// down to `min_size`, and persists that). Everything below the header
 /// is covered by the floating Monaco webview.
 ///
-/// `close` is set to `true` when the user clicks the close control; the caller turns
-/// that into `panels.code = false`.
-fn code_panel_body(ui: &mut egui::Ui, close: &mut bool) {
+/// `close`, when given, adds a close control that sets it to `true`; the
+/// caller turns that into `panels.code = false`. The Code screen passes
+/// `None`: there the editor is the whole screen and can't be closed.
+fn code_panel_body(ui: &mut egui::Ui, close: Option<&mut bool>) {
     panel_header(ui, |ui| {
         paint_shell_icon(ui, ShellIcon::Code);
         ui.label("Code");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if icon_button(ui, ShellIcon::Close, "")
-                .on_hover_text("Hide the Code panel")
-                .clicked()
-            {
-                *close = true;
-            }
-        });
+        if let Some(close) = close {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icon_button(ui, ShellIcon::Close, "")
+                    .on_hover_text("Hide the Code panel")
+                    .clicked()
+                {
+                    *close = true;
+                }
+            });
+        }
     });
     ui.allocate_space(ui.available_size());
 }
@@ -4620,28 +4725,18 @@ fn code_panel_body(ui: &mut egui::Ui, close: &mut bool) {
 /// Code mode: Monaco's project explorer and editor, rendered viewport, and output.
 #[cfg_attr(feature = "dock-shell", allow(dead_code))]
 fn show_code_workspace(ui: &mut egui::Ui, viewport: &Viewport, state: &mut EditorState) {
+    // The code editor is this screen's main view, so it is always shown.
+    state.panels.code = true;
     let parent = ui.available_rect_before_wrap();
+    let (default_width, max_width) = code_viewport_widths(parent.width());
     let viewport_panel = egui::Panel::right("code_viewport_panel")
         .resizable(true)
-        .default_size(280.0)
-        .min_size(220.0)
-        .max_size((ui.available_width() - 440.0).clamp(220.0, 600.0))
+        .default_size(default_width)
+        .min_size(CODE_VIEWPORT_MIN)
+        .max_size(max_width)
         .frame(studio_panel_frame())
         .show_separator_line(false)
-        .show_studio(ui, |ui| {
-            panel_title(ui, ShellIcon::Viewport, "Viewport");
-            let (width, height) = viewport.size();
-            let image_size = ui.available_size();
-            request_viewport_size(ui, viewport, state, image_size);
-            ui.add(
-                egui::Image::new((
-                    viewport.texture_id(),
-                    egui::vec2(width as f32, height as f32),
-                ))
-                .fit_to_exact_size(image_size)
-                .maintain_aspect_ratio(false),
-            );
-        });
+        .show_studio(ui, |ui| code_viewport(ui, viewport, state));
     paint_resize_grip(ui, parent, viewport_panel.response.rect);
 
     let mut console_open = state.panels.console;
@@ -4655,34 +4750,93 @@ fn show_code_workspace(ui: &mut egui::Ui, viewport: &Viewport, state: &mut Edito
         .show_studio_collapsible(ui, &mut console_open, |ui| bottom_tabs_panel(ui, state));
     state.panels.console = console_open;
 
-    let mut close_code = false;
     let code_shown = egui::CentralPanel::default()
         .frame(studio_panel_frame())
-        .show(ui, |ui| {
-            if state.panels.code {
-                code_panel_body(ui, &mut close_code);
-            } else {
-                ui.weak("The Code panel is hidden. Reopen it from Window.");
-            }
-        });
-    state.panels.code &= !close_code;
-    state.code_panel_rect = state.panels.code.then(|| {
-        let rect = code_shown.response.rect;
-        let top = rect.min.y + CODE_HEADER_HEIGHT;
-        [rect.min.x, top, rect.width(), (rect.max.y - top).max(1.0)]
-    });
+        .show(ui, |ui| code_panel_body(ui, None));
+    state.code_panel_rect = Some(code_webview_rect(code_shown.response.rect));
     state.code_panel_visible = code_webview_visible(
         state.code_panel_rect.is_some(),
         state.pending_action.is_some() || state.sdk_upgrade_message.is_some(),
         ui.ctx().any_popup_open(),
     );
-    let pointer_down = ui.input(|input| input.pointer.any_down());
-    state.code_panel_resizing = code_panel_is_resizing(
-        state.prev_code_panel_rect,
-        state.code_panel_rect,
-        pointer_down,
+}
+
+/// Narrowest the Code screen's Viewport may be dragged.
+const CODE_VIEWPORT_MIN: f32 = 260.0;
+
+/// Room the code editor keeps beside the Code screen's Viewport.
+const CODE_EDITOR_MIN: f32 = 420.0;
+
+/// The Code screen Viewport's starting and widest width for a screen
+/// `width` points wide: about two fifths of it to start, and up to
+/// everything but the code editor's minimum.
+fn code_viewport_widths(width: f32) -> (f32, f32) {
+    let max = (width - CODE_EDITOR_MIN).max(CODE_VIEWPORT_MIN);
+    ((width * 0.4).clamp(CODE_VIEWPORT_MIN, max), max)
+}
+
+/// The Code screen's Viewport: the Scene View's camera image, which drag
+/// turns (pan in 2D), right/middle-drag and scroll steer as in the Scene
+/// View, and **F** frames the selection.
+fn code_viewport(ui: &mut egui::Ui, viewport: &Viewport, state: &mut EditorState) {
+    panel_title(ui, ShellIcon::Viewport, "Viewport");
+    let (width, height) = viewport.size();
+    let image_size = ui.available_size();
+    request_viewport_size(ui, viewport, state, image_size);
+    let response = ui.add(
+        egui::Image::new((
+            viewport.texture_id(),
+            egui::vec2(width as f32, height as f32),
+        ))
+        .fit_to_exact_size(image_size)
+        .maintain_aspect_ratio(false)
+        .sense(egui::Sense::click_and_drag()),
     );
-    state.prev_code_panel_rect = state.code_panel_rect;
+    let gesture = handle_camera_navigation(ui, state, &response, true);
+    let cursor = match gesture {
+        Some(CameraGesture::Pan) => egui::CursorIcon::AllScroll,
+        Some(CameraGesture::Orbit | CameraGesture::Look) => egui::CursorIcon::Grabbing,
+        None => egui::CursorIcon::Grab,
+    };
+    if response.hovered() || gesture.is_some() {
+        ui.ctx().set_cursor_icon(cursor);
+    }
+    if response.hovered() && gesture.is_none() {
+        paint_code_viewport_hint(ui, state.dimension.is_2d(), response.rect);
+    }
+}
+
+/// How to steer the Code screen's Viewport, as a pill at its bottom while
+/// the pointer is over it. Left out when the Viewport is too narrow for it.
+fn paint_code_viewport_hint(ui: &egui::Ui, two_d: bool, image: egui::Rect) {
+    let palette = crate::theme::NIGHT;
+    let text = if two_d {
+        "Drag to move · Pinch or wheel to zoom · F to frame"
+    } else {
+        "Drag to turn · Two fingers to move · Pinch or wheel to zoom · F to frame"
+    };
+    let painter = ui.painter_at(image);
+    let galley = painter.layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(11.0),
+        palette.muted,
+    );
+    if galley.size().x + 24.0 > image.width() {
+        return;
+    }
+    let pill = egui::Rect::from_center_size(
+        egui::pos2(
+            image.center().x,
+            image.max.y - 10.0 - (galley.size().y + 6.0) / 2.0,
+        ),
+        galley.size() + egui::vec2(16.0, 6.0),
+    );
+    painter.rect_filled(
+        pill,
+        pill.height() / 2.0,
+        palette.raised.gamma_multiply(0.88),
+    );
+    painter.galley(pill.center() - galley.size() / 2.0, galley, palette.muted);
 }
 
 /// Bounded chat surface shared by the stable and docked shells. Provider
@@ -4744,14 +4898,6 @@ fn shell_layout(workspace: Workspace) -> ShellLayout {
         Workspace::Code => ShellLayout::Code,
         Workspace::Ai | Workspace::Debug => ShellLayout::Auxiliary,
     }
-}
-
-fn code_panel_is_resizing(
-    previous: Option<[f32; 4]>,
-    current: Option<[f32; 4]>,
-    pointer_down: bool,
-) -> bool {
-    pointer_down && previous.is_some() && current != previous
 }
 
 fn code_webview_visible(panel_open: bool, action_pending: bool, popup_open: bool) -> bool {
@@ -5457,7 +5603,7 @@ impl egui_dock::TabViewer for StudioDockViewer<'_> {
             ),
             dock::Tab::Code => {
                 let mut close = false;
-                code_panel_body(ui, &mut close);
+                code_panel_body(ui, Some(&mut close));
                 let rect = ui.min_rect();
                 self.state.code_panel_rect = Some([
                     rect.min.x,
@@ -5686,7 +5832,7 @@ mod ui_tests {
     use super::StudioPanelExt;
     use super::{
         CameraGesture, DragButtons, ScrollIntent, ShellIcon, ShellLayout, ViewTool, camera_gesture,
-        code_panel_is_resizing, code_webview_visible, paint_shell_icon, scene_cursor_icon,
+        code_webview_visible, paint_shell_icon, scene_cursor_icon,
         scene_ui_preview_tree, scroll_intent, shell_layout, viewport_render_size,
     };
     use crate::chrome::Workspace;
@@ -5802,6 +5948,37 @@ mod ui_tests {
         assert_eq!(super::SCENE_INSPECTOR_MIN, 200.0);
         assert_eq!(super::SCENE_TOP_MIN, 140.0);
         assert_eq!(super::SCENE_BOTTOM_MIN, 90.0);
+    }
+
+    #[test]
+    fn code_search_sits_centred_and_gives_way_to_the_bar() {
+        let bar = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 40.0));
+        let rect = super::code_search_rect(bar, 160.0, 1100.0).unwrap();
+        assert_eq!(rect.width(), super::CODE_SEARCH_WIDTH);
+        assert!((rect.center().x - 700.0).abs() < 0.001);
+        // A long toolbar pushes it left, out of the way.
+        let rect = super::code_search_rect(bar, 160.0, 800.0).unwrap();
+        assert!(rect.right() <= 784.0 + 0.001);
+        assert!(super::code_search_rect(bar, 160.0, 320.0).is_none());
+    }
+
+    #[test]
+    fn code_viewport_starts_wide_and_leaves_room_for_code() {
+        let (start, max) = super::code_viewport_widths(1500.0);
+        assert!((start - 600.0).abs() < 0.001);
+        assert!((max - 1080.0).abs() < 0.001);
+        let (start, max) = super::code_viewport_widths(500.0);
+        assert_eq!((start, max), (260.0, 260.0));
+    }
+
+    #[test]
+    fn code_webview_stays_inside_the_card() {
+        let panel = egui::Rect::from_min_max(egui::pos2(0.0, 40.0), egui::pos2(800.0, 640.0));
+        let [x, y, w, h] = super::code_webview_rect(panel);
+        let card = panel.shrink(f32::from(super::PANEL_GAP_HALF));
+        assert!(x > card.left() && x + w < card.right());
+        assert!(y > card.top() + super::CODE_HEADER_HEIGHT - 0.5);
+        assert!(y + h < card.bottom());
     }
 
     #[test]
@@ -5932,7 +6109,7 @@ mod ui_tests {
     }
 
     #[test]
-    fn project_assets_title_uses_a_folder_outline_instead_of_placeholder_glyph() {
+    fn project_assets_title_uses_a_folder_icon_instead_of_placeholder_glyph() {
         let (root, mut state) = menu_test_state();
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -5950,12 +6127,10 @@ mod ui_tests {
         });
         let title = title.expect("Project Assets title");
         let folder_outline = output.shapes.iter().any(|shape| match &shape.shape {
-            egui::epaint::Shape::Path(path) => {
-                path.points.len() >= 5
-                    && path
-                        .points
-                        .iter()
-                        .all(|point| point.x < title.min.x && point.y < title.max.y)
+            egui::epaint::Shape::Rect(rect) => {
+                crate::assets::is_folder_fill(rect.fill)
+                    && rect.rect.max.x < title.min.x
+                    && rect.rect.min.y < title.max.y
             }
             _ => false,
         });
@@ -6234,23 +6409,6 @@ mod ui_tests {
         assert_eq!(shell_layout(Workspace::Code), ShellLayout::Code);
         assert_eq!(shell_layout(Workspace::Ai), ShellLayout::Auxiliary);
         assert_eq!(shell_layout(Workspace::Debug), ShellLayout::Auxiliary);
-    }
-
-    #[test]
-    fn code_panel_resizes_only_during_a_pointer_drag_that_changes_its_rect() {
-        let previous = Some([10.0, 20.0, 300.0, 400.0]);
-        assert!(!code_panel_is_resizing(None, previous, true));
-        assert!(!code_panel_is_resizing(previous, previous, true));
-        assert!(!code_panel_is_resizing(
-            previous,
-            Some([10.0, 20.0, 320.0, 400.0]),
-            false
-        ));
-        assert!(code_panel_is_resizing(
-            previous,
-            Some([10.0, 20.0, 320.0, 400.0]),
-            true
-        ));
     }
 
     #[test]
@@ -8359,6 +8517,34 @@ mod ui_tests {
             },
         )
         .expect("snapshot");
+    }
+
+    /// Writes `code-header.png`: the top bar on the Code screen, with the
+    /// file search box, for a visual check. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_code_header() {
+        let (root, mut state) = menu_test_state();
+        state.set_workspace(Workspace::Code);
+        let path = crate::ui_snapshot::snapshot_dir().join("code-header.png");
+        crate::ui_snapshot::render_png(
+            &path,
+            egui::vec2(1400.0, super::STUDIO_HEADER_HEIGHT),
+            2.0,
+            |ui| {
+                ui.painter()
+                    .rect_filled(ui.max_rect(), 0.0, crate::theme::NIGHT.shell);
+                crate::theme::NIGHT.apply(ui.visuals_mut());
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(14, 0))
+                    .show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        super::studio_header_contents(ui, &mut state, &mut None, false);
+                    });
+            },
+        )
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Writes `scene-chrome.png`: the Scene panel's header and footer, for

@@ -87,6 +87,7 @@ Status colours are always these: errors `danger`, warnings `highlight`, info `in
 - **UI font:** SF Pro on macOS, loaded at runtime from `/System/Library/Fonts/SFNS.ttf` and drawn at its "Text" optical size. It is never bundled, because Apple's licence forbids redistributing it. Everywhere else it is the bundled Roboto.
 - **Monospace:** Menlo on macOS, egui's monospace elsewhere.
 - **The code editor** (Monaco) matches VS Code: `Menlo, Monaco, 'Courier New', monospace`.
+- **The code editor's web page** (`crates/editor_code/vendor/monaco/index.html`) can't read `theme::NIGHT`, so it copies the palette into CSS variables on `:root` and into the Monaco `vge-dark` theme (Tokyo Night syntax colours). Change both when a token changes. Its file list follows the same rules: one selected row (`selected`, or `accent_fill` while the list has focus), the trees' line chevron, filled file and folder icons, sentence case. Folders look the same everywhere: Project Assets and Hierarchy groups draw them with `assets::paint_folder` (filled `accent`, open when unfolded).
 - **Semibold:** use `theme::semibold("…")` for labels, or `theme::weighted_galley(…, theme::SEMIBOLD, …)` for painted text. Never set the whole UI to semibold; it flattens the hierarchy.
 - **Case:** sentence case everywhere ("Clean up automatically"). No ALL-CAPS labels and no letter-spaced captions.
 

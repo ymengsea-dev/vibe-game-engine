@@ -13,7 +13,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-wry = { workspace = true, features = ["devtools"] }
+# `transparent`: while the webview resizes, the strip it hasn't repainted
+# yet shows the Code card under it instead of WebKit's white background.
+wry = { workspace = true, features = ["devtools", "transparent"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Clear the autoresizing mask wry puts on the child webview so our

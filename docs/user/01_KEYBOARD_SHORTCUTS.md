@@ -117,6 +117,7 @@ An object that is several things shows the first match in this list. Terrain sho
 
 | Shortcut | What it does |
 | --- | --- |
+| Click a folder's row | Fold or unfold it, and pick it as the folder new files and folders go in. This includes the `scenes` folder and its groups |
 | Drag onto a folder | Move a file |
 | Drag a folder onto the top or bottom edge of another folder | Put it before or after that folder (a line shows where). In another folder it moves there too. The bottom edge of an open folder puts it inside. The order is kept when Studio reopens; folders you haven't placed follow by name |
 | Enter / Esc | Keep / cancel a new name |
@@ -199,6 +200,31 @@ Open it from a material file's Inspector: **Surface → Shader graph**, then **E
 | --- | --- |
 | ⌘S | Save the file |
 | ⌘F | Find |
+
+The file list on the left of the Code screen:
+
+| Shortcut | What it does |
+| --- | --- |
+| Click a file | Open it |
+| Click a folder | Open or fold it. New files go in the folder you clicked last (or beside the file you clicked) |
+| New file / New folder buttons at the top | Type a name, then Enter to make it or Esc to cancel. Clicking away keeps a good name. A name that is already there shows a red note |
+| Fold all button | Fold every folder |
+| Click the project name or empty space in the list | New files go in the project folder itself |
+| ↑ ↓ | Move through the list |
+| → / ← | Open / fold a folder (← on a file goes to its folder) |
+| Enter or Space | Open a file, or open or fold a folder |
+| Type in **Find a file** (the box in the middle of the top bar) | Show only matching files and pick the first; ↑ ↓ pick another, Enter opens it, Esc clears the box |
+
+The Viewport on the right of the Code screen shows the Scene View's camera:
+
+| Shortcut | What it does |
+| --- | --- |
+| Drag or right-drag | Turn around (in 2D: move) |
+| Middle-drag, Shift+right-drag or two-finger scroll | Move |
+| Mouse wheel or pinch | Zoom toward the cursor |
+| F | Frame the selected object |
+
+Moving the camera here moves the Scene View's camera too. Objects can't be clicked or moved in this Viewport.
 
 ## Playing the game
 

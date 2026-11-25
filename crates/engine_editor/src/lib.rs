@@ -93,7 +93,8 @@ pub use assets::{
     scan_with_folders as scan_assets_with_folders,
 };
 pub use chrome::{
-    BottomTab, EditorDimension, InspectorTab, PanelVisibility, TransformSpace, ViewTool, Workspace,
+    BottomTab, CodeFileStep, EditorDimension, InspectorTab, PanelVisibility, TransformSpace,
+    ViewTool, Workspace,
 };
 pub use console::{ConsoleFilter, ConsoleLayer, ConsoleLine, ConsoleLog, LevelFilter};
 pub use diagnostics::{ASSET_DROP_CODE, Diagnostic, Diagnostics, Severity};

@@ -410,6 +410,7 @@ impl CodeEditor {
 
         let webview = WebViewBuilder::new()
             .with_bounds(bounds.to_wry())
+            .with_transparent(true)
             .with_custom_protocol("monaco".into(), serve_asset)
             .with_ipc_handler(move |request: Request<String>| {
                 dispatch_event(request.body(), &tx, &wake);
@@ -493,19 +494,23 @@ impl CodeEditor {
         ));
     }
 
-    /// Populates the editor's Files tree. `files` are paths relative to
-    /// `root` (the project's source directory); `label` is the tree's
-    /// heading. Clicking a file that isn't open yet produces a
-    /// [`CodeEvent::OpenRequested`] carrying that relative path.
-    pub fn set_file_tree(&self, label: &str, root: &Path, files: &[PathBuf]) {
-        let files: Vec<String> = files
-            .iter()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .collect();
+    /// Populates the editor's Files tree. `files` and `folders` are paths
+    /// relative to `root` (the project's source directory); `folders` lets
+    /// empty folders show too. `label` is the tree's heading. Clicking a
+    /// file that isn't open yet produces a [`CodeEvent::OpenRequested`]
+    /// carrying that relative path.
+    pub fn set_file_tree(&self, label: &str, root: &Path, files: &[PathBuf], folders: &[PathBuf]) {
+        let slashes = |paths: &[PathBuf]| -> Vec<String> {
+            paths
+                .iter()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .collect()
+        };
         let payload = serde_json::json!({
             "label": label,
             "root": root.to_string_lossy().replace('\\', "/"),
-            "files": files,
+            "files": slashes(files),
+            "folders": slashes(folders),
         });
         self.eval(&format!(
             "window.studio && window.studio.setFiles({payload})"
@@ -572,6 +577,29 @@ impl CodeEditor {
     /// follows if there is an active file.
     pub fn request_save(&self) {
         self.eval("window.studio && window.studio.saveActive()");
+    }
+
+    /// Shows only the files whose path contains `query` in the Files tree
+    /// and highlights the first; an empty `query` shows them all. Fed by
+    /// Studio's file search box, which lives outside the webview.
+    pub fn set_file_query(&self, query: &str) {
+        let query = serde_json::Value::from(query);
+        self.eval(&format!(
+            "window.studio && window.studio.setFileQuery({query})"
+        ));
+    }
+
+    /// Highlights the next (`forward`) or previous file in the Files tree.
+    pub fn step_file_match(&self, forward: bool) {
+        let step = if forward { 1 } else { -1 };
+        self.eval(&format!(
+            "window.studio && window.studio.stepFileMatch({step})"
+        ));
+    }
+
+    /// Opens the file highlighted in the Files tree, if one is.
+    pub fn open_file_match(&self) {
+        self.eval("window.studio && window.studio.openFileMatch()");
     }
 
     /// Gives the webview keyboard focus — called when the user clicks

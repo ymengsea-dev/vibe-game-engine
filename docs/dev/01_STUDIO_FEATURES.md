@@ -62,6 +62,7 @@ Status: ✅ done · 🟡 partly done · ⬜ not started
 | Physics in Lua | Scripts can push things, move characters that slide along walls, shoot rays to see what is ahead, and react to triggers such as coin pickups. Each collider has settings in the Inspector: trigger, mass (or Auto), friction, bounciness, gravity and keep upright | Jumping and shoving crates, platformer and top-down characters, ground checks, pickups and goal zones | ✅ |
 | Safe sandbox | Scripts cannot touch files, the network or the computer, and are stopped if they run too long or use too much memory | A broken or endless script shows an error instead of freezing the game | ✅ |
 | Code editor help | Lua colouring, autocomplete, hover help and error marks before Play | Beginners see mistakes and available commands while typing | ✅ |
+| Code screen | The Code screen shows the project's files (with icons, New file and New folder, empty folders too) and a Find a file box in the top bar, the code editor in Studio's colours, and a Viewport you can turn, move and zoom. The editor can't be closed there | Write code while watching the scene | ✅ |
 | Save data | Store small values such as score or level between play sessions | Keep progress after the game is closed | ✅ |
 | Scripted prefabs | Spawn a saved object during play with its own script already attached and started | Enemies, pickups and bullets that each run their own behaviour | ✅ |
 

@@ -7,7 +7,7 @@
   }
 
   function installExplorerSplitter(handle) {
-    var width = 205;
+    var width = 230;
     var startX = 0;
     var startWidth = 0;
 

@@ -765,8 +765,11 @@ pub fn show_scene(
             let selection_shape = ui.painter().add(egui::Shape::Noop);
             let header = ui.horizontal(|ui| {
                 tree_disclosure(ui, &mut state);
-                folder_label(ui, "assets")
+                folder_label(ui, "assets", state.is_open())
             });
+            if folds_on_click(ui, &header.inner) {
+                state.toggle(ui);
+            }
             remember_fold(browser, Path::new(""), &state);
             paint_folder_row(ui, selection_shape, header.response.rect, selected_root);
             if header.inner.clicked()
@@ -1366,11 +1369,15 @@ fn show_folder_contents(
                 folder_icon(ui);
                 rename_prompt(ui, browser)
             } else {
-                let response = folder_label(ui, &child.name);
+                let response = folder_label(ui, &child.name, state.is_open());
                 response.dnd_set_drag_payload(FolderDrag(child.path.clone()));
                 response
             }
         });
+        // The whole row folds and unfolds, not only its arrow.
+        if !is_renaming && folds_on_click(ui, &header.inner) {
+            state.toggle(ui);
+        }
         remember_fold(browser, &child.path, &state);
         if !is_renaming {
             paint_folder_row(ui, selection_shape, header.response.rect, selected_folder);
@@ -1444,6 +1451,12 @@ fn remember_fold(
     }
 }
 
+/// Whether a click on a folder row folds or unfolds it. Letting go of
+/// something dragged onto the row is a drop, not a click.
+fn folds_on_click(ui: &egui::Ui, row: &egui::Response) -> bool {
+    row.clicked() && !egui::DragAndDrop::has_any_payload(ui.ctx())
+}
+
 pub(crate) fn tree_disclosure(
     ui: &mut egui::Ui,
     state: &mut egui::collapsing_header::CollapsingState,
@@ -1480,7 +1493,7 @@ fn paint_folder_row(
     }
 }
 
-fn folder_label(ui: &mut egui::Ui, name: &str) -> egui::Response {
+fn folder_label(ui: &mut egui::Ui, name: &str, open: bool) -> egui::Response {
     let button = egui::Button::selectable(
         false,
         (
@@ -1497,7 +1510,8 @@ fn folder_label(ui: &mut egui::Ui, name: &str) -> egui::Response {
             button.truncate().sense(egui::Sense::click_and_drag()),
         )
         .on_hover_text(name);
-    paint_tree_icon(ui, &response, 5.0, TreeIcon::Folder);
+    let origin = response.rect.left_center() + egui::vec2(5.0, -7.0);
+    paint_folder(ui.painter(), origin, open);
     response
 }
 
@@ -1510,8 +1524,11 @@ fn scenes_section(ui: &mut egui::Ui, browser: &mut AssetBrowser) {
     let selection_shape = ui.painter().add(egui::Shape::Noop);
     let header = ui.horizontal(|ui| {
         tree_disclosure(ui, &mut state);
-        folder_label(ui, "scenes")
+        folder_label(ui, "scenes", state.is_open())
     });
+    if folds_on_click(ui, &header.inner) {
+        state.toggle(ui);
+    }
     paint_folder_row(ui, selection_shape, header.response.rect, false);
     let mut request = None;
     header.inner.context_menu(|ui| {
@@ -1565,8 +1582,11 @@ fn scene_group_section(
     let selection_shape = ui.painter().add(egui::Shape::Noop);
     let header = ui.horizontal(|ui| {
         tree_disclosure(ui, &mut state);
-        folder_label(ui, group)
+        folder_label(ui, group, state.is_open())
     });
+    if folds_on_click(ui, &header.inner) {
+        state.toggle(ui);
+    }
     paint_folder_row(ui, selection_shape, header.response.rect, false);
     let mut request = None;
     header.inner.context_menu(|ui| {
@@ -1779,8 +1799,55 @@ pub(crate) fn scene_icon(ui: &mut egui::Ui) {
 }
 
 pub(crate) fn folder_icon(ui: &mut egui::Ui) {
+    folder_icon_open(ui, false);
+}
+
+/// A folder icon, drawn open (`open`) or closed.
+pub(crate) fn folder_icon_open(ui: &mut egui::Ui, open: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 16.0), egui::Sense::hover());
-    paint_icon(ui, rect.min + egui::vec2(0.0, 1.0), TreeIcon::Folder);
+    paint_folder(ui.painter(), rect.min + egui::vec2(0.0, 1.0), open);
+}
+
+/// Whether `fill` is one of [`paint_folder`]'s colours (its back part).
+#[cfg(test)]
+pub(crate) fn is_folder_fill(fill: egui::Color32) -> bool {
+    let palette = crate::theme::NIGHT;
+    [0.55, 0.75]
+        .into_iter()
+        .any(|amount| fill == palette.panel.lerp_to_gamma(palette.accent, amount))
+}
+
+/// A filled folder in `accent`, the same shape as the code editor's file
+/// list: closed, or open with its front flap tipped forward. `origin` is
+/// the top-left of the 14-point icon square.
+pub(crate) fn paint_folder(painter: &egui::Painter, origin: egui::Pos2, open: bool) {
+    let palette = crate::theme::NIGHT;
+    // Opaque mixes, so the overlapping parts don't darken each other.
+    let tint = |amount: f32| palette.panel.lerp_to_gamma(palette.accent, amount);
+    let point = |x: f32, y: f32| origin + egui::vec2(x, y);
+    let rect =
+        |x0: f32, y0: f32, x1: f32, y1: f32| egui::Rect::from_min_max(point(x0, y0), point(x1, y1));
+    let back = tint(if open { 0.55 } else { 0.75 });
+    // The tab, then the body.
+    painter.rect_filled(rect(0.5, 1.5, 5.6, 4.5), 1.5, back);
+    painter.add(egui::Shape::convex_polygon(
+        vec![point(4.6, 1.5), point(6.3, 3.0), point(4.6, 3.0)],
+        back,
+        egui::Stroke::NONE,
+    ));
+    painter.rect_filled(rect(0.5, 3.0, 13.5, 12.0), 1.5, back);
+    if open {
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                point(2.6, 5.6),
+                point(13.6, 5.6),
+                point(12.2, 12.0),
+                point(0.6, 12.0),
+            ],
+            tint(0.9),
+            egui::Stroke::NONE,
+        ));
+    }
 }
 
 fn paint_tree_icon(ui: &egui::Ui, row: &egui::Response, inset: f32, icon: TreeIcon) {
@@ -1789,18 +1856,14 @@ fn paint_tree_icon(ui: &egui::Ui, row: &egui::Response, inset: f32, icon: TreeIc
 }
 
 fn paint_icon(ui: &egui::Ui, origin: egui::Pos2, icon: TreeIcon) {
+    if matches!(icon, TreeIcon::Folder) {
+        paint_folder(ui.painter(), origin, false);
+        return;
+    }
     let point = |x: f32, y: f32| origin + egui::vec2(x, y);
     let stroke = egui::Stroke::new(1.2, ui.visuals().weak_text_color());
     let painter = ui.painter();
     let outline = match icon {
-        TreeIcon::Folder => vec![
-            point(1.0, 3.0),
-            point(5.0, 3.0),
-            point(7.0, 5.0),
-            point(13.0, 5.0),
-            point(13.0, 12.0),
-            point(1.0, 12.0),
-        ],
         TreeIcon::Scene => vec![
             point(1.0, 5.0),
             point(13.0, 5.0),
@@ -1817,6 +1880,7 @@ fn paint_icon(ui: &egui::Ui, origin: egui::Pos2, icon: TreeIcon) {
     };
     painter.add(egui::Shape::closed_line(outline, stroke));
     match icon {
+        // Drawn filled by `paint_folder`, above.
         TreeIcon::Folder => {}
         TreeIcon::Scene => {
             // The clapper, tilted up from the board, with its stripes.
@@ -2884,6 +2948,56 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_folder_name_folds_and_unfolds_it() {
+        let ctx = egui::Context::default();
+        let mut browser = AssetBrowser {
+            folders: vec![PathBuf::from("models")],
+            open_folders: [PathBuf::new()].into(),
+            ..AssetBrowser::default()
+        };
+        let mut selected = None;
+        let mut open_request = None;
+        let mut draw = |time, events, browser: &mut AssetBrowser| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300.0, 240.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show_scene(ui, &[], browser, &mut selected, &mut open_request),
+            )
+        };
+        let mut first = draw(0.0, Vec::new(), &mut browser);
+        let name = first
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == "models" => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center())
+                }
+                _ => None,
+            })
+            .expect("models folder row");
+        first.textures_delta.clear();
+        for (time, open) in [(0.1, true), (0.3, false)] {
+            let mut pressed = draw(
+                time,
+                vec![egui::Event::PointerMoved(name), pointer_button(name, true)],
+                &mut browser,
+            );
+            pressed.textures_delta.clear();
+            let mut released = draw(time + 0.05, vec![pointer_button(name, false)], &mut browser);
+            released.textures_delta.clear();
+            assert_eq!(browser.open_folders.contains(Path::new("models")), open);
+        }
+        assert_eq!(browser.target_dir, PathBuf::from("models"));
+    }
+
+    #[test]
     fn folder_row_starts_a_folder_drag() {
         let ctx = egui::Context::default();
         let mut browser = AssetBrowser {
@@ -3547,7 +3661,7 @@ mod tests {
     }
 
     #[test]
-    fn scene_tree_draws_outline_icons_for_folders_and_files() {
+    fn scene_tree_draws_filled_folders_and_outlined_files() {
         let entries = vec![AssetEntry {
             relative_path: PathBuf::from("sprites/player.png"),
             kind: AssetKind::Texture,
@@ -3568,7 +3682,7 @@ mod tests {
             },
             |ui| show_scene(ui, &entries, &mut browser, &mut selected, &mut open_request),
         );
-        let outlined_icons = output
+        let outlined_files = output
             .shapes
             .iter()
             .filter(|shape| match &shape.shape {
@@ -3576,10 +3690,20 @@ mod tests {
                 _ => false,
             })
             .count();
+        let folder_bodies = output
+            .shapes
+            .iter()
+            .filter(|shape| match &shape.shape {
+                egui::epaint::Shape::Rect(rect) => is_folder_fill(rect.fill),
+                _ => false,
+            })
+            .count();
         output.textures_delta.clear();
+        assert!(outlined_files >= 1, "expected an outlined file icon");
+        // Each folder is a tab and a body: root and `sprites`.
         assert!(
-            outlined_icons >= 3,
-            "expected root, folder, and file outline icons, got {outlined_icons}"
+            folder_bodies >= 4,
+            "expected filled root and folder icons, got {folder_bodies} parts"
         );
     }
 

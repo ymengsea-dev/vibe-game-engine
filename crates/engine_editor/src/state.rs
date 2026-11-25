@@ -341,18 +341,20 @@ pub struct EditorState {
     /// when the Code panel is hidden or a modal is open (egui can't draw
     /// over a native view).
     pub code_panel_visible: bool,
-    /// The Code panel rect from last frame — the shell compares it to
-    /// this frame's to detect an in-progress drag-resize.
-    pub(crate) prev_code_panel_rect: Option<[f32; 4]>,
-    /// Set by the shell while the Code panel is being drag-resized. The
-    /// host hides the Monaco webview for that frame so the native view
-    /// doesn't lag/overhang the panel edge mid-drag.
-    pub code_panel_resizing: bool,
     /// Set by the shell when Ctrl/Cmd+S is pressed while the Code panel
     /// is shown; the host forwards it to Monaco (`CodeEditor::request_save`
     /// in `editor_code`). Lets save work even when egui (not the webview)
     /// holds keyboard focus.
     pub code_save_requested: bool,
+    /// What the Code screen's top-bar search box holds; the code editor's
+    /// file list shows only the files whose path contains it.
+    pub code_file_query: String,
+    /// Set by the shell when `code_file_query` changed this frame, so the
+    /// host passes it on to the code editor once.
+    pub code_file_query_changed: bool,
+    /// A key pressed in the search box for the file list: move through
+    /// the matches or open one. The host takes it and forwards it.
+    pub code_file_step: Option<crate::chrome::CodeFileStep>,
     /// Caret line reported by the code editor (1-based), shown in the
     /// status bar.
     pub cursor_line: u32,
@@ -672,9 +674,10 @@ impl EditorState {
             code_panel_rect: None,
             viewport_size_request: None,
             code_panel_visible: false,
-            prev_code_panel_rect: None,
-            code_panel_resizing: false,
             code_save_requested: false,
+            code_file_query: String::new(),
+            code_file_query_changed: false,
+            code_file_step: None,
             cursor_line: 1,
             cursor_column: 1,
             #[cfg(feature = "terminal")]

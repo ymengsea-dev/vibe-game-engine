@@ -5,61 +5,96 @@
   <title>RustyEngine Studio — Code</title>
   <style>
     @font-face { font-family: 'Roboto'; src: url('monaco://localhost/fonts/Roboto-Variable.ttf') format('truetype'); font-weight: 400; }
-    :root { --explorer-width: 205px; --panel: #151d29; --raised: #1b2533; --hover: #233044;
-      --border: #2b3b50; --border-soft: #253346; --text: #e4eaf3; --muted: #91a0b4; --accent: #83b5ff; }
+    /* Studio's Tokyo Night palette (theme::NIGHT in engine_editor). */
+    :root { --explorer-width: 230px;
+      --shell: #16161e; --panel: #1a1b26; --raised: #1f2335; --hover: #24283b; --selected: #2f344d;
+      --rule: #26293d; --text: #c0caf5; --muted: #8289af; --subtle: #565f89;
+      --accent: #7aa2f7; --accent-fill: #283457; --danger: #f7768e; --success: #9ece6a;
+      --info: #7dcfff; --purple: #bb9af7; --highlight: #e0af68; --row: 24px; }
     html, body { margin: 0; height: 100%; overflow: hidden; background: var(--panel);
-      font-family: -apple-system, BlinkMacSystemFont, system-ui, 'Roboto', sans-serif; font-weight: 400; color: var(--text); }
+      font-family: -apple-system, BlinkMacSystemFont, system-ui, 'Roboto', sans-serif; font-weight: 400;
+      color: var(--text); -webkit-font-smoothing: antialiased; }
+    svg { display: block; flex: none; }
 
+    /* Open files */
     #tabs { position: absolute; top: 0; left: var(--explorer-width); right: 0; height: 34px;
-      display: flex; align-items: stretch; background: #111a27;
-      border-bottom: 1px solid var(--border-soft); font-size: 12px; overflow-x: auto; }
-    .tab { display: flex; align-items: center; gap: 7px; padding: 0 14px;
-      border-right: 1px solid var(--border-soft); white-space: nowrap; cursor: pointer; color: var(--muted); }
-    .tab.active { background: #192434; color: var(--text); box-shadow: inset 0 -1px var(--accent); }
+      display: flex; align-items: stretch; background: var(--shell); font-size: 12px;
+      overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+    #tabs::-webkit-scrollbar { display: none; }
+    .tab { position: relative; display: flex; align-items: center; gap: 6px; padding: 0 8px 0 12px;
+      white-space: nowrap; cursor: pointer; color: var(--muted); }
+    .tab + .tab::before { content: ''; position: absolute; left: 0; top: 9px; bottom: 9px; width: 1px; background: var(--rule); }
+    .tab:hover { color: var(--text); }
+    .tab.active { background: var(--panel); color: var(--text); border-radius: 7px 7px 0 0; }
+    .tab.active::before, .tab.active + .tab::before { display: none; }
+    .tab.active::after { content: ''; position: absolute; left: 10px; right: 10px; top: 0; height: 2px;
+      border-radius: 0 0 2px 2px; background: var(--accent); }
     .tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
-    .tab .dot { width: 7px; height: 7px; border-radius: 50%; background: #e1bc7d; visibility: hidden; }
-    .tab.dirty .dot { visibility: visible; }
-    .tab .close { width: 16px; height: 16px; line-height: 16px; text-align: center;
-      border-radius: 4px; color: var(--muted); visibility: hidden; font-size: 14px; }
+    .tab .close { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+      border-radius: 5px; color: var(--muted); visibility: hidden; }
     .tab:hover .close, .tab.active .close { visibility: visible; }
-    .tab.dirty .close { visibility: visible; color: #e1bc7d; }
     .tab .close:hover { background: var(--hover); color: var(--text); }
+    .tab .close .dot { display: none; width: 8px; height: 8px; border-radius: 50%; background: var(--highlight); }
+    .tab.dirty .close { visibility: visible; }
+    .tab.dirty .close .dot { display: block; }
+    .tab.dirty .close svg { display: none; }
+    .tab.dirty .close:hover .dot { display: none; }
+    .tab.dirty .close:hover svg { display: block; }
 
     #body { position: absolute; top: 34px; left: var(--explorer-width); right: 0; bottom: 0; display: flex; }
-
-    #files { position: absolute; top: 0; bottom: 0; left: 0; width: var(--explorer-width); background: #131d29;
-      border-right: 1px solid var(--border-soft); overflow: auto; font-size: 12px;
-      padding: 10px 6px; box-sizing: border-box; user-select: none; }
-    #files .title { padding: 0 9px 8px; color: var(--muted); text-transform: uppercase;
-      letter-spacing: .04em; font-size: 11px; }
-    #files .search { display: block; width: calc(100% - 12px); margin: 0 6px 8px;
-      padding: 6px 8px; box-sizing: border-box; background: #101824;
-      border: 1px solid var(--border-soft); border-radius: 6px; color: var(--text); font: inherit; }
-    #files .row { min-height: 27px; padding: 5px 9px; border-radius: 5px; box-sizing: border-box;
-      white-space: nowrap; cursor: default; }
-    #files .row.dir { color: #a9bed6; cursor: pointer; }
-    #files .row.dir:hover { background: var(--hover); }
-    #files .row.dir.target { background: #284b7d; color: var(--text); }
-    #files .actions { display: flex; gap: 4px; padding: 0 6px 6px; }
-    #files .actions button { flex: 1 1 auto; background: var(--raised); color: var(--muted);
-      border: 1px solid var(--border); border-radius: 5px; font-size: 10px;
-      padding: 3px 0; cursor: pointer; font-family: inherit; font-weight: 400; }
-    #files .actions button:hover { background: var(--hover); color: var(--text); }
-    #files input.new { width: calc(100% - 24px); margin: 2px 10px; background: #111b28;
-      border: 1px solid var(--accent); border-radius: 5px; color: var(--text);
-      font-family: inherit; font-size: 12px; padding: 1px 4px; }
-    #files .row.file { color: var(--muted); cursor: pointer; }
-    #files .row.file:hover { background: var(--hover); }
-    #files .row.file.active { background: #284b7d; color: var(--text); }
-
     #editor { flex: 1 1 auto; min-width: 0; }
-    #explorer-resize { position: absolute; top: 0; bottom: 0; left: calc(var(--explorer-width) - 4px);
-      width: 8px; z-index: 5; cursor: col-resize; touch-action: none; }
+
+    /* Explorer */
+    #files { position: absolute; top: 0; bottom: 0; left: 0; width: var(--explorer-width);
+      display: flex; flex-direction: column; background: var(--shell); font-size: 13px;
+      box-sizing: border-box; user-select: none; -webkit-user-select: none; outline: none; }
+    #files .head { display: flex; align-items: center; gap: 2px; height: 34px; padding: 0 6px 0 8px; flex: none; }
+    #files .head .name { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 4px;
+      height: 24px; padding: 0 4px; border-radius: 6px; font-weight: 600; font-size: 12px;
+      color: var(--text); cursor: default; overflow: hidden; }
+    #files .head .name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #files .tool { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+      border: 0; padding: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+    #files .tool:hover { background: var(--hover); color: var(--text); }
+    #files .tool:active { background: var(--selected); }
+    #file-list { flex: 1 1 auto; overflow: auto; padding: 0 6px 12px; }
+    #file-list::-webkit-scrollbar { width: 8px; }
+    #file-list::-webkit-scrollbar-thumb { background: var(--selected); border-radius: 4px; }
+    #files .row { position: relative; display: flex; align-items: center; gap: 4px; height: var(--row);
+      padding-right: 8px; border-radius: 6px; white-space: nowrap; cursor: pointer; color: var(--text); }
+    #files .row .label { overflow: hidden; text-overflow: ellipsis; }
+    #files .row:hover { background: var(--hover); }
+    #files .row.selected { background: var(--selected); }
+    #files:focus-within .row.selected { background: var(--accent-fill); }
+    #files .row.open .label { color: var(--text); }
+    #files .row.file .label { color: var(--muted); }
+    #files .row.file.open .label, #files .row.file.selected .label { color: var(--text); }
+    #files .row.dirty .label::after { content: ''; display: inline-block; width: 6px; height: 6px;
+      margin-left: 6px; border-radius: 50%; background: var(--highlight); vertical-align: 1px; }
+    #files .twisty { width: 16px; height: 16px; display: flex; align-items: center; justify-content: center;
+      color: var(--muted); transition: transform .12s ease; }
+    #files .row.expanded .twisty { transform: rotate(90deg); }
+    #files .guide { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--rule); }
+    #files .row:hover .guide { background: var(--selected); }
+    #files .note { padding: 6px 10px; color: var(--subtle); font-size: 12px; }
+    #files .row.create { background: var(--raised); cursor: default; }
+    #files .row.create input { flex: 1 1 auto; min-width: 0; height: 20px; box-sizing: border-box; padding: 0 6px;
+      background: var(--shell); border: 0; border-radius: 4px; outline: none;
+      box-shadow: 0 0 0 1px var(--accent); color: var(--text); font: inherit; font-size: 13px; }
+    #files .row.create.invalid input { box-shadow: 0 0 0 1px var(--danger); }
+    #files .problem { margin: 2px 0 4px; padding: 5px 8px; border-radius: 6px; background: #3a2233;
+      color: var(--danger); font-size: 12px; white-space: normal; }
+
+    #explorer-resize { position: absolute; top: 0; bottom: 0; left: calc(var(--explorer-width) - 3px);
+      width: 6px; z-index: 5; cursor: col-resize; touch-action: none; }
+    #explorer-resize::after { content: ''; position: absolute; top: 0; bottom: 0; left: 2px; width: 2px;
+      background: transparent; transition: background .1s; }
+    #explorer-resize:hover::after, #explorer-resize:active::after { background: var(--accent); opacity: .55; }
     #explorer-resize:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   </style>
 </head>
 <body>
-  <div id="files"><div class="title">Files</div></div>
+  <div id="files"></div>
   <div id="tabs"></div>
   <div id="body">
     <div id="editor"></div>
@@ -91,26 +126,68 @@
 
     require.config({ paths: { vs: 'monaco://localhost/vs' } });
     require(['vs/editor/editor.main'], function () {
+      // Tokyo Night, to match Studio's panels (theme::NIGHT).
       monaco.editor.defineTheme('vge-dark', {
-        base: 'vs-dark', inherit: true, rules: [],
+        base: 'vs-dark', inherit: true,
+        rules: [
+          { token: '', foreground: 'a9b1d6' },
+          { token: 'comment', foreground: '565f89', fontStyle: 'italic' },
+          { token: 'keyword', foreground: 'bb9af7' },
+          { token: 'string', foreground: '9ece6a' },
+          { token: 'string.escape', foreground: '89ddff' },
+          { token: 'number', foreground: 'ff9e64' },
+          { token: 'constant', foreground: 'ff9e64' },
+          { token: 'type', foreground: '2ac3de' },
+          { token: 'type.identifier', foreground: '2ac3de' },
+          { token: 'identifier', foreground: 'c0caf5' },
+          { token: 'attribute', foreground: '7dcfff' },
+          { token: 'annotation', foreground: '7dcfff' },
+          { token: 'operator', foreground: '89ddff' },
+          { token: 'delimiter', foreground: '89ddff' },
+          { token: 'delimiter.bracket', foreground: 'a9b1d6' },
+          { token: 'tag', foreground: 'f7768e' },
+          { token: 'key', foreground: '7aa2f7' },
+          { token: 'variable', foreground: 'c0caf5' },
+          { token: 'predefined', foreground: '7aa2f7' }
+        ],
         colors: {
-          'editor.background': '#111a27', 'editorGutter.background': '#111a27',
-          'editor.foreground': '#bdc9d9', 'editorLineNumber.foreground': '#536279',
-          'editor.lineHighlightBackground': '#192434', 'editor.selectionBackground': '#284b7d'
+          'editor.background': '#1a1b26', 'editorGutter.background': '#1a1b26',
+          'editor.foreground': '#a9b1d6', 'editorCursor.foreground': '#c0caf5',
+          'editorLineNumber.foreground': '#3b4261', 'editorLineNumber.activeForeground': '#737aa2',
+          'editor.lineHighlightBackground': '#1e202e', 'editor.lineHighlightBorder': '#00000000',
+          'editor.selectionBackground': '#283457', 'editor.inactiveSelectionBackground': '#28345780',
+          'editor.selectionHighlightBackground': '#28345780', 'editor.wordHighlightBackground': '#28345780',
+          'editor.findMatchBackground': '#3d59a1aa', 'editor.findMatchHighlightBackground': '#3d59a166',
+          'editorIndentGuide.background1': '#26293d', 'editorIndentGuide.activeBackground1': '#3b4261',
+          'editorWhitespace.foreground': '#363b54', 'editorBracketMatch.background': '#1f2335',
+          'editorBracketMatch.border': '#545c7e',
+          'editorWidget.background': '#1f2335', 'editorWidget.border': '#24283b',
+          'editorSuggestWidget.background': '#1f2335', 'editorSuggestWidget.border': '#24283b',
+          'editorSuggestWidget.selectedBackground': '#283457', 'editorHoverWidget.background': '#1f2335',
+          'editorHoverWidget.border': '#24283b', 'input.background': '#16161e',
+          'focusBorder': '#7aa2f74d', 'scrollbar.shadow': '#00000000',
+          'scrollbarSlider.background': '#2f344d80', 'scrollbarSlider.hoverBackground': '#2f344dcc',
+          'scrollbarSlider.activeBackground': '#3b4261',
+          'editorError.foreground': '#f7768e', 'editorWarning.foreground': '#e0af68',
+          'editorInfo.foreground': '#7dcfff'
         }
       });
       var editor = monaco.editor.create(document.getElementById('editor'), {
         value: [
           '// RustyEngine Studio',
           '//',
-          '// Pick a file from the Files list on the left.',
+          '// Pick a file in the list on the left.',
           '// Ctrl/Cmd+S saves the active file.',
           ''
         ].join('\n'),
         language: 'rust', theme: 'vge-dark',
-        automaticLayout: true, fontSize: 12, lineHeight: 20,
+        automaticLayout: true, fontSize: 13, lineHeight: 20,
         fontFamily: "Menlo, Monaco, 'Courier New', monospace",
-        minimap: { enabled: false },
+        minimap: { enabled: false }, padding: { top: 8 },
+        renderLineHighlight: 'all', smoothScrolling: true,
+        cursorBlinking: 'smooth', cursorSmoothCaretAnimation: 'on',
+        scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10, useShadows: false },
+        overviewRulerBorder: false, hideCursorInOverviewRuler: true,
         readOnly: true, scrollBeyondLastLine: false
       });
       var showingWelcome = true;
@@ -120,7 +197,7 @@
       var tabOrder = [];   // absolute paths, left-to-right tab order
       var current = null;  // absolute path of the active model
       var dragPath = null; // tab being dragged, during a reorder
-      var tree = { label: 'src', root: '', files: [] };
+      var tree = { label: 'src', root: '', files: [], folders: [] };
       var fileQuery = '';
 
       // Absolute path for a tree-relative entry, and the reverse.
@@ -142,13 +219,14 @@
           tab.className = 'tab' + (path === current ? ' active' : '') + (entry.dirty ? ' dirty' : '');
           tab.draggable = true;
 
-          var dot = document.createElement('span'); dot.className = 'dot';
+          var name = path.split('/').pop();
           var label = document.createElement('span');
-          label.textContent = path.split('/').pop();
+          label.textContent = name;
           var close = document.createElement('span');
-          close.className = 'close'; close.textContent = '×';
-          close.title = 'Close';
-          tab.appendChild(dot); tab.appendChild(label); tab.appendChild(close);
+          close.className = 'close';
+          close.title = entry.dirty ? 'Close (not saved)' : 'Close';
+          close.innerHTML = '<span class="dot"></span>' + ICONS.close;
+          tab.appendChild(fileIcon(name)); tab.appendChild(label); tab.appendChild(close);
 
           tab.onclick = function () { activate(path); };
           close.onclick = function (e) { e.stopPropagation(); closeTab(path); };
@@ -211,154 +289,402 @@
         renderFiles();
       }
 
-      // Directory collapse state, the directory new files are created
-      // in, and the pending "type a name" row. All keyed by
-      // tree-relative directory path ('' is the root), so they survive a
-      // tree refresh — the host re-sends the whole tree after every
-      // create.
-      var collapsed = {};
-      var targetDir = '';
-      var pendingCreate = null; // { kind: 'file' | 'folder' }
+      // Small line icons for the explorer and tabs, drawn in currentColor.
+      function line(d, extra) {
+        return '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"' +
+          ' stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"' + (extra || '') + '>' + d + '</svg>';
+      }
+      var ICONS = {
+        chevron: line('<path d="M6.5 4.5 10 8l-3.5 3.5"/>'),
+        newFile: line('<path d="M9 2H4.5A1.5 1.5 0 0 0 3 3.5v9A1.5 1.5 0 0 0 4.5 14H8"/><path d="M9 2l4 4v2"/><path d="M9 2v4h4"/><path d="M12 10v4M10 12h4"/>'),
+        newFolder: line('<path d="M7.5 13H3a1.5 1.5 0 0 1-1.5-1.5v-7A1.5 1.5 0 0 1 3 3h3l1.5 1.5H13a1.5 1.5 0 0 1 1.5 1.5v2"/><path d="M12 9.5v5M9.5 12h5"/>'),
+        collapse: line('<path d="M5 3.5 8 6l3-2.5M5 12.5 8 10l3 2.5"/>'),
+        close: line('<path d="m4.5 4.5 7 7M11.5 4.5l-7 7"/>', ' width="14" height="14"')
+      };
 
-      // Group the flat relative-path list into nested directories.
-      function groupFiles(files) {
+      // Filled shapes, coloured by kind, so files read at a glance.
+      var FILE_COLORS = {
+        lua: '#7aa2f7', rs: '#e0af68', ron: '#bb9af7', toml: '#8289af', md: '#7dcfff',
+        json: '#9ece6a', wgsl: '#9ece6a', glsl: '#9ece6a', txt: '#565f89'
+      };
+      function fileIcon(name) {
+        var ext = (name.split('.').pop() || '').toLowerCase();
+        var color = FILE_COLORS[ext] || '#8289af';
+        var span = document.createElement('span');
+        span.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16">' +
+          '<path d="M4.5 1.5h4.8l3.2 3.2v8.3a1.5 1.5 0 0 1-1.5 1.5h-6.5A1.5 1.5 0 0 1 3 13V3a1.5 1.5 0 0 1 1.5-1.5z" fill="' + color + '" fill-opacity=".85"/>' +
+          '<path d="M9.3 1.5v2.4c0 .5.3.8.8.8h2.4z" fill="#16161e" fill-opacity=".35"/></svg>';
+        return span.firstChild;
+      }
+      function folderIcon(open) {
+        var span = document.createElement('span');
+        span.innerHTML = open
+          ? '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M1.5 4A1.5 1.5 0 0 1 3 2.5h2.8l1.4 1.4H12A1.5 1.5 0 0 1 13.5 5.4V6H4.3a1.5 1.5 0 0 0-1.4 1L1.5 11z" fill="#7aa2f7" fill-opacity=".55"/>' +
+            '<path d="M3.4 7.2A1 1 0 0 1 4.3 6.6h10a.6.6 0 0 1 .6.8l-1.5 5a1.5 1.5 0 0 1-1.4 1.1H2.4a.6.6 0 0 1-.6-.8z" fill="#7aa2f7" fill-opacity=".9"/></svg>'
+          : '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M1.5 4A1.5 1.5 0 0 1 3 2.5h2.8l1.5 1.5H13A1.5 1.5 0 0 1 14.5 5.5v6A1.5 1.5 0 0 1 13 13H3a1.5 1.5 0 0 1-1.5-1.5z" fill="#7aa2f7" fill-opacity=".75"/></svg>';
+        return span.firstChild;
+      }
+
+      // Explorer state, keyed by tree-relative path ('' is the project
+      // root), so it survives a tree refresh: the host re-sends the whole
+      // tree after every create. `selected` is the one highlighted row (a
+      // file or a folder); new files go in it, or beside it for a file.
+      var collapsed = {};
+      var selected = null;
+      var pendingCreate = null; // { kind: 'file' | 'folder', dir: '' }
+      var createProblem = '';
+      var visibleRows = [];     // { path, dir } in screen order, for the arrow keys
+      var rebuilding = false;   // the tree is being redrawn: a lost focus means nothing
+
+      function parentOf(rel) {
+        var cut = rel.lastIndexOf('/');
+        return cut === -1 ? '' : rel.slice(0, cut);
+      }
+      function isFolder(rel) { return rel !== null && !!knownFolders()[rel]; }
+      function targetDir() {
+        if (selected === null) return '';
+        return isFolder(selected) ? selected : parentOf(selected);
+      }
+
+      // Every folder in the tree: the ones the host listed (empty ones
+      // too) and every parent of a file.
+      function knownFolders() {
+        var all = {};
+        function add(dir) {
+          while (dir) { all[dir] = true; dir = parentOf(dir); }
+        }
+        (tree.folders || []).forEach(add);
+        tree.files.forEach(function (rel) { add(parentOf(rel)); });
+        return all;
+      }
+
+      // Group the flat path lists into nested folders.
+      function groupFiles(files, folders) {
         var root = { dirs: {}, files: [] };
-        files.slice().sort().forEach(function (rel) {
-          var parts = rel.split('/');
+        function dirNode(path) {
           var node = root;
-          for (var i = 0; i < parts.length - 1; i++) {
-            if (!node.dirs[parts[i]]) { node.dirs[parts[i]] = { dirs: {}, files: [] }; }
-            node = node.dirs[parts[i]];
-          }
-          node.files.push(rel);
-        });
+          if (!path) return node;
+          path.split('/').forEach(function (part) {
+            if (!node.dirs[part]) { node.dirs[part] = { dirs: {}, files: [] }; }
+            node = node.dirs[part];
+          });
+          return node;
+        }
+        folders.forEach(dirNode);
+        files.slice().sort().forEach(function (rel) { dirNode(parentOf(rel)).files.push(rel); });
         return root;
       }
 
-      function actionButton(label, title, onClick) {
+      // Unfold every folder down to `rel` so its row can be seen.
+      function reveal(rel) {
+        var dir = parentOf(rel);
+        while (dir) { delete collapsed[dir]; dir = parentOf(dir); }
+      }
+
+      function toolButton(icon, title, onClick) {
         var b = document.createElement('button');
-        b.textContent = label;
+        b.className = 'tool';
+        b.innerHTML = icon;
         b.title = title;
-        b.onclick = onClick;
+        b.tabIndex = -1;
+        b.onmousedown = function (e) { e.preventDefault(); };
+        b.onclick = function (e) { e.stopPropagation(); onClick(); };
         return b;
       }
 
-      // Start a create: show the name field inside the selected folder.
+      // Start a create: a name field at the top of the target folder.
       function startCreate(kind) {
-        pendingCreate = { kind: kind };
-        if (collapsed[targetDir]) { delete collapsed[targetDir]; }
+        var dir = targetDir();
+        pendingCreate = { kind: kind, dir: dir };
+        createProblem = '';
+        if (dir) { reveal(dir + '/x'); delete collapsed[dir]; }
         renderFiles();
-        var field = document.querySelector('#files input.new');
+        var field = document.querySelector('#files .row.create input');
         if (field) { field.focus(); }
       }
 
-      // Ask the host to create the typed name inside `targetDir`. The
-      // host validates the path against the project root before it
-      // touches the disk — this side only trims and drops empties.
-      function commitCreate(name) {
-        var kind = pendingCreate && pendingCreate.kind;
-        pendingCreate = null;
-        name = (name || '').trim();
-        if (!kind || !name) { renderFiles(); return; }
-        var rel = targetDir ? (targetDir + '/' + name) : name;
-        post({ type: 'create', path: rel, folder: kind === 'folder' });
-      }
-
-      function createRow() {
-        var field = document.createElement('input');
-        field.className = 'new';
-        field.type = 'text';
-        field.placeholder = pendingCreate.kind === 'folder' ? 'folder name' : 'file name';
-        field.onkeydown = function (e) {
-          if (e.key === 'Enter') { commitCreate(field.value); }
-          else if (e.key === 'Escape') { pendingCreate = null; renderFiles(); }
-        };
-        field.onblur = function () { pendingCreate = null; renderFiles(); };
-        return field;
-      }
-
-      // Render the grouped tree as collapsible directories + file rows.
-      function renderNode(box, node, dirPath, depth) {
-        if (pendingCreate && targetDir === dirPath) {
-          box.appendChild(createRow());
+      // Why `name` can't be made in `dir`, or '' when it can. The host
+      // checks the path again before it touches the disk.
+      function nameProblem(name, dir) {
+        if (!name) return '';
+        if (/[\\:*?"<>|]/.test(name) || /(^|\/)\.\.?(\/|$)/.test(name) || name.charAt(0) === '/') {
+          return 'A name can’t use \\ : * ? " < > | or start with / or ..';
         }
-        Object.keys(node.dirs).sort().forEach(function (name) {
+        var rel = dir ? (dir + '/' + name) : name;
+        if (tree.files.indexOf(rel) !== -1 || knownFolders()[rel]) {
+          return '“' + name + '” is already here. Pick another name.';
+        }
+        return '';
+      }
+
+      // Ask the host to create the typed name inside the target folder.
+      function commitCreate(name) {
+        var create = pendingCreate;
+        name = (name || '').trim();
+        if (!create) return;
+        if (!name) { cancelCreate(); return; }
+        var problem = nameProblem(name, create.dir);
+        if (problem) { createProblem = problem; renderFileList(); focusCreate(); return; }
+        pendingCreate = null;
+        createProblem = '';
+        var rel = create.dir ? (create.dir + '/' + name) : name;
+        selected = rel;
+        if (create.kind === 'folder') { reveal(rel + '/x'); }
+        post({ type: 'create', path: rel, folder: create.kind === 'folder' });
+        renderFiles();
+      }
+      function cancelCreate() { pendingCreate = null; createProblem = ''; renderFiles(); }
+      function focusCreate() {
+        var field = document.querySelector('#files .row.create input');
+        if (field) { field.focus(); field.setSelectionRange(field.value.length, field.value.length); }
+      }
+
+      // One tree row: indent guides, a chevron for folders, the icon and the name.
+      function treeRow(depth, isDir) {
+        var row = document.createElement('div');
+        row.className = 'row' + (isDir ? ' dir' : ' file');
+        row.style.paddingLeft = (4 + depth * 14) + 'px';
+        for (var i = 0; i < depth; i++) {
+          var guide = document.createElement('span');
+          guide.className = 'guide';
+          guide.style.left = (12 + i * 14) + 'px';
+          row.appendChild(guide);
+        }
+        var twisty = document.createElement('span');
+        twisty.className = 'twisty';
+        if (isDir) twisty.innerHTML = ICONS.chevron;
+        row.appendChild(twisty);
+        return row;
+      }
+
+      function createRow(depth) {
+        var row = treeRow(depth, pendingCreate.kind === 'folder');
+        row.className += ' create' + (createProblem ? ' invalid' : '');
+        row.appendChild(pendingCreate.kind === 'folder' ? folderIcon(false) : fileIcon(''));
+        var field = document.createElement('input');
+        field.type = 'text';
+        field.spellcheck = false;
+        field.value = pendingCreate.value || '';
+        field.oninput = function () {
+          pendingCreate.value = field.value;
+          var problem = nameProblem(field.value.trim(), pendingCreate.dir);
+          if (problem !== createProblem) {
+            createProblem = problem;
+            row.classList.toggle('invalid', !!problem);
+            var note = row.nextSibling;
+            if (note && note.className === 'problem') note.remove();
+            if (problem) row.after(problemNote(problem, depth));
+          }
+          if (pendingCreate.kind === 'file') {
+            row.replaceChild(fileIcon(field.value.trim()), row.children[row.children.length - 2]);
+          }
+        };
+        field.onkeydown = function (e) {
+          e.stopPropagation();
+          if (e.key === 'Enter') { commitCreate(field.value); }
+          else if (e.key === 'Escape') { cancelCreate(); }
+        };
+        // Clicking away keeps a good name, as in VS Code, and drops the rest.
+        field.onblur = function () {
+          if (!pendingCreate || rebuilding) return;
+          var name = field.value.trim();
+          if (name && !nameProblem(name, pendingCreate.dir)) { commitCreate(name); }
+          else { cancelCreate(); }
+        };
+        row.onclick = function (e) { e.stopPropagation(); };
+        row.appendChild(field);
+        return row;
+      }
+      function problemNote(text, depth) {
+        var note = document.createElement('div');
+        note.className = 'problem';
+        note.style.marginLeft = (24 + depth * 14) + 'px';
+        note.textContent = text;
+        return note;
+      }
+
+      function select(rel) {
+        selected = rel;
+        document.getElementById('files').focus({ preventScroll: true });
+        renderFileList();
+      }
+
+      // Render one folder's contents: folders first, then files, by name.
+      function renderNode(box, node, dirPath, depth, searching) {
+        if (pendingCreate && pendingCreate.dir === dirPath) {
+          box.appendChild(createRow(depth));
+          if (createProblem) box.appendChild(problemNote(createProblem, depth));
+        }
+        var activeRel = current ? relOf(current) : null;
+        Object.keys(node.dirs).sort(function (a, b) {
+          return a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0;
+        }).forEach(function (name) {
           var childPath = dirPath ? (dirPath + '/' + name) : name;
-          var isCollapsed = !!collapsed[childPath];
-          var row = document.createElement('div');
-          row.className = 'row dir' + (childPath === targetDir ? ' target' : '');
-          row.style.paddingLeft = (10 + depth * 12) + 'px';
-          row.textContent = (isCollapsed ? '\u25b8 ' : '\u25be ') + name;
+          var isOpen = searching || !collapsed[childPath];
+          var row = treeRow(depth, true);
+          if (isOpen) row.classList.add('expanded');
+          if (childPath === selected) row.classList.add('selected');
+          row.appendChild(folderIcon(isOpen));
+          var label = document.createElement('span');
+          label.className = 'label';
+          label.textContent = name;
+          row.appendChild(label);
+          row.title = childPath;
           row.onclick = function () {
-            // One click both selects the folder (so New File lands in
-            // it) and toggles it — selecting without opening would hide
-            // where the new file went.
-            if (targetDir === childPath) {
-              if (isCollapsed) { delete collapsed[childPath]; } else { collapsed[childPath] = true; }
-            }
-            targetDir = childPath;
-            pendingCreate = null;
-            renderFiles();
+            if (collapsed[childPath]) { delete collapsed[childPath]; } else { collapsed[childPath] = true; }
+            select(childPath);
           };
           box.appendChild(row);
-          if (!isCollapsed) { renderNode(box, node.dirs[name], childPath, depth + 1); }
+          visibleRows.push({ path: childPath, dir: true, open: isOpen });
+          if (isOpen) { renderNode(box, node.dirs[name], childPath, depth + 1, searching); }
         });
-        var activeRel = current ? relOf(current) : null;
-        node.files.forEach(function (rel) {
-          var f = document.createElement('div');
-          f.className = 'row file' + (rel === activeRel ? ' active' : '');
-          f.style.paddingLeft = (10 + depth * 12) + 'px';
-          f.textContent = rel.split('/').pop();
-          f.onclick = function () { open(rel); };
-          box.appendChild(f);
+        node.files.slice().sort(function (a, b) {
+          return a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0;
+        }).forEach(function (rel) {
+          var name = rel.split('/').pop();
+          var row = treeRow(depth, false);
+          if (rel === selected) row.classList.add('selected');
+          if (rel === activeRel) row.classList.add('open');
+          if (models[absOf(rel)] && models[absOf(rel)].dirty) row.classList.add('dirty');
+          row.appendChild(fileIcon(name));
+          var label = document.createElement('span');
+          label.className = 'label';
+          label.textContent = name;
+          row.appendChild(label);
+          row.title = rel;
+          row.onclick = function () { selected = rel; open(rel); };
+          box.appendChild(row);
+          visibleRows.push({ path: rel, dir: false });
         });
       }
 
       function renderFiles() {
         var box = document.getElementById('files');
+        rebuilding = true;
         box.textContent = '';
+        rebuilding = false;
+        if (!box.hasAttribute('tabindex')) {
+          box.tabIndex = 0;
+          box.addEventListener('keydown', explorerKeys);
+        }
 
-        var title = document.createElement('div');
-        title.className = 'title';
-        title.textContent = (tree.label || 'Files') + (targetDir ? (' \u203a ' + targetDir) : '');
-        title.onclick = function () { targetDir = ''; pendingCreate = null; renderFiles(); };
-        box.appendChild(title);
-
-        var search = document.createElement('input');
-        search.className = 'search';
-        search.placeholder = 'Search files…';
-        search.value = fileQuery;
-        search.oninput = function () { fileQuery = search.value; renderFileList(); };
-        box.appendChild(search);
-
-        var actions = document.createElement('div');
-        actions.className = 'actions';
-        actions.appendChild(actionButton('+ File', 'New file in the selected folder',
-          function () { startCreate('file'); }));
-        actions.appendChild(actionButton('+ Folder', 'New folder in the selected folder',
-          function () { startCreate('folder'); }));
-        box.appendChild(actions);
+        var head = document.createElement('div');
+        head.className = 'head';
+        var name = document.createElement('div');
+        name.className = 'name';
+        // The project root, as in VS Code: always open, not a row that folds.
+        // Clicking it picks the root for new files.
+        var title = document.createElement('span');
+        title.textContent = tree.label || 'Project';
+        name.appendChild(title);
+        name.title = tree.root || title.textContent;
+        name.onclick = function () { selected = null; renderFileList(); };
+        head.appendChild(name);
+        head.appendChild(toolButton(ICONS.newFile, 'New file', function () { startCreate('file'); }));
+        head.appendChild(toolButton(ICONS.newFolder, 'New folder', function () { startCreate('folder'); }));
+        head.appendChild(toolButton(ICONS.collapse, 'Fold all folders', function () {
+          Object.keys(knownFolders()).forEach(function (dir) { collapsed[dir] = true; });
+          pendingCreate = null;
+          renderFileList();
+        }));
+        box.appendChild(head);
 
         var list = document.createElement('div');
         list.id = 'file-list';
+        // A click on empty space picks the project root for new files.
+        list.onclick = function (e) { if (e.target === list) { selected = null; renderFileList(); } };
         box.appendChild(list);
         renderFileList();
       }
 
       function renderFileList() {
         var list = document.getElementById('file-list');
+        if (!list) return;
+        var scroll = list.scrollTop;
+        rebuilding = true;
         list.textContent = '';
-        var query = fileQuery.trim().toLowerCase();
+        rebuilding = false;
+        visibleRows = [];
+        // While a name is being typed the whole tree shows, so the new
+        // row has its folder to sit in.
+        var query = pendingCreate ? '' : fileQuery.trim().toLowerCase();
         var files = query ? tree.files.filter(function (path) {
           return path.toLowerCase().indexOf(query) !== -1;
         }) : tree.files;
         if (query && !files.length) {
           var empty = document.createElement('div');
-          empty.className = 'row';
-          empty.textContent = 'No matching files.';
+          empty.className = 'note';
+          empty.textContent = 'No files match “' + fileQuery.trim() + '”.';
           list.appendChild(empty);
+          return;
         }
-        renderNode(list, groupFiles(files), '', 0);
+        if (!files.length && !(tree.folders || []).length && !pendingCreate) {
+          var none = document.createElement('div');
+          none.className = 'note';
+          none.textContent = 'No files yet. Use New file above to make one.';
+          list.appendChild(none);
+          return;
+        }
+        renderNode(list, groupFiles(files, query ? [] : (tree.folders || [])), '', 0, !!query);
+        list.scrollTop = scroll;
+        var row = list.querySelector('.row.selected');
+        if (row && row.scrollIntoViewIfNeeded) row.scrollIntoViewIfNeeded(false);
+      }
+
+      // The search box is in Studio's top bar; these are its keys.
+      function setFileQuery(query) {
+        fileQuery = query || '';
+        pendingCreate = null;
+        renderFileList();
+        if (fileQuery.trim()) {
+          var first = visibleRows.filter(function (r) { return !r.dir; })[0];
+          selected = first ? first.path : null;
+          renderFileList();
+        }
+      }
+      function stepFileMatch(step) {
+        var files = visibleRows.filter(function (r) { return !r.dir; });
+        if (!files.length) return;
+        var at = -1;
+        files.forEach(function (r, i) { if (r.path === selected) at = i; });
+        var next = at === -1 ? (step > 0 ? 0 : files.length - 1)
+          : Math.min(Math.max(at + step, 0), files.length - 1);
+        selected = files[next].path;
+        renderFileList();
+      }
+      function openFileMatch() {
+        if (selected !== null && tree.files.indexOf(selected) !== -1) { open(selected); }
+      }
+
+      // Arrow keys move the selection, Right/Left open and fold folders,
+      // Enter or Space opens a file or folds a folder.
+      function moveSelection(step) {
+        if (!visibleRows.length) return;
+        var at = -1;
+        for (var i = 0; i < visibleRows.length; i++) { if (visibleRows[i].path === selected) at = i; }
+        var next = at === -1 ? (step > 0 ? 0 : visibleRows.length - 1)
+          : Math.min(Math.max(at + step, 0), visibleRows.length - 1);
+        selected = visibleRows[next].path;
+        renderFileList();
+      }
+      function explorerKeys(e) {
+        if (e.target.tagName === 'INPUT') return;
+        var row = null;
+        for (var i = 0; i < visibleRows.length; i++) { if (visibleRows[i].path === selected) row = visibleRows[i]; }
+        if (e.key === 'ArrowDown') { moveSelection(1); }
+        else if (e.key === 'ArrowUp') { moveSelection(-1); }
+        else if (e.key === 'ArrowRight' && row && row.dir) {
+          if (!row.open) { delete collapsed[row.path]; renderFileList(); } else { moveSelection(1); }
+        } else if (e.key === 'ArrowLeft' && row) {
+          if (row.dir && row.open) { collapsed[row.path] = true; renderFileList(); }
+          else if (parentOf(row.path)) { selected = parentOf(row.path); renderFileList(); }
+        } else if ((e.key === 'Enter' || e.key === ' ') && row) {
+          if (row.dir) {
+            if (collapsed[row.path]) { delete collapsed[row.path]; } else { collapsed[row.path] = true; }
+            renderFileList();
+          } else { open(row.path); }
+        } else { return; }
+        e.preventDefault();
       }
 
       // Open a tree-relative file: focus its tab if already loaded, else
@@ -379,6 +705,9 @@
 
       function activate(path) {
         current = path;
+        // The explorer follows the open file, as in VS Code.
+        var rel = relOf(path);
+        if (rel !== path || !tree.root) { selected = rel; reveal(rel); }
         if (showingWelcome) {
           editor.updateOptions({ readOnly: false });
           showingWelcome = false;
@@ -393,7 +722,7 @@
       // inside a WKWebView that started hidden/zero-sized.
       function relayout() {
         var host = document.getElementById('editor');
-        var w = host.clientWidth || (window.innerWidth - 190);
+        var w = host.clientWidth || (window.innerWidth - 230);
         var h = host.clientHeight || (window.innerHeight - 30);
         editor.layout({ width: w, height: h });
       }
@@ -403,10 +732,14 @@
 
       window.studio = {
         relayout: relayout,
+        setFileQuery: setFileQuery,
+        stepFileMatch: stepFileMatch,
+        openFileMatch: openFileMatch,
         setFiles: function (payload) {
           tree = { label: (payload && payload.label) || 'src',
                    root: (payload && payload.root) || '',
-                   files: (payload && payload.files) || [] };
+                   files: (payload && payload.files) || [],
+                   folders: (payload && payload.folders) || [] };
           renderFiles();
           relayout();
         },
@@ -423,7 +756,7 @@
               var entry = models[path];
               if (entry.replacing) return;
               var dirty = model.getAlternativeVersionId() !== entry.savedVersion;
-              if (entry.dirty !== dirty) { entry.dirty = dirty; renderTabs(); }
+              if (entry.dirty !== dirty) { entry.dirty = dirty; renderTabs(); renderFileList(); }
               post({ type: 'edited', path: path, text: model.getValue(), dirty: dirty });
             });
           } else {

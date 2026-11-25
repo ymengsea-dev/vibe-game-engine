@@ -374,11 +374,62 @@ fn project_file_list(root: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
+/// Lists the folders the Files tree shows, as paths relative to `root`,
+/// sorted: the same folders [`project_file_list`] walks, so a folder made
+/// in the tree shows before it holds a file.
+fn project_folder_list(root: &std::path::Path) -> Vec<PathBuf> {
+    fn walk(dir: &std::path::Path, base: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>) {
+        if depth > 8 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || name.starts_with('.')
+                || CODE_TREE_SKIP_DIRS.contains(&name.as_ref())
+            {
+                continue;
+            }
+            if let Ok(rel) = path.strip_prefix(base) {
+                out.push(rel.to_path_buf());
+            }
+            walk(&path, base, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, 0, &mut out);
+    let scripts = root.join("assets").join("scripts");
+    if std::fs::symlink_metadata(&scripts)
+        .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+    {
+        // Parent folders come from the paths, as they do for files.
+        out.push(PathBuf::from("assets/scripts"));
+        walk(&scripts, root, 1, &mut out);
+    }
+    out.sort();
+    out
+}
+
 /// Sends the project's current file tree to the code editor, labelled
 /// with the project name.
 fn push_file_tree(code: &CodeEditor, state: &EditorState) {
     let root = state.project.root();
-    code.set_file_tree(state.project.name(), root, &project_file_list(root));
+    code.set_file_tree(
+        state.project.name(),
+        root,
+        &project_file_list(root),
+        &project_folder_list(root),
+    );
+    code.set_file_query(&state.code_file_query);
 }
 
 /// Creates the file or directory the Files tree asked for and returns its
@@ -464,12 +515,21 @@ fn sync_code_editor(
         return;
     };
 
-    // Hidden while a drag-resize is in progress so the native webview
-    // doesn't lag/overhang the panel edge.
-    let show_webview = state.code_panel_visible && !state.code_panel_resizing;
+    // Kept shown while a panel edge is dragged and moved every frame:
+    // hiding a WKWebView and showing it again flashes it.
+    let show_webview = state.code_panel_visible;
     code.set_visible(show_webview);
     if std::mem::take(&mut state.code_save_requested) {
         code.request_save();
+    }
+    if std::mem::take(&mut state.code_file_query_changed) {
+        code.set_file_query(&state.code_file_query);
+    }
+    match state.code_file_step.take() {
+        Some(engine::editor::CodeFileStep::Next) => code.step_file_match(true),
+        Some(engine::editor::CodeFileStep::Previous) => code.step_file_match(false),
+        Some(engine::editor::CodeFileStep::Open) => code.open_file_match(),
+        None => {}
     }
     if show_webview && let Some([x, y, w, h]) = state.code_panel_rect {
         code.set_bounds_px(PanelRect {
@@ -4127,6 +4187,25 @@ mod tests {
                 "src/systems/movement.rs",
             ],
             "Lua sources and project files are listed without binary assets or build output"
+        );
+
+        std::fs::create_dir_all(root.join("src/empty")).unwrap();
+        std::fs::create_dir_all(root.join("assets/scripts/enemies")).unwrap();
+        let folders: Vec<String> = project_folder_list(&root)
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(
+            folders,
+            vec![
+                "assets/scripts",
+                "assets/scripts/enemies",
+                "scenes",
+                "src",
+                "src/empty",
+                "src/systems",
+            ],
+            "empty folders show; build output, bookkeeping and other assets don't"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
