@@ -109,6 +109,14 @@ pub trait PlatformHandler {
         RedrawPolicy::Wait
     }
 
+    /// Called at the end of every event-loop turn, before the loop
+    /// sleeps. Returns when the loop must wake again even with nothing to
+    /// draw (for work winit does not see, such as another toolkit's
+    /// events), or `None`. Waking draws no frame. Default: `None`.
+    fn on_loop_turn(&mut self) -> Option<Instant> {
+        None
+    }
+
     /// Called when the OS asks the window to close (title-bar close
     /// button, `Cmd`/`Alt`+`F4`, ...). Return `true` to let the event
     /// loop exit now, `false` to keep running — e.g. to show an "unsaved
@@ -268,18 +276,23 @@ impl<H: PlatformHandler> ApplicationHandler<UserEvent> for Runner<H> {
         {
             apply_cursor_lock(window, locked);
         }
+        let wake_at = self.handler.on_loop_turn();
         let policy = self.handler.redraw_policy();
         if deadline_needs_redraw(Instant::now(), policy)
             && let Some(window) = &self.window
         {
             window.request_redraw();
         }
-        match policy {
-            RedrawPolicy::Wait => event_loop.set_control_flow(ControlFlow::Wait),
-            RedrawPolicy::WaitUntil(deadline) => {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        match (policy, wake_at) {
+            (RedrawPolicy::Wait, None) => event_loop.set_control_flow(ControlFlow::Wait),
+            (RedrawPolicy::Wait, Some(wake)) => {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
             }
-            RedrawPolicy::Continuous => {
+            (RedrawPolicy::WaitUntil(deadline), wake) => {
+                let until = wake.map_or(deadline, |wake| wake.min(deadline));
+                event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+            }
+            (RedrawPolicy::Continuous, _) => {
                 event_loop.set_control_flow(ControlFlow::Poll);
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -343,7 +356,13 @@ pub fn run_windowed(
     config: WindowConfig,
     handler: impl PlatformHandler + 'static,
 ) -> Result<(), PlatformError> {
-    let event_loop = EventLoop::<UserEvent>::with_user_event()
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+    #[cfg(target_os = "linux")]
+    if config.prefer_x11 && std::env::var_os("DISPLAY").is_some() {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        builder.with_x11();
+    }
+    let event_loop = builder
         .build()
         .map_err(|err| PlatformError::EventLoop(err.to_string()))?;
     let wake = WakeHandle::new(event_loop.create_proxy());

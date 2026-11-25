@@ -401,6 +401,11 @@ impl CodeEditor {
             return Err(CodeError::Asset("monaco/index.html"));
         }
 
+        // On Linux the webview is WebKitGTK, which panics unless GTK was
+        // set up on this thread first.
+        #[cfg(target_os = "linux")]
+        gtk::init().map_err(|err| CodeError::WebViewInit(err.to_string()))?;
+
         let (tx, rx): (Sender<CodeEvent>, Receiver<CodeEvent>) = channel();
 
         let webview = WebViewBuilder::new()
@@ -410,7 +415,7 @@ impl CodeEditor {
                 dispatch_event(request.body(), &tx, &wake);
             })
             .with_devtools(true)
-            .with_url("monaco://localhost/index.html")
+            .with_url(format!("{PAGE_ORIGIN}index.html"))
             .build_as_child(window)
             .map_err(|err| CodeError::WebViewInit(err.to_string()))?;
 
@@ -637,6 +642,11 @@ fn serve_asset(_id: WebViewId<'_>, request: Request<Vec<u8>>) -> Response<Cow<'s
     } else {
         std::fs::read(monaco_dir().join(relative)).map(Cow::Owned)
     };
+    let bytes = if relative == "index.html" {
+        bytes.map(|page| page_for_origin(page, PAGE_ORIGIN))
+    } else {
+        bytes
+    };
     match bytes {
         Ok(bytes) => {
             tracing::debug!(
@@ -654,6 +664,38 @@ fn serve_asset(_id: WebViewId<'_>, request: Request<Vec<u8>>) -> Response<Cow<'s
             tracing::warn!(asset = relative, error = %err, "monaco asset not found");
             simple_response(404, b"not found")
         }
+    }
+}
+
+/// Where the page lives. WebView2 on Windows serves a custom protocol at
+/// `http://<scheme>.localhost/`, not at `<scheme>://localhost/`.
+const PAGE_ORIGIN: &str = if cfg!(windows) {
+    "http://monaco.localhost/"
+} else {
+    "monaco://localhost/"
+};
+
+/// `index.html` names its files with absolute `monaco://localhost/` URLs;
+/// they are pointed at `origin` when the page lives elsewhere (Windows).
+fn page_for_origin<'a>(page: Cow<'a, [u8]>, origin: &str) -> Cow<'a, [u8]> {
+    const WRITTEN_ORIGIN: &str = "monaco://localhost/";
+    if origin == WRITTEN_ORIGIN {
+        return page;
+    }
+    match std::str::from_utf8(&page) {
+        Ok(text) => Cow::Owned(text.replace(WRITTEN_ORIGIN, origin).into_bytes()),
+        Err(_) => page,
+    }
+}
+
+/// Gives GTK, which runs the code editor's webview on Linux, a turn to
+/// handle its events. Call it every event-loop turn while a
+/// [`CodeEditor`] exists, and often enough for typing (about 60 times a
+/// second). Does nothing on other systems.
+pub fn pump_webview_events() {
+    #[cfg(target_os = "linux")]
+    while gtk::events_pending() {
+        gtk::main_iteration_do(false);
     }
 }
 
@@ -880,6 +922,18 @@ mod tests {
             wry::dpi::Size::Physical(p) => assert_eq!((p.width, p.height), (1, 1)),
             other => panic!("expected physical size, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_page_points_its_files_at_the_windows_origin() {
+        let page = std::fs::read(monaco_dir().join("index.html")).expect("page reads");
+        let mac = page_for_origin(Cow::Borrowed(&page), "monaco://localhost/");
+        assert_eq!(&*mac, &page[..], "unchanged where the page was written for");
+        let windows = page_for_origin(Cow::Borrowed(&page), "http://monaco.localhost/");
+        let text = std::str::from_utf8(&windows).expect("utf-8 page");
+        assert!(!text.contains("monaco://"), "no monaco:// URL left");
+        assert!(text.contains("http://monaco.localhost/vs/loader.js"));
+        assert!(text.contains("paths: { vs: 'http://monaco.localhost/vs' }"));
     }
 
     #[test]

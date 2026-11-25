@@ -28,6 +28,12 @@ The packager refuses binaries that hold the home folder path (build with the `RU
 
 Options that belong to another OS are refused before staging starts.
 
+## Windows and Linux notes
+
+- **Windows C runtime.** `.cargo/config.toml` builds Studio and the player with the Microsoft C runtime inside (`+crt-static`), so they start without the Visual C++ runtime installed. A `RUSTFLAGS` variable replaces that setting, so on Windows build with `RUSTFLAGS="--remap-path-prefix=<home>=/build -C target-feature=+crt-static"`. Rust games built by Studio on Windows get the same flag through cargo's `--config`.
+- **Windows console.** Release builds of Studio, the player and the Rust starter's game are windowed programs, so no console window opens behind them, and programs Studio starts in the background (cargo, the game, language servers) open none either.
+- **Linux libraries.** The code editor is WebKitGTK: building needs the GTK 3 and WebKitGTK 4.1 development packages (`libgtk-3-dev`, `libwebkit2gtk-4.1-dev` on Debian and Ubuntu), and running needs `libwebkit2gtk-4.1-0`. Studio opens through X11, or XWayland on a Wayland desktop, because the code editor can only attach to an X11 window.
+
 ## Not verified
 
-The macOS path has been run on a Mac. The Windows and Linux paths are covered by tests of the commands they build, but no package has been built or opened on Windows or Linux, nor on a clean machine without Rust.
+The macOS path has been run on a Mac. The Windows and Linux paths are covered by tests of the commands they build and by a code review (2026-11-25). On that date Studio, the player and the packager were also built for Windows on a Mac (MinGW, `x86_64-pc-windows-gnu`) with no clippy warnings. No package has been built or opened on Windows or Linux, nor on a clean machine without Rust, and nothing has been built for Linux.

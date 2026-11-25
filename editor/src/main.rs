@@ -14,6 +14,9 @@
 //! panel), AI Assistant (placeholder), Console/Problems/Output,
 //! Profiler, and the central Scene panel.
 
+// A release Studio on Windows is a windowed app: no console window behind it.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod embedded_session;
 #[cfg(target_os = "macos")]
 mod mac_app;
@@ -2098,12 +2101,13 @@ fn launch_exported_game(
     binary: &std::path::Path,
     output: &engine_editor::OutputLog,
 ) -> Result<(), String> {
-    let mut child = std::process::Command::new(binary)
-        .current_dir(binary.parent().unwrap_or(std::path::Path::new(".")))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("could not start {}: {err}", binary.display()))?;
+    let mut child =
+        engine::project::build::no_console_window(&mut std::process::Command::new(binary))
+            .current_dir(binary.parent().unwrap_or(std::path::Path::new(".")))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("could not start {}: {err}", binary.display()))?;
     use std::io::BufRead;
     for pipe in [
         child
@@ -2786,6 +2790,16 @@ impl PlatformHandler for EditorHandler {
             self.shell.as_ref().and_then(EditorShell::repaint_deadline),
             Instant::now(),
         )
+    }
+
+    fn on_loop_turn(&mut self) -> Option<Instant> {
+        // On Linux the code editor's webview runs on GTK, which winit does
+        // not wake for: give it a turn about 60 times a second.
+        if cfg!(target_os = "linux") && self.code.is_some() {
+            editor_code::pump_webview_events();
+            return Some(Instant::now() + Duration::from_millis(16));
+        }
+        None
     }
 
     fn on_close_requested(&mut self) -> bool {
@@ -3599,7 +3613,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // doesn't exist yet) — the editor just won't hot-reload assets.
     let window_config = WindowConfig::new(app.config().app_name.clone(), 1280, 720)
         .min_size(900, 600)
-        .maximized(true);
+        .maximized(true)
+        // The code editor's webview attaches only to X11 windows on Linux.
+        .prefer_x11(true);
     let pending_open = Some(starter_code_path(&state.project).to_path_buf());
     run_windowed(
         window_config,

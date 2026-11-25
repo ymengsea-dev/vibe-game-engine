@@ -358,7 +358,7 @@ impl LspClient {
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Option<Self> {
         let program = resolve_server(language)?;
-        let mut child = match Command::new(&program)
+        let mut child = match no_console_window(&mut Command::new(&program))
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -754,7 +754,10 @@ fn resolve_server(language: LspLanguage) -> Option<PathBuf> {
         );
     }
     let via_rustup = |args: &[&str]| -> Option<PathBuf> {
-        let output = Command::new("rustup").args(args).output().ok()?;
+        let output = no_console_window(&mut Command::new("rustup"))
+            .args(args)
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -768,11 +771,13 @@ fn resolve_server(language: LspLanguage) -> Option<PathBuf> {
         return Some(path);
     }
 
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         let toolchains = PathBuf::from(home).join(".rustup/toolchains");
         if let Ok(entries) = std::fs::read_dir(&toolchains) {
             for entry in entries.flatten() {
-                let candidate = entry.path().join("bin/rust-analyzer");
+                let candidate = entry
+                    .path()
+                    .join(format!("bin/rust-analyzer{}", std::env::consts::EXE_SUFFIX));
                 if candidate.is_file() {
                     return Some(candidate);
                 }
@@ -780,7 +785,7 @@ fn resolve_server(language: LspLanguage) -> Option<PathBuf> {
         }
     }
 
-    if Command::new("rust-analyzer")
+    if no_console_window(&mut Command::new("rust-analyzer"))
         .arg("--version")
         .output()
         .map(|output| output.status.success())
@@ -1306,9 +1311,43 @@ fn markup_to_string(value: &serde_json::Value) -> Option<String> {
 /// Percent-encodes an absolute path into a `file://` URI (RFC 3986
 /// unreserved set plus `/` pass through). A space in the path — e.g.
 /// `Game engine` — would otherwise make the URI unparseable.
+/// Stops a language server started from Studio from opening its own
+/// console window on Windows. Does nothing elsewhere.
+fn no_console_window(command: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 fn path_to_uri(path: &Path) -> String {
+    path_text_to_uri(&path.to_string_lossy(), cfg!(windows))
+}
+
+/// [`path_to_uri`] on the path's text. A Windows path (`C:\a\b.rs`) turns
+/// its backslashes into slashes and gains the leading slash file URIs need
+/// before a drive (`file:///C%3A/a/b.rs`).
+fn path_text_to_uri(path: &str, windows: bool) -> String {
     let mut uri = String::from("file://");
-    for byte in path.to_string_lossy().as_bytes() {
+    let path = if windows {
+        // `\\?\C:\...` (from canonicalising) is the same file as `C:\...`.
+        let path = path
+            .strip_prefix(r"\\?\")
+            .filter(|rest| rest.as_bytes().get(1) == Some(&b':'))
+            .unwrap_or(path);
+        let slashed = path.replace('\\', "/");
+        if slashed.starts_with('/') {
+            slashed
+        } else {
+            format!("/{slashed}")
+        }
+    } else {
+        path.to_owned()
+    };
+    for byte in path.as_bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
                 uri.push(*byte as char);
@@ -1322,6 +1361,12 @@ fn path_to_uri(path: &Path) -> String {
 /// Reverses [`path_to_uri`]. `None` if `uri` isn't a `file://` URI or has
 /// malformed percent-escapes / non-UTF-8 bytes.
 fn uri_to_path(uri: &str) -> Option<PathBuf> {
+    uri_to_path_text(uri, cfg!(windows)).map(PathBuf::from)
+}
+
+/// [`uri_to_path`] as text. On Windows the slash before the drive goes and
+/// the drive letter is made upper case, as servers may send `c%3A`.
+fn uri_to_path_text(uri: &str, windows: bool) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
     let mut bytes = Vec::with_capacity(rest.len());
     let mut chars = rest.bytes();
@@ -1334,7 +1379,18 @@ fn uri_to_path(uri: &str) -> Option<PathBuf> {
             bytes.push(byte);
         }
     }
-    String::from_utf8(bytes).ok().map(PathBuf::from)
+    let mut path = String::from_utf8(bytes).ok()?;
+    if windows {
+        let drive = path.as_bytes().get(1).copied();
+        if path.starts_with('/') && path.as_bytes().get(2) == Some(&b':') {
+            path.remove(0);
+            if let Some(letter) = drive {
+                path.replace_range(0..1, &(letter as char).to_ascii_uppercase().to_string());
+            }
+        }
+        path = path.replace('/', "\\");
+    }
+    Some(path)
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
@@ -1400,6 +1456,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn file_uri_round_trips_a_windows_path() {
+        let uri = path_text_to_uri(r"C:\Users\me\My Game\src\main.rs", true);
+        assert_eq!(uri, "file:///C%3A/Users/me/My%20Game/src/main.rs");
+        assert_eq!(
+            uri_to_path_text(&uri, true).as_deref(),
+            Some(r"C:\Users\me\My Game\src\main.rs")
+        );
+        assert_eq!(
+            path_text_to_uri(r"\\?\C:\game\main.lua", true),
+            "file:///C%3A/game/main.lua"
+        );
+        assert_eq!(
+            uri_to_path_text("file:///c:/game/main.lua", true).as_deref(),
+            Some(r"C:\game\main.lua")
+        );
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn file_uri_round_trips_a_path_with_spaces() {
         let path = Path::new("/Users/me/Game engine/src/main.rs");

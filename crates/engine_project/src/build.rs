@@ -201,6 +201,34 @@ pub fn exe_suffix() -> &'static str {
     std::env::consts::EXE_SUFFIX
 }
 
+/// Cargo `--config` arguments that build the Microsoft C runtime into a
+/// Windows program, so it starts on a machine without the Visual C++
+/// runtime installed.
+fn windows_static_runtime_args() -> Vec<String> {
+    ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+        .iter()
+        .flat_map(|triple| {
+            [
+                "--config".to_string(),
+                format!("target.{triple}.rustflags=[\"-C\", \"target-feature=+crt-static\"]"),
+            ]
+        })
+        .collect()
+}
+
+/// Stops a command started from Studio from opening its own console
+/// window on Windows (Studio is a windowed app there, so every console
+/// program it starts would otherwise flash one). Does nothing elsewhere.
+pub fn no_console_window(command: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// Everything needed to compile and stage one export — all derived, no
 /// I/O. Build it with [`ExportPlan::new`], inspect [`ExportPlan::cargo_args`]
 /// and the `*_dest` paths, then hand it to [`export`].
@@ -318,6 +346,9 @@ impl ExportPlan {
         if !self.features.is_empty() {
             args.push("--features".to_string());
             args.push(self.features.join(","));
+        }
+        if self.os == TargetOs::Windows {
+            args.extend(windows_static_runtime_args());
         }
         args
     }
@@ -485,7 +516,7 @@ pub fn export_logged(
         plan.profile.label()
     ));
 
-    let mut cargo = Command::new("cargo")
+    let mut cargo = no_console_window(&mut Command::new("cargo"))
         .args(plan.cargo_args())
         .current_dir(project.root())
         .stdout(Stdio::piped())
@@ -1272,6 +1303,21 @@ mod tests {
         let args = forced.cargo_args();
         let at = args.iter().position(|arg| arg == "--target-dir");
         assert_eq!(at.map(|i| args[i + 1].as_str()), Some("/tmp/shared-target"));
+
+        let static_runtime = |plan: &ExportPlan| {
+            plan.cargo_args()
+                .iter()
+                .any(|arg| arg.contains("target-feature=+crt-static"))
+        };
+        let mut windows = plan_rel.clone();
+        windows.os = TargetOs::Windows;
+        assert!(
+            static_runtime(&windows),
+            "Windows games carry their C runtime"
+        );
+        let mut mac = plan_rel.clone();
+        mac.os = TargetOs::MacOs;
+        assert!(!static_runtime(&mac));
 
         std::fs::remove_dir_all(project.root()).ok();
     }

@@ -173,7 +173,8 @@ fn valid_bundle_id(id: &str) -> bool {
 
 /// `name` made safe as a file name on every system: letters, digits, spaces,
 /// `-` and `_` kept, anything else dropped, spaces collapsed; `Game` if
-/// nothing is left.
+/// nothing is left. A name Windows keeps for devices (`CON`, `COM1`, ...)
+/// gets ` Game` added.
 #[must_use]
 pub fn file_safe_name(name: &str) -> String {
     let kept: String = name
@@ -183,9 +184,22 @@ pub fn file_safe_name(name: &str) -> String {
     let kept = kept.split_whitespace().collect::<Vec<_>>().join(" ");
     if kept.is_empty() {
         "Game".to_owned()
+    } else if is_windows_device_name(&kept) {
+        format!("{kept} Game")
     } else {
         kept
     }
+}
+
+/// Whether Windows reserves `name` for a device, whatever its case.
+fn is_windows_device_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            upper
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.len() == 1 && rest.bytes().all(|b| b.is_ascii_digit()))
+        })
 }
 
 /// `name` as one ASCII word for program names and identifiers: letters and
@@ -250,6 +264,10 @@ mod tests {
     fn names_become_safe_file_names_and_slugs() {
         assert_eq!(file_safe_name("Space: Cats?"), "Space Cats");
         assert_eq!(file_safe_name("..."), "Game");
+        assert_eq!(file_safe_name("Con"), "Con Game");
+        assert_eq!(file_safe_name("com1"), "com1 Game");
+        assert_eq!(file_safe_name("Console"), "Console");
+        assert_eq!(file_safe_name("COM10"), "COM10");
         assert_eq!(slug("Space Cats 2!"), "Space-Cats-2");
         assert_eq!(slug("ñ"), "game");
     }

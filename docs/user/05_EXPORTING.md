@@ -62,5 +62,5 @@ Exported Mac apps are signed only for your own Mac (an ad-hoc signature), not wi
 
 - You can export only for the system Studio runs on: a Mac makes Mac apps, Windows makes Windows games.
 - The Windows `.exe` itself shows the standard program icon in Explorer; the icon appears on the game's window and taskbar button.
-- Windows and Linux exports have not yet been built or tried on those systems.
+- Windows and Linux exports have not yet been tried on those systems. Studio supports macOS for now.
 - Mac apps aren't notarised, so other Macs show the warning above.

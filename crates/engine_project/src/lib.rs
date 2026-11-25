@@ -3094,6 +3094,25 @@ pub enum ProjectTemplate {
     Starter3D,
 }
 
+/// `path` made absolute with links resolved, so two spellings of one folder
+/// compare equal; `path` as given if that fails (it may not exist yet). On
+/// Windows the `\\?\` prefix that adds to `C:\...` paths is dropped, so the
+/// path still reads, and is shown, as the user wrote it.
+pub fn canonical_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).map_or_else(|_| path.to_path_buf(), without_verbatim_prefix)
+}
+
+/// `path` without a `\\?\` prefix before a drive letter (`\\?\C:\a` to
+/// `C:\a`); other paths unchanged.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let plain = path
+        .to_str()
+        .and_then(|text| text.strip_prefix(r"\\?\"))
+        .filter(|rest| rest.as_bytes().get(1) == Some(&b':'))
+        .map(PathBuf::from);
+    plain.unwrap_or(path)
+}
+
 /// Turns a project name into a plausible cargo package name: ASCII
 /// alphanumerics lowercased, everything else an underscore, and a
 /// leading digit prefixed (cargo rejects a crate starting with one).
@@ -3726,6 +3745,18 @@ fn is_contained(relative: &Path) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn verbatim_drive_paths_lose_their_prefix() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\C:\Games\Cats")),
+            PathBuf::from(r"C:\Games\Cats")
+        );
+        let unc = PathBuf::from(r"\\?\UNC\server\share");
+        assert_eq!(without_verbatim_prefix(unc.clone()), unc);
+        let plain = PathBuf::from("/Users/me/game");
+        assert_eq!(without_verbatim_prefix(plain.clone()), plain);
+    }
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 

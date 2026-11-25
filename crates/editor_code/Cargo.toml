@@ -20,5 +20,10 @@ wry = { workspace = true, features = ["devtools"] }
 # per-frame `set_bounds` is authoritative. Versions match wry 0.52's.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# wry's webview on Linux is WebKitGTK: GTK must be set up and pumped by us.
+# Same version wry 0.52 uses.
+gtk = "0.18"
+
 [lints]
 workspace = true

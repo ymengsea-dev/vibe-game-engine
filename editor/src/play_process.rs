@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 
 use engine::editor::OutputLog;
 use engine::platform::WakeHandle;
-use engine::project::build::{BuiltExecutables, ExportPlan};
+use engine::project::build::{BuiltExecutables, ExportPlan, no_console_window};
 use engine::project::{BuildConfiguration, GameplayLanguage, Project};
 use engine::scripting::{LUA_DIAGNOSTIC_PREFIX, LuaScriptDiagnostic};
 
@@ -157,7 +157,7 @@ impl PlayProcess {
     ) -> Result<(), String> {
         let (sender, receiver) = mpsc::sync_channel(OUTPUT_CAPACITY);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command
+        let mut child = no_console_window(command)
             .spawn()
             .map_err(|err| format!("could not start cargo: {err}"))?;
         // Progress and compiler errors are text on stderr; stdout carries
@@ -454,7 +454,7 @@ fn spawn_captured(
     wake: Option<WakeHandle>,
 ) -> Result<Child, String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command
+    let mut child = no_console_window(command)
         .spawn()
         .map_err(|err| format!("could not start {label}: {err}"))?;
 

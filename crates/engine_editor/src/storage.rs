@@ -82,7 +82,7 @@ pub struct StorageLedger {
 impl StorageLedger {
     /// Records that `root` was opened at `now`.
     pub fn touch(&mut self, root: &Path, now: SystemTime) {
-        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let root = engine_project::canonical_path(root);
         self.projects.retain(|entry| entry.root != root);
         self.projects.insert(
             0,
@@ -472,7 +472,7 @@ impl StorageView {
             self.last_automatic = Some(now);
             self.ledger.forget_missing();
             let projects = self.ledger.projects.clone();
-            let current = std::fs::canonicalize(current).unwrap_or_else(|_| current.to_path_buf());
+            let current = engine_project::canonical_path(current);
             if let Some(worker) = self.worker() {
                 worker.automatic(projects, current, settings);
                 self.busy = true;

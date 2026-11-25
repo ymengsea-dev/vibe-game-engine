@@ -26,6 +26,10 @@
 //! otherwise-good scene is a warning and a skipped entity, so one bad
 //! file never costs you the rest of the level.
 
+// A released game on Windows opens no console window. Studio still reads
+// its printed lines through pipes.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::collections::{HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};

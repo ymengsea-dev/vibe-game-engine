@@ -123,7 +123,7 @@ impl RecentProjects {
         // directory are one entry, not two. A path that cannot be
         // canonicalized (it may have just been created) is kept as
         // given rather than dropped.
-        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let root = engine_project::canonical_path(root);
         self.paths.retain(|existing| existing != &root);
         self.paths.insert(0, root);
         self.paths.truncate(MAX_RECENT_PROJECTS);
@@ -192,9 +192,13 @@ impl RecentProjects {
     /// directory to write into, in which case the studio simply runs
     /// without a recent list.
     pub fn default_path() -> Option<PathBuf> {
+        // Windows has no HOME; its per-user app data lives in APPDATA.
+        if cfg!(windows) {
+            let app_data = PathBuf::from(std::env::var_os("APPDATA")?);
+            return Some(app_data.join("RustyEngine").join("recent-projects.ron"));
+        }
         let home = PathBuf::from(std::env::var_os("HOME")?);
-        // macOS keeps app data here; the XDG-ish fallback covers the
-        // platforms this has not been run on yet.
+        // macOS keeps app data here; Linux uses the XDG-style folder.
         let dir = if cfg!(target_os = "macos") {
             home.join("Library/Application Support/RustyEngine")
         } else {

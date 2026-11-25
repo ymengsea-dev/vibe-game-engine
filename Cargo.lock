@@ -1317,6 +1317,7 @@ dependencies = [
 name = "editor_code"
 version = "0.1.0"
 dependencies = [
+ "gtk",
  "objc2-app-kit 0.3.2",
  "serde",
  "serde_json",

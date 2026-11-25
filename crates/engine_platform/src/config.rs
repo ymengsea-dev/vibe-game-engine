@@ -32,6 +32,10 @@ pub struct WindowConfig {
     pub resizable: bool,
     /// The window's icon on Windows and Linux. macOS shows the app's icon.
     pub icon: Option<WindowIcon>,
+    /// On Linux, open the window through X11 (XWayland on a Wayland
+    /// desktop) when an X display is there. Studio needs this: its code
+    /// editor can only attach to an X11 window. Ignored elsewhere.
+    pub prefer_x11: bool,
 }
 
 impl WindowConfig {
@@ -56,12 +60,20 @@ impl WindowConfig {
             fullscreen: false,
             resizable: true,
             icon: None,
+            prefer_x11: false,
         }
     }
 
     /// Requests a maximized, non-full-screen window at startup.
     pub fn maximized(mut self, maximized: bool) -> Self {
         self.maximized = maximized;
+        self
+    }
+
+    /// On Linux, prefers an X11 window over a Wayland one (see
+    /// [`WindowConfig::prefer_x11`]).
+    pub fn prefer_x11(mut self, prefer: bool) -> Self {
+        self.prefer_x11 = prefer;
         self
     }
 

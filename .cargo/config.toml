@@ -1,0 +1,7 @@
+# Windows builds of Studio and the player carry the Microsoft C runtime, so
+# they start on a machine without the Visual C++ runtime installed.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -3,6 +3,9 @@
 //! spawning and scene changes all work here too. Add your gameplay in the
 //! hooks marked "Your gameplay".
 
+// On Windows, a release build of the game opens no console window.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
