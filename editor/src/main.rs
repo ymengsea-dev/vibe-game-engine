@@ -2043,8 +2043,56 @@ struct EditorHandler {
 /// boundary as-is without dragging its error type along, and the editor
 /// only needs the summary.
 struct ExportSummary {
+    root: PathBuf,
     binary: PathBuf,
     bundle_files: usize,
+}
+
+/// Studio's own icon, used for games that set none.
+const FALLBACK_GAME_ICON: &[u8] = include_bytes!("../assets/app_logo.png");
+
+/// Starts an exported game, its printed lines going to the Output tab as
+/// `[game]`. It runs on after Studio closes.
+fn launch_exported_game(
+    binary: &std::path::Path,
+    output: &engine_editor::OutputLog,
+) -> Result<(), String> {
+    let mut child = std::process::Command::new(binary)
+        .current_dir(binary.parent().unwrap_or(std::path::Path::new(".")))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("could not start {}: {err}", binary.display()))?;
+    use std::io::BufRead;
+    for pipe in [
+        child
+            .stdout
+            .take()
+            .map(|out| Box::new(out) as Box<dyn std::io::Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|err| Box::new(err) as Box<dyn std::io::Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let output = output.clone();
+        let _ = std::thread::Builder::new()
+            .name("exported-game-output".to_owned())
+            .spawn(move || {
+                for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+                    output.write_line(format!("[game] {line}"));
+                }
+            });
+    }
+    // Reap it when it exits so it doesn't linger as a zombie.
+    let _ = std::thread::Builder::new()
+        .name("exported-game-wait".to_owned())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    Ok(())
 }
 
 impl EditorHandler {
@@ -2405,9 +2453,16 @@ impl EditorHandler {
                 return;
             };
             let project = self.state.project.clone();
-            let plan = ExportPlan::for_configuration(&project, &configuration, &export_dir);
+            let mut plan = ExportPlan::for_configuration(&project, &configuration, &export_dir);
+            plan.fallback_icon = Some(FALLBACK_GAME_ICON.to_vec());
             let (sender, receiver) = std::sync::mpsc::channel();
             let wake = self.wake.clone();
+            let output = self.state.output.clone();
+            output.write_line(format!(
+                "[export] {} ({})",
+                configuration.name,
+                plan.profile.label()
+            ));
             tracing::info!(
                 configuration = %configuration.name,
                 crate_name = %plan.crate_name,
@@ -2417,8 +2472,10 @@ impl EditorHandler {
             match std::thread::Builder::new()
                 .name("studio-export".to_owned())
                 .spawn(move || {
-                    let result = engine::project::build::export(&project, &plan)
+                    let log = |line: &str| output.write_line(format!("[export] {line}"));
+                    let result = engine::project::build::export_logged(&project, &plan, &log)
                         .map(|report| ExportSummary {
+                            root: report.root,
                             binary: report.binary,
                             bundle_files: report.bundle_files,
                         })
@@ -2447,10 +2504,29 @@ impl EditorHandler {
                     bundle_files = summary.bundle_files,
                     "export finished"
                 );
+                self.state.output.write_line(format!(
+                    "[export] Done: {} ({} asset files)",
+                    summary.root.display(),
+                    summary.bundle_files
+                ));
+                let run = self.state.export_then_run;
                 self.finish_export();
+                if run {
+                    self.state.output.write_line("[export] Starting the game");
+                    if let Err(message) = launch_exported_game(&summary.binary, &self.state.output)
+                    {
+                        self.state.output.write_line(format!("[export] {message}"));
+                        self.state.asset_browser.operation_error = Some(message);
+                    }
+                }
             }
             Ok(Err(message)) => {
                 tracing::error!(error = %message, "export failed");
+                self.state
+                    .output
+                    .write_line(format!("[export] Failed: {message}"));
+                self.state.asset_browser.operation_error =
+                    Some(format!("Export failed: {message}"));
                 self.finish_export();
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -2465,6 +2541,7 @@ impl EditorHandler {
     fn finish_export(&mut self) {
         self.export = None;
         self.state.export_running = false;
+        self.state.export_then_run = false;
     }
 
     /// Persists the current workspace / panel layout / open scene to the

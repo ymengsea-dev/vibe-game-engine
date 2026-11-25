@@ -76,6 +76,7 @@ fn kind_color(kind: StorageKind, palette: &Palette) -> egui::Color32 {
         StorageKind::BuildCache => palette.accent,
         StorageKind::StudioTemp => palette.info,
         StorageKind::OldEngineCopy => palette.purple,
+        StorageKind::GameBuild => palette.success,
         StorageKind::Backup => palette.subtle,
     }
 }
@@ -705,6 +706,181 @@ fn project_section(ui: &mut egui::Ui, state: &mut EditorState, palette: &Palette
             tracing::error!(error = %err, "could not save the graphics quality");
         }
     }
+    ui.add_space(22.0);
+    game_section(ui, state, palette);
+}
+
+/// Where the Game group keeps settings being typed that aren't valid yet
+/// (a half-typed bundle ID), so typing isn't undone every frame.
+fn game_draft_id() -> egui::Id {
+    egui::Id::new("settings.game.draft")
+}
+
+/// The project's game settings: what the finished game is called, its
+/// icon and how its window opens. A valid change is saved at once.
+fn game_section(ui: &mut egui::Ui, state: &mut EditorState, palette: &Palette) {
+    let project_name = state.project.manifest().name.clone();
+    let saved = state.project.manifest().game.clone();
+    let mut draft: engine_project::GameSettings = ui
+        .data(|data| data.get_temp(game_draft_id()))
+        .unwrap_or_else(|| saved.clone());
+    let enabled = !state.export_running;
+    let icons: Vec<String> = state
+        .asset_index
+        .entries()
+        .map(|(path, _)| path.to_string_lossy().replace('\\', "/"))
+        .filter(|path| {
+            let lower = path.to_ascii_lowercase();
+            lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg")
+        })
+        .collect();
+
+    ui.label(
+        crate::theme::semibold("Game")
+            .size(15.0)
+            .color(palette.text),
+    );
+    ui.add_space(8.0);
+    let field_width = 220.0;
+    let text_row = |ui: &mut egui::Ui, value: &mut String, hint: &str| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(field_width, 28.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                crate::widgets::text_field(ui, value, hint);
+            },
+        );
+    };
+    ui.add_enabled_ui(enabled, |ui| {
+        group(ui, palette, |ui| {
+            let mut name = draft.name.clone().unwrap_or_default();
+            let row = Row {
+                first: true,
+                swatch: None,
+                title: "Name",
+                detail: Some("Window title and app name"),
+                enabled,
+            };
+            group_row(ui, palette, row, |ui| {
+                text_row(ui, &mut name, &project_name)
+            });
+            draft.name = Some(name).filter(|name| !name.trim().is_empty());
+
+            let row = Row {
+                first: false,
+                swatch: None,
+                title: "Version",
+                detail: None,
+                enabled,
+            };
+            group_row(ui, palette, row, |ui| {
+                text_row(ui, &mut draft.version, "1.0.0")
+            });
+
+            let mut bundle = draft.bundle_id.clone().unwrap_or_default();
+            let made_up = draft.bundle_id(&project_name);
+            let row = Row {
+                first: false,
+                swatch: None,
+                title: "Bundle ID",
+                detail: Some("macOS only"),
+                enabled,
+            };
+            group_row(ui, palette, row, |ui| text_row(ui, &mut bundle, &made_up));
+            draft.bundle_id = Some(bundle).filter(|id| !id.trim().is_empty());
+
+            let row = Row {
+                first: false,
+                swatch: None,
+                title: "Icon",
+                detail: Some("Square PNG or JPEG"),
+                enabled,
+            };
+            group_row(ui, palette, row, |ui| {
+                let label = draft
+                    .icon
+                    .clone()
+                    .unwrap_or_else(|| "Studio icon".to_owned());
+                egui::ComboBox::from_id_salt("settings.game.icon")
+                    .width(field_width)
+                    .icon(crate::widgets::combo_chevron)
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut draft.icon, None, "Studio icon");
+                        for icon in &icons {
+                            ui.selectable_value(&mut draft.icon, Some(icon.clone()), icon);
+                        }
+                    });
+            });
+
+            let row = Row {
+                first: false,
+                swatch: None,
+                title: "Window size",
+                detail: Some("In points; ignored when full screen"),
+                enabled,
+            };
+            group_row(ui, palette, row, |ui| {
+                let range = engine_project::MIN_WINDOW_SIDE..=engine_project::MAX_WINDOW_SIDE;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(field_width, 28.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add(egui::DragValue::new(&mut draft.window.width).range(range.clone()));
+                        ui.label(egui::RichText::new("×").color(palette.muted));
+                        ui.add(egui::DragValue::new(&mut draft.window.height).range(range));
+                    },
+                );
+            });
+
+            let row = Row {
+                first: false,
+                swatch: None,
+                title: "Full screen",
+                detail: None,
+                enabled,
+            };
+            group_row(ui, palette, row, |ui| {
+                crate::widgets::toggle(ui, palette, &mut draft.window.fullscreen);
+            });
+            let row = Row {
+                first: false,
+                swatch: None,
+                title: "Resizable window",
+                detail: None,
+                enabled,
+            };
+            group_row(ui, palette, row, |ui| {
+                crate::widgets::toggle(ui, palette, &mut draft.window.resizable);
+            });
+        });
+    });
+    ui.add_space(8.0);
+    let problem = draft.validate().err();
+    let note = match &problem {
+        Some(reason) => egui::RichText::new(format!("Not saved: {reason}")).color(palette.danger),
+        None => egui::RichText::new(
+            "Used by Run and every export. Build and Run (⌘B) makes the game in Builds.",
+        )
+        .color(palette.subtle),
+    };
+    ui.label(note.size(12.0));
+
+    if problem.is_none() && draft != saved {
+        state.project.manifest_mut().game = draft.clone();
+        if let Err(err) = state.project.save_manifest() {
+            state.project.manifest_mut().game = saved;
+            tracing::error!(error = %err, "could not save the game settings");
+        }
+    }
+    let keep = problem.is_some() || draft != state.project.manifest().game;
+    ui.data_mut(|data| {
+        if keep {
+            data.insert_temp(game_draft_id(), draft);
+        } else {
+            data.remove::<engine_project::GameSettings>(game_draft_id());
+        }
+    });
 }
 
 fn quality_label(level: QualityLevel) -> &'static str {
@@ -948,7 +1124,9 @@ mod tests {
         let inside = window.expand(0.5);
         for shape in &output.shapes {
             match &shape.shape {
-                egui::epaint::Shape::Text(text) => {
+                // An empty text field still emits an empty galley, with no
+                // bounds to check.
+                egui::epaint::Shape::Text(text) if !text.galley.text().is_empty() => {
                     let rect = text.visual_bounding_rect();
                     assert!(
                         inside.contains_rect(rect),
@@ -1011,11 +1189,46 @@ mod tests {
     fn snapshot_settings_project() {
         let (root, mut state) = settings_state();
         state.project.manifest_mut().quality = QualityLevel::High;
+        state.project.manifest_mut().game.name = Some("Star Hop".into());
+        state.project.manifest_mut().game.window.fullscreen = true;
         let path = crate::ui_snapshot::snapshot_dir().join("settings-project.png");
-        crate::ui_snapshot::render_png(&path, egui::vec2(900.0, 700.0), 2.0, |ui| {
+        crate::ui_snapshot::render_png(&path, egui::vec2(900.0, 820.0), 2.0, |ui| {
             draw_page(ui, &mut state, Page::Project);
         })
         .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn game_settings_save_only_when_valid() {
+        let (root, mut state) = settings_state();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let frame = |state: &mut EditorState, draft: engine_project::GameSettings| {
+            ctx.data_mut(|data| data.insert_temp(super::game_draft_id(), draft));
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                draw_page(ui, state, Page::Project)
+            });
+            output.textures_delta.clear();
+        };
+        let bad = engine_project::GameSettings {
+            bundle_id: Some("nodots".into()),
+            ..engine_project::GameSettings::default()
+        };
+        frame(&mut state, bad);
+        assert_eq!(
+            state.project.manifest().game,
+            engine_project::GameSettings::default()
+        );
+
+        let good = engine_project::GameSettings {
+            name: Some("Star Hop".into()),
+            ..engine_project::GameSettings::default()
+        };
+        frame(&mut state, good.clone());
+        assert_eq!(state.project.manifest().game, good);
+        let reopened = engine_project::Project::open(state.project.root()).expect("open");
+        assert_eq!(reopened.manifest().game.name.as_deref(), Some("Star Hop"));
         let _ = std::fs::remove_dir_all(root);
     }
 

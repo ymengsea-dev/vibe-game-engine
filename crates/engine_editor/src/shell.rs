@@ -645,6 +645,13 @@ impl EditorShell {
             MenuCommand::OpenSettings.apply(state);
         }
 
+        // Cmd+B exports into Builds/ and starts the game.
+        if self.context.input(|input| {
+            input.modifiers.command && !input.modifiers.shift && input.key_pressed(egui::Key::B)
+        }) {
+            MenuCommand::BuildAndRun.apply(state);
+        }
+
         // Cmd+P plays in the Scene View (or stops), Cmd+Shift+P pauses or
         // resumes, Cmd+Option+P steps one frame. They work while the game
         // has focus too, so the preview can always be paused or stopped.
@@ -3055,6 +3062,16 @@ fn menu_file(
             dispatch_menu_command(state, new_project, MenuCommand::Export);
             ui.close();
         }
+        if ui
+            .add_enabled(enabled, egui::Button::new("Build and Run   ⌘B"))
+            .on_hover_text(
+                "Export the selected configuration into the project's Builds folder and start it",
+            )
+            .clicked()
+        {
+            dispatch_menu_command(state, new_project, MenuCommand::BuildAndRun);
+            ui.close();
+        }
         ui.separator();
         if ui.button("Settings…   ⌘,").clicked() {
             dispatch_menu_command(state, new_project, MenuCommand::OpenSettings);
@@ -3108,6 +3125,7 @@ fn dispatch_menu_command(
                 && let Some(dir) = pick_project_directory("Export into")
             {
                 state.export_request = Some(dir);
+                state.export_then_run = false;
             }
         }
     }

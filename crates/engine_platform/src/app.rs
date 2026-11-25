@@ -165,7 +165,18 @@ impl<H: PlatformHandler> ApplicationHandler<UserEvent> for Runner<H> {
                 self.config.min_width,
                 self.config.min_height,
             ))
-            .with_maximized(self.config.maximized);
+            .with_maximized(self.config.maximized)
+            .with_resizable(self.config.resizable)
+            .with_fullscreen(
+                self.config
+                    .fullscreen
+                    .then_some(winit::window::Fullscreen::Borderless(None)),
+            )
+            .with_window_icon(self.config.icon.as_ref().and_then(|icon| {
+                winit::window::Icon::from_rgba(icon.rgba.clone(), icon.width, icon.height)
+                    .map_err(|error| tracing::warn!(%error, "skipped an invalid window icon"))
+                    .ok()
+            }));
 
         match event_loop.create_window(attributes) {
             Ok(window) => {

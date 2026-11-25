@@ -31,6 +31,8 @@ pub use engine_utils as utils;
 pub mod app;
 pub mod embed;
 pub mod gameplay;
+mod window_settings;
+pub use window_settings::PROJECT_ENV;
 
 /// Commonly used engine types, re-exported for convenient glob imports.
 ///

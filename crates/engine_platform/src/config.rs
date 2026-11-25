@@ -1,5 +1,16 @@
 //! Window configuration.
 
+/// A window icon: RGBA pixels, row by row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowIcon {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// `width * height * 4` bytes.
+    pub rgba: Vec<u8>,
+}
+
 /// Configuration for the window created by [`crate::run_windowed`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowConfig {
@@ -15,6 +26,12 @@ pub struct WindowConfig {
     pub min_width: u32,
     /// Minimum height in logical pixels, independent of the monitor scale.
     pub min_height: u32,
+    /// Fill the screen (borderless, on the current monitor) instead of a window.
+    pub fullscreen: bool,
+    /// Whether the window can be resized.
+    pub resizable: bool,
+    /// The window's icon on Windows and Linux. macOS shows the app's icon.
+    pub icon: Option<WindowIcon>,
 }
 
 impl WindowConfig {
@@ -36,6 +53,9 @@ impl WindowConfig {
             maximized: false,
             min_width: 640,
             min_height: 480,
+            fullscreen: false,
+            resizable: true,
+            icon: None,
         }
     }
 

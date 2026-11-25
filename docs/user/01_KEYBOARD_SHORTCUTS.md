@@ -13,6 +13,7 @@ Shortcuts don't work while you type in a text box.
 | ⌘Z | Undo |
 | ⌘⇧Z or ⌘Y | Redo |
 | ⌘, | Settings |
+| ⌘B | Build and Run: export the game into the project's `Builds` folder and start it |
 | ⌘Q | Quit |
 
 ## Scene View: moving the view

@@ -38,14 +38,14 @@ cargo run -p island                         # Run the Island sample project
 cargo run -p player -- path/to/export-dir   # Run an exported game folder
 ```
 
-The player expects `main.ron` plus either `assets.pak` or a loose `assets/` directory. The Island project is a sample and acceptance target, not required to use the engine.
+The player expects `main.ron` plus either `assets.pak` or a loose `assets/` directory (in a macOS export, in `<Game>.app/Contents/Resources`). The Island project is a sample and acceptance target, not required to use the engine.
 
 ## Create, run, and export a project
 
 1. Start Studio with `cargo run -p editor`.
 2. Choose **File > New Project…**, enter a project name, then choose its parent location. Studio creates `<location>/<project-name>` with `src/`, `assets/`, `scenes/`, and `project.ron`.
 3. Build a scene, add assets, then use the toolbar Play control to run the selected configuration.
-4. Choose **File > Build & Export…** and select an empty export directory to stage a distributable game folder.
+4. Choose **File > Build & Export…** and pick a folder: Studio puts `<Game>.app` there on macOS, or a `<Game>` folder with the program on Windows and Linux. **File > Build and Run** (⌘B) does the same into the project's `Builds` folder and starts the game. See `docs/user/05_EXPORTING.md`.
 
 ## Island sample
 

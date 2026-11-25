@@ -18,6 +18,7 @@ Docs are split by audience (index: `docs/README.md`): `docs/user/` is product do
 - `docs/user/02_SCENE_VIEW_GUIDE.md`: every Scene View option (gizmo tools, 3D/2D, overlays, Terrain, Tilemap, Environment) and what choosing it does.
 - `docs/user/03_STORAGE.md`: Settings → Storage: what Studio may clean (build caches, temp files, old engine copies), what it never touches, and automatic cleanup.
 - `docs/user/04_GRAPHICS_QUALITY.md`: Settings → Project graphics quality, the Inspector's Level of detail section, `_LODn` model files and the Distance detail overlay.
+- `docs/user/05_EXPORTING.md`: Settings → Project → Game (name, icon, window), Build & Export, Build and Run, sharing an unsigned Mac app.
 
 Whenever a change adds or changes a shortcut, mouse action, menu option, overlay or on-screen marker, update the matching doc in the same change. Tell the user about new shortcuts and point to the doc. Verify each documented behaviour against the code; document limitations honestly.
 
@@ -48,6 +49,7 @@ cargo test -p engine_scripting --features lua <name>
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 cargo deny check                          # licenses/advisories (deny.toml)
+# CI: .github/workflows/ci.yml builds, lints and tests on macOS, Windows and Linux, then stages a Studio package per OS
 RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo build -p editor -p player --release && cargo run -p studio_packager -- target/release target/<new-dir>   # the packager refuses binaries holding the home folder path
 ```
 

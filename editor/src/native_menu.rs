@@ -31,6 +31,7 @@ fn command_for_id(id: &str, recent: &[PathBuf]) -> Option<MenuCommand> {
         "save_scene" => MenuCommand::SaveScene,
         "upgrade_rust_sdk" => MenuCommand::UpgradeRustSdk,
         "export" => MenuCommand::Export,
+        "build_and_run" => MenuCommand::BuildAndRun,
         "settings" => MenuCommand::OpenSettings,
         "quit" => MenuCommand::Quit,
         "undo" => MenuCommand::Undo,
@@ -133,7 +134,7 @@ fn enabled(id: &str, state: &EditorState) -> bool {
                 && !state.play.is_playing()
                 && !state.export_running
         }
-        "export" => {
+        "export" | "build_and_run" => {
             state.selected_configuration().is_some()
                 && !state.export_running
                 && !state.play.is_playing()
@@ -172,6 +173,7 @@ impl NativeMenu {
         add_item(&file, &mut items, "upgrade_rust_sdk", "Upgrade Rust SDK")?;
         file.append(&PredefinedMenuItem::separator())?;
         add_item(&file, &mut items, "export", "Build & Export…")?;
+        add_item(&file, &mut items, "build_and_run", "Build and Run (⌘B)")?;
         file.append(&PredefinedMenuItem::separator())?;
         add_item(&file, &mut items, "settings", "Settings… (⌘,)")?;
         menu.append(&file)?;

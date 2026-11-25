@@ -929,7 +929,8 @@ impl Game for Player {
 /// Loads the export and runs it.
 fn run(export_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let player = load_export(export_dir)?;
-    let mut config = GameConfig::new("RustyEngine Player", 1280, 720);
+    let mut config =
+        GameConfig::new("RustyEngine Player", 1280, 720).with_exported_settings(export_dir);
     config.save_path = player.save_path.clone();
     run_game(config, player)?;
     Ok(())
@@ -975,7 +976,7 @@ fn run_project(
     selected_scene: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let player = load_project(root, selected_scene)?;
-    let mut config = GameConfig::new("RustyEngine Lua Game", 1280, 720);
+    let mut config = GameConfig::new("RustyEngine Lua Game", 1280, 720).with_project_settings(root);
     config.save_path = player.save_path.clone();
     run_game(config, player)?;
     Ok(())

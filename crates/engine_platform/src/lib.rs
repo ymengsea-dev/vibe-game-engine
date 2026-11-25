@@ -21,7 +21,7 @@ mod input;
 
 pub use actions::{ActionMap, AxisBinding, Binding};
 pub use app::{PlatformHandler, RedrawPolicy, WakeHandle, Window, apply_cursor_lock, run_windowed};
-pub use config::WindowConfig;
+pub use config::{WindowConfig, WindowIcon};
 pub use error::PlatformError;
 pub use event::{KeyCode, MouseButton, PlatformEvent, map_window_event, typed_characters};
 pub use gamepad::{

@@ -7,6 +7,12 @@
 //! Cross-compilation is out of scope — you export for the OS you build
 //! on. "Windows and macOS first-class" means the binary name and the
 //! `cargo` invocation are correct on both.
+//!
+//! The result is one thing a player can start ([`ExportLayout`]): on macOS
+//! a `<Game>.app` bundle (program in `Contents/MacOS`, data and icon in
+//! `Contents/Resources`), elsewhere a `<Game>` folder holding the program
+//! and its data. A new export replaces an older export of the same project
+//! there, and refuses to touch anything else.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -37,6 +43,110 @@ pub struct ExportedSettings {
     /// The graphics quality the game starts at.
     #[serde(default)]
     pub quality: crate::QualityLevel,
+    /// The window title. Empty in exports from before game settings, which
+    /// keep the title their program sets.
+    #[serde(default)]
+    pub title: String,
+    /// How the window opens. `None` in older exports.
+    #[serde(default)]
+    pub window: Option<crate::WindowSettings>,
+    /// The window icon's file beside these settings, if one was exported.
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+/// Marks an export Studio made, holding the project's id, so a new export
+/// replaces only its own earlier result.
+pub const EXPORT_IDENTITY_FILE: &str = ".rustyengine-export";
+/// The window icon written beside the game's data.
+pub const WINDOW_ICON_FILE: &str = "icon.png";
+/// The macOS bundle icon, in `Contents/Resources`.
+pub const BUNDLE_ICON_FILE: &str = "AppIcon.icns";
+
+/// Which kind of system an export is laid out for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetOs {
+    /// A `.app` bundle.
+    MacOs,
+    /// A folder with `<Game>.exe`.
+    Windows,
+    /// A folder with the program.
+    Linux,
+}
+
+impl TargetOs {
+    /// The system Studio is running on (Linux for anything not macOS or
+    /// Windows).
+    #[must_use]
+    pub fn host() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else if cfg!(target_os = "windows") {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
+    }
+}
+
+/// Where an export's pieces go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportLayout {
+    /// What a player starts or copies: `<Game>.app` or the `<Game>` folder.
+    pub root: PathBuf,
+    /// The program.
+    pub executable: PathBuf,
+    /// The folder the game's data goes in (beside the program, or
+    /// `Contents/Resources`).
+    pub data: PathBuf,
+}
+
+impl ExportLayout {
+    /// The layout of an export called `name` inside `dir` for `os`.
+    #[must_use]
+    pub fn new(dir: &Path, name: &str, os: TargetOs) -> Self {
+        let folder = crate::file_safe_name(name);
+        match os {
+            TargetOs::MacOs => {
+                let root = dir.join(format!("{folder}.app"));
+                let contents = root.join("Contents");
+                Self {
+                    executable: contents.join("MacOS").join(crate::slug(name)),
+                    data: contents.join("Resources"),
+                    root,
+                }
+            }
+            TargetOs::Windows => {
+                let root = dir.join(&folder);
+                Self {
+                    executable: root.join(format!("{folder}.exe")),
+                    data: root.clone(),
+                    root,
+                }
+            }
+            TargetOs::Linux => {
+                let root = dir.join(&folder);
+                Self {
+                    executable: root.join(crate::slug(name)),
+                    data: root.clone(),
+                    root,
+                }
+            }
+        }
+    }
+
+    /// The same layout moved to `root`, for staging beside the real one.
+    fn rebased(&self, root: &Path) -> Self {
+        let move_path = |path: &Path| {
+            path.strip_prefix(&self.root)
+                .map_or_else(|_| path.to_path_buf(), |rest| root.join(rest))
+        };
+        Self {
+            root: root.to_path_buf(),
+            executable: move_path(&self.executable),
+            data: move_path(&self.data),
+        }
+    }
 }
 
 /// What an exported game knows about its scene order.
@@ -116,6 +226,16 @@ pub struct ExportPlan {
     pub assets_src: PathBuf,
     /// The scene file copied next to the bundle for the runtime to load.
     pub scene_src: PathBuf,
+    /// The name players see; names the `.app` or folder.
+    pub game_name: String,
+    /// The project's game settings (version, bundle id, icon, window).
+    pub game: crate::GameSettings,
+    /// The project's name, for defaults the settings leave open.
+    pub project_name: String,
+    /// The system the export is laid out for.
+    pub os: TargetOs,
+    /// Image used when the project sets no icon (Studio passes its own).
+    pub fallback_icon: Option<Vec<u8>>,
 }
 
 impl ExportPlan {
@@ -127,6 +247,7 @@ impl ExportPlan {
         profile: BuildProfile,
         export_dir: impl Into<PathBuf>,
     ) -> Self {
+        let manifest = project.manifest();
         Self {
             crate_name: crate_name.into(),
             profile,
@@ -135,6 +256,11 @@ impl ExportPlan {
             features: Vec::new(),
             assets_src: project.assets_dir(),
             scene_src: project.main_scene_path(),
+            game_name: manifest.game.display_name(&manifest.name),
+            game: manifest.game.clone(),
+            project_name: manifest.name.clone(),
+            os: TargetOs::host(),
+            fallback_icon: None,
         }
     }
 
@@ -157,6 +283,7 @@ impl ExportPlan {
             .filter(|absolute| absolute.is_file())
             .unwrap_or_else(|| project.main_scene_path());
 
+        let manifest = project.manifest();
         Self {
             crate_name: configuration.crate_name(project),
             profile: configuration.profile,
@@ -165,6 +292,11 @@ impl ExportPlan {
             features: configuration.features.clone(),
             assets_src: project.assets_dir(),
             scene_src,
+            game_name: manifest.game.display_name(&manifest.name),
+            game: manifest.game.clone(),
+            project_name: manifest.name.clone(),
+            os: TargetOs::host(),
+            fallback_icon: None,
         }
     }
 
@@ -190,24 +322,24 @@ impl ExportPlan {
         args
     }
 
-    /// The binary file name (`<crate>` plus the host `.exe` suffix).
-    pub fn binary_name(&self) -> String {
-        format!("{}{}", self.crate_name, exe_suffix())
+    /// Where the export's pieces go inside [`ExportPlan::export_dir`].
+    pub fn layout(&self) -> ExportLayout {
+        ExportLayout::new(&self.export_dir, &self.game_name, self.os)
     }
 
-    /// Where [`export`] copies the binary in the staged folder.
+    /// Where [`export`] copies the program.
     pub fn binary_dest(&self) -> PathBuf {
-        self.export_dir.join(self.binary_name())
+        self.layout().executable
     }
 
     /// Where [`export`] writes the packed asset bundle.
     pub fn bundle_dest(&self) -> PathBuf {
-        self.export_dir.join(engine_scene::BUNDLE_FILE)
+        self.layout().data.join(engine_scene::BUNDLE_FILE)
     }
 
     /// Where [`export`] copies the main scene.
     pub fn scene_dest(&self) -> PathBuf {
-        self.export_dir.join(engine_scene::EXPORT_SCENE_FILE)
+        self.layout().data.join(engine_scene::EXPORT_SCENE_FILE)
     }
 }
 
@@ -289,7 +421,9 @@ impl BuiltExecutables {
 /// What [`export`] produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportReport {
-    /// The staged game binary.
+    /// What a player starts or copies: the `.app` bundle or the game folder.
+    pub root: PathBuf,
+    /// The staged game binary (run it to launch the game).
     pub binary: PathBuf,
     /// The staged `assets.pak`.
     pub bundle: PathBuf,
@@ -318,38 +452,72 @@ fn io(path: &Path, err: std::io::Error) -> ProjectError {
 /// fails; [`ProjectError::Io`] if staging a file fails; the packing
 /// error is wrapped in [`ProjectError::Build`].
 pub fn export(project: &Project, plan: &ExportPlan) -> Result<ExportReport, ProjectError> {
+    export_logged(project, plan, &|line| tracing::info!("{line}"))
+}
+
+/// [`export`], reporting each step and Cargo's compiler output through
+/// `log` as readable lines (called from more than one thread).
+///
+/// # Errors
+///
+/// As [`export`].
+pub fn export_logged(
+    project: &Project,
+    plan: &ExportPlan,
+    log: &(dyn Fn(&str) + Sync),
+) -> Result<ExportReport, ProjectError> {
+    let layout = plan.layout();
+    log(&format!(
+        "Exporting {} into {}",
+        plan.game_name,
+        layout.root.display()
+    ));
     if project.language() == GameplayLanguage::Lua {
         let studio = std::env::current_exe()
             .map_err(|err| ProjectError::Build(format!("could not locate Studio: {err}")))?;
         let player = studio.with_file_name(format!("player{}", exe_suffix()));
+        log("Packing the Lua game with the bundled player");
         return export_lua(project, plan, &player);
     }
-    tracing::info!(
-        crate_name = %plan.crate_name,
-        profile = plan.profile.label(),
-        out = %plan.export_dir.display(),
-        "starting export build"
-    );
+    log(&format!(
+        "Compiling {} ({})",
+        plan.crate_name,
+        plan.profile.label()
+    ));
 
     let mut cargo = Command::new("cargo")
         .args(plan.cargo_args())
         .current_dir(project.root())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| ProjectError::Build(format!("could not launch cargo: {err}")))?;
     let mut built = BuiltExecutables::default();
-    if let Some(stdout) = cargo.stdout.take() {
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => built.observe(&line),
-                Err(err) => {
-                    return Err(ProjectError::Build(format!(
-                        "could not read cargo output: {err}"
-                    )));
+    let stderr = cargo.stderr.take();
+    let read = std::thread::scope(|scope| {
+        // Compiler progress and errors, as they come.
+        if let Some(stderr) = stderr {
+            scope.spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    log(&line);
+                }
+            });
+        }
+        if let Some(stdout) = cargo.stdout.take() {
+            for line in BufReader::new(stdout).lines() {
+                match line {
+                    Ok(line) => built.observe(&line),
+                    Err(err) => {
+                        return Err(ProjectError::Build(format!(
+                            "could not read cargo output: {err}"
+                        )));
+                    }
                 }
             }
         }
-    }
+        Ok(())
+    });
+    read?;
     let status = cargo
         .wait()
         .map_err(|err| ProjectError::Build(format!("could not wait for cargo: {err}")))?;
@@ -412,34 +580,101 @@ fn stage_export(
     compiled: &Path,
     lua: bool,
 ) -> Result<ExportReport, ProjectError> {
-    std::fs::create_dir_all(&plan.export_dir).map_err(|err| io(&plan.export_dir, err))?;
-    // Invalidate an old export identity before replacing any game content.
-    let marker = plan.export_dir.join(LUA_EXPORT_MARKER);
-    if marker.exists() {
-        std::fs::remove_file(&marker).map_err(|err| io(&marker, err))?;
+    plan.game
+        .validate()
+        .map_err(|reason| ProjectError::Build(format!("game settings: {reason}")))?;
+    let layout = plan.layout();
+    let identity = project.manifest().project_id.to_string();
+    if layout.root.exists() && !is_own_export(&layout, &identity) {
+        return Err(ProjectError::Build(format!(
+            "{} already holds something that isn't an export of this project; \
+             move it away or choose another folder",
+            layout.root.display()
+        )));
+    }
+    let mut staging_name = layout.root.as_os_str().to_owned();
+    staging_name.push(".partial");
+    let staging = layout.rebased(Path::new(&staging_name));
+    if staging.root.exists() {
+        // Left by an export that stopped half way; only ever Studio's.
+        std::fs::remove_dir_all(&staging.root).map_err(|err| io(&staging.root, err))?;
+    }
+    let staged = stage_files(project, plan, &staging, compiled, lua, &identity);
+    let stats = match staged {
+        Ok(stats) => stats,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging.root);
+            return Err(error);
+        }
+    };
+    if layout.root.exists() {
+        std::fs::remove_dir_all(&layout.root).map_err(|err| io(&layout.root, err))?;
+    }
+    std::fs::rename(&staging.root, &layout.root).map_err(|err| io(&layout.root, err))?;
+    if plan.os == TargetOs::MacOs {
+        sign_bundle(&layout.root);
     }
 
-    let binary_dest = plan.binary_dest();
-    std::fs::copy(compiled, &binary_dest).map_err(|err| io(&binary_dest, err))?;
+    tracing::info!(
+        game = %layout.root.display(),
+        bundle_files = stats.files,
+        "export complete"
+    );
+    let scene =
+        Some(layout.data.join(engine_scene::EXPORT_SCENE_FILE)).filter(|path| path.is_file());
+    Ok(ExportReport {
+        root: layout.root.clone(),
+        binary: layout.executable.clone(),
+        bundle: layout.data.join(engine_scene::BUNDLE_FILE),
+        bundle_files: stats.files,
+        scene,
+    })
+}
 
-    let bundle_dest = plan.bundle_dest();
+/// Whether `layout.root` holds an earlier export of the project `identity`.
+fn is_own_export(layout: &ExportLayout, identity: &str) -> bool {
+    std::fs::read_to_string(layout.data.join(EXPORT_IDENTITY_FILE))
+        .is_ok_and(|text| text.trim() == identity)
+}
+
+/// Writes every file of the export into `layout`.
+fn stage_files(
+    project: &Project,
+    plan: &ExportPlan,
+    layout: &ExportLayout,
+    compiled: &Path,
+    lua: bool,
+    identity: &str,
+) -> Result<engine_asset::BundleStats, ProjectError> {
+    let write = |path: &Path, bytes: &[u8]| -> Result<(), ProjectError> {
+        std::fs::write(path, bytes).map_err(|err| io(path, err))
+    };
+    for dir in [&layout.root, &layout.data] {
+        std::fs::create_dir_all(dir).map_err(|err| io(dir, err))?;
+    }
+    if let Some(parent) = layout.executable.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| io(parent, err))?;
+    }
+    std::fs::copy(compiled, &layout.executable).map_err(|err| io(&layout.executable, err))?;
+    write(
+        &layout.data.join(EXPORT_IDENTITY_FILE),
+        format!("{identity}\n").as_bytes(),
+    )?;
+
     let stats = engine_asset::pack_dir_with_metadata(
         &plan.assets_src,
         &project.studio_dir().join("assets"),
-        &bundle_dest,
+        &layout.data.join(engine_scene::BUNDLE_FILE),
     )
     .map_err(|err| ProjectError::Build(format!("packing assets: {err}")))?;
 
-    let scene = if plan.scene_src.exists() {
-        let dest = plan.scene_dest();
+    if plan.scene_src.exists() {
+        let dest = layout.data.join(engine_scene::EXPORT_SCENE_FILE);
         std::fs::copy(&plan.scene_src, &dest).map_err(|err| io(&dest, err))?;
-        Some(dest)
-    } else {
-        None
-    };
+    }
 
     let scenes = project.resolve(Path::new(crate::SCENES_DIR))?;
-    engine_asset::pack_dir(&scenes, &plan.export_dir.join(SCENE_BUNDLE_FILE))
+    engine_asset::pack_dir(&scenes, &layout.data.join(SCENE_BUNDLE_FILE))
         .map_err(|err| ProjectError::Build(format!("packing scenes: {err}")))?;
     let order = ExportedSceneOrder {
         start: project
@@ -449,34 +684,145 @@ fn stage_export(
             .replace('\\', "/"),
         order: project.ordered_scenes(),
     };
-    let order_path = plan.export_dir.join(SCENE_ORDER_FILE);
     let order_text = ron::ser::to_string_pretty(&order, ron::ser::PrettyConfig::default())
         .map_err(|err| ProjectError::Build(format!("writing the scene order: {err}")))?;
-    std::fs::write(&order_path, order_text).map_err(|err| io(&order_path, err))?;
+    write(&layout.data.join(SCENE_ORDER_FILE), order_text.as_bytes())?;
+
+    let icon = export_icon(project, plan, layout)?;
     let settings = ExportedSettings {
         quality: project.manifest().quality,
+        title: plan.game_name.clone(),
+        window: Some(plan.game.window),
+        icon: icon.then(|| WINDOW_ICON_FILE.to_owned()),
     };
-    let settings_path = plan.export_dir.join(EXPORT_SETTINGS_FILE);
     let settings_text = ron::ser::to_string_pretty(&settings, ron::ser::PrettyConfig::default())
         .map_err(|err| ProjectError::Build(format!("writing the project settings: {err}")))?;
-    std::fs::write(&settings_path, settings_text).map_err(|err| io(&settings_path, err))?;
+    write(
+        &layout.data.join(EXPORT_SETTINGS_FILE),
+        settings_text.as_bytes(),
+    )?;
     if lua {
-        std::fs::write(&marker, format!("2\n{}\n", project.manifest().project_id))
-            .map_err(|err| io(&marker, err))?;
+        write(
+            &layout.data.join(LUA_EXPORT_MARKER),
+            format!("2\n{}\n", project.manifest().project_id).as_bytes(),
+        )?;
     }
+    if plan.os == TargetOs::MacOs {
+        let plist = info_plist(
+            &plan.game_name,
+            &plan.game.bundle_id(&plan.project_name),
+            &plan.game.version,
+            &layout
+                .executable
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            icon,
+        );
+        write(
+            &layout.root.join("Contents").join("Info.plist"),
+            plist.as_bytes(),
+        )?;
+    }
+    Ok(stats)
+}
 
-    tracing::info!(
-        binary = %binary_dest.display(),
-        bundle_files = stats.files,
-        "export complete"
-    );
+/// Writes the window icon (and on macOS the bundle icon) from the project's
+/// icon image, or the plan's fallback. Returns whether an icon was written.
+fn export_icon(
+    project: &Project,
+    plan: &ExportPlan,
+    layout: &ExportLayout,
+) -> Result<bool, ProjectError> {
+    let source = match &plan.game.icon {
+        Some(icon) => {
+            let path = project.resolve(&Path::new(crate::ASSETS_DIR).join(icon))?;
+            Some(std::fs::read(&path).map_err(|err| io(&path, err))?)
+        }
+        None => plan.fallback_icon.clone(),
+    };
+    let Some(source) = source else {
+        return Ok(false);
+    };
+    let icon =
+        crate::icon::square_icon(&source).map_err(|err| ProjectError::Build(err.to_string()))?;
+    let png = crate::icon::png_at(&icon, crate::icon::WINDOW_ICON_SIZE)
+        .map_err(|err| ProjectError::Build(err.to_string()))?;
+    let path = layout.data.join(WINDOW_ICON_FILE);
+    std::fs::write(&path, png).map_err(|err| io(&path, err))?;
+    if plan.os == TargetOs::MacOs {
+        let icns = crate::icon::icns(&icon).map_err(|err| ProjectError::Build(err.to_string()))?;
+        let path = layout.data.join(BUNDLE_ICON_FILE);
+        std::fs::write(&path, icns).map_err(|err| io(&path, err))?;
+    }
+    Ok(true)
+}
 
-    Ok(ExportReport {
-        binary: binary_dest,
-        bundle: bundle_dest,
-        bundle_files: stats.files,
-        scene,
-    })
+/// `text` safe inside an XML element.
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// A macOS bundle's `Info.plist` for the game.
+fn info_plist(name: &str, bundle_id: &str, version: &str, executable: &str, icon: bool) -> String {
+    let entry = |key: &str, value: &str| {
+        format!(
+            "\t<key>{}</key>\n\t<string>{}</string>\n",
+            xml_escape(key),
+            xml_escape(value)
+        )
+    };
+    let mut body = String::new();
+    body.push_str(&entry("CFBundleDevelopmentRegion", "en"));
+    body.push_str(&entry("CFBundleDisplayName", name));
+    body.push_str(&entry("CFBundleExecutable", executable));
+    if icon {
+        body.push_str(&entry("CFBundleIconFile", "AppIcon"));
+    }
+    body.push_str(&entry("CFBundleIdentifier", bundle_id));
+    body.push_str(&entry("CFBundleInfoDictionaryVersion", "6.0"));
+    body.push_str(&entry("CFBundleName", name));
+    body.push_str(&entry("CFBundlePackageType", "APPL"));
+    body.push_str(&entry("CFBundleShortVersionString", version));
+    body.push_str(&entry("CFBundleVersion", version));
+    body.push_str(&entry(
+        "LSApplicationCategoryType",
+        "public.app-category.games",
+    ));
+    body.push_str(&entry("LSMinimumSystemVersion", "11.0"));
+    body.push_str("\t<key>NSHighResolutionCapable</key>\n\t<true/>\n");
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n<dict>\n{body}</dict>\n</plist>\n"
+    )
+}
+
+/// Seals a macOS bundle with an ad-hoc signature, so macOS on Apple silicon
+/// accepts the copied program inside it. A failure is logged, not fatal: the
+/// game still runs on this Mac.
+fn sign_bundle(bundle: &Path) {
+    let codesign = Path::new("/usr/bin/codesign");
+    if !codesign.is_file() {
+        return;
+    }
+    match Command::new(codesign)
+        .args(["--force", "--deep", "--sign", "-"])
+        .arg(bundle)
+        .output()
+    {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => tracing::warn!(
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "could not sign the game bundle"
+        ),
+        Err(error) => tracing::warn!(%error, "could not run codesign"),
+    }
 }
 
 #[cfg(test)]
@@ -514,12 +860,12 @@ mod tests {
             b"player binary"
         );
         assert!(report.scene.as_ref().is_some_and(|path| path.is_file()));
-        assert!(plan.export_dir.join(LUA_EXPORT_MARKER).is_file());
+        assert!(plan.layout().data.join(LUA_EXPORT_MARKER).is_file());
         assert_eq!(
-            std::fs::read_to_string(plan.export_dir.join(LUA_EXPORT_MARKER)).expect("marker"),
+            std::fs::read_to_string(plan.layout().data.join(LUA_EXPORT_MARKER)).expect("marker"),
             format!("2\n{}\n", project.manifest().project_id)
         );
-        let content = engine_scene::open_export(&plan.export_dir)
+        let content = engine_scene::open_export(&plan.layout().data)
             .expect("packed bundle")
             .expect("open export");
         assert!(
@@ -550,14 +896,14 @@ mod tests {
             root.join("out"),
         );
         export_lua(&project, &plan, &player).expect("first export");
-        let packed =
-            engine_asset::Bundle::open(&plan.export_dir.join("scenes.pak")).expect("packed scenes");
+        let packed = engine_asset::Bundle::open(&plan.layout().data.join("scenes.pak"))
+            .expect("packed scenes");
         assert!(packed.get("main.ron").is_some());
         assert!(packed.get("level2.ron").is_some());
 
         std::fs::remove_file(&second).expect("remove second source");
         export_lua(&project, &plan, &player).expect("re-export");
-        let packed = engine_asset::Bundle::open(&plan.export_dir.join("scenes.pak"))
+        let packed = engine_asset::Bundle::open(&plan.layout().data.join("scenes.pak"))
             .expect("repacked scenes");
         assert!(packed.get("level2.ron").is_none());
         let _ = std::fs::remove_dir_all(root);
@@ -584,7 +930,8 @@ mod tests {
             root.join("out"),
         );
         export_lua(&project, &plan, &player).expect("export");
-        let text = std::fs::read_to_string(plan.export_dir.join(SCENE_ORDER_FILE)).expect("file");
+        let text =
+            std::fs::read_to_string(plan.layout().data.join(SCENE_ORDER_FILE)).expect("file");
         let order: ExportedSceneOrder = ron::from_str(&text).expect("parse");
         assert_eq!(order.start, "scenes/main.ron");
         assert_eq!(order.order, ["scenes/level2.ron", "scenes/main.ron"]);
@@ -610,19 +957,18 @@ mod tests {
 
         stage_export(&project, &plan, &binary, false).expect("export");
 
-        let packed = engine_asset::Bundle::open(&plan.export_dir.join(SCENE_BUNDLE_FILE))
+        let packed = engine_asset::Bundle::open(&plan.layout().data.join(SCENE_BUNDLE_FILE))
             .expect("packed scenes");
         assert!(packed.get("level2.ron").is_some());
-        assert!(!plan.export_dir.join(LUA_EXPORT_MARKER).exists());
+        assert!(!plan.layout().data.join(LUA_EXPORT_MARKER).exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn failed_reexport_never_keeps_the_previous_games_identity() {
-        let root = std::env::temp_dir().join(format!(
-            "vge-lua-export-marker-failure-{}",
-            std::process::id()
-        ));
+    fn a_failed_reexport_keeps_the_previous_export_whole() {
+        let root =
+            std::env::temp_dir().join(format!("vge-lua-export-failure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
         let project = Project::create_with_language(&root, "New Game", GameplayLanguage::Lua)
             .expect("project");
         let binary = root.join("bundled-player");
@@ -632,17 +978,121 @@ mod tests {
             &BuildConfiguration::new("Debug", BuildProfile::Debug),
             root.join("out"),
         );
-        std::fs::create_dir_all(&plan.export_dir).expect("export dir");
-        let marker = plan.export_dir.join(LUA_EXPORT_MARKER);
-        std::fs::write(&marker, b"2\n00000000-0000-4000-8000-000000000001\n").expect("old marker");
+        let first = stage_export(&project, &plan, &binary, true).expect("first export");
         plan.assets_src = root.join("missing-assets");
 
         assert!(stage_export(&project, &plan, &binary, true).is_err());
-        assert!(
-            !marker.exists(),
-            "old save identity must be invalidated first"
-        );
+        assert!(first.bundle.is_file(), "the earlier export is untouched");
+        assert!(plan.layout().data.join(LUA_EXPORT_MARKER).is_file());
+        let partial = std::fs::read_dir(&plan.export_dir)
+            .expect("out")
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".partial"));
+        assert!(!partial, "the half-made export is cleaned up");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_export_never_replaces_what_it_did_not_make() {
+        let root = std::env::temp_dir().join(format!("vge-export-foreign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project =
+            Project::create_with_language(&root, "Taken", GameplayLanguage::Lua).expect("project");
+        let binary = root.join("bundled-player");
+        std::fs::write(&binary, b"player").expect("binary");
+        let plan = ExportPlan::for_configuration(
+            &project,
+            &BuildConfiguration::new("Debug", BuildProfile::Debug),
+            root.join("out"),
+        );
+        let layout = plan.layout();
+        std::fs::create_dir_all(&layout.root).expect("someone else's folder");
+        std::fs::write(layout.root.join("notes.txt"), b"mine").expect("their file");
+        let error = stage_export(&project, &plan, &binary, true).expect_err("refused");
+        assert!(
+            error
+                .to_string()
+                .contains("isn't an export of this project"),
+            "{error}"
+        );
+        assert!(layout.root.join("notes.txt").is_file());
+
+        // Another project's export there is refused too.
+        std::fs::remove_file(layout.root.join("notes.txt")).expect("clear");
+        std::fs::create_dir_all(&layout.data).expect("data");
+        std::fs::write(layout.data.join(EXPORT_IDENTITY_FILE), "another-project\n").expect("id");
+        assert!(stage_export(&project, &plan, &binary, true).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exports_carry_the_game_name_window_and_icon() {
+        let root = std::env::temp_dir().join(format!("vge-export-game-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut project =
+            Project::create_with_language(&root, "Plain", GameplayLanguage::Lua).expect("project");
+        let image = image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 200, 10, 255]));
+        image
+            .save(project.assets_dir().join("icon.png"))
+            .expect("icon");
+        let game = &mut project.manifest_mut().game;
+        game.name = Some("Moon & Co".into());
+        game.icon = Some("icon.png".into());
+        game.window.fullscreen = true;
+        let binary = root.join("bundled-player");
+        std::fs::write(&binary, b"player").expect("binary");
+        let plan = ExportPlan::for_configuration(
+            &project,
+            &BuildConfiguration::new("Debug", BuildProfile::Debug),
+            root.join("out"),
+        );
+        let report = stage_export(&project, &plan, &binary, true).expect("export");
+        let layout = plan.layout();
+        assert_eq!(report.root, layout.root);
+        assert!(layout.root.ends_with(match TargetOs::host() {
+            TargetOs::MacOs => "Moon Co.app",
+            _ => "Moon Co",
+        }));
+        let settings: ExportedSettings = ron::from_str(
+            &std::fs::read_to_string(layout.data.join(EXPORT_SETTINGS_FILE)).expect("settings"),
+        )
+        .expect("parse");
+        assert_eq!(settings.title, "Moon & Co");
+        assert!(settings.window.is_some_and(|window| window.fullscreen));
+        assert_eq!(settings.icon.as_deref(), Some(WINDOW_ICON_FILE));
+        assert!(layout.data.join(WINDOW_ICON_FILE).is_file());
+        if TargetOs::host() == TargetOs::MacOs {
+            assert!(layout.data.join(BUNDLE_ICON_FILE).is_file());
+            let plist =
+                std::fs::read_to_string(layout.root.join("Contents/Info.plist")).expect("plist");
+            assert!(plist.contains("<string>Moon &amp; Co</string>"), "{plist}");
+            assert!(
+                plist.contains("<string>com.rustyengine.moon-co</string>"),
+                "{plist}"
+            );
+            assert!(
+                plist.contains("<string>Moon-Co</string>"),
+                "executable: {plist}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn each_system_gets_its_own_layout() {
+        let dir = Path::new("/out");
+        let mac = ExportLayout::new(dir, "Space Cats", TargetOs::MacOs);
+        assert_eq!(mac.root, dir.join("Space Cats.app"));
+        assert_eq!(
+            mac.executable,
+            dir.join("Space Cats.app/Contents/MacOS/Space-Cats")
+        );
+        assert_eq!(mac.data, dir.join("Space Cats.app/Contents/Resources"));
+        let windows = ExportLayout::new(dir, "Space Cats", TargetOs::Windows);
+        assert_eq!(windows.executable, dir.join("Space Cats/Space Cats.exe"));
+        assert_eq!(windows.data, dir.join("Space Cats"));
+        let linux = ExportLayout::new(dir, "Space Cats", TargetOs::Linux);
+        assert_eq!(linux.executable, dir.join("Space Cats/Space-Cats"));
     }
 
     #[test]
@@ -831,13 +1281,12 @@ mod tests {
         let project = temp_project();
         let out = project.root().join("export");
         let plan = ExportPlan::new(&project, "game", BuildProfile::Release, &out);
+        let layout = plan.layout();
 
-        assert_eq!(
-            plan.binary_dest(),
-            out.join(format!("game{}", exe_suffix()))
-        );
-        assert_eq!(plan.bundle_dest(), out.join("assets.pak"));
-        assert_eq!(plan.scene_dest(), out.join("main.ron"));
+        assert!(layout.root.starts_with(&out));
+        assert_eq!(plan.binary_dest(), layout.executable);
+        assert_eq!(plan.bundle_dest(), layout.data.join("assets.pak"));
+        assert_eq!(plan.scene_dest(), layout.data.join("main.ron"));
 
         std::fs::remove_dir_all(project.root()).ok();
     }
@@ -892,12 +1341,9 @@ mod tests {
 
         assert!(report.binary.is_file(), "staged binary must exist");
         assert!(report.bundle.is_file(), "asset bundle must exist");
-        assert_eq!(
-            report.scene.as_deref(),
-            Some(project.root().join("export/main.ron").as_path())
-        );
+        assert_eq!(report.scene, Some(plan.scene_dest()));
         assert!(report.scene.as_ref().is_some_and(|path| path.is_file()));
-        let exported = engine_scene::open_export(&out)
+        let exported = engine_scene::open_export(&plan.layout().data)
             .expect("bundle exists")
             .expect("export opens");
         assert_eq!(

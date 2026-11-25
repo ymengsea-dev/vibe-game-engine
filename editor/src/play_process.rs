@@ -382,7 +382,9 @@ fn rust_play_command(binary: &PathBuf, root: &std::path::Path, scene: &std::path
     command
         .current_dir(root)
         .env("RUST_BACKTRACE", "1")
-        .env("VGE_SCENE", scene);
+        .env("VGE_SCENE", scene)
+        // The game's window follows the project's game settings.
+        .env(engine::PROJECT_ENV, root);
     command
 }
 

@@ -13,6 +13,7 @@ Open **File → Settings…** (or press **⌘,**). Storage is the first section.
 | **Build cache** | The compiled code of a **Rust** game, in the project's `target` folder. Usually the biggest item: a few GB per project. Lua projects have none. | Always. The next **Play** or **Run** rebuilds it; that one start takes longer (a few minutes after a full clean). |
 | **Temp files** | Studio's leftovers: the Play staging folder, and crash reports older than 30 days. | Always. |
 | **Old engine copies** | Engine folders under `sdk/` that **Upgrade Rust SDK** left behind and the project no longer uses. | Always. Studio asks once before deleting them. |
+| **Game builds** | Games that **Build and Run** (⌘B) made in the project's `Builds` folder, one folder per configuration. | Always. The next Build and Run makes it again. Automatic cleanup never removes them. |
 
 Studio also lists **Backups**: copies of your files that Studio saved before changing them automatically, such as `project.ron.v1.bak` (before upgrading the project format) or `Cargo.toml.sdk-<version>.bak` (before **Upgrade Rust SDK**). They are tiny, and they let you undo a change Studio made. Studio never deletes them. Use **Show in Finder** if you want to remove them yourself.
 

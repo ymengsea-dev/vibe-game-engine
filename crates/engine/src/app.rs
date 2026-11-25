@@ -193,6 +193,12 @@ pub struct GameConfig {
     /// draw distance. Games can change it while running with
     /// [`GameContext::set_quality`].
     pub quality: engine_renderer::QualityLevel,
+    /// Open filling the screen instead of in a window.
+    pub fullscreen: bool,
+    /// Whether players can resize the window.
+    pub resizable: bool,
+    /// The window's icon on Windows and Linux (macOS uses the app's icon).
+    pub icon: Option<engine_platform::WindowIcon>,
 }
 
 impl GameConfig {
@@ -227,7 +233,28 @@ impl GameConfig {
             save_policy: SavePolicy::default(),
             ui_navigation: true,
             quality: engine_renderer::QualityLevel::default(),
+            fullscreen: false,
+            resizable: true,
+            icon: None,
         }
+    }
+
+    /// This config with the window the project's game settings ask for
+    /// (title, size, fullscreen, resizing, icon). `root` is the project
+    /// folder; nothing changes if its `project.ron` can't be read.
+    #[must_use]
+    pub fn with_project_settings(mut self, root: &std::path::Path) -> Self {
+        crate::window_settings::apply_project(&mut self, root);
+        self
+    }
+
+    /// This config with the window an exported game's settings ask for.
+    /// `data_dir` is the folder holding the export's data; nothing changes
+    /// for an export made before game settings.
+    #[must_use]
+    pub fn with_exported_settings(mut self, data_dir: &std::path::Path) -> Self {
+        crate::window_settings::apply_exported(&mut self, data_dir);
+        self
     }
 
     /// Checks the fields [`run_game`] can't recover from.
@@ -2634,10 +2661,16 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
 /// - [`GameError::Renderer`] if GPU initialization fails.
 /// - [`GameError::Setup`] (or whatever the game returns) if
 ///   [`Game::setup`] fails.
-pub fn run_game(config: GameConfig, game: impl Game + 'static) -> Result<(), GameError> {
+pub fn run_game(mut config: GameConfig, game: impl Game + 'static) -> Result<(), GameError> {
+    // The project's game settings win over what the code says.
+    crate::window_settings::apply_automatic(&mut config);
     config.validate()?;
 
-    let window_config = WindowConfig::new(config.title.clone(), config.width, config.height);
+    let mut window_config = WindowConfig::new(config.title.clone(), config.width, config.height)
+        .min_size(config.width.min(640), config.height.min(480));
+    window_config.fullscreen = config.fullscreen;
+    window_config.resizable = config.resizable;
+    window_config.icon = config.icon.clone();
     // `run_windowed` takes the handler by value and can't hand a setup
     // failure back, so the handler drops any fatal error into this shared
     // slot (single-threaded; genuine shared ownership between here and the

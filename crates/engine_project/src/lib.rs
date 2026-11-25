@@ -20,7 +20,13 @@ use serde::{Deserialize, Serialize};
 pub use engine_renderer::QualityLevel;
 
 pub mod build;
+mod game;
+pub mod icon;
 mod starter;
+pub use game::{
+    GameSettings, MAX_GAME_NAME_CHARS, MAX_WINDOW_SIDE, MIN_WINDOW_SIDE, WindowSettings,
+    file_safe_name, slug,
+};
 
 pub mod storage;
 
@@ -2919,6 +2925,10 @@ pub struct ProjectManifest {
     /// written before quality levels; only written when changed.
     #[serde(default, skip_serializing_if = "is_default_quality")]
     pub quality: QualityLevel,
+    /// What the finished game is called and how its window opens. Missing
+    /// (defaults) in older manifests; only written when changed.
+    #[serde(default, skip_serializing_if = "game::is_default_game")]
+    pub game: GameSettings,
 }
 
 fn is_default_quality(level: &QualityLevel) -> bool {
@@ -3041,6 +3051,7 @@ impl Project {
             configurations: default_configurations(),
             scene_order: Vec::new(),
             quality: QualityLevel::default(),
+            game: GameSettings::default(),
         };
         validate_project_paths(&root, &manifest)?;
 

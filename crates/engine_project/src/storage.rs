@@ -9,6 +9,7 @@
 //! | [`StorageKind::BuildCache`] | `<root>/target`, only with Cargo's `CACHEDIR.TAG` | a click, or the automatic limits |
 //! | [`StorageKind::StudioTemp`] | `.studio/play-output`, a `.studio/crash.log` older than 30 days | a click, or the automatic limits |
 //! | [`StorageKind::OldEngineCopy`] | `sdk/<version>` that `Cargo.toml` no longer uses | a click only |
+//! | [`StorageKind::GameBuild`] | `Builds/<configuration>` folders that Build and Run made | a click only |
 //! | [`StorageKind::Backup`] | `*.bak` files Studio made before changing a user file | never (shown only) |
 //!
 //! Scenes, assets, scripts, asset IDs (`.studio/assets`), sessions,
@@ -18,6 +19,9 @@
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+/// The folder Build and Run exports into, inside a project.
+pub const GAME_BUILDS_DIR: &str = "Builds";
 
 /// Cargo's build folder inside a project.
 pub const BUILD_CACHE_DIR: &str = "target";
@@ -40,16 +44,19 @@ pub enum StorageKind {
     StudioTemp,
     /// Engine SDK copies left behind by an SDK upgrade.
     OldEngineCopy,
+    /// Games Build and Run exported into the project's `Builds` folder.
+    GameBuild,
     /// Copies of user files Studio made before changing them.
     Backup,
 }
 
 impl StorageKind {
     /// All kinds, in display order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::BuildCache,
         Self::StudioTemp,
         Self::OldEngineCopy,
+        Self::GameBuild,
         Self::Backup,
     ];
 
@@ -59,6 +66,7 @@ impl StorageKind {
             Self::BuildCache => "Build cache",
             Self::StudioTemp => "Temp files",
             Self::OldEngineCopy => "Old engine copies",
+            Self::GameBuild => "Game builds",
             Self::Backup => "Backups",
         }
     }
@@ -69,6 +77,7 @@ impl StorageKind {
             Self::BuildCache => "Rebuilt on your next Play or Run",
             Self::StudioTemp => "Leftovers from Play and old crash reports",
             Self::OldEngineCopy => "Left behind by Upgrade Rust SDK",
+            Self::GameBuild => "Made by Build and Run; made again next time",
             Self::Backup => "Copies of files Studio changed",
         }
     }
@@ -232,6 +241,18 @@ pub fn scan_project(root: &Path, now: SystemTime) -> ProjectStorage {
         }
     }
 
+    if let Ok(builds) = std::fs::read_dir(root.join(GAME_BUILDS_DIR)) {
+        let mut found: Vec<PathBuf> = builds
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| is_real_dir(path))
+            .collect();
+        found.sort();
+        for path in found {
+            add(StorageKind::GameBuild, path);
+        }
+    }
+
     let mut backups: Vec<PathBuf> = [root.to_path_buf(), root.join("src")]
         .iter()
         .filter_map(|dir| std::fs::read_dir(dir).ok())
@@ -292,6 +313,11 @@ fn check(root: &Path, item: &StorageItem) -> Result<PathBuf, StorageError> {
             let version = name.to_str().ok_or_else(refuse)?;
             if sdk_in_use(&root, version) {
                 return Err(StorageError::InUse(path.clone()));
+            }
+        }
+        StorageKind::GameBuild => {
+            if parent != root.join(GAME_BUILDS_DIR) || !metadata.is_dir() {
+                return Err(refuse());
             }
         }
         StorageKind::Backup => return Err(StorageError::NotCleanable(path.clone())),
@@ -413,6 +439,7 @@ mod tests {
         write(&root.join("sdk/0.2.0/crates/engine/lib.rs"), 20);
         write(&root.join("project.ron.v1.bak"), 4);
         write(&root.join("src/studio_api.lua.legacy.bak"), 6);
+        write(&root.join("Builds/Debug/Game.app/Contents/MacOS/game"), 30);
         // Never listed:
         write(&root.join(".studio/assets/a.png.meta"), 9);
         write(&root.join(".studio/autosave.ron"), 9);
@@ -426,6 +453,20 @@ mod tests {
         assert_eq!(engines.len(), 1, "0.2.0 is still in Cargo.toml");
         assert!(engines[0].path.ends_with("sdk/0.1.0"));
         assert_eq!(storage.bytes(StorageKind::Backup), 10);
+        let builds: Vec<_> = storage.items_of(StorageKind::GameBuild).collect();
+        assert_eq!(builds.len(), 1);
+        assert!(builds[0].path.ends_with("Builds/Debug"));
+        assert_eq!(clean_item(&root, builds[0]).expect("clean"), 30);
+        assert!(!root.join("Builds/Debug").exists());
+        let outside = StorageItem {
+            kind: StorageKind::GameBuild,
+            path: root.join("scenes"),
+            bytes: 0,
+        };
+        assert!(
+            clean_item(&root, &outside).is_err(),
+            "only folders inside Builds"
+        );
         for item in &storage.items {
             let text = item.path.to_string_lossy();
             assert!(!text.contains("assets") && !text.contains("save") && !text.contains("scenes"));

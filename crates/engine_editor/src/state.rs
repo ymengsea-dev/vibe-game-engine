@@ -83,6 +83,10 @@ pub(crate) fn road_insert_index(points: &[[f32; 3]], at: Vec3, width: f32) -> us
     }
 }
 
+/// The project folder Build and Run exports into, one folder per
+/// configuration. Rebuildable; Settings → Storage can clear it.
+pub const BUILDS_DIR: &str = engine_project::storage::GAME_BUILDS_DIR;
+
 /// Where the editor's "Save Scene" / "Open Scene" actions read and write,
 /// relative to the editor's working directory.
 pub const DEFAULT_SCENE_PATH: &str = "scene.ron";
@@ -221,6 +225,8 @@ pub struct EditorState {
     /// Set by File ▸ Build & Export…: the folder to stage the export
     /// into. Taken by the shell binary, which owns the build thread.
     pub export_request: Option<PathBuf>,
+    /// Start the game once the requested export finishes (Build and Run).
+    pub export_then_run: bool,
     /// File-menu request to pin this Rust project to the bundled SDK.
     pub sdk_upgrade_request: bool,
     /// Result shown in a dismissible dialog after the host handles that request.
@@ -605,6 +611,7 @@ impl EditorState {
             overlays: OverlayToggles::default(),
             cull_report: None,
             export_request: None,
+            export_then_run: false,
             sdk_upgrade_request: false,
             sdk_upgrade_message: None,
             export_running: false,

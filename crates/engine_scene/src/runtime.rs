@@ -1073,19 +1073,50 @@ fn load_export(dir: &Path, bundle_path: &Path) -> Result<ExportContent, SceneErr
     Ok(ExportContent { library, scene })
 }
 
-/// The directory the running executable lives in, if it can be found.
+/// The directory a shipped game's content sits in, if it can be found: the
+/// running executable's own folder, or for a program inside a macOS bundle
+/// (`<Game>.app/Contents/MacOS`) with its data in `Contents/Resources`,
+/// that folder.
 ///
-/// This is where a shipped game's content sits — not the working
-/// directory, which is wherever the player happened to double-click
-/// from.
+/// Not the working directory, which is wherever the player happened to
+/// double-click from.
 pub fn executable_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    exe.parent().map(Path::to_path_buf)
+    exe.parent().map(data_dir_for)
+}
+
+/// Where a game whose program sits in `program_dir` keeps its data.
+fn data_dir_for(program_dir: &Path) -> PathBuf {
+    if program_dir.ends_with("Contents/MacOS")
+        && let Some(contents) = program_dir.parent()
+    {
+        let resources = contents.join("Resources");
+        if resources.join(BUNDLE_FILE).is_file() {
+            return resources;
+        }
+    }
+    program_dir.to_path_buf()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_program_inside_a_mac_bundle_finds_its_data_in_resources() {
+        let root = std::env::temp_dir().join(format!("vge-bundle-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let program = root.join("Game.app/Contents/MacOS");
+        let resources = root.join("Game.app/Contents/Resources");
+        std::fs::create_dir_all(&program).expect("program dir");
+        std::fs::create_dir_all(&resources).expect("resources");
+        assert_eq!(data_dir_for(&program), program, "no data yet: stay put");
+        std::fs::write(resources.join(BUNDLE_FILE), b"pak").expect("bundle");
+        assert_eq!(data_dir_for(&program), resources);
+        let plain = root.join("Game");
+        assert_eq!(data_dir_for(&plain), plain);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     /// A project-shaped temp directory with one asset and its sidecar.
     fn temp_project(name: &str) -> PathBuf {

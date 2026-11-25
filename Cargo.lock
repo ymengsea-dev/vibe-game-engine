@@ -1626,6 +1626,7 @@ dependencies = [
  "engine_renderer",
  "engine_scene",
  "engine_scripting",
+ "image",
  "ron",
  "serde",
  "serde_json",

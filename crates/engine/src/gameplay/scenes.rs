@@ -19,6 +19,9 @@ pub use engine_project::build::SCENE_BUNDLE_FILE;
 
 /// The origin of scenes requested with `change_scene`.
 #[derive(Debug, Clone)]
+// One per game, so the size gap doesn't matter; boxing `Project` would break
+// every Rust game's `main.rs`, which builds `SceneSource::Project(project)`.
+#[allow(clippy::large_enum_variant)]
 pub enum SceneSource {
     /// A project on disk, as used by Studio Play.
     Project(Project),

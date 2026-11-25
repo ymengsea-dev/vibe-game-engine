@@ -61,6 +61,9 @@ pub enum MenuCommand {
     UpgradeRustSdk,
     /// Choose an export destination.
     Export,
+    /// Export the selected configuration into the project's `Builds` folder
+    /// and start it.
+    BuildAndRun,
     /// Quit after the unsaved-work guard.
     Quit,
     /// Undo the last scene edit.
@@ -182,6 +185,21 @@ impl MenuCommand {
             Self::NewProject => return MenuEffect::NewProjectDialog,
             Self::OpenProject => return MenuEffect::OpenProjectDialog,
             Self::Export => return MenuEffect::ExportDialog,
+            Self::BuildAndRun => {
+                if let Some(configuration) = state.selected_configuration()
+                    && !state.export_running
+                    && !state.play.is_playing()
+                {
+                    state.export_request = Some(
+                        state
+                            .project
+                            .root()
+                            .join(crate::state::BUILDS_DIR)
+                            .join(engine_project::file_safe_name(&configuration.name)),
+                    );
+                    state.export_then_run = true;
+                }
+            }
             Self::OpenRecent(path) => {
                 crate::shell::request_guarded(state, PendingAction::OpenProject(path))
             }
