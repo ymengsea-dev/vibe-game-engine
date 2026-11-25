@@ -150,6 +150,8 @@ Open it from the Inspector: **AI → Brain → Behaviour tree → Edit behaviour
 | **Tidy** | Put every node back in the automatic layout |
 | **Add point here** (Patrol) | Add the object's current position as a patrol point |
 
+While the game plays, the window can't be changed. With **Play** in the Scene View, it shows what each node of the selected object's tree answered on the last frame: a yellow dot for still running, green for worked, red for failed. Nodes the tree didn't reach are faded. Select the object and open the window before pressing Play: the Hierarchy and Inspector are locked while playing.
+
 ## Code panel
 
 | Shortcut | What it does |
@@ -167,6 +169,18 @@ Open it from the Inspector: **AI → Brain → Behaviour tree → Edit behaviour
 | Click the game | Give the game the keyboard and mouse |
 | Esc | Free the mouse if the game holds it (the game keeps running); click the game to lock it again (that click does not count as a click in the game) |
 | Esc (game in its own window) | Close the game |
+
+While the game is paused in the Scene View, the usual Scene View moves look around the frozen game with a free camera. It starts where the game's camera was:
+
+| Shortcut | What it does |
+| --- | --- |
+| Right-drag, ⌘+drag or ⌘+two-finger scroll | Orbit |
+| Middle-drag, Shift+right-drag or two-finger scroll | Pan |
+| Mouse wheel or pinch | Zoom toward the cursor |
+| Hold right mouse + W A S D / Q E | Fly (Shift to go faster) |
+| **Back to game camera** | Look through the game's camera again |
+
+⏭ Step keeps the free camera. Resuming goes back to the game's camera.
 
 Players use these on the game's own UI:
 

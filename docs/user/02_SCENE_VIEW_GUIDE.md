@@ -312,6 +312,8 @@ Tick **Paint solid tiles** in the Inspector to make tiles block movement.
 - Click the game to control it. Click another panel to get the keyboard back.
 - If the game holds the mouse, press **Esc** to free it. Esc does not stop the game. Click the game to lock the mouse again; that click does not count as a click in the game.
 - You can't edit the scene while playing.
+- While paused, drag, scroll or pinch over the game to look around it with a free camera, the same way you move around the Scene View. **Back to game camera**, or resuming, returns to the game's view. The game doesn't move on while you look.
+- An open **Behaviour tree** window shows, live, which nodes of the selected object's tree run (see [Keyboard and Mouse Shortcuts](01_KEYBOARD_SHORTCUTS.md#behaviour-tree-window)).
 - Errors show in **Output** and **Problems**.
 
 **Play or Run?** Play is a quick check inside Studio. **Run** opens the game in its own window, the way players see it.

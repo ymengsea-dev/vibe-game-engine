@@ -32,6 +32,15 @@ pub(crate) enum SessionEvent {
     Resumed,
     /// The game wants the mouse locked (`true`) or released (`false`).
     CursorLock(bool),
+    /// The game's camera, reported right after it paused.
+    GameCamera(engine::embed::protocol::CameraPose),
+    /// What the watched object's behaviour tree did on its last frame.
+    AiTrace {
+        /// The watched object.
+        object_id: String,
+        /// `(node index, answer)` pairs, in visiting order.
+        nodes: engine::scene::BtTrace,
+    },
     /// The connection closed (the game quit, crashed or was stopped).
     Closed,
     /// The preview cannot continue; the message says why, for the user.
@@ -257,7 +266,11 @@ fn read_game(
             }
             Ok(ToStudio::Paused) => Some(SessionEvent::Paused),
             Ok(ToStudio::Resumed) => Some(SessionEvent::Resumed),
+            Ok(ToStudio::GameCamera(pose)) => Some(SessionEvent::GameCamera(pose)),
             Ok(ToStudio::CursorLock { locked }) => Some(SessionEvent::CursorLock(locked)),
+            Ok(ToStudio::AiTrace { object_id, nodes }) => {
+                Some(SessionEvent::AiTrace { object_id, nodes })
+            }
             Ok(ToStudio::Hello { .. }) => None,
             Err(protocol::ProtocolError::Io(_)) => Some(SessionEvent::Closed),
             Err(err) => Some(SessionEvent::Failed(format!(

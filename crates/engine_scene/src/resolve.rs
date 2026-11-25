@@ -172,6 +172,23 @@ pub trait SceneResolver {
         Ok(None)
     }
 
+    /// Gives an animated model's `renderer` its lower detail tiers (see
+    /// [`SceneResolver::resolve_mesh_lods`]). Defaulted to doing nothing:
+    /// the model is then drawn in full detail at every distance.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Resolve`] if a tier cannot be uploaded.
+    fn resolve_skinned_lods(
+        &mut self,
+        mesh: &AssetRef,
+        renderer: &mut engine_ecs::components::SkinnedMeshRenderer,
+        auto_generate: bool,
+    ) -> Result<(), SceneError> {
+        let _ = (mesh, renderer, auto_generate);
+        Ok(())
+    }
+
     /// Builds the GPU side of a terrain: its chunk meshes and tile
     /// materials. `Ok(None)` means "not drawn by this resolver".
     ///
@@ -518,12 +535,27 @@ pub(crate) fn insert_components(
             &mesh_renderer.material,
             mesh_renderer.material_override.as_ref(),
         ) {
-            Ok(Some(model)) => insert_skinned_model(
-                entity_mut,
-                model,
-                mesh_renderer.animation.clone().unwrap_or_default(),
-                mesh_renderer.material_override.clone(),
-            ),
+            Ok(Some(mut model)) => {
+                // A model whose tiers fail still draws, in full detail.
+                if let Err(err) = resolver.resolve_skinned_lods(
+                    &mesh_renderer.mesh,
+                    &mut model.renderer,
+                    auto_generate,
+                ) {
+                    tracing::warn!(
+                        mesh = %mesh_renderer.mesh.id,
+                        error = %err,
+                        "could not load an animated model's detail tiers"
+                    );
+                }
+                insert_skinned_model(
+                    entity_mut,
+                    model,
+                    mesh_renderer.animation.clone().unwrap_or_default(),
+                    mesh_renderer.material_override.clone(),
+                );
+                entity_mut.insert(crate::AppliedLod(auto_generate));
+            }
             Ok(None) => match resolver.resolve_mesh_with_material(
                 &mesh_renderer.mesh,
                 &mesh_renderer.material,

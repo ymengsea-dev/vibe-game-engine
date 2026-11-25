@@ -39,13 +39,25 @@ fn lod_suffix(name: &str) -> Option<(u32, &str)> {
 /// two or more unskinned meshes all named `<Name>_LOD<n>` with the same
 /// `<Name>` and distinct `n`. `None` for any other file.
 pub fn authored_lod_tiers(gltf: &ImportedGltf) -> Option<Vec<&ImportedMesh>> {
+    lod_tiers(gltf, false)
+}
+
+/// [`authored_lod_tiers`] for an animated model: every `_LOD<n>` mesh is
+/// skinned to the same skeleton, so all tiers share one pose.
+pub fn authored_skinned_lod_tiers(gltf: &ImportedGltf) -> Option<Vec<&ImportedMesh>> {
+    lod_tiers(gltf, true)
+}
+
+fn lod_tiers(gltf: &ImportedGltf, skinned: bool) -> Option<Vec<&ImportedMesh>> {
     if gltf.meshes.len() < 2 {
         return None;
     }
+    let skeleton = gltf.meshes.first()?.skeleton;
     let mut tiers = Vec::with_capacity(gltf.meshes.len());
     let mut stem = None;
     for mesh in &gltf.meshes {
-        if mesh.skin_weights.is_some() {
+        let is_skinned = mesh.skin_weights.is_some() && mesh.skeleton.is_some();
+        if is_skinned != skinned || (skinned && mesh.skeleton != skeleton) {
             return None;
         }
         let (number, name) = lod_suffix(mesh.name.as_deref()?)?;
@@ -66,9 +78,12 @@ pub fn authored_lod_tiers(gltf: &ImportedGltf) -> Option<Vec<&ImportedMesh>> {
 /// Simpler copies of `mesh` for far away, most detailed first (see
 /// [`GENERATED_LOD_RATIOS`]). Empty when `mesh` is too small to be worth
 /// it or the simplifier cannot reduce it.
+///
+/// A skinned mesh keeps its skin: the simplifier only drops vertices, so
+/// each kept vertex keeps its own joints and weights.
 pub fn generated_lod_tiers(mesh: &ImportedMesh) -> Vec<ImportedMesh> {
     let full = mesh.indices.len() / 3;
-    if full < MIN_TRIANGLES_TO_SIMPLIFY || mesh.skin_weights.is_some() {
+    if full < MIN_TRIANGLES_TO_SIMPLIFY {
         return Vec::new();
     }
     let mut tiers = Vec::new();
@@ -111,14 +126,38 @@ fn simplify(mesh: &ImportedMesh, ratio: f32) -> Option<ImportedMesh> {
     if indices.len() < 3 {
         return None;
     }
-    let (vertices, indices) = compact(&mesh.vertices, &indices)?;
+    let (vertices, indices, skin_weights) = match &mesh.skin_weights {
+        Some(skin) => {
+            if skin.joints.len() != mesh.vertices.len() || skin.weights.len() != mesh.vertices.len()
+            {
+                return None;
+            }
+            let skinned: Vec<_> = mesh
+                .vertices
+                .iter()
+                .zip(skin.joints.iter().zip(&skin.weights))
+                .map(|(vertex, (joints, weights))| (*vertex, *joints, *weights))
+                .collect();
+            let (kept, indices) = compact(&skinned, &indices)?;
+            let vertices = kept.iter().map(|(vertex, _, _)| *vertex).collect();
+            let skin = crate::ImportedSkinWeights {
+                joints: kept.iter().map(|(_, joints, _)| *joints).collect(),
+                weights: kept.iter().map(|(_, _, weights)| *weights).collect(),
+            };
+            (vertices, indices, Some(skin))
+        }
+        None => {
+            let (vertices, indices) = compact(&mesh.vertices, &indices)?;
+            (vertices, indices, None)
+        }
+    };
     Some(ImportedMesh {
         name: mesh.name.clone(),
         vertices,
         indices,
         material: mesh.material,
-        skin_weights: None,
-        skeleton: None,
+        skeleton: skin_weights.as_ref().and(mesh.skeleton),
+        skin_weights,
     })
 }
 
@@ -249,6 +288,61 @@ mod tests {
             assert!(tier.vertices.len() <= full.vertices.len());
             previous = tier.indices.len();
         }
+    }
+
+    #[test]
+    fn generated_tiers_of_a_skinned_mesh_keep_each_vertex_skin() {
+        let mut full = grid(30);
+        let count = full.vertices.len();
+        // Weight each vertex by its own x, so a kept vertex can be checked.
+        full.skin_weights = Some(crate::ImportedSkinWeights {
+            joints: (0..count)
+                .map(|i| [u16::try_from(i % 4).unwrap(), 0, 0, 0])
+                .collect(),
+            weights: full
+                .vertices
+                .iter()
+                .map(|vertex| [vertex.position[0], 0.0, 0.0, 0.0])
+                .collect(),
+        });
+        full.skeleton = Some(0);
+        let tiers = generated_lod_tiers(&full);
+        assert!(!tiers.is_empty());
+        for tier in &tiers {
+            let skin = tier.skin_weights.as_ref().expect("skin kept");
+            assert_eq!(skin.weights.len(), tier.vertices.len());
+            assert_eq!(skin.joints.len(), tier.vertices.len());
+            assert_eq!(tier.skeleton, Some(0));
+            for (vertex, weights) in tier.vertices.iter().zip(&skin.weights) {
+                assert_eq!(
+                    weights[0], vertex.position[0],
+                    "weights stay with their vertex"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn skinned_files_have_their_own_authored_tiers() {
+        let skinned = |name: &str| {
+            let mut mesh = grid(2);
+            mesh.name = Some(name.into());
+            mesh.skin_weights = Some(crate::ImportedSkinWeights {
+                joints: vec![[0; 4]; mesh.vertices.len()],
+                weights: vec![[1.0, 0.0, 0.0, 0.0]; mesh.vertices.len()],
+            });
+            mesh.skeleton = Some(0);
+            mesh
+        };
+        let file = gltf(vec![skinned("Hero_LOD1"), skinned("Hero_LOD0")]);
+        assert!(authored_lod_tiers(&file).is_none(), "not a still model");
+        let tiers = authored_skinned_lod_tiers(&file).expect("tiers");
+        assert_eq!(tiers[0].name.as_deref(), Some("Hero_LOD0"));
+        let mut other_skeleton = skinned("Hero_LOD1");
+        other_skeleton.skeleton = Some(1);
+        assert!(
+            authored_skinned_lod_tiers(&gltf(vec![skinned("Hero_LOD0"), other_skeleton])).is_none()
+        );
     }
 
     #[test]

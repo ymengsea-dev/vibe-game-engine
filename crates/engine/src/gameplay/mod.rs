@@ -56,7 +56,7 @@ use engine_ui::NodeId;
 
 use crate::app::{GameContext, GameError};
 
-pub use ai::{AiEvent, ai_state};
+pub use ai::{AiEvent, ai_state, behaviour_tree_trace};
 pub use animation::AnimationEventFired;
 pub use bodies::GameplayQueries;
 pub use camera::{choose_active_camera, view_from_world};
@@ -206,6 +206,9 @@ pub struct GameplayRuntime {
     carried_objects: Vec<Entity>,
     /// Their IDs: their start rules have already run.
     carried_ids: HashSet<String>,
+    /// Objects spawned while playing whose data joined `scene`, so their
+    /// rules run; forgotten again when they are destroyed.
+    adopted: HashSet<String>,
     /// Noises made since AI last listened.
     noises: Vec<ai::Noise>,
     /// AI events not yet taken by the host.
@@ -259,6 +262,7 @@ impl GameplayRuntime {
             carried: Vec::new(),
             carried_objects: Vec::new(),
             carried_ids: HashSet::new(),
+            adopted: HashSet::new(),
             noises: Vec::new(),
             ai_events: Vec::new(),
             ai_rng: engine_utils::Rng::new(AI_SEED),
@@ -781,13 +785,14 @@ impl GameplayRuntime {
                 })
             })
             .collect();
+        let mut spawned = spawned;
         if let Some(library) = &self.assets
             && !spawned.is_empty()
         {
             let has_sprites = spawned
                 .iter()
                 .any(|(_, scene)| scene.entities.iter().any(|entity| entity.sprite.is_some()));
-            for (entities, mut scene) in spawned {
+            for (entities, scene) in &mut spawned {
                 for (&entity, data) in entities.iter().zip(&mut scene.entities) {
                     if let Some(transform) =
                         ctx.world().get::<engine_ecs::components::Transform>(entity)
@@ -796,10 +801,10 @@ impl GameplayRuntime {
                     }
                 }
                 let report = engine_scene::InstantiateReport {
-                    spawned: entities,
+                    spawned: entities.clone(),
                     unresolved: 0,
                 };
-                ctx.spawn_scene_colliders(&scene, &report, library);
+                ctx.spawn_scene_colliders(scene, &report, library);
                 let (world, physics, _, _) = ctx.object_parts();
                 objects::disable_authored_subtrees(world, physics, &report.spawned);
             }
@@ -807,6 +812,14 @@ impl GameplayRuntime {
                 ctx.set_scene_sprite_atlas(library)?;
             }
         }
+        // Spawned copies join the scene data, so their rules run.
+        let started = (!spawned.is_empty()).then(|| {
+            rule_runtime::adopt_spawned(
+                &mut self.scene,
+                spawned.into_iter().map(|(_, scene)| scene),
+                &mut self.adopted,
+            )
+        });
         let poses = commands::moved_body_poses(ctx.world(), &commands::moved_object_ids(&commands));
         commands::sync_moved_bodies(ctx.physics_mut(), &poses);
 
@@ -844,6 +857,7 @@ impl GameplayRuntime {
             &mut self.warned,
             &commands,
         );
+        let destroyed_before = self.destroyed.len();
         {
             let (world, physics, ui, assets) = ctx.object_parts();
             objects::apply_object_commands(
@@ -859,6 +873,14 @@ impl GameplayRuntime {
                 },
                 &mut |world, entity| scenes::release_entity_assets(world, entity, assets),
                 &commands,
+            );
+        }
+        if let Some(destroyed) = self.destroyed.get(destroyed_before..) {
+            rule_runtime::forget_spawned(
+                &mut self.scene,
+                &mut self.rule_clock,
+                &mut self.adopted,
+                destroyed,
             );
         }
 
@@ -878,6 +900,15 @@ impl GameplayRuntime {
                 GameCommand::RequestSave => ctx.request_save(),
                 _ => {}
             }
+        }
+        // New copies start like a scene does: their variables are watched
+        // and their "Scene starts" rules run once.
+        if let Some(existing) = started {
+            self.rule_clock.watch(
+                &self.scene,
+                ctx.world().get_resource::<engine_scene::RuleVariables>(),
+            );
+            self.run_rule_event(ctx, RuleEvent::SceneStartExcept(&existing));
         }
         Ok(spawned_objects)
     }
@@ -1198,6 +1229,7 @@ impl GameplayRuntime {
         self.pending_scene = None;
         self.rule_spawns.clear();
         self.destroyed.clear();
+        self.adopted.clear();
         self.noises.clear();
         self.ai_events.clear();
         self.scene_loads.clear();

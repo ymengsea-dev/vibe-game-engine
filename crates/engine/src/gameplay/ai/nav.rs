@@ -177,7 +177,25 @@ pub(in crate::gameplay) fn apply_route_commands(
     }
 }
 
-/// Takes this frame's step for every walking object.
+/// The velocity an AI object moved with last frame, on the ground plane,
+/// for its neighbours' avoidance.
+#[derive(bevy_ecs::component::Component, Debug, Clone, Copy, PartialEq, Default)]
+pub(super) struct WalkVelocity(pub Vec2);
+
+/// One walker's plan for this frame, before avoidance.
+struct Step {
+    entity: Entity,
+    object_id: String,
+    position: Vec3,
+    agent: NavAgentData,
+    route: NavRoute,
+    /// Where its path takes it this frame, and how many corners it passes.
+    path_next: Vec2,
+    path_reached: usize,
+}
+
+/// Takes this frame's step for every walking object, steering round other
+/// AI objects (see [`engine_ai::avoid`]).
 pub(super) fn walk(world: &mut World, physics: &PhysicsWorld, dt: f32, out: &mut AiTick) {
     let walkers: Vec<(Entity, NavRoute)> = world
         .query_filtered::<(Entity, &NavRoute), engine_ecs::prelude::Without<engine_ecs::components::Disabled>>()
@@ -189,7 +207,8 @@ pub(super) fn walk(world: &mut World, physics: &PhysicsWorld, dt: f32, out: &mut
         && world
             .get_resource::<SceneNavGrid>()
             .is_some_and(|grid| !grid.0.heights.is_empty());
-    for (entity, mut route) in walkers {
+    let mut steps = Vec::with_capacity(walkers.len());
+    for (entity, route) in walkers {
         let (Some(object_id), Some(position)) = (
             super::object_id(world, entity),
             super::position(world, entity),
@@ -204,13 +223,59 @@ pub(super) fn walk(world: &mut World, physics: &PhysicsWorld, dt: f32, out: &mut
             || route.waypoints.is_empty()
         {
             world.entity_mut(entity).remove::<NavRoute>();
+            world.entity_mut(entity).insert(WalkVelocity::default());
             out.events.push(AiEvent::Arrived { object_id });
             continue;
         }
         let speed = route.speed.unwrap_or(agent.speed);
-        let (next, reached) = follow_path(here, &route.waypoints, speed, dt);
-        route.waypoints.drain(..reached.min(route.waypoints.len()));
+        let (path_next, path_reached) = follow_path(here, &route.waypoints, speed, dt);
+        steps.push(Step {
+            entity,
+            object_id,
+            position,
+            agent,
+            route,
+            path_next,
+            path_reached,
+        });
+    }
+    let velocities = steered_velocities(world, &steps, dt);
+
+    for (step, velocity) in steps.into_iter().zip(velocities) {
+        let Step {
+            entity,
+            object_id,
+            position,
+            agent,
+            mut route,
+            path_next,
+            path_reached,
+        } = step;
+        let here = flat(position);
+        let speed = route.speed.unwrap_or(agent.speed);
+        let next = match velocity {
+            Some(velocity) => here + velocity * dt,
+            None => path_next,
+        };
+        if velocity.is_none() {
+            route
+                .waypoints
+                .drain(..path_reached.min(route.waypoints.len()));
+        } else {
+            // Steered off the path: a corner counts as passed once it is
+            // within reach.
+            let reach = agent.radius.max(speed * dt).max(0.05);
+            while route.waypoints.len() > 1
+                && route
+                    .waypoints
+                    .first()
+                    .is_some_and(|corner| corner.distance(next) <= reach)
+            {
+                route.waypoints.remove(0);
+            }
+        }
         let step = next - here;
+        let moved = if dt > 0.0 { step / dt } else { Vec2::ZERO };
         let body = body_kind(world, physics, entity);
         let ground = if has_heights {
             world
@@ -225,10 +290,9 @@ pub(super) fn walk(world: &mut World, physics: &PhysicsWorld, dt: f32, out: &mut
                 delta: [step.x, -WALK_GRAVITY * dt, step.y],
             }),
             Some(Body::Dynamic(velocity_y)) => {
-                let velocity = if dt > 0.0 { step / dt } else { Vec2::ZERO };
                 out.commands.push(GameCommand::SetVelocity {
                     object_id: object_id.clone(),
-                    velocity: [velocity.x, velocity_y, velocity.y],
+                    velocity: [moved.x, velocity_y, moved.y],
                 });
             }
             None => out.commands.push(GameCommand::SetPosition {
@@ -248,8 +312,71 @@ pub(super) fn walk(world: &mut World, physics: &PhysicsWorld, dt: f32, out: &mut
                 rotation: turned.to_array(),
             });
         }
-        world.entity_mut(entity).insert(route);
+        world
+            .entity_mut(entity)
+            .insert((route, WalkVelocity(moved)));
     }
+}
+
+/// The steered velocity of each walker in `steps`, or `None` where it just
+/// follows its path: avoidance is off for it, or nobody is near. Other AI
+/// objects standing still are obstacles. A steered step that would leave
+/// walkable ground falls back to the path.
+fn steered_velocities(world: &mut World, steps: &[Step], dt: f32) -> Vec<Option<Vec2>> {
+    if dt <= 0.0 || !steps.iter().any(|step| step.agent.avoid_others) {
+        return vec![None; steps.len()];
+    }
+    let walking: HashSet<Entity> = steps.iter().map(|step| step.entity).collect();
+    let mut agents: Vec<engine_ai::AvoidAgent> = steps
+        .iter()
+        .map(|step| {
+            let here = flat(step.position);
+            let speed = step.route.speed.unwrap_or(step.agent.speed);
+            engine_ai::AvoidAgent {
+                position: here,
+                velocity: world
+                    .get::<WalkVelocity>(step.entity)
+                    .map_or(Vec2::ZERO, |velocity| velocity.0),
+                preferred: (step.path_next - here) / dt,
+                radius: step.agent.radius,
+                max_speed: speed,
+                steers: step.agent.avoid_others,
+            }
+        })
+        .collect();
+    let standing: Vec<(Entity, f32)> = world
+        .query_filtered::<(Entity, &SceneAi), engine_ecs::prelude::Without<engine_ecs::components::Disabled>>()
+        .iter(world)
+        .filter(|(entity, _)| !walking.contains(entity))
+        .map(|(entity, ai)| (entity, ai.0.agent.radius))
+        .collect();
+    for (entity, radius) in standing {
+        if let Some(position) = super::position(world, entity) {
+            agents.push(engine_ai::AvoidAgent {
+                position: flat(position),
+                velocity: Vec2::ZERO,
+                preferred: Vec2::ZERO,
+                radius,
+                max_speed: 0.0,
+                steers: false,
+            });
+        }
+    }
+    let chosen = engine_ai::avoid(&agents);
+    let grid = world.get_resource::<ActiveNavGrid>().map(|grid| &grid.0);
+    steps
+        .iter()
+        .zip(&agents)
+        .zip(chosen)
+        .map(|((step, agent), velocity)| {
+            if !step.agent.avoid_others || velocity == agent.preferred {
+                return None;
+            }
+            let next = agent.position + velocity * dt;
+            let walkable = grid.is_none_or(|grid| grid.is_walkable(grid.world_to_coord(next)));
+            walkable.then_some(velocity)
+        })
+        .collect()
 }
 
 /// How an object's body moves, when it has one.

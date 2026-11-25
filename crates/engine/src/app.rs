@@ -1555,6 +1555,34 @@ impl<G: Game> GameRunner<G> {
         self.embedded = embedded;
     }
 
+    /// The camera the game renders from, once it has started.
+    pub(crate) fn camera(&self) -> Option<&Camera> {
+        self.runtime.as_ref().map(|runtime| &runtime.camera)
+    }
+
+    /// Draws the world as it is, without running the game, from `pose` when
+    /// given (a free camera while paused) or the game's own camera. The
+    /// game's camera is left as it was.
+    pub(crate) fn render_still(&mut self, pose: Option<&crate::embed::protocol::CameraPose>) {
+        let Some(runtime) = self.runtime.as_mut() else {
+            return;
+        };
+        let own = runtime.camera;
+        if let Some(view) = pose.and_then(|pose| pose.applied_to(&own)) {
+            runtime.camera = view;
+        }
+        engine_ecs::propagate_transforms(runtime.ecs.world_mut());
+        update_shadow_fit(runtime);
+        render_frame(runtime, 0.0);
+        runtime.camera = own;
+        update_shadow_fit(runtime);
+    }
+
+    /// The game's world, once it has started.
+    pub(crate) fn world(&self) -> Option<&engine_ecs::prelude::World> {
+        self.runtime.as_ref().map(|runtime| runtime.ecs.world())
+    }
+
     fn fail(&mut self, error: GameError) {
         self.error_slot.set(Some(error));
         self.finished = true;

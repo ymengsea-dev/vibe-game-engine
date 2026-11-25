@@ -233,6 +233,19 @@ impl SceneResolver for EditorResolver<'_> {
         )
     }
 
+    fn resolve_skinned_lods(
+        &mut self,
+        mesh: &AssetRef,
+        renderer: &mut SkinnedMeshRenderer,
+        auto_generate: bool,
+    ) -> Result<(), SceneError> {
+        let id = asset_id(mesh)?;
+        let Some(ImportedAsset::Mesh(gltf)) = self.importer.get(id) else {
+            return Ok(());
+        };
+        engine_scene::attach_skinned_lod_tiers(self.gpu, self.assets, renderer, gltf, auto_generate)
+    }
+
     fn resolve_skinned_mesh(
         &mut self,
         mesh: &AssetRef,
@@ -369,9 +382,15 @@ pub fn resolve_pending(
             id: source.material,
         };
         match resolver.resolve_skinned_mesh(&mesh, &material, authored.as_ref()) {
-            Ok(Some(model)) => {
+            Ok(Some(mut model)) => {
                 if let Some(previous) = world.get::<MeshRenderer>(entity) {
                     previous.release(resolver.assets);
+                }
+                let auto_generate = wants_generated_lods(world, entity);
+                if let Err(err) =
+                    resolver.resolve_skinned_lods(&mesh, &mut model.renderer, auto_generate)
+                {
+                    tracing::warn!(error = %err, "could not load an animated model's detail tiers");
                 }
                 let settings = world
                     .get::<SceneModelAnimation>(entity)
@@ -380,6 +399,7 @@ pub fn resolve_pending(
                 let mut entity_mut = world.entity_mut(entity);
                 entity_mut.remove::<MeshRenderer>();
                 engine_scene::insert_skinned_model(&mut entity_mut, model, settings, authored);
+                entity_mut.insert(AppliedLod(auto_generate));
                 if let Some(mut player) = entity_mut.get_mut::<engine_ecs::AnimationPlayer>() {
                     // Studio plays a clip only when asked to (Preview).
                     player.playing = false;
@@ -557,6 +577,37 @@ fn refresh_lods(world: &mut World, resolver: &mut EditorResolver<'_>) {
         }
         entity_mut.insert((renderer, AppliedLod(wanted)));
     }
+
+    // Animated models: the same, for their skinned tiers.
+    let stale: Vec<(Entity, String, bool)> = world
+        .query::<(
+            Entity,
+            &MeshSource,
+            &SkinnedMeshRenderer,
+            Option<&MeshLod>,
+            Option<&AppliedLod>,
+        )>()
+        .iter(world)
+        .filter_map(|(entity, source, _, lod, applied)| {
+            let wanted = lod.is_some_and(|lod| lod.auto_generate);
+            (applied.map(|applied| applied.0) != Some(wanted))
+                .then(|| (entity, source.mesh.clone(), wanted))
+        })
+        .collect();
+    for (entity, mesh, wanted) in stale {
+        let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+            continue;
+        };
+        let Some(mut renderer) = entity_mut.take::<SkinnedMeshRenderer>() else {
+            continue;
+        };
+        if let Err(err) =
+            resolver.resolve_skinned_lods(&AssetRef { id: mesh }, &mut renderer, wanted)
+        {
+            tracing::warn!(error = %err, "could not rebuild an animated model's detail tiers");
+        }
+        entity_mut.insert((renderer, AppliedLod(wanted)));
+    }
 }
 
 /// Drops an animated model's renderer, clips and player, releasing its GPU
@@ -566,8 +617,7 @@ pub fn release_skinned(world: &mut World, assets: &mut RenderAssets, entity: Ent
         return;
     };
     if let Some(renderer) = entity_mut.take::<SkinnedMeshRenderer>() {
-        assets.skinned_meshes.release(renderer.mesh);
-        assets.materials.release(renderer.material);
+        renderer.release(assets);
     }
     entity_mut.remove::<(
         engine_ecs::AnimationPlayer,

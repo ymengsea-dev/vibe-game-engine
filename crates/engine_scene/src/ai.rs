@@ -107,6 +107,29 @@ pub struct NavAgentData {
     /// `0` never turns it.
     #[serde(default = "default_turn_speed")]
     pub turn_speed: f32,
+    /// Its size as a circle on the ground, for steering round others.
+    #[serde(
+        default = "default_agent_radius",
+        skip_serializing_if = "is_default_agent_radius"
+    )]
+    pub radius: f32,
+    /// Whether it steers round other AI objects while walking. Off, it
+    /// keeps to its path (others still steer round it).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub avoid_others: bool,
+}
+
+/// Largest agent radius.
+pub const MAX_AGENT_RADIUS: f32 = 10.0;
+
+fn is_default_agent_radius(radius: &f32) -> bool {
+    *radius == default_agent_radius()
+}
+fn default_true() -> bool {
+    true
+}
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn default_walk_speed() -> f32 {
@@ -125,6 +148,8 @@ impl Default for NavAgentData {
             speed: default_walk_speed(),
             stopping_distance: default_stopping_distance(),
             turn_speed: default_turn_speed(),
+            radius: default_agent_radius(),
+            avoid_others: true,
         }
     }
 }
@@ -347,6 +372,7 @@ impl AiData {
             MAX_AI_DISTANCE,
         )?;
         in_range("turn speed", agent.turn_speed, 0.0, 100_000.0)?;
+        in_range("radius", agent.radius, 0.0, MAX_AGENT_RADIUS)?;
         if let Some(senses) = &self.senses {
             valid_ai_name("target tag", &senses.target_tag)?;
             in_range("sight range", senses.sight_range, 0.0, MAX_AI_DISTANCE)?;

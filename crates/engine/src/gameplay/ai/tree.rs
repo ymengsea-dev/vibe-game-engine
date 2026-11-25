@@ -13,7 +13,9 @@
 use std::collections::HashMap;
 
 use engine_ecs::prelude::{Entity, World};
-use engine_scene::{AiBrainData, BehaviourTreeData, BtNodeKind, NavAgentData, RuleVariables};
+use engine_scene::{
+    AiBrainData, BehaviourTreeData, BtNodeKind, BtNodeRun, BtTrace, NavAgentData, RuleVariables,
+};
 use engine_scripting::GameCommand;
 use glam::Vec3;
 
@@ -33,6 +35,16 @@ pub(in crate::gameplay) enum Status {
     Running,
 }
 
+impl From<Status> for BtNodeRun {
+    fn from(status: Status) -> Self {
+        match status {
+            Status::Success => Self::Success,
+            Status::Failure => Self::Failure,
+            Status::Running => Self::Running,
+        }
+    }
+}
+
 /// A tree's progress between frames.
 #[derive(Debug, Clone, Default)]
 pub(in crate::gameplay) struct TreeMemory {
@@ -43,6 +55,8 @@ pub(in crate::gameplay) struct TreeMemory {
     /// Per Patrol node: the point it walks to next. Kept while other
     /// branches run, so a patrol carries on where it stopped.
     patrol: HashMap<usize, usize>,
+    /// The nodes the last frame visited and what each answered, for Studio.
+    pub(in crate::gameplay) trace: BtTrace,
 }
 
 /// What one node keeps while it runs.
@@ -84,6 +98,7 @@ pub(super) fn update(world: &mut World, dt: f32, rng: &mut engine_utils::Rng, ou
         for state in memory.tree.nodes.values_mut() {
             state.ticked = false;
         }
+        memory.tree.trace.clear();
         Run {
             world: &mut *world,
             entity,
@@ -116,6 +131,20 @@ impl Run<'_> {
     }
 
     fn tick(&mut self, node: usize, depth: usize) -> Status {
+        // Recorded in visiting order; the answer is filled in on the way out.
+        let at = self.memory.tree.trace.len();
+        let traced = self.tree.nodes.get(node).is_some() && at < engine_scene::MAX_BT_NODES * 4;
+        if traced && let Ok(index) = u16::try_from(node) {
+            self.memory.tree.trace.push((index, BtNodeRun::Running));
+        }
+        let status = self.tick_node(node, depth);
+        if traced && let Some(entry) = self.memory.tree.trace.get_mut(at) {
+            entry.1 = status.into();
+        }
+        status
+    }
+
+    fn tick_node(&mut self, node: usize, depth: usize) -> Status {
         let Some(data) = self.tree.nodes.get(node) else {
             return Status::Failure;
         };

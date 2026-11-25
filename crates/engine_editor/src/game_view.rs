@@ -291,7 +291,8 @@ pub fn frame_position(
 
 /// Draws the game view in `ui`'s remaining space.
 pub(crate) fn show(ui: &mut egui::Ui, state: &mut crate::EditorState) {
-    let (area, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+    let (area, response) =
+        ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
     let painter = ui.painter_at(area);
     painter.rect_filled(area, 0.0, crate::theme::NIGHT.shell);
 
@@ -352,8 +353,43 @@ pub(crate) fn show(ui: &mut egui::Ui, state: &mut crate::EditorState) {
         egui::Stroke::new(width, color),
         egui::StrokeKind::Inside,
     );
-    let hint = if state.play.is_paused() {
-        Some("Paused")
+    // While paused, the usual Scene View navigation moves a free camera.
+    let tool = state.active_view_tool();
+    if let Some(free) = state.play.free_camera_mut() {
+        let two_d = free.two_d;
+        let steer = crate::shell::steer_camera(ui, &response, &mut free.camera, two_d, tool);
+        if steer.moved {
+            state.play.free_camera_moved();
+        }
+        if steer.moved || steer.flying {
+            ui.ctx().request_repaint();
+        }
+    }
+    if state.play.is_free_camera() {
+        let at = image.center_bottom() - egui::vec2(0.0, 28.0);
+        let mut place = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_center_size(at, egui::vec2(180.0, 28.0)))
+                .layout(egui::Layout::centered_and_justified(
+                    egui::Direction::LeftToRight,
+                )),
+        );
+        let palette = crate::theme::NIGHT;
+        let button = crate::widgets::pill_button(
+            &mut place,
+            &palette,
+            "Back to game camera",
+            palette.text,
+            true,
+        );
+        if button.clicked() {
+            state.play.back_to_game_camera();
+        }
+    }
+    let hint = if state.play.is_free_camera() {
+        Some("Paused · free camera")
+    } else if state.play.is_paused() {
+        Some("Paused · drag to look around")
     } else if !state.game_view.focused {
         Some("Click the game to play")
     } else {

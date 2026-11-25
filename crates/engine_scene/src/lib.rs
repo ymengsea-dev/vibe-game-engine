@@ -52,11 +52,12 @@ pub use validate::{MAX_TAG_BYTES, MAX_TAGS, valid_prefab_path, valid_scene_path}
 mod world;
 
 pub use ai::{
-    AiBrainData, AiClips, AiData, AiState, MAX_AI_DISTANCE, MAX_AI_NAME_BYTES, MAX_PATROL_POINTS,
+    AiBrainData, AiClips, AiData, AiState, MAX_AGENT_RADIUS, MAX_AI_DISTANCE, MAX_AI_NAME_BYTES,
+    MAX_PATROL_POINTS,
     NavAgentData, NavBakeSettings, SceneAi, SensesData, SimpleBrainData,
 };
 pub use behaviour_tree::{
-    BehaviourTreeData, BtNodeData, BtNodeKind, MAX_BT_CHILDREN, MAX_BT_NODES,
+    BehaviourTreeData, BtNodeData, BtNodeKind, BtNodeRun, BtTrace, MAX_BT_CHILDREN, MAX_BT_NODES,
 };
 pub use animator::{
     AnimatorData, AnimatorMotion, AnimatorState, AnimatorStateData, AnimatorTransitionData,
@@ -110,7 +111,8 @@ pub use runtime::{
     AssetLibrary, BUNDLE_FILE, EXPORT_SCENE_FILE, ExportContent, ImportCache, LoadedSkinnedMesh,
     build_road_renderer,
     LodCache,
-    MeshGeometry, RuntimeResolver, attach_lod_tiers, base_mesh, executable_dir, load_mesh_geometry,
+    MeshGeometry, RuntimeResolver, SkinnedGeometry, attach_lod_tiers, attach_skinned_lod_tiers,
+    base_mesh, executable_dir, load_mesh_geometry, skinned_lod_tier_geometry,
     load_skinned_mesh, lod_tier_geometry, material_from_imported, open_export, skinned_parts,
     upload_skinned_model,
 };

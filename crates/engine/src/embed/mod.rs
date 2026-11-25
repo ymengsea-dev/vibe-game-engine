@@ -42,6 +42,9 @@ pub const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 /// Game time one Step advances.
 pub const STEP_SECONDS: f32 = 1.0 / 60.0;
 
+/// Most [`protocol::ToStudio::AiTrace`] messages a second.
+pub const AI_TRACE_PER_SECOND: u32 = 10;
+
 /// Where to find Studio, from [`EMBED_ENV`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedTarget {

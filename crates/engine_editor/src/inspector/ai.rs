@@ -13,6 +13,15 @@ use engine_scene::{
 use super::{behaviour_tree_graph, choice, note, number, property_row, subsection};
 use crate::theme;
 
+/// Present while a game is playing: behaviour tree windows then show what
+/// the game reports (`trace`: the watched object's ID and its tree's last
+/// frame) and can't be edited.
+#[derive(bevy_ecs::resource::Resource, Debug, Default)]
+pub struct PlayingTrees {
+    /// The watched object and its tree's answers, once the game sent them.
+    pub trace: Option<(String, engine_scene::BtTrace)>,
+}
+
 /// The section's body. Returns whether anything changed.
 pub(super) fn inspect(world: &mut World, entity: Entity, ui: &mut egui::Ui) -> bool {
     let Some(before) = world.get::<SceneAi>(entity).map(|ai| ai.0.clone()) else {
@@ -32,7 +41,25 @@ pub(super) fn inspect(world: &mut World, entity: Entity, ui: &mut egui::Ui) -> b
     });
 
     if let Some(AiBrainData::Tree(tree)) = value.brain.as_mut() {
-        behaviour_tree_graph::show(ui.ctx(), entity, tree, &clips, here.to_array());
+        let playing = world.get_resource::<PlayingTrees>();
+        let live = playing
+            .and_then(|playing| playing.trace.as_ref())
+            .filter(|(watched, _)| {
+                world
+                    .get::<engine_scene::SceneObjectId>(entity)
+                    .is_some_and(|id| id.0 == *watched)
+            })
+            .map(|(_, trace)| behaviour_tree_graph::live_answers(tree, trace));
+        let playing = playing.is_some();
+        behaviour_tree_graph::show(
+            ui.ctx(),
+            entity,
+            tree,
+            &clips,
+            here.to_array(),
+            playing,
+            live.as_deref(),
+        );
     }
     let changed = value != before;
     if changed && let Ok(mut entity_mut) = world.get_entity_mut(entity) {
@@ -71,6 +98,20 @@ fn walking(ui: &mut egui::Ui, value: &mut AiData) {
                 .suffix("°/s"),
         )
         .on_hover_text("How fast it turns to face where it walks; 0 never turns it");
+    });
+    property_row(ui, "Radius", |ui| {
+        number(
+            ui,
+            egui::DragValue::new(&mut agent.radius)
+                .speed(0.01)
+                .range(0.0..=engine_scene::MAX_AGENT_RADIUS),
+        )
+        .on_hover_text("Its size on the ground, for keeping clear of other characters");
+    });
+    let palette = theme::NIGHT;
+    property_row(ui, "Avoid others", |ui| {
+        crate::widgets::checkbox(ui, &palette, &mut agent.avoid_others, "")
+            .on_hover_text("Steer round other AI characters while walking");
     });
 }
 

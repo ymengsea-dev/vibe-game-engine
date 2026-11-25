@@ -529,3 +529,92 @@ fn ai_state_names_match_the_scripting_list() {
     let names: Vec<&str> = AiState::ALL.iter().map(|state| state.name()).collect();
     assert_eq!(names, engine_scripting::AI_STATES);
 }
+
+#[test]
+fn a_tree_reports_which_nodes_ran_and_what_they_answered() {
+    use engine_scene::BtNodeRun;
+    let node = |kind, children: Vec<usize>| BtNodeData {
+        kind,
+        children,
+        graph_position: None,
+    };
+    // Selector: "has target?" fails, so it goes on to waiting, which runs.
+    let tree = BehaviourTreeData {
+        nodes: vec![
+            node(BtNodeKind::Selector, vec![1, 2]),
+            node(BtNodeKind::HasTarget, vec![]),
+            node(BtNodeKind::Wait { seconds: 5.0 }, vec![]),
+        ],
+    };
+    let mut world = World::new();
+    let physics = PhysicsWorld::default();
+    let entity = tree_guard(&mut world, tree);
+    assert!(super::behaviour_tree_trace(&world, entity).is_empty());
+    step(&mut world, &physics, &[]);
+    assert_eq!(
+        super::behaviour_tree_trace(&world, entity),
+        [
+            (0, BtNodeRun::Running),
+            (1, BtNodeRun::Failure),
+            (2, BtNodeRun::Running),
+        ]
+    );
+    // Each frame replaces the last one's trace.
+    step(&mut world, &physics, &[]);
+    assert_eq!(super::behaviour_tree_trace(&world, entity).len(), 3);
+}
+
+/// Two walkers sent at each other along the same line; returns the closest
+/// they came, and where each ended.
+fn head_on(avoid_others: bool) -> (f32, Vec3, Vec3) {
+    let mut world = World::new();
+    let physics = PhysicsWorld::default();
+    let walker = |avoid_others| AiData {
+        agent: engine_scene::NavAgentData {
+            avoid_others,
+            ..engine_scene::NavAgentData::default()
+        },
+        ..AiData::default()
+    };
+    let a = spawn(&mut world, "a", Vec3::new(-6.0, 0.0, 0.0));
+    world.entity_mut(a).insert(SceneAi(walker(avoid_others)));
+    let b = spawn(&mut world, "b", Vec3::new(6.0, 0.0, 0.0));
+    world.entity_mut(b).insert(SceneAi(walker(avoid_others)));
+    nav::apply_route_commands(
+        &mut world,
+        &mut std::collections::HashSet::new(),
+        &[
+            GameCommand::MoveTo {
+                object_id: "a".into(),
+                target: [6.0, 0.0, 0.0],
+                speed: None,
+            },
+            GameCommand::MoveTo {
+                object_id: "b".into(),
+                target: [-6.0, 0.0, 0.0],
+                speed: None,
+            },
+        ],
+    );
+    let mut closest = f32::INFINITY;
+    for _ in 0..240 {
+        step(&mut world, &physics, &[]);
+        closest = closest.min(at(&world, a).distance(at(&world, b)));
+    }
+    (closest, at(&world, a), at(&world, b))
+}
+
+#[test]
+fn walkers_steer_round_each_other_and_still_arrive() {
+    let (closest, a, b) = head_on(true);
+    assert!(closest >= 0.7, "came within {closest}");
+    assert!(a.distance(Vec3::new(6.0, 0.0, 0.0)) < 0.5, "a arrived: {a}");
+    assert!(
+        b.distance(Vec3::new(-6.0, 0.0, 0.0)) < 0.5,
+        "b arrived: {b}"
+    );
+
+    // With avoidance off they keep to their line and walk through each other.
+    let (closest, _, _) = head_on(false);
+    assert!(closest < 0.2, "kept to the path: {closest}");
+}

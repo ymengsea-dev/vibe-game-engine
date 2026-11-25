@@ -50,6 +50,8 @@ Leaf and grass images usually have clear parts. A model exported with glTF's alp
 
 Put each version in the same glTF file as its own mesh, named with `_LOD` and a number: `Rock_LOD0` (full detail), `Rock_LOD1`, `Rock_LOD2`. All must share the same name before `_LOD`. Studio then uses them instead of generating its own.
 
+Animated characters work the same way: each `_LOD` mesh must be skinned to the same skeleton, so every version moves with one pose. **Generate simpler meshes** keeps each vertex's bone weights. Past its draw distance a character isn't drawn and its animation only keeps time, so far crowds cost little.
+
 ## Seeing it in the Scene View
 
 Turn on **Overlays → Distance detail** to see simpler models and draw ranges from the Scene View camera, at the project's quality. Off, every model and plant is drawn in full.
@@ -58,6 +60,6 @@ With **Overlays → Cull from game camera** also on, distances are measured from
 
 ## Not available yet
 
-- Animated characters always draw in full detail and at any distance.
+- Animated characters are not left out when they are outside the camera's view, only when they are too far away, because a pose can reach outside the model's resting shape. They also cast no shadows yet.
 - Plants don't keep the simpler mesh a little longer when the camera hovers at the switch distance, as single models do.
 - Terrain draws far-away ground with fewer triangles on its own; the quality level's detail setting moves those distances too. Set it per terrain with **Detail** in the Inspector.

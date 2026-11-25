@@ -849,6 +849,32 @@ fn import_destination(state: &EditorState) -> Option<PathBuf> {
 
 /// Grabs (`Some(true)`) or frees (`Some(false)`) Studio's cursor for a
 /// locked game, the way a windowed game does. Esc always frees it.
+/// A paused game's camera, as Studio's free camera starts from it.
+fn view_pose(pose: &engine::embed::protocol::CameraPose) -> engine_editor::play::ViewPose {
+    engine_editor::play::ViewPose {
+        eye: glam::Vec3::from_array(pose.eye),
+        target: glam::Vec3::from_array(pose.target),
+        up: glam::Vec3::from_array(pose.up),
+        fov_y: pose.fov_y,
+        ortho_height: pose.ortho_height,
+        near: pose.near,
+        far: pose.far,
+    }
+}
+
+/// Studio's free camera, as the paused game draws from it.
+fn camera_pose(pose: &engine_editor::play::ViewPose) -> engine::embed::protocol::CameraPose {
+    engine::embed::protocol::CameraPose {
+        eye: pose.eye.to_array(),
+        target: pose.target.to_array(),
+        up: pose.up.to_array(),
+        fov_y: pose.fov_y,
+        ortho_height: pose.ortho_height,
+        near: pose.near,
+        far: pose.far,
+    }
+}
+
 fn apply_cursor_grab(window: Option<&Window>, change: Option<bool>) {
     if let (Some(window), Some(locked)) = (window, change) {
         engine::platform::apply_cursor_lock(window, locked);
@@ -2272,6 +2298,12 @@ impl EditorHandler {
                 }
                 SessionEvent::Paused => self.state.play.set_paused(true),
                 SessionEvent::Resumed => self.state.play.set_paused(false),
+                SessionEvent::GameCamera(pose) => {
+                    self.state.play.set_game_camera(view_pose(&pose));
+                }
+                SessionEvent::AiTrace { object_id, nodes } => {
+                    self.state.play.set_ai_trace(object_id, nodes);
+                }
                 SessionEvent::CursorLock(locked) => {
                     let change = self.preview_lock.on_game_request(
                         locked,
@@ -2303,6 +2335,15 @@ impl EditorHandler {
             }
             if let Some((width, height)) = self.state.game_view.size_request.take() {
                 outgoing.push(ToGame::Resize { width, height });
+            }
+            if let Some(update) = self.state.play.take_free_camera_update() {
+                outgoing.push(ToGame::FreeCamera {
+                    camera: update.as_ref().map(camera_pose),
+                });
+            }
+            let watched = self.state.watched_behaviour_tree();
+            if let Some(object_id) = self.state.play.watch_ai(watched) {
+                outgoing.push(ToGame::WatchAi { object_id });
             }
             outgoing.extend(self.state.play.take_controls().into_iter().map(
                 |control| match control {

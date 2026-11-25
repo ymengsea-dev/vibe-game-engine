@@ -119,8 +119,7 @@ pub(crate) fn release_entity_assets(world: &World, entity: Entity, assets: &mut 
         renderer.release(assets);
     }
     if let Some(renderer) = world.get::<SkinnedMeshRenderer>(entity) {
-        assets.skinned_meshes.release(renderer.mesh);
-        assets.materials.release(renderer.material);
+        renderer.release(assets);
     }
     if let Some(renderer) = world.get::<InstancedMeshRenderer>(entity) {
         renderer.release(assets);

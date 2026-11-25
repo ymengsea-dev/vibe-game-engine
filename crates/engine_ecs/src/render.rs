@@ -55,6 +55,9 @@ pub struct RenderStats {
     /// resolved). Not frustum-culled — an animated pose can deform a mesh
     /// outside its bind-pose bounds.
     pub skinned_drawn: u32,
+    /// `SkinnedMeshRenderer` entities past their draw distance and so not
+    /// drawn (their animation only keeps time). Not part of `meshes_total`.
+    pub skinned_beyond_draw_distance: u32,
     /// Total instances across every `InstancedMeshRenderer` entity, before
     /// culling. Does not include GPU-batched `MeshRenderer`s
     /// (`auto_batched_drawn` covers those).
@@ -146,6 +149,20 @@ fn distance_choice(
         return Some((renderer.mesh, 1.0));
     };
     let centre = world_from_local.transform_point3(full_mesh.local_bounds.center());
+    let (tier, fade) = tier_and_fade(view, lod, centre, renderer.tier_count(), &renderer.lod_tier)?;
+    Some((renderer.tier_mesh(tier), fade))
+}
+
+/// The detail tier (of `tiers`) and fade for an object whose centre is at
+/// `centre`, or `None` past its draw distance. `last_tier` is last frame's
+/// tier, kept for hysteresis and updated.
+fn tier_and_fade(
+    view: DistanceQuality,
+    lod: Option<&MeshLod>,
+    centre: glam::Vec3,
+    tiers: usize,
+    last_tier: &std::sync::atomic::AtomicU8,
+) -> Option<(usize, f32)> {
     let (switch, draw_distance, fade_length) = match lod {
         Some(lod) => (
             lod.switch_distances.as_slice(),
@@ -165,16 +182,13 @@ fn distance_choice(
     if fade <= 0.0 {
         return None;
     }
-    let tiers = renderer.tier_count();
     if tiers < 2 {
-        return Some((renderer.mesh, fade));
+        return Some((0, fade));
     }
-    let current = usize::from(renderer.lod_tier.load(Ordering::Relaxed));
+    let current = usize::from(last_tier.load(Ordering::Relaxed));
     let tier = engine_renderer::select_lod_tier(switch, tiers, view.lod_distance(centre), current);
-    renderer
-        .lod_tier
-        .store(u8::try_from(tier).unwrap_or(u8::MAX), Ordering::Relaxed);
-    Some((renderer.tier_mesh(tier), fade))
+    last_tier.store(u8::try_from(tier).unwrap_or(u8::MAX), Ordering::Relaxed);
+    Some((tier, fade))
 }
 
 /// The GPU handles a caller supplies for the sprite draw: the pipeline,
@@ -625,8 +639,12 @@ pub fn extract_and_render_to(
         Option<&MeshLod>,
         Has<Disabled>,
     ), DrawFilter>();
-    let mut skinned_query = world
-        .query_filtered::<(&GlobalTransform, &SkinnedMeshRenderer, Has<Disabled>), DrawFilter>();
+    let mut skinned_query = world.query_filtered::<(
+        &GlobalTransform,
+        &SkinnedMeshRenderer,
+        Option<&MeshLod>,
+        Has<Disabled>,
+    ), DrawFilter>();
     let mut instanced_query =
         world.query_filtered::<(&InstancedMeshRenderer, Has<Disabled>), DrawFilter>();
     let mut vegetation_query =
@@ -737,12 +755,15 @@ pub fn extract_and_render_to(
     // joint matrices are the caller's to upload into `skin.joints_buffer`
     // before this call. Not frustum-culled (bind-pose bounds can't bound
     // an arbitrary pose) and not shadow casters (no skinned shadow shader).
+    // Detail tiers and the draw distance work as for still meshes; every
+    // tier shares the one pose in `skin`.
     let mut skinned_drawables = Vec::new();
-    for (transform, skinned, disabled) in skinned_query.iter(&*world) {
+    let mut skinned_beyond = 0u32;
+    for (transform, skinned, lod, disabled) in skinned_query.iter(&*world) {
         if disabled && !draw_disabled {
             continue;
         }
-        let Some(mesh) = assets.skinned_meshes.get(skinned.mesh) else {
+        let Some(full_mesh) = assets.skinned_meshes.get(skinned.mesh) else {
             tracing::warn!(
                 mesh = ?skinned.mesh,
                 "skipping SkinnedMeshRenderer: skinned mesh handle not registered in RenderAssets"
@@ -757,9 +778,33 @@ pub fn extract_and_render_to(
             continue;
         };
 
+        let world_from_local = transform.0.to_matrix();
+        let choice = match distance {
+            Some(view) => tier_and_fade(
+                view,
+                lod,
+                world_from_local.transform_point3(full_mesh.local_bounds.center()),
+                skinned.tier_count(),
+                &skinned.lod_tier,
+            ),
+            None => Some((0, 1.0)),
+        };
+        skinned
+            .beyond_draw_distance
+            .store(choice.is_none(), Ordering::Relaxed);
+        let Some((tier, fade)) = choice else {
+            skinned_beyond += 1;
+            continue;
+        };
+        // A tier missing from `assets` falls back to the full mesh.
+        let mesh = assets
+            .skinned_meshes
+            .get(skinned.tier_mesh(tier))
+            .unwrap_or(full_mesh);
+
         gpu.write_uniform_buffer(
             &skinned.skin.model_buffer,
-            &ModelUniform::from_cols(transform.0.to_matrix().to_cols_array_2d()),
+            &ModelUniform::faded(world_from_local.to_cols_array_2d(), fade),
         );
 
         skinned_drawables.push(SkinnedDrawable {
@@ -1098,6 +1143,7 @@ pub fn extract_and_render_to(
         meshes_drawn: visible.len() as u32,
         transparent_drawn: transparent.len() as u32,
         skinned_drawn: skinned_drawables.len() as u32,
+        skinned_beyond_draw_distance: skinned_beyond,
         instances_total,
         instances_drawn,
         instances_beyond_draw_distance,
@@ -1291,8 +1337,7 @@ pub fn despawn_skinned_mesh_renderer(
     assets: &mut RenderAssets,
 ) -> bool {
     if let Some(skinned) = world.get::<SkinnedMeshRenderer>(entity) {
-        assets.skinned_meshes.release(skinned.mesh);
-        assets.materials.release(skinned.material);
+        skinned.release(assets);
     }
     world.despawn(entity)
 }
@@ -1327,6 +1372,35 @@ pub fn despawn_vegetation_renderer(
         assets.materials.release(plants.material);
     }
     world.despawn(entity)
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::tier_and_fade;
+    use crate::components::MeshLod;
+    use engine_renderer::{DistanceQuality, QualityLevel};
+    use glam::Vec3;
+    use std::sync::atomic::AtomicU8;
+
+    #[test]
+    fn tiers_switch_with_distance_and_fade_out_at_the_draw_distance() {
+        let view = DistanceQuality::new(Vec3::ZERO, QualityLevel::High);
+        let lod = MeshLod {
+            draw_distance: Some(100.0),
+            ..MeshLod::default()
+        };
+        let last = AtomicU8::new(0);
+        let at = |z: f32| tier_and_fade(view, Some(&lod), Vec3::new(0.0, 0.0, z), 3, &last);
+        assert_eq!(at(1.0), Some((0, 1.0)));
+        let (far_tier, _) = at(90.0).expect("still drawn");
+        assert_eq!(far_tier, 2);
+        assert!(at(10_000.0).is_none(), "past the draw distance");
+        // Without tiers it is always the full mesh.
+        assert_eq!(
+            tier_and_fade(view, None, Vec3::new(0.0, 0.0, 90.0), 1, &AtomicU8::new(0)),
+            Some((0, 1.0))
+        );
+    }
 }
 
 #[cfg(test)]

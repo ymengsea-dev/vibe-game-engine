@@ -224,6 +224,32 @@ impl SceneCamera {
         arrived
     }
 
+    /// A 3D view from `eye` toward `target`; `None` when they coincide or
+    /// aren't finite.
+    pub fn looking(eye: Vec3, target: Vec3) -> Option<Self> {
+        let offset = eye - target;
+        let distance = offset.length();
+        if !offset.is_finite() || distance < 1e-4 {
+            return None;
+        }
+        Some(Self {
+            focus: target,
+            yaw: offset.x.atan2(offset.z),
+            pitch: (offset.y / distance).clamp(-1.0, 1.0).asin(),
+            distance: distance.clamp(MIN_DISTANCE, MAX_DISTANCE),
+            ..Self::default()
+        })
+    }
+
+    /// A 2D view centred on `focus`, `height` world units tall.
+    pub fn flat(focus: Vec3, height: f32) -> Option<Self> {
+        (focus.is_finite() && height.is_finite() && height > 0.0).then(|| Self {
+            focus,
+            ortho_height: height.clamp(MIN_ORTHO_HEIGHT, MAX_ORTHO_HEIGHT),
+            ..Self::default()
+        })
+    }
+
     /// Centres the view on a sphere and fits it on screen, keeping the angle.
     pub fn frame(&mut self, center: Vec3, radius: f32) {
         if !center.is_finite() {
@@ -607,5 +633,18 @@ mod tests {
             .pan(Vec2::new(40.0, 0.0), true, 100.0);
         assert_eq!(cameras.active(false), &SceneCamera::default());
         assert_ne!(cameras.active(true).focus, Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_view_made_from_an_eye_and_target_looks_from_that_eye() {
+        let eye = Vec3::new(3.0, 4.0, -2.0);
+        let target = Vec3::new(1.0, 0.0, 1.0);
+        let camera = SceneCamera::looking(eye, target).expect("view");
+        assert!(camera.eye().distance(eye) < 1e-4);
+        assert_eq!(camera.focus, target);
+        assert!(SceneCamera::looking(target, target).is_none());
+        let flat = SceneCamera::flat(Vec3::new(2.0, 1.0, 0.0), 12.0).expect("2D view");
+        assert_eq!(flat.ortho_height, 12.0);
+        assert!(SceneCamera::flat(Vec3::ZERO, -1.0).is_none());
     }
 }

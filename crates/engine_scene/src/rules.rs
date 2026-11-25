@@ -348,8 +348,8 @@ impl Scene {
     /// An owner with an object ID runs only while its live object exists and
     /// is not `Disabled`, so enabling a scene-disabled object turns its rules
     /// on. An owner without an ID does not run if disabled in the scene data.
-    /// Rules of objects created at
-    /// runtime (such as spawned prefabs) are not part of the scene and do not run.
+    /// Objects created at runtime (such as spawned prefabs) run their rules
+    /// once the game adds their data to this scene, as `GameplayRuntime` does.
     pub fn apply_rule_event(
         &self,
         event: RuleEvent<'_>,

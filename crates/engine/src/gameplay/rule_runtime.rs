@@ -54,6 +54,59 @@ pub(crate) struct RuleClock {
     state: Option<GameStateName>,
 }
 
+/// Adds prefab copies spawned while playing to the running scene's data, so
+/// their rules run like authored ones, and records their IDs in `adopted`.
+///
+/// Returns every object ID the scene held before, for
+/// [`RuleEvent::SceneStartExcept`]: only the new objects' start rules run.
+pub(crate) fn adopt_spawned(
+    scene: &mut Scene,
+    spawned: impl IntoIterator<Item = Scene>,
+    adopted: &mut HashSet<String>,
+) -> HashSet<String> {
+    let existing = scene
+        .entities
+        .iter()
+        .filter_map(|entity| entity.object_id.clone())
+        .collect();
+    for copy in spawned {
+        let offset = scene.entities.len();
+        adopted.extend(
+            copy.entities
+                .iter()
+                .filter_map(|entity| entity.object_id.clone()),
+        );
+        scene
+            .entities
+            .extend(copy.entities.into_iter().map(|mut entity| {
+                entity.parent = entity.parent.map(|parent| parent + offset);
+                entity
+            }));
+    }
+    existing
+}
+
+/// Drops destroyed spawned objects from the scene data and the timers, so a
+/// game that spawns and destroys all the time doesn't grow without bound.
+/// Authored objects stay: their data is still the scene's.
+pub(crate) fn forget_spawned(
+    scene: &mut Scene,
+    clock: &mut RuleClock,
+    adopted: &mut HashSet<String>,
+    destroyed: &[String],
+) {
+    let gone: HashSet<String> = destroyed
+        .iter()
+        .filter(|id| adopted.remove(*id))
+        .cloned()
+        .collect();
+    if gone.is_empty() {
+        return;
+    }
+    scene.remove_objects(&gone);
+    clock.forget(&gone);
+}
+
 fn watched_variables(scene: &Scene) -> BTreeMap<String, f64> {
     scene
         .entities
@@ -92,6 +145,12 @@ impl RuleClock {
             let value = variables.map_or(0.0, |all| all.get(&name));
             self.variables.entry(name).or_insert(value);
         }
+    }
+
+    /// Forgets the timers of these owners.
+    pub(crate) fn forget(&mut self, owners: &HashSet<String>) {
+        self.elapsed.retain(|(owner, _), _| !owners.contains(owner));
+        self.finished.retain(|(owner, _)| !owners.contains(owner));
     }
 
     /// Takes the current variables and state as already seen, without touching
@@ -957,6 +1016,80 @@ mod tests {
         assert_eq!((guard.depth, guard.warned), (0, false));
         assert!(guard.enter());
         guard.leave();
+    }
+
+    #[test]
+    fn spawned_copies_run_their_rules_until_destroyed() {
+        const COPY: &str = "00000000-0000-4000-8000-0000000000c3";
+        const CHILD: &str = "00000000-0000-4000-8000-0000000000d4";
+        let mut h = Harness::new(vec![rule(RuleTrigger::SceneStart, bump("authored"))]);
+        assert_eq!(h.dispatch(RuleEvent::SceneStart), 1);
+        let copy = Scene {
+            entities: vec![
+                SceneEntity {
+                    object_id: Some(COPY.into()),
+                    rules: vec![
+                        rule(RuleTrigger::SceneStart, bump("spawned")),
+                        rule(
+                            RuleTrigger::Timer {
+                                seconds: 1.0,
+                                repeat: false,
+                            },
+                            bump("timer"),
+                        ),
+                    ],
+                    ..Default::default()
+                },
+                SceneEntity {
+                    object_id: Some(CHILD.into()),
+                    parent: Some(0),
+                    rules: vec![rule(RuleTrigger::Named("ping".into()), bump("ping"))],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let live = copy.instantiate(&mut h.world);
+        let mut adopted = HashSet::new();
+        let existing = adopt_spawned(&mut h.scene, [copy], &mut adopted);
+        assert_eq!(h.scene.entities.len(), 4);
+        assert_eq!(
+            h.scene.entities[3].parent,
+            Some(2),
+            "parents follow the copy"
+        );
+        h.clock.watch(&h.scene, h.world.get_resource());
+
+        // Only the copy's own start rule runs; the authored one ran already.
+        assert_eq!(h.dispatch(RuleEvent::SceneStartExcept(&existing)), 1);
+        assert_eq!((h.count("authored"), h.count("spawned")), (1.0, 1.0));
+        assert_eq!(h.dispatch(RuleEvent::Named("ping")), 1);
+        for _ in 0..70 {
+            h.frame(&[], FRAME, false);
+        }
+        assert_eq!(h.count("timer"), 1.0, "the copy's timer counts");
+
+        for entity in live {
+            h.world.despawn(entity);
+        }
+        forget_spawned(
+            &mut h.scene,
+            &mut h.clock,
+            &mut adopted,
+            &[COPY.to_owned(), CHILD.to_owned()],
+        );
+        assert_eq!(h.scene.entities.len(), 2, "destroyed copies leave the data");
+        assert!(adopted.is_empty() && h.clock.elapsed.is_empty() && h.clock.finished.is_empty());
+        assert_eq!(h.dispatch(RuleEvent::Named("ping")), 0);
+
+        // Destroying an authored object keeps its data.
+        forget_spawned(
+            &mut h.scene,
+            &mut h.clock,
+            &mut adopted,
+            &[OWNER.to_owned()],
+        );
+        assert_eq!(h.scene.entities.len(), 2);
     }
 
     #[test]

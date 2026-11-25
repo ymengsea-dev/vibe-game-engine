@@ -49,7 +49,8 @@ pub use gltf_import::{
 };
 pub use hot_reload::AssetWatcher;
 pub use lod::{
-    GENERATED_LOD_RATIOS, MIN_TRIANGLES_TO_SIMPLIFY, authored_lod_tiers, generated_lod_tiers,
+    GENERATED_LOD_RATIOS, MIN_TRIANGLES_TO_SIMPLIFY, authored_lod_tiers, authored_skinned_lod_tiers,
+    generated_lod_tiers,
 };
 pub use meta::{AssetMeta, AssetMetadataStore, ImportCache, hash_bytes};
 pub use texture_import::{ImportedTexture, generate_mip_chain, import_texture_bytes};

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever a message changes incompatibly; [`ToStudio::Hello`]
 /// carries it so a game built against an older engine is refused with a
 /// readable message instead of misbehaving.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Header kind of a JSON control message.
 pub const KIND_CONTROL: u8 = 1;
@@ -174,6 +174,18 @@ pub enum ToGame {
     Step,
     /// Quit as if the window were closed (saves flush).
     Stop,
+    /// While paused, draw the frozen world from this camera instead of the
+    /// game's; `None` goes back to the game's camera. Resume drops it.
+    FreeCamera {
+        /// Where to look from.
+        camera: Option<CameraPose>,
+    },
+    /// Report this object's behaviour tree as it runs
+    /// ([`ToStudio::AiTrace`]); `None` stops reporting.
+    WatchAi {
+        /// Stable scene ID of the object to watch.
+        object_id: Option<String>,
+    },
 }
 
 /// Game → Studio.
@@ -190,15 +202,103 @@ pub enum ToStudio {
     Paused,
     /// The game acknowledged [`ToGame::Resume`].
     Resumed,
+    /// The game's own camera, sent right after [`ToStudio::Paused`] so a
+    /// free camera can start where the game was looking.
+    GameCamera(CameraPose),
     /// The game wants the mouse locked (`true`) or released (`false`); sent
     /// once per change so Studio can grab or free its own cursor.
     CursorLock {
         /// Whether the game now wants the cursor locked.
         locked: bool,
     },
+    /// The nodes the watched object's behaviour tree visited on its last
+    /// frame, in visiting order, with what each answered. Sent when it
+    /// changes, at most [`super::AI_TRACE_PER_SECOND`] times a second.
+    AiTrace {
+        /// The watched object.
+        object_id: String,
+        /// `(node index, answer)` pairs.
+        nodes: engine_scene::BtTrace,
+    },
     /// A rendered frame. Sent as [`KIND_FRAME`], never as JSON.
     #[serde(skip)]
     Frame(Frame),
+}
+
+/// A camera on the wire: where it is, where it looks, and its lens. The
+/// game keeps its own aspect ratio.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CameraPose {
+    /// World-space eye position.
+    pub eye: [f32; 3],
+    /// World-space point looked at.
+    pub target: [f32; 3],
+    /// World-space up direction.
+    pub up: [f32; 3],
+    /// Vertical field of view in radians; `None` for an orthographic camera.
+    pub fov_y: Option<f32>,
+    /// Visible world height of an orthographic camera.
+    pub ortho_height: f32,
+    /// Near clip plane.
+    pub near: f32,
+    /// Far clip plane.
+    pub far: f32,
+}
+
+impl CameraPose {
+    /// `camera`'s pose.
+    pub fn from_camera(camera: &engine_renderer::Camera) -> Self {
+        let (fov_y, ortho_height) = match camera.projection {
+            engine_renderer::Projection::Perspective { fov_y_radians } => {
+                (Some(fov_y_radians), 10.0)
+            }
+            engine_renderer::Projection::Orthographic { height } => (None, height),
+        };
+        Self {
+            eye: camera.eye.to_array(),
+            target: camera.target.to_array(),
+            up: camera.up.to_array(),
+            fov_y,
+            ortho_height,
+            near: camera.near,
+            far: camera.far,
+        }
+    }
+
+    /// `camera` moved to this pose, keeping its aspect ratio. `None` when a
+    /// value is not finite or the lens is impossible.
+    pub fn applied_to(&self, camera: &engine_renderer::Camera) -> Option<engine_renderer::Camera> {
+        let finite = self
+            .eye
+            .iter()
+            .chain(&self.target)
+            .chain(&self.up)
+            .chain([&self.ortho_height, &self.near, &self.far])
+            .all(|value| value.is_finite());
+        if !finite || self.near <= 0.0 || self.far <= self.near {
+            return None;
+        }
+        let projection = match self.fov_y {
+            Some(fov) if fov.is_finite() && fov > 0.0 && fov < std::f32::consts::PI => {
+                engine_renderer::Projection::Perspective { fov_y_radians: fov }
+            }
+            Some(_) => return None,
+            None if self.ortho_height > 0.0 => engine_renderer::Projection::Orthographic {
+                height: self.ortho_height,
+            },
+            None => return None,
+        };
+        let moved = engine_renderer::Camera {
+            eye: glam::Vec3::from_array(self.eye),
+            target: glam::Vec3::from_array(self.target),
+            up: glam::Vec3::from_array(self.up).normalize_or(glam::Vec3::Y),
+            projection,
+            near: self.near,
+            far: self.far,
+            ..*camera
+        };
+        moved.is_valid().then_some(moved)
+    }
 }
 
 /// One rendered frame.
@@ -427,6 +527,22 @@ mod tests {
             ToGame::Resume,
             ToGame::Step,
             ToGame::Stop,
+            ToGame::WatchAi {
+                object_id: Some("guard".to_owned()),
+            },
+            ToGame::WatchAi { object_id: None },
+            ToGame::FreeCamera {
+                camera: Some(CameraPose {
+                    eye: [1.0, 2.0, 3.0],
+                    target: [0.0; 3],
+                    up: [0.0, 1.0, 0.0],
+                    fov_y: Some(0.8),
+                    ortho_height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                }),
+            },
+            ToGame::FreeCamera { camera: None },
         ] {
             assert_eq!(round_trip_to_game(message.clone()), message);
         }
@@ -441,6 +557,13 @@ mod tests {
             },
             ToStudio::Paused,
             ToStudio::Resumed,
+            ToStudio::AiTrace {
+                object_id: "guard".to_owned(),
+                nodes: vec![
+                    (0, engine_scene::BtNodeRun::Running),
+                    (3, engine_scene::BtNodeRun::Failure),
+                ],
+            },
             ToStudio::Frame(Frame {
                 sequence: 7,
                 width: 2,
@@ -571,5 +694,57 @@ mod tests {
         );
         let lock = ToStudio::CursorLock { locked: true };
         assert_eq!(round_trip_to_studio(lock.clone()), lock);
+    }
+
+    #[test]
+    fn camera_poses_round_trip_and_bad_ones_are_refused() {
+        let camera = engine_renderer::Camera::new(
+            glam::Vec3::new(1.0, 2.0, 3.0),
+            glam::Vec3::ZERO,
+            16.0 / 9.0,
+        );
+        let pose = CameraPose::from_camera(&camera);
+        let back = pose.applied_to(&camera).expect("valid");
+        assert_eq!(back, camera);
+        let flat = engine_renderer::Camera::new_orthographic(
+            glam::Vec3::Z * 10.0,
+            glam::Vec3::ZERO,
+            2.0,
+            8.0,
+        );
+        let flat_pose = CameraPose::from_camera(&flat);
+        assert_eq!(flat_pose.fov_y, None);
+        assert_eq!(
+            flat_pose.applied_to(&camera).map(|c| c.aspect_ratio),
+            Some(16.0 / 9.0)
+        );
+        for bad in [
+            CameraPose {
+                eye: [f32::NAN, 0.0, 0.0],
+                ..pose
+            },
+            CameraPose { near: 0.0, ..pose },
+            CameraPose {
+                far: 0.01,
+                near: 0.1,
+                ..pose
+            },
+            CameraPose {
+                fov_y: Some(4.0),
+                ..pose
+            },
+            CameraPose {
+                fov_y: None,
+                ortho_height: 0.0,
+                ..pose
+            },
+            CameraPose {
+                eye: [0.0; 3],
+                target: [0.0; 3],
+                ..pose
+            },
+        ] {
+            assert!(bad.applied_to(&camera).is_none(), "{bad:?}");
+        }
     }
 }

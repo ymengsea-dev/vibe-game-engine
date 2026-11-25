@@ -17,10 +17,13 @@
 //! Grids can carry a ground height per cell ([`NavGrid::with_heights`]),
 //! and [`find_route`] is the one-call route a walking agent uses. Studio
 //! bakes grids from colliders and terrain slope; `engine::gameplay` walks
-//! agents along them. Polygon navmeshes and local steering / obstacle
-//! avoidance are future work.
+//! agents along them, and [`avoid`] steers walking agents round each
+//! other. Polygon navmeshes are future work.
 
+pub mod avoid;
 pub mod nav;
+
+pub use avoid::{AVOID_HORIZON, AvoidAgent, avoid};
 
 pub use nav::{
     GridCoord, NavError, NavGrid, find_path, find_path_world, find_route, follow_path,

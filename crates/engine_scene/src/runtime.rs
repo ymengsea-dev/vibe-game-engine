@@ -743,6 +743,20 @@ impl SceneResolver for RuntimeResolver<'_> {
         )
     }
 
+    fn resolve_skinned_lods(
+        &mut self,
+        mesh: &AssetRef,
+        renderer: &mut engine_ecs::components::SkinnedMeshRenderer,
+        auto_generate: bool,
+    ) -> Result<(), SceneError> {
+        let uuid = mesh.parse_id().map_err(SceneError::Resolve)?;
+        let id = AssetId::from_uuid(uuid);
+        let Some(gltf) = self.import(mesh, id)? else {
+            return Ok(());
+        };
+        attach_skinned_lod_tiers(self.gpu, self.assets, renderer, &gltf, auto_generate)
+    }
+
     fn resolve_road(
         &mut self,
         road: &crate::road::RoadData,
@@ -920,7 +934,11 @@ pub fn skinned_parts(
     gltf: &engine_asset::ImportedGltf,
     label: &str,
 ) -> Result<Option<LoadedSkinnedMesh>, SceneError> {
-    let Some(mesh) = gltf.meshes.first() else {
+    // A file with `_LOD<n>` tiers is drawn up close with its `_LOD0`.
+    let base = engine_asset::authored_skinned_lod_tiers(gltf)
+        .and_then(|tiers| tiers.first().copied())
+        .or_else(|| gltf.meshes.first());
+    let Some(mesh) = base else {
         return Ok(None);
     };
     let Some(weights) = &mesh.skin_weights else {
@@ -937,20 +955,7 @@ pub fn skinned_parts(
         ))
     })?;
 
-    let vertices = mesh
-        .vertices
-        .iter()
-        .zip(weights.joints.iter().zip(&weights.weights))
-        .map(
-            |(vertex, (joints, weights))| engine_renderer::SkinnedVertex {
-                position: vertex.position,
-                normal: vertex.normal,
-                uv: vertex.uv,
-                joints: joints.map(u32::from),
-                weights: *weights,
-            },
-        )
-        .collect();
+    let vertices = skinned_vertices(mesh.vertices.as_slice(), weights);
 
     Ok(Some(LoadedSkinnedMesh {
         vertices,
@@ -963,6 +968,92 @@ pub fn skinned_parts(
             .map(std::sync::Arc::new)
             .collect(),
     }))
+}
+
+/// Imported vertices with their skin, as the skinned pipeline reads them.
+fn skinned_vertices(
+    vertices: &[engine_renderer::Vertex],
+    skin: &engine_asset::ImportedSkinWeights,
+) -> Vec<engine_renderer::SkinnedVertex> {
+    vertices
+        .iter()
+        .zip(skin.joints.iter().zip(&skin.weights))
+        .map(
+            |(vertex, (joints, weights))| engine_renderer::SkinnedVertex {
+                position: vertex.position,
+                normal: vertex.normal,
+                uv: vertex.uv,
+                joints: joints.map(u32::from),
+                weights: *weights,
+            },
+        )
+        .collect()
+}
+
+/// Skinned geometry of one detail tier: vertices and triangle indices.
+pub type SkinnedGeometry = (Vec<engine_renderer::SkinnedVertex>, Vec<u32>);
+
+/// Geometry for an animated model's lower detail tiers, most detailed
+/// first: the file's `_LOD1`, `_LOD2`, … meshes when it has them,
+/// otherwise simplified copies when `auto_generate` is on. Every tier is
+/// bound to the same skeleton as the full mesh.
+pub fn skinned_lod_tier_geometry(
+    gltf: &ImportedGltf,
+    auto_generate: bool,
+) -> (Vec<SkinnedGeometry>, LodSource) {
+    let skinned = |mesh: &ImportedMesh| {
+        mesh.skin_weights
+            .as_ref()
+            .map(|skin| (skinned_vertices(&mesh.vertices, skin), mesh.indices.clone()))
+    };
+    if let Some(tiers) = engine_asset::authored_skinned_lod_tiers(gltf) {
+        let geometry = tiers
+            .iter()
+            .skip(1)
+            .filter_map(|mesh| skinned(mesh))
+            .collect();
+        return (geometry, LodSource::File);
+    }
+    match gltf.meshes.first() {
+        Some(full) if auto_generate && full.skin_weights.is_some() => {
+            let geometry = engine_asset::generated_lod_tiers(full)
+                .iter()
+                .filter_map(skinned)
+                .collect();
+            (geometry, LodSource::Generated)
+        }
+        _ => (Vec::new(), LodSource::None),
+    }
+}
+
+/// Gives an animated model's `renderer` the lower detail tiers of `gltf`.
+/// Each copy of a character uploads its own, like its full mesh.
+///
+/// # Errors
+///
+/// [`SceneError::Resolve`] if a tier fails to upload.
+pub fn attach_skinned_lod_tiers(
+    gpu: &GpuContext,
+    assets: &mut RenderAssets,
+    renderer: &mut engine_ecs::components::SkinnedMeshRenderer,
+    gltf: &ImportedGltf,
+    auto_generate: bool,
+) -> Result<(), SceneError> {
+    let (geometry, source) = skinned_lod_tier_geometry(gltf, auto_generate);
+    let mut handles = Vec::with_capacity(geometry.len());
+    for (vertices, indices) in &geometry {
+        match gpu.create_skinned_mesh("scene skinned mesh tier", vertices, indices) {
+            Ok(mesh) => handles.push(assets.skinned_meshes.insert(mesh)),
+            Err(err) => {
+                for handle in handles {
+                    assets.skinned_meshes.release(handle);
+                }
+                return Err(SceneError::Resolve(format!("detail tier: {err}")));
+            }
+        }
+    }
+    renderer.set_lods(assets, handles, source);
+    Ok(())
 }
 
 /// Uploads an imported file as an animated model, or `None` when it is a
@@ -1116,6 +1207,79 @@ mod tests {
         let plain = root.join("Game");
         assert_eq!(data_dir_for(&plain), plain);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A skinned `n` x `n` grid named `name`, bound to skeleton 0.
+    fn skinned_grid(name: &str, n: u32) -> ImportedMesh {
+        let mut vertices = Vec::new();
+        for z in 0..=n {
+            for x in 0..=n {
+                vertices.push(engine_renderer::Vertex {
+                    position: [x as f32, 0.0, z as f32],
+                    normal: [0.0, 1.0, 0.0],
+                    uv: [0.0, 0.0],
+                });
+            }
+        }
+        let mut indices = Vec::new();
+        for z in 0..n {
+            for x in 0..n {
+                let a = z * (n + 1) + x;
+                indices.extend([a, a + n + 1, a + 1, a + 1, a + n + 1, a + n + 2]);
+            }
+        }
+        let count = vertices.len();
+        ImportedMesh {
+            name: Some(name.into()),
+            vertices,
+            indices,
+            material: None,
+            skin_weights: Some(engine_asset::ImportedSkinWeights {
+                joints: vec![[1, 0, 0, 0]; count],
+                weights: vec![[1.0, 0.0, 0.0, 0.0]; count],
+            }),
+            skeleton: Some(0),
+        }
+    }
+
+    #[test]
+    fn animated_models_get_detail_tiers_from_the_file_or_generated() {
+        let generated = ImportedGltf {
+            meshes: vec![skinned_grid("Hero", 30)],
+            ..ImportedGltf::default()
+        };
+        let (tiers, source) = skinned_lod_tier_geometry(&generated, false);
+        assert!(tiers.is_empty());
+        assert_eq!(source, LodSource::None);
+        let (tiers, source) = skinned_lod_tier_geometry(&generated, true);
+        assert_eq!(source, LodSource::Generated);
+        assert!(!tiers.is_empty());
+        for (vertices, indices) in &tiers {
+            assert!(vertices.iter().all(|vertex| vertex.joints[0] == 1));
+            assert!(
+                indices
+                    .iter()
+                    .all(|&index| (index as usize) < vertices.len())
+            );
+        }
+
+        let authored = ImportedGltf {
+            meshes: vec![skinned_grid("Hero_LOD1", 2), skinned_grid("Hero_LOD0", 4)],
+            skeletons: vec![engine_asset::ImportedSkeleton {
+                name: None,
+                joints: Vec::new(),
+            }],
+            ..ImportedGltf::default()
+        };
+        let (tiers, source) = skinned_lod_tier_geometry(&authored, true);
+        assert_eq!(source, LodSource::File, "the file's tiers win");
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].1.len(), 2 * 2 * 6);
+        // The full mesh drawn up close is the file's `_LOD0`.
+        let parts = skinned_parts(&authored, "hero")
+            .expect("parts")
+            .expect("skinned");
+        assert_eq!(parts.indices.len(), 4 * 4 * 6);
     }
 
     /// A project-shaped temp directory with one asset and its sidecar.

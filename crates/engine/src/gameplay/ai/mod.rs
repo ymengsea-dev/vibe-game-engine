@@ -176,6 +176,15 @@ pub fn ai_state(world: &World, entity: Entity) -> Option<&'static str> {
         .map(AiState::name)
 }
 
+/// The nodes `entity`'s behaviour tree visited on its last frame, in visiting
+/// order, with what each answered. Empty for other brains.
+pub fn behaviour_tree_trace(world: &World, entity: Entity) -> engine_scene::BtTrace {
+    world
+        .get::<AiMemory>(entity)
+        .map(|memory| memory.tree.trace.clone())
+        .unwrap_or_default()
+}
+
 /// `entity`'s world position.
 pub(super) fn position(world: &World, entity: Entity) -> Option<Vec3> {
     world

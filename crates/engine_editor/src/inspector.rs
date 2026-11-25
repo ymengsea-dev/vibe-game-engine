@@ -30,6 +30,7 @@ use crate::assets::{AssetIndex, AssetKind};
 use crate::inspect::{InspectField, Inspectable, number, property_row};
 
 mod ai;
+pub use ai::PlayingTrees;
 mod animator_graph;
 mod behaviour_tree_graph;
 mod graph;
@@ -294,11 +295,14 @@ fn terrain_section(ui: &mut egui::Ui, world: &mut World, entity: Entity, assets:
 
 fn lod_section(ui: &mut egui::Ui, world: &mut World, entity: Entity) -> bool {
     let before = world.get::<MeshLod>(entity).cloned().unwrap_or_default();
-    let (tiers, source) = world
-        .get::<MeshRenderer>(entity)
-        .map_or((1, LodSource::None), |renderer| {
-            (renderer.tier_count(), renderer.lod_source)
-        });
+    let (tiers, source) = match (
+        world.get::<MeshRenderer>(entity),
+        world.get::<engine_ecs::components::SkinnedMeshRenderer>(entity),
+    ) {
+        (Some(renderer), _) => (renderer.tier_count(), renderer.lod_source),
+        (None, Some(renderer)) => (renderer.tier_count(), renderer.lod_source),
+        (None, None) => (1, LodSource::None),
+    };
     match lod_controls(ui, &before, &MeshLod::default(), tiers, source) {
         Some(value) => set_mesh_lod(world, entity, value),
         None => false,

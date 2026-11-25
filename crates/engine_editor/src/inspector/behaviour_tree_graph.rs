@@ -7,7 +7,8 @@
 
 use engine_ecs::prelude::Entity;
 use engine_scene::{
-    BehaviourTreeData, BtNodeData, BtNodeKind, MAX_BT_NODES, MAX_PATROL_POINTS, RuleCompare,
+    BehaviourTreeData, BtNodeData, BtNodeKind, BtNodeRun, MAX_BT_NODES, MAX_PATROL_POINTS,
+    RuleCompare,
 };
 
 use super::animator_graph::{arrow, node};
@@ -168,14 +169,46 @@ pub(super) fn move_among_siblings(tree: &mut BehaviourTreeData, index: usize, st
     }
 }
 
+/// What each node answered on the tree's last frame in the running game,
+/// by node index; `None` for nodes that did not run.
+pub(super) fn live_answers(
+    tree: &BehaviourTreeData,
+    trace: &[(u16, BtNodeRun)],
+) -> Vec<Option<BtNodeRun>> {
+    let mut answers = vec![None; tree.nodes.len()];
+    for &(index, answer) in trace {
+        if let Some(slot) = answers.get_mut(usize::from(index)) {
+            *slot = Some(answer);
+        }
+    }
+    answers
+}
+
+/// The colour of a node's live answer.
+fn answer_color(answer: BtNodeRun) -> egui::Color32 {
+    let palette = theme::NIGHT;
+    match answer {
+        BtNodeRun::Running => palette.highlight,
+        BtNodeRun::Success => palette.success,
+        BtNodeRun::Failure => palette.danger,
+    }
+}
+
 /// Draws the window while it is open. `clips` are the model's clip names;
 /// `here` is the object's position, for adding patrol points.
+///
+/// While a game plays (`playing`) the window can't be edited, because the
+/// scene goes back to how it was when the game stops. `live` is what each
+/// node answered on the last frame (from [`live_answers`]), once a game in
+/// the Scene View reports it.
 pub(super) fn show(
     ctx: &egui::Context,
     entity: Entity,
     tree: &mut BehaviourTreeData,
     clips: &[String],
     here: [f32; 3],
+    playing: bool,
+    live: Option<&[Option<BtNodeRun>]>,
 ) {
     let id = window_id(entity);
     let mut visible = ctx.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
@@ -206,16 +239,28 @@ pub(super) fn show(
         )
         .show(ctx, |ui| {
             ui.label("Runs from the top every frame. A Selector tries its children left to right until one works; a Sequence runs them in order until one fails.");
-            ui.weak("Drag nodes to arrange them; drag empty space to pan.");
+            if live.is_some() {
+                live_legend(ui);
+            } else if playing {
+                ui.weak("Playing, so the tree can't be changed. Play in the Scene View shows what each node answers.");
+            } else {
+                ui.weak("Drag nodes to arrange them; drag empty space to pan.");
+            }
             ui.add_space(10.0);
-            toolbar(ui, tree, &mut selected, &mut pan);
-            ui.add_space(10.0);
-            canvas(ui, id, tree, &mut selected, &mut pan);
+            if !playing {
+                toolbar(ui, tree, &mut selected, &mut pan);
+                ui.add_space(10.0);
+            }
+            canvas(ui, id, tree, &mut selected, &mut pan, playing, live);
             ui.add_space(10.0);
             egui::ScrollArea::vertical()
                 .id_salt(id.with("details"))
                 .max_height(240.0)
-                .show(ui, |ui| node_fields(ui, entity, tree, selected, clips, here));
+                .show(ui, |ui| {
+                    ui.add_enabled_ui(!playing, |ui| {
+                        node_fields(ui, entity, tree, selected, clips, here);
+                    });
+                });
         });
     ctx.data_mut(|data| {
         data.insert_temp(id, visible);
@@ -289,12 +334,31 @@ fn toolbar(
     });
 }
 
+/// While playing: what the dots mean, and why nothing can be changed.
+fn live_legend(ui: &mut egui::Ui) {
+    ui.horizontal_wrapped(|ui| {
+        ui.weak("Playing, so the tree can't be changed. Each dot is what a node answered on the last frame:");
+        for (answer, label) in [
+            (BtNodeRun::Running, "Running"),
+            (BtNodeRun::Success, "Worked"),
+            (BtNodeRun::Failure, "Failed"),
+        ] {
+            let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter()
+                .circle_filled(dot.center(), 4.0, answer_color(answer));
+            ui.weak(label);
+        }
+    });
+}
+
 fn canvas(
     ui: &mut egui::Ui,
     id: egui::Id,
     tree: &mut BehaviourTreeData,
     selected: &mut usize,
     pan: &mut egui::Vec2,
+    playing: bool,
+    live: Option<&[Option<BtNodeRun>]>,
 ) {
     let palette = theme::NIGHT;
     let (rect, background) = ui.allocate_exact_size(
@@ -351,7 +415,27 @@ fn canvas(
         ) else {
             continue;
         };
-        if response.dragged() {
+        if let Some(live) = live {
+            let at = node_rect(index);
+            match live.get(index).copied().flatten() {
+                Some(answer) => {
+                    painter.circle_filled(
+                        // Below the run-order number in the top corner.
+                        at.right_bottom() - egui::vec2(12.0, 12.0),
+                        5.0,
+                        answer_color(answer),
+                    );
+                }
+                // Nodes the last frame did not reach fade back.
+                None => {
+                    painter.rect_filled(
+                        at,
+                        egui::CornerRadius::same(8),
+                        palette.shell.gamma_multiply(0.6),
+                    );
+                }
+            }
+        } else if !playing && response.dragged() {
             moves.push((index, response.drag_delta()));
         }
         if response.clicked() || response.drag_started() {

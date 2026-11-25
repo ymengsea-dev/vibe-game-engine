@@ -480,7 +480,8 @@ impl AnimationEvents {
 /// Call once per frame, before rendering. An entity with an
 /// [`AnimationPlayer`] but no [`crate::components::SkinnedMeshRenderer`]
 /// still ticks its clock and fires its events — useful for driving
-/// something other than a mesh.
+/// something other than a mesh. So does a skinned mesh that was past its
+/// draw distance last frame, without uploading a pose.
 ///
 /// Never fails: a clip with no duration is skipped, and an oversized
 /// skeleton is truncated to what the shader can hold rather than
@@ -501,7 +502,13 @@ pub fn update_animations(world: &mut World, gpu: &GpuContext, dt: f32) {
             events.0 = fired;
         }
 
-        if let Some(skinned) = skinned {
+        // Past its draw distance last frame: keep time (and events), but
+        // don't work out a pose nobody sees.
+        if let Some(skinned) = skinned
+            && !skinned
+                .beyond_draw_distance
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
             upload_pose(gpu, &player, skinned);
         }
     }

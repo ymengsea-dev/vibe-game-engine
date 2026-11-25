@@ -20,6 +20,22 @@ pub const MAX_BT_NODES: usize = 128;
 /// The most children one node may have.
 pub const MAX_BT_CHILDREN: usize = 16;
 
+/// What a node answered on the last frame it ran, for Studio's live view of
+/// a running tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BtNodeRun {
+    /// It worked.
+    Success,
+    /// It did not work.
+    Failure,
+    /// It is still going (walking, waiting).
+    Running,
+}
+
+/// The nodes one frame of a tree visited, in the order they ran, with what
+/// each answered.
+pub type BtTrace = Vec<(u16, BtNodeRun)>;
+
 /// A behaviour tree. Node `0` is the root.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BehaviourTreeData {

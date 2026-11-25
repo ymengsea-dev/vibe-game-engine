@@ -3675,6 +3675,17 @@ impl EditorState {
         usize::from(self.selected_entity.is_some()) + self.secondary_selection.len()
     }
 
+    /// The selected object's ID when its AI brain is a behaviour tree: the
+    /// object a game playing in the Scene View reports its tree for.
+    pub fn watched_behaviour_tree(&self) -> Option<String> {
+        let entity = self.selected_entity?;
+        let ai = self.world.get::<engine_scene::SceneAi>(entity)?;
+        matches!(ai.0.brain, Some(engine_scene::AiBrainData::Tree(_))).then_some(())?;
+        self.world
+            .get::<engine_scene::SceneObjectId>(entity)
+            .map(|id| id.0.clone())
+    }
+
     /// Makes `entity` the only selected entity (primary, empty
     /// secondary).
     pub fn select_only(&mut self, entity: Entity) {

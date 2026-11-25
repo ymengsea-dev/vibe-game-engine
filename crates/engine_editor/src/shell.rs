@@ -1391,11 +1391,9 @@ fn cull_badge_text(report: &crate::CullReport) -> String {
         count(stats.meshes_drawn + stats.transparent_drawn + stats.skinned_drawn),
         count(stats.meshes_culled()),
     );
-    if stats.meshes_beyond_draw_distance > 0 {
-        text.push_str(&format!(
-            " · {} too far",
-            count(stats.meshes_beyond_draw_distance)
-        ));
+    let too_far = stats.meshes_beyond_draw_distance + stats.skinned_beyond_draw_distance;
+    if too_far > 0 {
+        text.push_str(&format!(" · {} too far", count(too_far)));
     }
     if stats.instances_total > 0 {
         text.push_str(&format!(
@@ -1679,7 +1677,7 @@ fn scene_owns_cursor(hovered: bool, dragged: bool, camera_gesture: bool, gizmo_d
 
 /// What a Scene View drag does to the camera.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CameraGesture {
+pub(crate) enum CameraGesture {
     /// Rotate around the focus point.
     Orbit,
     /// Turn in place while flying with WASD.
@@ -1783,13 +1781,54 @@ fn handle_camera_navigation(
     response: &egui::Response,
 ) -> Option<CameraGesture> {
     let two_d = state.dimension.is_2d();
+    let tool = state.active_view_tool();
+    let typing = ui.ctx().text_edit_focused();
+    let (dt, frame) =
+        ui.input(|input| (input.stable_dt, !typing && input.key_pressed(egui::Key::F)));
+    let camera = state.scene_cameras.active_mut(two_d);
+    let steer = steer_camera(ui, response, camera, two_d, tool);
+    if steer.moved {
+        // The user took control; a glide in progress would fight them.
+        state.scene_cameras.stop_glide(two_d);
+    }
+    if response.hovered() && frame {
+        state.frame_selection();
+    }
+    let gliding = state.scene_cameras.advance_glide(two_d, dt);
+    if steer.moved || frame || gliding || steer.flying {
+        ui.ctx().request_repaint();
+    }
+    steer.gesture
+}
+
+/// What [`steer_camera`] did this frame.
+pub(crate) struct Steer {
+    /// The drag gesture in progress, if the camera owns this drag.
+    pub gesture: Option<CameraGesture>,
+    /// Whether the camera changed.
+    pub moved: bool,
+    /// Whether fly keys are held (the camera keeps moving).
+    pub flying: bool,
+}
+
+/// Moves `camera` by this frame's drags, scrolls, pinches and fly keys over
+/// `response`, with the Scene View's conventions: orbit, look, pan, fly and
+/// zoom toward the pointer. Shared by the Scene View and the free camera of
+/// a paused game.
+pub(crate) fn steer_camera(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    camera: &mut crate::scene_camera::SceneCamera,
+    two_d: bool,
+    tool: ViewTool,
+) -> Steer {
     let buttons = DragButtons {
         primary: response.dragged_by(egui::PointerButton::Primary),
         secondary: response.dragged_by(egui::PointerButton::Secondary),
         middle: response.dragged_by(egui::PointerButton::Middle),
     };
     let typing = ui.ctx().text_edit_focused();
-    let (modifiers, dt, fly, scroll, pointer, frame) = ui.input(|input| {
+    let (modifiers, dt, fly, scroll, pointer) = ui.input(|input| {
         let fly = if !two_d && buttons.secondary && !typing {
             fly_direction(input)
         } else {
@@ -1801,19 +1840,11 @@ fn handle_camera_navigation(
             fly,
             scroll_intent(&input.events),
             input.pointer.hover_pos(),
-            !typing && input.key_pressed(egui::Key::F),
         )
     });
-    let gesture = camera_gesture(
-        buttons,
-        modifiers,
-        two_d,
-        fly != glam::Vec3::ZERO,
-        state.active_view_tool(),
-    );
+    let gesture = camera_gesture(buttons, modifiers, two_d, fly != glam::Vec3::ZERO, tool);
     let rect = response.rect;
     let drag = response.drag_delta();
-    let camera = state.scene_cameras.active_mut(two_d);
     let before = *camera;
     match gesture {
         Some(CameraGesture::Orbit) => camera.orbit(Vec2::new(drag.x, drag.y)),
@@ -1848,19 +1879,11 @@ fn handle_camera_navigation(
             camera.zoom(steps, two_d, toward);
         }
     }
-    let moved = *camera != before;
-    if moved {
-        // The user took control; a glide in progress would fight them.
-        state.scene_cameras.stop_glide(two_d);
+    Steer {
+        gesture,
+        moved: *camera != before,
+        flying: fly != glam::Vec3::ZERO,
     }
-    if response.hovered() && frame {
-        state.frame_selection();
-    }
-    let gliding = state.scene_cameras.advance_glide(two_d, dt);
-    if moved || frame || gliding || fly != glam::Vec3::ZERO {
-        ui.ctx().request_repaint();
-    }
-    gesture
 }
 
 /// Scroll input this frame, split by device.
@@ -4326,6 +4349,18 @@ fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
                             .collect(),
                     );
                     state.world.insert_resource(scenes);
+                    // A running game's behaviour trees are shown, not edited.
+                    if state.play.is_playing() {
+                        let trace = state
+                            .play
+                            .ai_trace()
+                            .map(|(id, nodes)| (id.to_owned(), nodes.to_vec()));
+                        state
+                            .world
+                            .insert_resource(inspector::PlayingTrees { trace });
+                    } else {
+                        state.world.remove_resource::<inspector::PlayingTrees>();
+                    }
                     inspector::show(
                         ui,
                         &mut state.world,
@@ -7465,6 +7500,129 @@ mod ui_tests {
             .id();
         state.select_only(guard);
         let path = crate::ui_snapshot::snapshot_dir().join("behaviour-tree-window.png");
+        let mut first = true;
+        crate::ui_snapshot::render_png(&path, egui::vec2(840.0, 780.0), 2.0, |ui| {
+            if std::mem::take(&mut first) {
+                crate::inspector::open_behaviour_tree(ui.ctx(), guard, 5);
+            }
+            ui.painter()
+                .rect_filled(ui.max_rect(), 0.0, crate::theme::NIGHT.shell);
+            let mut batch = false;
+            let mut open_script = None;
+            crate::inspector::show(
+                ui,
+                &mut state.world,
+                Some(guard),
+                &[],
+                &mut batch,
+                &crate::AssetIndex::new(),
+                &mut open_script,
+            );
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `game-view-free-camera.png`: a game paused in the Scene View
+    /// whose view was moved with the free camera. The frame is a stand-in
+    /// texture. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_game_view_free_camera() {
+        let (root, mut state) = menu_test_state();
+        state.play.start_in_viewport(&mut state.world);
+        state.play.mark_running();
+        state.play.set_paused(true);
+        state.play.set_game_camera(crate::play::ViewPose {
+            eye: glam::Vec3::new(0.0, 4.0, 8.0),
+            target: glam::Vec3::ZERO,
+            up: glam::Vec3::Y,
+            fov_y: Some(0.8),
+            ortho_height: 10.0,
+            near: 0.1,
+            far: 200.0,
+        });
+        if let Some(free) = state.play.free_camera_mut() {
+            free.camera.orbit(glam::Vec2::new(30.0, 0.0));
+        }
+        state.play.free_camera_moved();
+        state.game_view.texture = Some(crate::game_view::GameTexture {
+            id: egui::TextureId::Managed(0),
+            width: 1280,
+            height: 720,
+        });
+        let path = crate::ui_snapshot::snapshot_dir().join("game-view-free-camera.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(720.0, 420.0), 2.0, |ui| {
+            crate::game_view::show(ui, &mut state);
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `behaviour-tree-running.png`: the guard's tree while the game
+    /// plays, patrolling after failing to see a target. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_behaviour_tree_running() {
+        use engine_scene::{
+            AiBrainData, AiData, BehaviourTreeData, BtNodeData, BtNodeKind, SceneAi, SensesData,
+        };
+        let node = |kind, children: Vec<usize>| BtNodeData {
+            kind,
+            children,
+            graph_position: None,
+        };
+        let tree = BehaviourTreeData {
+            nodes: vec![
+                node(BtNodeKind::Selector, vec![1, 4]),
+                node(BtNodeKind::Sequence, vec![2, 3]),
+                node(BtNodeKind::CanSeeTarget, vec![]),
+                node(BtNodeKind::MoveToTarget { speed: Some(5.0) }, vec![]),
+                node(BtNodeKind::Sequence, vec![5, 6]),
+                node(
+                    BtNodeKind::Patrol {
+                        points: vec![[0.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+                    },
+                    vec![],
+                ),
+                node(BtNodeKind::Wait { seconds: 2.0 }, vec![]),
+            ],
+        };
+        let (root, mut state) = menu_test_state();
+        let guard = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Guard"),
+                engine_scene::SceneObjectId("guard".into()),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                SceneAi(AiData {
+                    senses: Some(SensesData::default()),
+                    brain: Some(AiBrainData::Tree(tree)),
+                    ..AiData::default()
+                }),
+            ))
+            .id();
+        state.select_only(guard);
+        // On the last frame it could not see a target, so it patrols.
+        use engine_scene::BtNodeRun::{Failure, Running};
+        state.world.insert_resource(crate::inspector::PlayingTrees {
+            trace: state
+                .world
+                .get::<engine_scene::SceneObjectId>(guard)
+                .map(|id| {
+                    (
+                        id.0.clone(),
+                        vec![
+                            (0, Running),
+                            (1, Failure),
+                            (2, Failure),
+                            (4, Running),
+                            (5, Running),
+                        ],
+                    )
+                }),
+        });
+        let path = crate::ui_snapshot::snapshot_dir().join("behaviour-tree-running.png");
         let mut first = true;
         crate::ui_snapshot::render_png(&path, egui::vec2(840.0, 780.0), 2.0, |ui| {
             if std::mem::take(&mut first) {

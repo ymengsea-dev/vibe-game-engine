@@ -535,9 +535,72 @@ pub struct SkinnedMeshRenderer {
     /// [`crate::render::extract_and_render`]) plus joint-matrices uniform
     /// (uploaded by the caller from a sampled pose).
     pub skin: engine_renderer::SkinnedBinding,
+    /// Simpler versions of `mesh` for far away, most detailed first, bound
+    /// to the same skeleton so they share `skin`'s pose. Empty for a mesh
+    /// with no detail tiers.
+    pub lods: Vec<engine_utils::AssetHandle<engine_renderer::SkinnedMesh>>,
+    /// Where `lods` came from.
+    pub lod_source: LodSource,
+    /// The tier drawn last frame (see [`MeshRenderer::lod_tier`]).
+    pub lod_tier: std::sync::atomic::AtomicU8,
+    /// Whether it was past its draw distance last frame. Its animation then
+    /// only keeps time, without working out a pose nobody sees. Atomic
+    /// because the renderer reads the world shared.
+    pub beyond_draw_distance: std::sync::atomic::AtomicBool,
 }
 
 impl SkinnedMeshRenderer {
+    /// Releases every GPU handle this renderer holds (mesh, detail tiers
+    /// and material) in `assets`. Call before removing or despawning it.
+    pub fn release(&self, assets: &mut engine_renderer::RenderAssets) {
+        assets.skinned_meshes.release(self.mesh);
+        for tier in &self.lods {
+            assets.skinned_meshes.release(*tier);
+        }
+        assets.materials.release(self.material);
+    }
+
+    /// Replaces the detail tiers with `lods` (already registered in
+    /// `assets`), releasing the old ones.
+    pub fn set_lods(
+        &mut self,
+        assets: &mut engine_renderer::RenderAssets,
+        lods: Vec<engine_utils::AssetHandle<engine_renderer::SkinnedMesh>>,
+        source: LodSource,
+    ) {
+        for tier in self.lods.drain(..) {
+            assets.skinned_meshes.release(tier);
+        }
+        self.lods = lods;
+        self.lod_source = if self.lods.is_empty() {
+            LodSource::None
+        } else {
+            source
+        };
+        *self.lod_tier.get_mut() = 0;
+    }
+
+    /// The mesh for detail tier `tier` (0 = `mesh`), clamped to the last.
+    pub fn tier_mesh(
+        &self,
+        tier: usize,
+    ) -> engine_utils::AssetHandle<engine_renderer::SkinnedMesh> {
+        match tier.checked_sub(1) {
+            None => self.mesh,
+            Some(index) => self
+                .lods
+                .get(index)
+                .or(self.lods.last())
+                .copied()
+                .unwrap_or(self.mesh),
+        }
+    }
+
+    /// How many detail tiers this renderer has, counting `mesh`.
+    pub fn tier_count(&self) -> usize {
+        1 + self.lods.len()
+    }
+
     /// Builds a [`SkinnedMeshRenderer`], uploading `mesh` and building a
     /// material binding from `texture`/`material`, then registering both
     /// as freshly owned entries (ref count `1` each) in `assets`.
@@ -564,6 +627,10 @@ impl SkinnedMeshRenderer {
             mesh: assets.skinned_meshes.insert(mesh),
             material: assets.materials.insert(material_binding),
             skin,
+            lods: Vec::new(),
+            lod_source: LodSource::None,
+            lod_tier: std::sync::atomic::AtomicU8::new(0),
+            beyond_draw_distance: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

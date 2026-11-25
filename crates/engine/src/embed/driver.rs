@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use engine_platform::{PlatformEvent, PlatformHandler};
 use engine_renderer::CapturedFrame;
 
-use super::protocol::{Frame, MAX_FRAME_SIDE, ToGame, ToStudio};
-use super::{Incoming, Link, STEP_SECONDS};
+use super::protocol::{CameraPose, Frame, MAX_FRAME_SIDE, ToGame, ToStudio};
+use super::{AI_TRACE_PER_SECOND, Incoming, Link, STEP_SECONDS};
 use crate::app::{Game, GameRunner};
 
 /// What the frame loop needs from the running game.
@@ -33,6 +33,14 @@ pub(crate) trait Embedded {
     fn cursor_lock(&self) -> Option<bool>;
     /// Last chance to save, as when a window closes.
     fn finish(&mut self);
+    /// What `object_id`'s behaviour tree did on its last frame; `None` when
+    /// no such object is alive.
+    fn ai_trace(&self, object_id: &str) -> Option<engine_scene::BtTrace>;
+    /// The game's own camera.
+    fn camera_pose(&self) -> Option<CameraPose>;
+    /// Draws the world as it is, without advancing it, from `camera` (or
+    /// the game's own camera).
+    fn render_still(&mut self, camera: Option<&CameraPose>);
 }
 
 impl<G: Game> Embedded for GameRunner<G> {
@@ -63,6 +71,20 @@ impl<G: Game> Embedded for GameRunner<G> {
     fn finish(&mut self) {
         self.on_exit();
     }
+
+    fn camera_pose(&self) -> Option<CameraPose> {
+        GameRunner::camera(self).map(CameraPose::from_camera)
+    }
+
+    fn render_still(&mut self, camera: Option<&CameraPose>) {
+        GameRunner::render_still(self, camera);
+    }
+
+    fn ai_trace(&self, object_id: &str) -> Option<engine_scene::BtTrace> {
+        let world = self.world()?;
+        let entity = crate::gameplay::find_object(world, object_id)?;
+        Some(crate::gameplay::behaviour_tree_trace(world, entity))
+    }
 }
 
 /// Whether Studio asked for a size the game can render.
@@ -84,6 +106,11 @@ pub(crate) fn drive(
     let mut paused = false;
     let mut sequence = 0u64;
     let mut next_frame = Instant::now();
+    let mut ai_watch = AiWatch::default();
+    // While paused: the camera Studio looks through, and whether the frozen
+    // world needs drawing again (the camera moved or the size changed).
+    let mut free_camera: Option<CameraPose> = None;
+    let mut redraw_still = false;
     let result = loop {
         let mut step = false;
         let mut stop = false;
@@ -92,6 +119,7 @@ pub(crate) fn drive(
                 Incoming::Message(ToGame::Resize { width, height }) => {
                     if valid_size(width, height) {
                         game.deliver(PlatformEvent::Resized { width, height });
+                        redraw_still |= paused;
                     } else {
                         tracing::warn!(width, height, "ignored an invalid preview size");
                     }
@@ -106,7 +134,11 @@ pub(crate) fn drive(
                     if !paused {
                         paused = true;
                         game.set_paused(true);
-                        if let Err(err) = link.send(&ToStudio::Paused) {
+                        let camera = game.camera_pose().map(ToStudio::GameCamera);
+                        let sent = link
+                            .send(&ToStudio::Paused)
+                            .and_then(|()| camera.map_or(Ok(()), |camera| link.send(&camera)));
+                        if let Err(err) = sent {
                             game.finish();
                             return Err(err);
                         }
@@ -115,6 +147,8 @@ pub(crate) fn drive(
                 Incoming::Message(ToGame::Resume) => {
                     if paused {
                         paused = false;
+                        free_camera = None;
+                        redraw_still = false;
                         game.set_paused(false);
                         if let Err(err) = link.send(&ToStudio::Resumed) {
                             game.finish();
@@ -123,6 +157,13 @@ pub(crate) fn drive(
                     }
                 }
                 Incoming::Message(ToGame::Step) => step |= paused,
+                Incoming::Message(ToGame::WatchAi { object_id }) => ai_watch.watch(object_id),
+                Incoming::Message(ToGame::FreeCamera { camera }) => {
+                    if paused {
+                        free_camera = camera;
+                        redraw_still = true;
+                    }
+                }
                 Incoming::Message(ToGame::Stop) => {
                     game.deliver(PlatformEvent::CloseRequested);
                     stop = true;
@@ -143,6 +184,11 @@ pub(crate) fn drive(
                 game.prepare_step(STEP_SECONDS);
             }
             game.deliver(PlatformEvent::RedrawRequested);
+            // A step moves the world on; it is still seen from the free camera.
+            redraw_still = step && free_camera.is_some();
+        }
+        if paused && std::mem::take(&mut redraw_still) {
+            game.render_still(free_camera.as_ref());
         }
         if let Some(locked) = game.cursor_lock()
             && let Err(err) = link.send(&ToStudio::CursorLock { locked })
@@ -161,6 +207,11 @@ pub(crate) fn drive(
                 break Err(err);
             }
         }
+        if let Some(message) = ai_watch.due(game, Instant::now())
+            && let Err(err) = link.send(&message)
+        {
+            break Err(err);
+        }
         // Keep a steady pace; after a slow frame, start again from now
         // rather than rushing to catch up.
         next_frame += interval;
@@ -172,6 +223,47 @@ pub(crate) fn drive(
     };
     game.finish();
     result
+}
+
+/// The object whose behaviour tree Studio watches, and what it was last sent.
+#[derive(Default)]
+struct AiWatch {
+    object_id: Option<String>,
+    sent: Option<engine_scene::BtTrace>,
+    last: Option<Instant>,
+}
+
+impl AiWatch {
+    fn watch(&mut self, object_id: Option<String>) {
+        if self.object_id != object_id {
+            self.object_id = object_id;
+            self.sent = None;
+            self.last = None;
+        }
+    }
+
+    /// The trace to send now: only when it changed, and not more often than
+    /// [`AI_TRACE_PER_SECOND`].
+    fn due(&mut self, game: &impl Embedded, now: Instant) -> Option<ToStudio> {
+        let object_id = self.object_id.as_ref()?;
+        let gap = Duration::from_secs(1) / AI_TRACE_PER_SECOND;
+        if self
+            .last
+            .is_some_and(|last| now.saturating_duration_since(last) < gap)
+        {
+            return None;
+        }
+        let nodes = game.ai_trace(object_id).unwrap_or_default();
+        if self.sent.as_ref() == Some(&nodes) {
+            return None;
+        }
+        self.last = Some(now);
+        self.sent = Some(nodes.clone());
+        Some(ToStudio::AiTrace {
+            object_id: object_id.clone(),
+            nodes,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -191,6 +283,8 @@ mod tests {
         finished: u32,
         exit_after_redraws: Option<usize>,
         lock_changes: std::cell::RefCell<VecDeque<bool>>,
+        trace: engine_scene::BtTrace,
+        stills: Vec<Option<CameraPose>>,
     }
 
     impl FakeGame {
@@ -231,6 +325,32 @@ mod tests {
         }
         fn cursor_lock(&self) -> Option<bool> {
             self.lock_changes.borrow_mut().pop_front()
+        }
+        fn ai_trace(&self, object_id: &str) -> Option<engine_scene::BtTrace> {
+            (object_id == "guard").then(|| self.trace.clone())
+        }
+        fn camera_pose(&self) -> Option<CameraPose> {
+            Some(pose(1.0))
+        }
+        fn render_still(&mut self, camera: Option<&CameraPose>) {
+            self.stills.push(camera.copied());
+            self.pending = Some(CapturedFrame {
+                width: 1,
+                height: 1,
+                rgba: vec![5, 5, 5, 255],
+            });
+        }
+    }
+
+    fn pose(x: f32) -> CameraPose {
+        CameraPose {
+            eye: [x, 2.0, 5.0],
+            target: [0.0; 3],
+            up: [0.0, 1.0, 0.0],
+            fov_y: Some(0.8),
+            ortho_height: 10.0,
+            near: 0.1,
+            far: 100.0,
         }
     }
 
@@ -300,6 +420,92 @@ mod tests {
             .collect();
         assert_eq!(sequences, [1, 2, 3]);
         assert_eq!(game.finished, 1, "a closed connection still saves");
+    }
+
+    #[test]
+    fn a_watched_tree_is_sent_when_it_changes_and_not_too_often() {
+        use engine_scene::BtNodeRun;
+        let mut game = FakeGame {
+            trace: vec![(0, BtNodeRun::Running)],
+            ..FakeGame::default()
+        };
+        let mut link = ScriptedLink::new(vec![
+            vec![ToGame::WatchAi {
+                object_id: Some("guard".into()),
+            }],
+            vec![],
+            vec![],
+        ]);
+        drive(&mut game, &mut link, Duration::ZERO).expect("drive");
+        let traces: Vec<_> = link
+            .sent
+            .iter()
+            .filter(|message| matches!(message, ToStudio::AiTrace { .. }))
+            .collect();
+        assert_eq!(
+            traces,
+            [&ToStudio::AiTrace {
+                object_id: "guard".into(),
+                nodes: vec![(0, BtNodeRun::Running)],
+            }],
+            "an unchanged trace is sent once"
+        );
+
+        // Within the rate limit nothing goes out; after it, a change does.
+        let start = Instant::now();
+        let mut watch = AiWatch::default();
+        watch.watch(Some("guard".into()));
+        assert!(watch.due(&game, start).is_some());
+        game.trace = vec![(0, BtNodeRun::Success)];
+        assert!(
+            watch
+                .due(&game, start + Duration::from_millis(10))
+                .is_none()
+        );
+        assert!(
+            watch
+                .due(&game, start + Duration::from_millis(150))
+                .is_some()
+        );
+        watch.watch(None);
+        assert!(watch.due(&game, start + Duration::from_secs(5)).is_none());
+    }
+
+    #[test]
+    fn a_free_camera_redraws_the_frozen_game_without_moving_it_on() {
+        let mut game = FakeGame::default();
+        let mut link = ScriptedLink::new(vec![
+            // Ignored while running.
+            vec![ToGame::FreeCamera {
+                camera: Some(pose(9.0)),
+            }],
+            vec![ToGame::Pause],
+            vec![ToGame::FreeCamera {
+                camera: Some(pose(3.0)),
+            }],
+            vec![],
+            vec![ToGame::Step],
+            vec![ToGame::FreeCamera { camera: None }],
+            vec![ToGame::Resume],
+        ]);
+        drive(&mut game, &mut link, Duration::ZERO).expect("drive");
+        assert_eq!(
+            game.stills,
+            [Some(pose(3.0)), Some(pose(3.0)), None],
+            "drawn once per change, again after a step, then from the game's camera"
+        );
+        let paused_at = link
+            .sent
+            .iter()
+            .position(|message| *message == ToStudio::Paused)
+            .expect("paused");
+        assert_eq!(
+            link.sent.get(paused_at + 1),
+            Some(&ToStudio::GameCamera(pose(1.0))),
+            "the game's camera follows the pause"
+        );
+        // One redraw before the pause, one step, then running again.
+        assert_eq!(game.redraws(), 3);
     }
 
     #[test]
