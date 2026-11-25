@@ -1369,6 +1369,16 @@ fn handle_asset_requests(state: &mut EditorState) {
     {
         state.asset_browser.operation_error = Some(error);
     }
+    if let Some(folder) = state.asset_browser.new_graph_request.take() {
+        match state.create_gameplay_graph_file(&folder) {
+            Ok(path) => {
+                if let Err(error) = state.open_gameplay_graph(&path) {
+                    state.asset_browser.operation_error = Some(error);
+                }
+            }
+            Err(error) => state.asset_browser.operation_error = Some(error),
+        }
+    }
     let dropped = std::mem::take(&mut state.dropped_files);
     let import_requested = std::mem::take(&mut state.import_request);
     let explicit_rescan = std::mem::take(&mut state.rescan_request);
@@ -2309,6 +2319,9 @@ impl EditorHandler {
                 SessionEvent::AiTrace { object_id, nodes } => {
                     self.state.play.set_ai_trace(object_id, nodes);
                 }
+                SessionEvent::GraphTrace { object_id, nodes } => {
+                    self.state.play.set_graph_trace(object_id, nodes);
+                }
                 SessionEvent::CursorLock(locked) => {
                     let change = self.preview_lock.on_game_request(
                         locked,
@@ -2349,6 +2362,10 @@ impl EditorHandler {
             let watched = self.state.watched_behaviour_tree();
             if let Some(object_id) = self.state.play.watch_ai(watched) {
                 outgoing.push(ToGame::WatchAi { object_id });
+            }
+            let watched_graph = self.state.watched_graph();
+            if let Some(object_id) = self.state.play.watch_graph(watched_graph) {
+                outgoing.push(ToGame::WatchGraph { object_id });
             }
             outgoing.extend(self.state.play.take_controls().into_iter().map(
                 |control| match control {

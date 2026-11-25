@@ -354,6 +354,8 @@ impl SavedEntity {
             // Like AI: the scene that spawned the object already made it an
             // area.
             stream_area: None,
+            // Like AI: the scene gave the object its graph.
+            gameplay_graph: None,
             // Roads are part of the level, not of what a save restores.
             road: None,
             painted: None,

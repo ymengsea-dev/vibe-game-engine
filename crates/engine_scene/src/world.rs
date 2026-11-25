@@ -340,6 +340,9 @@ impl Scene {
             scene_entity.stream_area = world
                 .get::<crate::stream_area::SceneStreamArea>(*entity)
                 .map(|carrier| carrier.0.clone());
+            scene_entity.gameplay_graph = world
+                .get::<crate::gameplay_graph::SceneGameplayGraph>(*entity)
+                .and_then(|carrier| carrier.0.clone());
             scene_entity.painted = world
                 .get::<crate::painted::ScenePaintedGroup>(*entity)
                 .map(|carrier| carrier.0.clone());

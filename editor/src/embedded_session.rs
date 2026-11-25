@@ -41,6 +41,13 @@ pub(crate) enum SessionEvent {
         /// `(node index, answer)` pairs, in visiting order.
         nodes: engine::scene::BtTrace,
     },
+    /// The gameplay graph nodes the watched object ran lately.
+    GraphTrace {
+        /// The watched object.
+        object_id: String,
+        /// Node IDs.
+        nodes: Vec<u32>,
+    },
     /// The connection closed (the game quit, crashed or was stopped).
     Closed,
     /// The preview cannot continue; the message says why, for the user.
@@ -270,6 +277,9 @@ fn read_game(
             Ok(ToStudio::CursorLock { locked }) => Some(SessionEvent::CursorLock(locked)),
             Ok(ToStudio::AiTrace { object_id, nodes }) => {
                 Some(SessionEvent::AiTrace { object_id, nodes })
+            }
+            Ok(ToStudio::GraphTrace { object_id, nodes }) => {
+                Some(SessionEvent::GraphTrace { object_id, nodes })
             }
             Ok(ToStudio::Hello { .. }) => None,
             Err(protocol::ProtocolError::Io(_)) => Some(SessionEvent::Closed),

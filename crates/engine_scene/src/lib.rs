@@ -33,6 +33,7 @@ mod environment;
 mod error;
 mod format;
 mod game_state;
+mod gameplay_graph;
 mod io;
 mod material;
 mod migration;
@@ -97,6 +98,12 @@ pub use format::{
     SpawnAt, SpriteAnimationData, SpriteClipData, SpriteClipPlayback, SpriteData, TilemapData,
     TileLayerData, AutoTileLayout,
     TransformData, UiAnchor, UiElementData, UiKind, UiLayoutDirection, WaterData,
+};
+pub use gameplay_graph::{
+    GAMEPLAY_GRAPH_EXTENSION, GameplayGraphData, GameplayNodeData, GameplayNodeKind,
+    GameplayWire, GraphAiEvent, GraphComment, GraphPin, GraphProblem, GraphVariable,
+    MAX_GAMEPLAY_NODES, MAX_GRAPH_COMMENTS, MAX_GRAPH_TEXT, MAX_GRAPH_VARIABLES, MAX_LOOP_COUNT,
+    NodeGroup, PinType, PinValue, SceneGameplayGraph, TouchKind,
 };
 pub use game_state::{GameState, GameStateName};
 pub use io::write_atomic;

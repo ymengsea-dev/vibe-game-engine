@@ -128,6 +128,10 @@ pub struct PlayState {
     ai_watch_sent: Option<String>,
     /// The latest report: which object, and what its tree's nodes answered.
     ai_trace: Option<(String, engine_scene::BtTrace)>,
+    /// The object whose gameplay graph Studio last asked the game to report.
+    graph_watch_sent: Option<String>,
+    /// The latest report: which object, and the graph nodes it ran lately.
+    graph_trace: Option<(String, Vec<u32>)>,
     /// The game's camera, as it reported when it paused.
     game_camera: Option<ViewPose>,
     /// The free camera, once the user moved the view of a paused game.
@@ -155,6 +159,8 @@ impl PlayState {
             snapshot: None,
             ai_watch_sent: None,
             ai_trace: None,
+            graph_watch_sent: None,
+            graph_trace: None,
             game_camera: None,
             free_camera: None,
             free_camera_update: None,
@@ -198,6 +204,8 @@ impl PlayState {
         self.compiling = false;
         self.ai_watch_sent = None;
         self.ai_trace = None;
+        self.graph_watch_sent = None;
+        self.graph_trace = None;
         self.game_camera = None;
         self.free_camera = None;
         self.free_camera_update = None;
@@ -322,6 +330,34 @@ impl PlayState {
         }
     }
 
+    /// Records which object's gameplay graph Studio wants reported. Returns
+    /// the request to send when it differs from the last one sent.
+    pub fn watch_graph(&mut self, object_id: Option<String>) -> Option<Option<String>> {
+        if self.graph_watch_sent == object_id {
+            return None;
+        }
+        self.graph_watch_sent.clone_from(&object_id);
+        if self.graph_trace.as_ref().map(|(id, _)| id) != object_id.as_ref() {
+            self.graph_trace = None;
+        }
+        Some(object_id)
+    }
+
+    /// Keeps the game's report of the watched object's gameplay graph.
+    pub fn set_graph_trace(&mut self, object_id: String, nodes: Vec<u32>) {
+        if self.graph_watch_sent.as_ref() == Some(&object_id) && self.mode == EditorMode::Play {
+            self.graph_trace = Some((object_id, nodes));
+        }
+    }
+
+    /// The watched object's gameplay graph nodes that ran lately, while
+    /// playing in the Scene View.
+    pub fn graph_trace(&self) -> Option<(&str, &[u32])> {
+        self.graph_trace
+            .as_ref()
+            .map(|(id, nodes)| (id.as_str(), nodes.as_slice()))
+    }
+
     /// The watched object's behaviour tree as it ran last, while playing in
     /// the Scene View.
     pub fn ai_trace(&self) -> Option<(&str, &[(u16, engine_scene::BtNodeRun)])> {
@@ -357,6 +393,8 @@ impl PlayState {
         self.compiling = false;
         self.ai_watch_sent = None;
         self.ai_trace = None;
+        self.graph_watch_sent = None;
+        self.graph_trace = None;
         self.game_camera = None;
         self.free_camera = None;
         self.free_camera_update = None;

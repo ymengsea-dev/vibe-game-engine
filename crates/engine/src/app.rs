@@ -408,6 +408,16 @@ pub trait Game {
         FrameDemand::Idle
     }
 
+    /// The nodes `object_id`'s gameplay graph ran lately, for Studio's live
+    /// view while the game plays in the Scene View. Games that run graphs
+    /// through [`crate::gameplay::GameplayRuntime`] return its
+    /// [`graph_trace`](crate::gameplay::GameplayRuntime::graph_trace).
+    /// Default: none.
+    fn graph_trace(&self, object_id: &str) -> Option<Vec<u32>> {
+        let _ = object_id;
+        None
+    }
+
     /// This game's own state, serialized, for the engine to persist.
     ///
     /// Score, inventory, quest flags, clock — whatever the world snapshot
@@ -1533,6 +1543,11 @@ pub(crate) struct GameRunner<G: Game> {
 }
 
 impl<G: Game> GameRunner<G> {
+    /// The game being run.
+    pub(crate) fn game(&self) -> &G {
+        &self.game
+    }
+
     pub(crate) fn new(
         config: GameConfig,
         game: G,
@@ -2985,6 +3000,175 @@ mod tests {
         }
 
         fn update(&mut self, _ctx: &mut GameContext<'_>, _dt: f32) {}
+    }
+
+    /// A coin with a gameplay graph: when the player's body enters its
+    /// trigger, the graph adds one to the `coins` variable and destroys
+    /// the coin. Runs the shared runtime as a Rust game drives it, with the
+    /// graph read from the project's assets. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn a_gameplay_graph_picks_up_a_coin() {
+        use crate::gameplay::{GameplayRuntime, find_object};
+        use engine_scene::{
+            AssetRef, BodyKind, ColliderData, ColliderShape, GameplayGraphData, GameplayNodeData,
+            GameplayNodeKind, GameplayWire, PinValue, SceneEntity, TouchKind, TransformData,
+        };
+        use std::cell::RefCell;
+
+        const PLAYER: &str = "00000000-0000-4000-8000-0000000000e1";
+        const COIN: &str = "00000000-0000-4000-8000-0000000000e2";
+        const GRAPH: &str = "00000000-0000-4000-8000-0000000000e3";
+
+        struct CoinGame {
+            gameplay: GameplayRuntime,
+            log: Rc<RefCell<Vec<(f64, bool)>>>,
+        }
+        impl Game for CoinGame {
+            fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+                self.gameplay.setup(ctx)
+            }
+
+            fn on_ready(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+                self.gameplay.start_rules(ctx);
+                let push = engine_scripting::GameCommand::SetVelocity {
+                    object_id: PLAYER.into(),
+                    velocity: [4.0, 0.0, 0.0],
+                };
+                self.gameplay
+                    .apply(ctx, vec![push])
+                    .map_err(|error| GameError::Setup(error.to_string()))?;
+                Ok(())
+            }
+
+            fn update(&mut self, ctx: &mut GameContext<'_>, dt: f32) {
+                self.gameplay.begin_frame(ctx);
+                self.gameplay.update_rules(ctx, dt);
+                let coins = ctx
+                    .world()
+                    .get_resource::<engine_scene::RuleVariables>()
+                    .map_or(0.0, |variables| variables.get("coins"));
+                let coin = find_object(ctx.world(), COIN).is_some();
+                self.log.borrow_mut().push((coins, coin));
+                self.gameplay.present_camera(ctx, dt);
+            }
+
+            fn post_fixed_update(&mut self, ctx: &mut GameContext<'_>, _step: f32) {
+                self.gameplay.sample_collisions(ctx);
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("vge-coin-graph-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("assets");
+        // Trigger entered → coins = coins + 1 → Destroy (this object).
+        let node = |id, kind| GameplayNodeData {
+            id,
+            kind,
+            position: [0.0, 0.0],
+            inputs: Default::default(),
+        };
+        let mut add = node(3, GameplayNodeKind::Add);
+        add.inputs.insert(1, PinValue::Number(1.0));
+        let wire = |from, from_pin, to, to_pin| GameplayWire {
+            from,
+            from_pin,
+            to,
+            to_pin,
+        };
+        let graph = GameplayGraphData {
+            nodes: vec![
+                node(
+                    0,
+                    GameplayNodeKind::Touch {
+                        kind: TouchKind::Enters,
+                    },
+                ),
+                node(
+                    1,
+                    GameplayNodeKind::SetGameVariable {
+                        name: "coins".into(),
+                    },
+                ),
+                node(
+                    2,
+                    GameplayNodeKind::GetGameVariable {
+                        name: "coins".into(),
+                    },
+                ),
+                add,
+                node(4, GameplayNodeKind::Destroy),
+            ],
+            wires: vec![
+                wire(0, 0, 1, 0),
+                wire(2, 0, 3, 0),
+                wire(3, 0, 1, 1),
+                wire(1, 0, 4, 0),
+            ],
+            ..GameplayGraphData::default()
+        };
+        assert!(graph.problems().is_empty(), "{:?}", graph.problems());
+        let file = root.join("coin.graph");
+        graph.save(&file).expect("graph file");
+        std::fs::write(
+            engine_asset::AssetMeta::sidecar_path(&file),
+            format!("(id: \"{GRAPH}\", source_hash: 0)"),
+        )
+        .expect("sidecar");
+
+        let mut scene = engine_scene::Scene::default();
+        let mut body = ColliderData::new(ColliderShape::Ball { radius: 0.5 }, BodyKind::Dynamic);
+        body.gravity_scale = 0.0;
+        scene.entities.push(SceneEntity {
+            object_id: Some(PLAYER.into()),
+            name: Some("Player".into()),
+            transform: Some(TransformData::from(
+                engine_utils::Transform::from_translation(Vec3::new(-1.2, 0.0, 0.0)),
+            )),
+            collider: Some(body),
+            ..SceneEntity::default()
+        });
+        let mut trigger = ColliderData::new(
+            ColliderShape::Cuboid {
+                half_extents: [0.5, 0.5, 0.5],
+            },
+            BodyKind::Fixed,
+        );
+        trigger.trigger = true;
+        scene.entities.push(SceneEntity {
+            object_id: Some(COIN.into()),
+            name: Some("Coin".into()),
+            transform: Some(TransformData::from(engine_utils::Transform::IDENTITY)),
+            collider: Some(trigger),
+            gameplay_graph: Some(AssetRef { id: GRAPH.into() }),
+            ..SceneEntity::default()
+        });
+
+        let library = engine_scene::AssetLibrary::index(&root).expect("assets");
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let game = CoinGame {
+            gameplay: GameplayRuntime::new(scene, Some(library)),
+            log: Rc::clone(&log),
+        };
+        let gpu = GpuContext::headless(64, 64).expect("headless GPU");
+        let mut runner = GameRunner::new(
+            GameConfig::new("coin", 64, 64),
+            game,
+            Rc::new(Cell::new(None)),
+        );
+        runner.start_with_gpu(gpu, 64, 64);
+        for _ in 0..400 {
+            runner.on_event(PlatformEvent::RedrawRequested);
+        }
+        assert!(runner.error_slot.take().is_none());
+        let log = log.borrow();
+        assert_eq!(
+            log.last().copied(),
+            Some((1.0, false)),
+            "one coin counted and the coin is gone: {:?}",
+            log.iter().rev().take(3).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A world area loads its scene while the camera is near and unloads it

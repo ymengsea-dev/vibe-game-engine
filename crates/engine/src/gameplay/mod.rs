@@ -35,6 +35,7 @@ mod bodies;
 mod camera;
 mod collisions;
 mod commands;
+mod graph;
 mod keys;
 pub(crate) mod objects;
 mod prefab;
@@ -219,6 +220,8 @@ pub struct GameplayRuntime {
     time_of_day: Option<f32>,
     /// Real minutes a whole day takes; 0 holds the clock.
     day_minutes: f32,
+    /// The objects' gameplay graphs and their state.
+    graphs: graph::GraphRunner,
 }
 
 impl GameplayRuntime {
@@ -268,6 +271,7 @@ impl GameplayRuntime {
             ai_rng: engine_utils::Rng::new(AI_SEED),
             time_of_day: None,
             day_minutes: 0.0,
+            graphs: graph::GraphRunner::default(),
         }
     }
 
@@ -399,6 +403,10 @@ impl GameplayRuntime {
                 entity.parent = entity.parent.map(|parent| parent + offset);
                 entity
             }));
+        // Every object with a graph gets a fresh one; Start runs with the
+        // scene's start rules.
+        self.graphs.clear();
+        self.adopt_graphs();
         let clock = self.scene.environment.time_of_day;
         self.time_of_day = clock.map(|clock| clock.start_hour);
         self.day_minutes = clock.map_or(0.0, |clock| clock.day_minutes);
@@ -674,6 +682,7 @@ impl GameplayRuntime {
             &self.scene,
             ctx.world().get_resource::<engine_scene::RuleVariables>(),
         );
+        self.adopt_graphs();
         self.run_rule_event(ctx, RuleEvent::SceneStartExcept(&existing));
         Ok(())
     }
@@ -696,6 +705,7 @@ impl GameplayRuntime {
             tracing::warn!(scene = %path, %error, "scene could not be unloaded cleanly");
         }
         self.scene.remove_objects(&ids);
+        self.graphs.forget(&ids.iter().cloned().collect::<Vec<_>>());
         if let Some(library) = &self.assets {
             ctx.set_scene_ui_images(&self.scene, library);
         }
@@ -812,7 +822,7 @@ impl GameplayRuntime {
                 ctx.set_scene_sprite_atlas(library)?;
             }
         }
-        // Spawned copies join the scene data, so their rules run.
+        // Spawned copies join the scene data, so their rules and graphs run.
         let started = (!spawned.is_empty()).then(|| {
             rule_runtime::adopt_spawned(
                 &mut self.scene,
@@ -820,6 +830,9 @@ impl GameplayRuntime {
                 &mut self.adopted,
             )
         });
+        if started.is_some() {
+            self.adopt_graphs();
+        }
         let poses = commands::moved_body_poses(ctx.world(), &commands::moved_object_ids(&commands));
         commands::sync_moved_bodies(ctx.physics_mut(), &poses);
 
@@ -882,6 +895,7 @@ impl GameplayRuntime {
                 &mut self.adopted,
                 destroyed,
             );
+            self.graphs.forget(destroyed);
         }
 
         self.record_state_changes(ctx.world_mut(), &commands);
@@ -921,12 +935,16 @@ impl GameplayRuntime {
     /// Runs the rules for `event`, then applies the actions that change
     /// objects, scenes or the game state. Returns how many actions ran.
     fn run_rule_event(&mut self, ctx: &mut GameContext<'_>, event: RuleEvent<'_>) -> usize {
+        let graph_event = graph_event(&event);
         let outcome = {
             let (world, ui) = ctx.rule_targets_mut();
             self.scene
                 .apply_rule_event(event, world, ui, &self.ui_nodes)
         };
         let count = outcome.applied + outcome.deferred.len();
+        if let Some(event) = graph_event {
+            self.run_graphs(ctx, &event);
+        }
         if outcome.deferred.is_empty() {
             return count;
         }
@@ -1007,6 +1025,86 @@ impl GameplayRuntime {
         if !paused {
             self.update_ai(ctx, dt);
         }
+        if !self.graphs.is_empty() {
+            let input = ctx.input();
+            let pressed: Vec<&'static str> = engine_scripting::ScriptKey::ALL
+                .iter()
+                .filter(|key| input.is_key_pressed(keys::platform_key(**key)))
+                .map(|key| key.name())
+                .collect();
+            let held: Vec<&'static str> = engine_scripting::ScriptKey::ALL
+                .iter()
+                .filter(|key| input.is_key_held(keys::platform_key(**key)))
+                .map(|key| key.name())
+                .collect();
+            let output = {
+                let queries = GameplayQueries {
+                    world: ctx.world(),
+                    physics: ctx.physics(),
+                    grounded: Some(&self.grounded),
+                };
+                let key_held = |name: &str| key_held(ctx, name);
+                let env = graph::GraphWorld {
+                    world: ctx.world(),
+                    queries: &queries,
+                    key_held: &key_held,
+                    variables: ctx.world().get_resource::<engine_scene::RuleVariables>(),
+                };
+                self.graphs.update(&env, &pressed, &held, dt, paused)
+            };
+            self.apply_graph_commands(ctx, output.commands);
+        }
+    }
+
+    /// Runs every object's graph for `event` and applies what they did.
+    fn run_graphs(&mut self, ctx: &mut GameContext<'_>, event: &graph::GraphEvent<'_>) {
+        if self.graphs.is_empty() {
+            return;
+        }
+        let output = {
+            let queries = GameplayQueries {
+                world: ctx.world(),
+                physics: ctx.physics(),
+                grounded: Some(&self.grounded),
+            };
+            let key_held = |name: &str| key_held(ctx, name);
+            let env = graph::GraphWorld {
+                world: ctx.world(),
+                queries: &queries,
+                key_held: &key_held,
+                variables: ctx.world().get_resource::<engine_scene::RuleVariables>(),
+            };
+            self.graphs.dispatch(&env, event)
+        };
+        self.apply_graph_commands(ctx, output.commands);
+    }
+
+    /// Applies commands graphs queued, like rule actions: not while
+    /// already applying too deep.
+    fn apply_graph_commands(&mut self, ctx: &mut GameContext<'_>, commands: Vec<GameCommand>) {
+        if commands.is_empty() || !self.rule_guard.enter() {
+            return;
+        }
+        match self.apply(ctx, commands) {
+            Ok(spawned) => self.rule_spawns.extend(spawned),
+            Err(error) => tracing::warn!(%error, "a gameplay graph action failed"),
+        }
+        self.rule_guard.leave();
+    }
+
+    /// Gives every object of the scene that has a gameplay graph, and none
+    /// running yet, its graph.
+    fn adopt_graphs(&mut self) {
+        let library = self.assets.as_ref();
+        let read = |id: &str| library.and_then(|library| library.read(id).ok().flatten());
+        self.graphs.adopt(&self.scene, &read);
+    }
+
+    /// The nodes `object_id`'s gameplay graph ran in about the last half
+    /// second, by node ID, for the editor's live view (see
+    /// [`crate::Game::graph_trace`]).
+    pub fn graph_trace(&self, object_id: &str) -> Option<Vec<u32>> {
+        self.graphs.trace(object_id)
     }
 
     /// One frame of AI: senses, brains and walking, then the rules for what
@@ -1034,8 +1132,29 @@ impl GameplayRuntime {
         }
     }
 
-    /// Runs the visual rules for one AI event.
+    /// Runs the visual rules and graphs for one AI event.
     fn run_ai_rules(&mut self, ctx: &mut GameContext<'_>, event: &AiEvent) {
+        let (graph_event, target) = match event {
+            AiEvent::Arrived { .. } => (engine_scene::GraphAiEvent::MoveFinished, None),
+            AiEvent::TargetSeen { target_id, .. } => (
+                engine_scene::GraphAiEvent::TargetSeen,
+                Some(target_id.as_str()),
+            ),
+            AiEvent::TargetLost { target_id, .. } => (
+                engine_scene::GraphAiEvent::TargetLost,
+                Some(target_id.as_str()),
+            ),
+            AiEvent::NoiseHeard { .. } => (engine_scene::GraphAiEvent::NoiseHeard, None),
+            AiEvent::StateChanged { .. } => (engine_scene::GraphAiEvent::StateChanged, None),
+        };
+        self.run_graphs(
+            ctx,
+            &graph::GraphEvent::Ai {
+                owner: event.object_id(),
+                event: graph_event,
+                target,
+            },
+        );
         let kind = match event {
             AiEvent::Arrived { .. } => engine_scene::AiRuleEvent::MoveFinished,
             AiEvent::TargetSeen { .. } => engine_scene::AiRuleEvent::TargetSeen,
@@ -1242,4 +1361,38 @@ impl GameplayRuntime {
         self.setup(ctx)?;
         Ok(())
     }
+}
+
+/// Whether the key called `name` is held this frame.
+fn key_held(ctx: &GameContext<'_>, name: &str) -> bool {
+    engine_scripting::ScriptKey::from_name(name)
+        .is_some_and(|key| ctx.input().is_key_held(keys::platform_key(key)))
+}
+
+/// The graph event a rule event also is, for the events graphs share with
+/// rules. Keys, timers and variable changes graphs watch themselves.
+fn graph_event<'a>(event: &RuleEvent<'a>) -> Option<graph::GraphEvent<'a>> {
+    use engine_scene::{ContactRuleKind, TouchKind};
+    Some(match *event {
+        RuleEvent::SceneStart => graph::GraphEvent::Start(None),
+        RuleEvent::SceneStartExcept(except) => graph::GraphEvent::Start(Some(except)),
+        RuleEvent::Named(name) => graph::GraphEvent::Named(name),
+        RuleEvent::UiClicked(id) => graph::GraphEvent::UiClicked(id),
+        RuleEvent::Contact { kind, owner, other } => graph::GraphEvent::Touch {
+            kind: match kind {
+                ContactRuleKind::CollisionEnter => TouchKind::Starts,
+                ContactRuleKind::CollisionExit => TouchKind::Stops,
+                ContactRuleKind::TriggerEnter => TouchKind::Enters,
+                ContactRuleKind::TriggerExit => TouchKind::Leaves,
+            },
+            owner,
+            other,
+        },
+        RuleEvent::Animation { owner, name } => graph::GraphEvent::Animation { owner, name },
+        RuleEvent::KeyPressed(_)
+        | RuleEvent::Timer { .. }
+        | RuleEvent::VariableChanged(_)
+        | RuleEvent::StateChanged(_)
+        | RuleEvent::Ai { .. } => return None,
+    })
 }

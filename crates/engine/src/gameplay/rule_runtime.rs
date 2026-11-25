@@ -374,7 +374,7 @@ fn place(
     }
 }
 
-fn object_position(world: &World, id: &str) -> Option<[f32; 3]> {
+pub(super) fn object_position(world: &World, id: &str) -> Option<[f32; 3]> {
     let entity = world
         .iter_entities()
         .find(|entity| entity.get::<SceneObjectId>().is_some_and(|o| o.0 == id))?;

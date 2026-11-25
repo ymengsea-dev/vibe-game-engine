@@ -349,7 +349,7 @@ pub(super) fn show(
     let mut pending_connection = None;
     let mut moves = Vec::new();
     let mut relayout = false;
-    egui::Window::new("Gameplay Graph")
+    egui::Window::new("Rules graph")
         .id(id)
         .open(&mut visible)
         .default_size([760.0, 520.0])

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever a message changes incompatibly; [`ToStudio::Hello`]
 /// carries it so a game built against an older engine is refused with a
 /// readable message instead of misbehaving.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Header kind of a JSON control message.
 pub const KIND_CONTROL: u8 = 1;
@@ -186,6 +186,12 @@ pub enum ToGame {
         /// Stable scene ID of the object to watch.
         object_id: Option<String>,
     },
+    /// Report which nodes this object's gameplay graph runs
+    /// ([`ToStudio::GraphTrace`]); `None` stops reporting.
+    WatchGraph {
+        /// Stable scene ID of the object to watch.
+        object_id: Option<String>,
+    },
 }
 
 /// Game → Studio.
@@ -219,6 +225,15 @@ pub enum ToStudio {
         object_id: String,
         /// `(node index, answer)` pairs.
         nodes: engine_scene::BtTrace,
+    },
+    /// The nodes the watched object's gameplay graph ran lately, by node
+    /// ID. Sent when it changes, at most [`super::AI_TRACE_PER_SECOND`]
+    /// times a second.
+    GraphTrace {
+        /// The watched object.
+        object_id: String,
+        /// Node IDs, smallest first.
+        nodes: Vec<u32>,
     },
     /// A rendered frame. Sent as [`KIND_FRAME`], never as JSON.
     #[serde(skip)]
@@ -531,6 +546,9 @@ mod tests {
                 object_id: Some("guard".to_owned()),
             },
             ToGame::WatchAi { object_id: None },
+            ToGame::WatchGraph {
+                object_id: Some("coin".to_owned()),
+            },
             ToGame::FreeCamera {
                 camera: Some(CameraPose {
                     eye: [1.0, 2.0, 3.0],
@@ -563,6 +581,10 @@ mod tests {
                     (0, engine_scene::BtNodeRun::Running),
                     (3, engine_scene::BtNodeRun::Failure),
                 ],
+            },
+            ToStudio::GraphTrace {
+                object_id: "coin".to_owned(),
+                nodes: vec![0, 4],
             },
             ToStudio::Frame(Frame {
                 sequence: 7,

@@ -36,6 +36,8 @@ pub(crate) trait Embedded {
     /// What `object_id`'s behaviour tree did on its last frame; `None` when
     /// no such object is alive.
     fn ai_trace(&self, object_id: &str) -> Option<engine_scene::BtTrace>;
+    /// The nodes `object_id`'s gameplay graph ran lately.
+    fn graph_trace(&self, object_id: &str) -> Option<Vec<u32>>;
     /// The game's own camera.
     fn camera_pose(&self) -> Option<CameraPose>;
     /// Draws the world as it is, without advancing it, from `camera` (or
@@ -85,6 +87,10 @@ impl<G: Game> Embedded for GameRunner<G> {
         let entity = crate::gameplay::find_object(world, object_id)?;
         Some(crate::gameplay::behaviour_tree_trace(world, entity))
     }
+
+    fn graph_trace(&self, object_id: &str) -> Option<Vec<u32>> {
+        self.game().graph_trace(object_id)
+    }
 }
 
 /// Whether Studio asked for a size the game can render.
@@ -107,6 +113,7 @@ pub(crate) fn drive(
     let mut sequence = 0u64;
     let mut next_frame = Instant::now();
     let mut ai_watch = AiWatch::default();
+    let mut graph_watch = GraphWatch::default();
     // While paused: the camera Studio looks through, and whether the frozen
     // world needs drawing again (the camera moved or the size changed).
     let mut free_camera: Option<CameraPose> = None;
@@ -158,6 +165,9 @@ pub(crate) fn drive(
                 }
                 Incoming::Message(ToGame::Step) => step |= paused,
                 Incoming::Message(ToGame::WatchAi { object_id }) => ai_watch.watch(object_id),
+                Incoming::Message(ToGame::WatchGraph { object_id }) => {
+                    graph_watch.watch(object_id);
+                }
                 Incoming::Message(ToGame::FreeCamera { camera }) => {
                     if paused {
                         free_camera = camera;
@@ -212,6 +222,11 @@ pub(crate) fn drive(
         {
             break Err(err);
         }
+        if let Some(message) = graph_watch.due(game, Instant::now())
+            && let Err(err) = link.send(&message)
+        {
+            break Err(err);
+        }
         // Keep a steady pace; after a slow frame, start again from now
         // rather than rushing to catch up.
         next_frame += interval;
@@ -260,6 +275,46 @@ impl AiWatch {
         self.last = Some(now);
         self.sent = Some(nodes.clone());
         Some(ToStudio::AiTrace {
+            object_id: object_id.clone(),
+            nodes,
+        })
+    }
+}
+
+/// The object whose gameplay graph Studio watches, and what it was last
+/// sent; like [`AiWatch`].
+#[derive(Default)]
+struct GraphWatch {
+    object_id: Option<String>,
+    sent: Option<Vec<u32>>,
+    last: Option<Instant>,
+}
+
+impl GraphWatch {
+    fn watch(&mut self, object_id: Option<String>) {
+        if self.object_id != object_id {
+            self.object_id = object_id;
+            self.sent = None;
+            self.last = None;
+        }
+    }
+
+    fn due(&mut self, game: &impl Embedded, now: Instant) -> Option<ToStudio> {
+        let object_id = self.object_id.as_ref()?;
+        let gap = Duration::from_secs(1) / AI_TRACE_PER_SECOND;
+        if self
+            .last
+            .is_some_and(|last| now.saturating_duration_since(last) < gap)
+        {
+            return None;
+        }
+        let nodes = game.graph_trace(object_id).unwrap_or_default();
+        if self.sent.as_ref() == Some(&nodes) {
+            return None;
+        }
+        self.last = Some(now);
+        self.sent = Some(nodes.clone());
+        Some(ToStudio::GraphTrace {
             object_id: object_id.clone(),
             nodes,
         })
@@ -328,6 +383,9 @@ mod tests {
         }
         fn ai_trace(&self, object_id: &str) -> Option<engine_scene::BtTrace> {
             (object_id == "guard").then(|| self.trace.clone())
+        }
+        fn graph_trace(&self, object_id: &str) -> Option<Vec<u32>> {
+            (object_id == "coin").then(|| vec![0, 3])
         }
         fn camera_pose(&self) -> Option<CameraPose> {
             Some(pose(1.0))

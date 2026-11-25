@@ -121,6 +121,8 @@ An object that is several things shows the first match in this list. Terrain sho
 | Enter / Esc | Keep / cancel a new name |
 | Right-click | More options |
 | Right-click a folder → **New Material** | Make a material file there |
+| Right-click a folder → **New Gameplay Graph** | Make a gameplay graph there and open it ([Gameplay Graphs](07_GAMEPLAY_GRAPHS.md)) |
+| Click a `.graph` file | Open it in the Gameplay graph window |
 | Drag a material onto a model in the Scene View or the Hierarchy | Draw the model with that material ([Materials](06_MATERIALS.md)) |
 
 ## Console
@@ -129,13 +131,33 @@ An object that is several things shows the first match in this list. Terrain sho
 | --- | --- |
 | Right-click a message | Copy it |
 
-## Gameplay Graph
+## Rules graph
+
+Open it from the Inspector's Rules section: **Open rules graph**. It shows the object's visual rules as boxes.
 
 | Shortcut | What it does |
 | --- | --- |
 | Drag a box | Move it |
 | Drag empty space | Move the view |
 | Click an event, then an action | Connect them |
+
+## Gameplay graph window
+
+Open it from the Inspector's **Gameplay Graph** section (**Edit graph**), or by clicking a `.graph` file in Project Assets. See [Gameplay Graphs](07_GAMEPLAY_GRAPHS.md).
+
+| Shortcut | What it does |
+| --- | --- |
+| Click a node | Select it and show its settings below |
+| Drag a node | Move it |
+| Drag empty space | Move the view |
+| Drag from an output dot to an input dot of the same colour | Join them with a wire |
+| Drag a wire off an input dot | Pick it up to move it, or drop it on empty space to remove it |
+| Right-click empty space, or **+ Node** | Add a node; type to search |
+| **+ Comment** | Add a note behind the nodes; drag its title strip to move it and its corner to resize it |
+| ⌘C / ⌘V, or **Copy** / **Paste** | Copy the selected node and paste it beside the original |
+| **Delete** or **Backspace**, or the **Delete** button | Remove the selected node or comment |
+| ⌘Z | Undo the last change to the graph (after the mouse is released) |
+| **Reset view** | Move the view back to the start |
 
 ## Behaviour tree window
 

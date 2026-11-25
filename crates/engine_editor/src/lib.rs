@@ -46,6 +46,7 @@ pub mod i18n;
 mod import;
 pub mod inspect;
 pub mod inspector;
+mod gameplay_graph_window;
 mod menu;
 mod node_canvas;
 pub(crate) mod object_clipboard;

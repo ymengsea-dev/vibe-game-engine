@@ -54,6 +54,7 @@ const FIELDS: &[Field] = &[
     field!(terrain),
     field!(ai),
     field!(stream_area),
+    field!(gameplay_graph),
     field!(road),
     field!(painted),
     field!(water),

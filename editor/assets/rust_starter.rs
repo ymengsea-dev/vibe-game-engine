@@ -65,6 +65,11 @@ impl Game for MyGame {
         FrameDemand::AnimateUntil(now + Duration::from_millis(16))
     }
 
+    // Lets Studio light up the gameplay graph nodes that run.
+    fn graph_trace(&self, object_id: &str) -> Option<Vec<u32>> {
+        self.gameplay.graph_trace(object_id)
+    }
+
     fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
         self.gameplay.setup(ctx)?;
         // Fire the scene's "Scene starts" rules once it is ready.

@@ -2374,6 +2374,9 @@ pub struct SceneEntity {
     /// while the camera is near.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_area: Option<crate::stream_area::StreamAreaData>,
+    /// The gameplay graph this object runs, if any: a `.graph` asset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gameplay_graph: Option<AssetRef>,
     /// The road or path this object draws, if it is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub road: Option<crate::road::RoadData>,

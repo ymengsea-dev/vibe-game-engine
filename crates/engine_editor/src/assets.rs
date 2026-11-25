@@ -55,6 +55,9 @@ pub enum AssetKind {
     /// `.material`, a material file — see `engine_scene::MaterialData`.
     /// Referenced by id from the objects drawn with it.
     Material,
+    /// `.graph`, a gameplay graph — see `engine_scene::GameplayGraphData`.
+    /// Referenced by id from the objects that run it.
+    Graph,
     /// Anything else.
     Other,
 }
@@ -77,6 +80,7 @@ impl AssetKind {
             "prefab" => Self::Prefab,
             "terrain" => Self::Terrain,
             "material" => Self::Material,
+            "graph" => Self::Graph,
             _ => Self::Other,
         }
     }
@@ -91,6 +95,7 @@ impl AssetKind {
             Self::Prefab => "Prefab",
             Self::Terrain => "Terrain",
             Self::Material => "Material",
+            Self::Graph => "Gameplay graph",
             Self::Other => "Other",
         }
     }
@@ -101,7 +106,7 @@ impl AssetKind {
     pub fn is_referenceable(self) -> bool {
         matches!(
             self,
-            Self::Mesh | Self::Texture | Self::Audio | Self::Terrain | Self::Material
+            Self::Mesh | Self::Texture | Self::Audio | Self::Terrain | Self::Material | Self::Graph
         )
     }
 }
@@ -401,6 +406,9 @@ pub struct AssetBrowser {
     /// A folder to create a new material file in, relative to the assets
     /// root; taken by the host.
     pub new_material_request: Option<PathBuf>,
+    /// A folder (relative to the assets root) to make a new gameplay graph
+    /// in, set by "New Gameplay Graph".
+    pub new_graph_request: Option<PathBuf>,
     /// Window-local logical pointer position supplied with an OS file drop.
     pub drop_position: Option<(i32, i32)>,
     /// File operation requested by the tree; the host validates and performs it.
@@ -485,6 +493,7 @@ impl Default for AssetBrowser {
             new_folder_needs_focus: false,
             new_folder_request: None,
             new_material_request: None,
+            new_graph_request: None,
             drop_position: None,
             operation_request: None,
             operation_error: None,
@@ -702,6 +711,14 @@ pub fn show_scene(
                     .clicked()
                 {
                     browser.new_material_request = Some(PathBuf::new());
+                    ui.close();
+                }
+                if ui
+                    .button("New Gameplay Graph")
+                    .on_hover_text("Nodes an object runs: events, flow and actions, no code")
+                    .clicked()
+                {
+                    browser.new_graph_request = Some(PathBuf::new());
                     ui.close();
                 }
             });
@@ -970,6 +987,10 @@ fn asset_context_menu(ui: &mut egui::Ui, browser: &mut AssetBrowser, path: &Path
         paste_menu_item(ui, browser, path);
         if ui.button("New Material").clicked() {
             browser.new_material_request = Some(path.to_path_buf());
+            ui.close();
+        }
+        if ui.button("New Gameplay Graph").clicked() {
+            browser.new_graph_request = Some(path.to_path_buf());
             ui.close();
         }
     }

@@ -373,7 +373,11 @@ fn import_one(
                 engine_scene::MaterialData::from_ron(text).map_err(|err| err.to_string())
             })
             .map(|material| ImportedAsset::Material(Box::new(material))),
-        AssetKind::Scene | AssetKind::Prefab | AssetKind::Terrain | AssetKind::Other => {
+        AssetKind::Scene
+        | AssetKind::Prefab
+        | AssetKind::Terrain
+        | AssetKind::Graph
+        | AssetKind::Other => {
             Err("no importer for this asset kind".to_string())
         }
     }

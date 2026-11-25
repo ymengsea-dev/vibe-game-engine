@@ -8,7 +8,7 @@ The code that implements them:
 | --- | --- |
 | Palette, fonts, base style | `crates/engine_editor/src/theme.rs` (`NIGHT`, `Palette::apply`, `semibold`, `weighted_galley`) |
 | Shared controls | `crates/engine_editor/src/widgets.rs` (`pill_button`, `toggle`, `checkbox`, `text_field`, `field`, `popup_choice`, `segmented`, `segment_label`, `more_button`, `paint_chevron`, `combo_chevron`, `one_line`) |
-| Node graphs | `crates/engine_editor/src/node_canvas.rs`: the pin-and-wire canvas (raised node cards with a coloured top bar, accent output dots, wires in `muted`, a dot grid on `shell`, the node an error names outlined in `danger`). New node editors use it instead of drawing their own |
+| Node graphs | `crates/engine_editor/src/node_canvas.rs`: the pin-and-wire canvas (raised node cards with a coloured top bar, accent output dots, wires in `muted`, a dot grid on `shell`, the node an error names outlined in `danger`, a node that just ran outlined in `success`; pins and wires may take a colour per value type, and comments are `panel` cards with a `hover` title strip behind the nodes). New node editors use it instead of drawing their own. The gameplay graph's type colours: flow `text`, true/false `danger`, number `success`, text `purple`, vector `highlight`, object `info` |
 | Property rows | `crates/engine_editor/src/inspect.rs` (`property_row`, `cell_width`, `number`) |
 | Panel frame and header | `crates/engine_editor/src/shell.rs` (`studio_panel_frame`, `panel_header`, `panel_title`, `toolbar_icon_button`) |
 | Reference screens | Settings → Storage (`settings_window.rs`), the Scene panel header and footer (`shell.rs`), the Inspector (`inspector.rs`: `section`, `identity_header`) |

@@ -623,6 +623,11 @@ impl SceneEntity {
             area.validate()
                 .map_err(|reason| format!("stream_area: {reason}"))?;
         }
+        if let Some(graph) = &self.gameplay_graph {
+            graph
+                .validate()
+                .map_err(|reason| format!("gameplay_graph: {reason}"))?;
+        }
         if let Some(road) = &self.road {
             road.validate()
                 .map_err(|reason| format!("road: {reason}"))?;

@@ -431,6 +431,11 @@ pub(crate) fn insert_components(
     if let Some(area) = &data.stream_area {
         entity_mut.insert(crate::stream_area::SceneStreamArea(area.clone()));
     }
+    if let Some(graph) = &data.gameplay_graph {
+        entity_mut.insert(crate::gameplay_graph::SceneGameplayGraph(Some(
+            graph.clone(),
+        )));
+    }
     if let Some(painted) = &data.painted {
         entity_mut.insert(crate::painted::ScenePaintedGroup(painted.clone()));
     }

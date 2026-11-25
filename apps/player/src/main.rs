@@ -769,6 +769,10 @@ impl FramePhases {
 }
 
 impl Game for Player {
+    fn graph_trace(&self, object_id: &str) -> Option<Vec<u32>> {
+        self.gameplay.graph_trace(object_id)
+    }
+
     fn frame_demand(&self, now: Instant) -> engine::prelude::FrameDemand {
         if self.lua.is_some() {
             engine::prelude::FrameDemand::AnimateUntil(now + Duration::from_millis(16))

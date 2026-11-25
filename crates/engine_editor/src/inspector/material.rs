@@ -18,7 +18,7 @@ fn asset_name(assets: &AssetIndex, reference: &AssetRef) -> Option<String> {
 
 /// A drop slot for one asset of `kind` with a small Clear button: `slot` is
 /// set to a dropped asset, or cleared. `empty` is shown when it has none.
-fn asset_slot(
+pub(super) fn asset_slot(
     ui: &mut egui::Ui,
     label: &str,
     slot: &mut Option<AssetRef>,

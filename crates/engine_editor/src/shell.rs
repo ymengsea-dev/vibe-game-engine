@@ -619,6 +619,7 @@ impl EditorShell {
             sdk_upgrade_message_modal(ui, state);
             crate::settings_window::show(ui.ctx(), state);
             crate::scenes_window::show(ui.ctx(), state);
+            crate::gameplay_graph_window::show(ui.ctx(), state);
         });
 
         // Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redo.
@@ -706,6 +707,9 @@ impl EditorShell {
         // multi-frame drag coalesces into a single step.
         let pointer_down = self.context.input(|input| input.pointer.any_down());
         let widget_focused = self.context.memory(|memory| memory.focused().is_some());
+        if !pointer_down && !widget_focused {
+            state.settle_gameplay_graph();
+        }
         if !state.play.is_playing()
             && !pointer_down
             && !widget_focused
@@ -4364,7 +4368,8 @@ fn material_file_panel(ui: &mut egui::Ui, state: &mut EditorState, path: &std::p
     };
     material_preview(ui, state, &edited);
     let key = path.to_string_lossy();
-    let mut changed = inspector::material_file_editor(ui, &key, &name, &mut edited, &state.asset_index);
+    let mut changed =
+        inspector::material_file_editor(ui, &key, &name, &mut edited, &state.asset_index);
     changed |= inspector::shader_graph_window(ui.ctx(), &key, &name, &mut edited);
     if changed {
         if let Ok(data) = state.material_being_edited(path) {
@@ -6892,6 +6897,103 @@ mod ui_tests {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
                 .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `gameplay-graph-window.png`: a coin's graph (trigger entered →
+    /// add one to `coins` → destroy) inside a comment, with a graph
+    /// variable, the Set game variable node selected, and the Hierarchy's
+    /// coin running it.
+    #[test]
+    #[ignore = "renders on the GPU; run with --ignored"]
+    fn snapshot_gameplay_graph_window() {
+        use engine_scene::{
+            GameplayGraphData, GameplayNodeData, GameplayNodeKind, GameplayWire, GraphComment,
+            GraphVariable, PinValue, TouchKind,
+        };
+        let (root, mut state) = menu_test_state();
+        let node = |id, kind, x, y| GameplayNodeData {
+            id,
+            kind,
+            position: [x, y],
+            inputs: Default::default(),
+        };
+        let mut add = node(3, GameplayNodeKind::Add, 210.0, 210.0);
+        add.inputs.insert(1, PinValue::Number(1.0));
+        let wire = |from, from_pin, to, to_pin| GameplayWire {
+            from,
+            from_pin,
+            to,
+            to_pin,
+        };
+        let graph = GameplayGraphData {
+            nodes: vec![
+                node(
+                    0,
+                    GameplayNodeKind::Touch {
+                        kind: TouchKind::Enters,
+                    },
+                    20.0,
+                    40.0,
+                ),
+                node(
+                    1,
+                    GameplayNodeKind::SetGameVariable {
+                        name: "coins".into(),
+                    },
+                    400.0,
+                    40.0,
+                ),
+                node(
+                    2,
+                    GameplayNodeKind::GetGameVariable {
+                        name: "coins".into(),
+                    },
+                    20.0,
+                    210.0,
+                ),
+                add,
+                node(4, GameplayNodeKind::Destroy, 600.0, 40.0),
+            ],
+            wires: vec![
+                wire(0, 0, 1, 0),
+                wire(2, 0, 3, 0),
+                wire(3, 0, 1, 1),
+                wire(1, 0, 4, 0),
+            ],
+            variables: vec![
+                GraphVariable {
+                    name: "picked".into(),
+                    value: PinValue::Bool(false),
+                },
+                GraphVariable {
+                    name: "spin".into(),
+                    value: PinValue::Number(90.0),
+                },
+            ],
+            comments: vec![GraphComment {
+                text: "Count the coin, then remove it".into(),
+                position: [6.0, 0.0],
+                size: [790.0, 320.0],
+            }],
+        };
+        graph
+            .save(&state.project.assets_dir().join("Coin.graph"))
+            .expect("graph file");
+        state
+            .open_gameplay_graph(std::path::Path::new("Coin.graph"))
+            .expect("opens");
+        let path = crate::ui_snapshot::snapshot_dir().join("gameplay-graph-window.png");
+        let mut first = true;
+        crate::ui_snapshot::render_png(&path, egui::vec2(1240.0, 860.0), 2.0, |ui| {
+            if std::mem::take(&mut first) {
+                crate::gameplay_graph_window::select_node(ui.ctx(), 1);
+            }
+            ui.painter()
+                .rect_filled(ui.max_rect(), 0.0, crate::theme::NIGHT.shell);
+            crate::gameplay_graph_window::show(ui.ctx(), &mut state);
         })
         .expect("snapshot");
         let _ = std::fs::remove_dir_all(root);

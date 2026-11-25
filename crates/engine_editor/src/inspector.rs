@@ -33,9 +33,11 @@ mod ai;
 pub use ai::PlayingTrees;
 mod animator_graph;
 mod behaviour_tree_graph;
+mod gameplay_graph;
 mod graph;
 mod lights;
 mod material;
+pub(crate) use gameplay_graph::open_request_id as gameplay_graph_open_request;
 pub use material::material_file_editor;
 pub(crate) use shader_graph::show as shader_graph_window;
 #[cfg(test)]
@@ -2290,6 +2292,19 @@ const REGISTRY: &[ComponentUi] = &[
         copy_to: copy_component::<engine_scene::SceneAi>,
     },
     ComponentUi {
+        name: "Gameplay Graph",
+        type_name: "SceneGameplayGraph",
+        present: has::<engine_scene::SceneGameplayGraph>,
+        insert_default: |world, entity| {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(engine_scene::SceneGameplayGraph(None));
+            }
+        },
+        remove: strip::<engine_scene::SceneGameplayGraph>,
+        inspect: |world, entity, ui, assets| gameplay_graph::inspect(world, entity, ui, assets),
+        copy_to: copy_component::<engine_scene::SceneGameplayGraph>,
+    },
+    ComponentUi {
         name: "World Area",
         type_name: "SceneStreamArea",
         present: has::<engine_scene::SceneStreamArea>,
@@ -3441,7 +3456,7 @@ fn show_body(
                     }
                 });
             });
-            if ui.button("Open gameplay graph").clicked() {
+            if ui.button("Open rules graph").clicked() {
                 graph::open(ui.ctx(), entity);
             }
         });

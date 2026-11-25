@@ -91,6 +91,19 @@ pub const BUILDS_DIR: &str = engine_project::storage::GAME_BUILDS_DIR;
 /// relative to the editor's working directory.
 pub const DEFAULT_SCENE_PATH: &str = "scene.ron";
 
+/// The gameplay graph open in the Gameplay graph window.
+#[derive(Debug, Clone)]
+pub struct GraphEditing {
+    /// Its file, relative to the assets root.
+    pub path: PathBuf,
+    /// The graph as edited; saved after every change.
+    pub data: engine_scene::GameplayGraphData,
+    /// The file before the edit in progress, until it is recorded for undo.
+    pub pending: Option<Vec<u8>>,
+    /// Why the last save or reload failed.
+    pub error: Option<String>,
+}
+
 /// What the Inspector shows: the selected object, or a material file
 /// picked in Project Assets after it.
 #[derive(Debug, Default)]
@@ -405,6 +418,8 @@ pub struct EditorState {
     /// What the Inspector shows: a material file picked in Project Assets
     /// after the last object, or the selected object.
     pub inspector_focus: InspectorFocus,
+    /// The gameplay graph open in the Gameplay graph window, if any.
+    pub graph_editor: Option<GraphEditing>,
     /// Set at startup when unsaved scene edits were recovered from a
     /// previous session's autosave (see
     /// [`EditorState::recover_from_autosave`]). Purely informational —
@@ -687,6 +702,7 @@ impl EditorState {
             dropped_files: Vec::new(),
             rescan_request: false,
             inspector_focus: InspectorFocus::default(),
+            graph_editor: None,
             recovered_from_autosave: false,
         }
     }
@@ -807,6 +823,20 @@ impl EditorState {
             Ok(Some(crate::HistoryChange::Terrain { paths })) => {
                 self.terrains.invalidate_paths(&paths);
                 self.foliage_follow_all_terrains();
+            }
+            Ok(Some(crate::HistoryChange::File { path })) => {
+                let assets = self.project.assets_dir();
+                if let Some(editing) = &mut self.graph_editor
+                    && assets.join(&editing.path) == path
+                {
+                    match engine_scene::GameplayGraphData::load(&path) {
+                        Ok(data) => {
+                            editing.data = data;
+                            editing.pending = None;
+                        }
+                        Err(error) => editing.error = Some(error.to_string()),
+                    }
+                }
             }
             Ok(None) => {}
             Err(error) => self.asset_browser.operation_error = Some(error.to_string()),
@@ -2053,6 +2083,98 @@ impl EditorState {
     /// number when that is taken, selects it and asks for a rescan so it
     /// gets its ID. Returns its path relative to the assets root.
     pub fn create_material_file(&mut self, folder: &Path) -> Result<PathBuf, String> {
+        let text = engine_scene::MaterialData::default()
+            .to_ron()
+            .map_err(|error| error.to_string())?;
+        self.create_asset_file(
+            folder,
+            "New Material",
+            engine_scene::MATERIAL_EXTENSION,
+            &text,
+        )
+    }
+
+    /// Creates a new gameplay graph (with Start and Every frame) in the
+    /// assets folder `folder`, like [`Self::create_material_file`].
+    pub fn create_gameplay_graph_file(&mut self, folder: &Path) -> Result<PathBuf, String> {
+        let text = engine_scene::GameplayGraphData::new()
+            .to_ron()
+            .map_err(|error| error.to_string())?;
+        self.create_asset_file(
+            folder,
+            "New Graph",
+            engine_scene::GAMEPLAY_GRAPH_EXTENSION,
+            &text,
+        )
+    }
+
+    /// Opens the gameplay graph `path` (relative to the assets root) in
+    /// the Gameplay graph window.
+    pub fn open_gameplay_graph(&mut self, path: &Path) -> Result<(), String> {
+        if self
+            .graph_editor
+            .as_ref()
+            .is_some_and(|editing| editing.path == path)
+        {
+            return Ok(());
+        }
+        self.settle_gameplay_graph();
+        let data = engine_scene::GameplayGraphData::load(&self.project.assets_dir().join(path))
+            .map_err(|error| error.to_string())?;
+        self.graph_editor = Some(GraphEditing {
+            path: path.to_path_buf(),
+            data,
+            pending: None,
+            error: None,
+        });
+        Ok(())
+    }
+
+    /// Writes the open graph to its file. The file as it was before the
+    /// edit in progress is kept until [`Self::settle_gameplay_graph`]
+    /// records the edit for undo.
+    pub fn save_gameplay_graph(&mut self) {
+        let assets = self.project.assets_dir();
+        let Some(editing) = &mut self.graph_editor else {
+            return;
+        };
+        let path = assets.join(&editing.path);
+        if editing.pending.is_none() {
+            editing.pending = Some(std::fs::read(&path).unwrap_or_default());
+        }
+        editing.error = editing
+            .data
+            .save(&path)
+            .err()
+            .map(|error| error.to_string());
+    }
+
+    /// Records the open graph's edit in progress as one undo step. Call
+    /// when the user stops interacting.
+    pub fn settle_gameplay_graph(&mut self) {
+        let assets = self.project.assets_dir();
+        let Some(editing) = &mut self.graph_editor else {
+            return;
+        };
+        let Some(before) = editing.pending.take() else {
+            return;
+        };
+        let path = assets.join(&editing.path);
+        if let Ok(after) = std::fs::read(&path) {
+            self.history.record_file(path, before, after);
+        }
+    }
+
+    /// Creates `<base>.<extension>` (or `<base> 2…`) holding `text` in the
+    /// assets folder `folder`, selects it and asks for a rescan so it gets
+    /// its ID. Returns its path relative to the assets root.
+    fn create_asset_file(
+        &mut self,
+        folder: &Path,
+        base: &str,
+        extension: &str,
+        text: &str,
+    ) -> Result<PathBuf, String> {
         use std::io::Write as _;
         if !folder
             .components()
@@ -2064,14 +2186,11 @@ impl EditorState {
         if !directory.is_dir() {
             return Err("That folder no longer exists".into());
         }
-        let text = engine_scene::MaterialData::default()
-            .to_ron()
-            .map_err(|error| error.to_string())?;
         for number in 1..1000 {
             let name = if number == 1 {
-                format!("New Material.{}", engine_scene::MATERIAL_EXTENSION)
+                format!("{base}.{extension}")
             } else {
-                format!("New Material {number}.{}", engine_scene::MATERIAL_EXTENSION)
+                format!("{base} {number}.{extension}")
             };
             let file = match std::fs::OpenOptions::new()
                 .write(true)
@@ -2080,17 +2199,17 @@ impl EditorState {
             {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(format!("Could not create the material: {error}")),
+                Err(error) => return Err(format!("Could not create the file: {error}")),
             };
             let mut file = file;
             file.write_all(text.as_bytes())
-                .map_err(|error| format!("Could not write the material: {error}"))?;
+                .map_err(|error| format!("Could not write the file: {error}"))?;
             let relative = folder.join(name);
             self.selected_asset = Some(relative.clone());
             self.rescan_request = true;
             return Ok(relative);
         }
-        Err("Too many materials named New Material here".into())
+        Err(format!("Too many files named {base} here"))
     }
 
     /// Creates a sparse tilemap from the selected imported image.
@@ -3927,6 +4046,39 @@ impl EditorState {
         self.world
             .get::<engine_scene::SceneObjectId>(entity)
             .map(|id| id.0.clone())
+    }
+
+    /// The object whose gameplay graph a game playing in the Scene View
+    /// should report: while the Gameplay graph window is open, the
+    /// selected object if it runs that graph, or else the first object
+    /// that does.
+    pub fn watched_graph(&mut self) -> Option<String> {
+        let editing = self.graph_editor.as_ref()?;
+        let runs_it = |graph: &engine_scene::SceneGameplayGraph| {
+            graph
+                .0
+                .as_ref()
+                .and_then(|reference| crate::assets::parse_asset_id(&reference.id))
+                .and_then(|id| self.asset_index.path_for(id))
+                .is_some_and(|path| path == editing.path)
+        };
+        if let Some(entity) = self.selected_entity
+            && self
+                .world
+                .get::<engine_scene::SceneGameplayGraph>(entity)
+                .is_some_and(runs_it)
+            && let Some(id) = self.world.get::<engine_scene::SceneObjectId>(entity)
+        {
+            return Some(id.0.clone());
+        }
+        let mut objects = self.world.query::<(
+            &engine_scene::SceneGameplayGraph,
+            &engine_scene::SceneObjectId,
+        )>();
+        objects
+            .iter(&self.world)
+            .find(|(graph, _)| runs_it(graph))
+            .map(|(_, id)| id.0.clone())
     }
 
     /// Makes `entity` the only selected entity (primary, empty

@@ -441,6 +441,9 @@ pub(crate) fn show(ctx: &egui::Context, key: &str, name: &str, data: &mut Materi
                             .collect(),
                         accent: accent(&node.kind),
                         warning: error.as_ref().and_then(|error| error.node) == Some(node.id),
+                        input_colors: Vec::new(),
+                        output_colors: Vec::new(),
+                        lit: false,
                     }
                 })
                 .collect();
@@ -460,9 +463,13 @@ pub(crate) fn show(ctx: &egui::Context, key: &str, name: &str, data: &mut Materi
                 ui,
                 canvas_id,
                 size,
-                &nodes,
-                &wires,
-                selected,
+                &node_canvas::CanvasContent {
+                    nodes: &nodes,
+                    wires: &wires,
+                    comments: &[],
+                    selected,
+                    selected_comment: None,
+                },
                 &mut |ui, at| {
                     let mut copy = graph.clone();
                     let mut pick = selected;
@@ -508,6 +515,10 @@ pub(crate) fn show(ctx: &egui::Context, key: &str, name: &str, data: &mut Materi
                             changed = true;
                         }
                     }
+                    // A shader graph has no comments.
+                    CanvasEvent::CommentSelected(_)
+                    | CanvasEvent::CommentMoved { .. }
+                    | CanvasEvent::CommentResized { .. } => {}
                 }
             }
 

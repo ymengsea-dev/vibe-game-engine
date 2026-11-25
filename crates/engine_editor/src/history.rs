@@ -43,6 +43,12 @@ pub enum HistoryChange {
         /// The tile files written.
         paths: Vec<PathBuf>,
     },
+    /// An asset file (such as a gameplay graph) was rewritten; whatever
+    /// shows it must read it again.
+    File {
+        /// The file written.
+        path: PathBuf,
+    },
 }
 
 /// An undo or redo step that could not be applied. The step stays on its
@@ -58,12 +64,18 @@ pub struct HistoryError {
 enum Step {
     World(Box<Snapshot>),
     Terrain(TerrainEdit),
+    /// A whole asset file before and after one settled edit.
+    File {
+        path: PathBuf,
+        before: Vec<u8>,
+        after: Vec<u8>,
+    },
 }
 
 impl Step {
     fn terrain_bytes(&self) -> usize {
         match self {
-            Self::World(_) => 0,
+            Self::World(_) | Self::File { .. } => 0,
             Self::Terrain(edit) => edit.byte_size(),
         }
     }
@@ -178,6 +190,19 @@ impl History {
         self.pending = Some(Snapshot::capture(world, selected));
     }
 
+    /// Records one settled edit of the asset file at `path` (its whole
+    /// contents before and after) as one undo step. Nothing is recorded
+    /// when they are the same.
+    pub fn record_file(&mut self, path: PathBuf, before: Vec<u8>, after: Vec<u8>) {
+        if before != after {
+            self.push_new(Step::File {
+                path,
+                before,
+                after,
+            });
+        }
+    }
+
     /// Records a finished terrain stroke as one undo step.
     pub fn record_terrain(&mut self, edit: TerrainEdit) {
         self.push_new(Step::Terrain(edit));
@@ -243,6 +268,40 @@ impl History {
                 self.pending = None;
                 Ok(Some(HistoryChange::World))
             }
+            Step::File {
+                path,
+                before,
+                after,
+            } => {
+                let contents = if direction == Direction::Undo {
+                    &before
+                } else {
+                    &after
+                };
+                match engine_scene::write_atomic(&path, contents) {
+                    Ok(()) => {
+                        let change = HistoryChange::File { path: path.clone() };
+                        to.push(Step::File {
+                            path,
+                            before,
+                            after,
+                        });
+                        Ok(Some(change))
+                    }
+                    Err(source) => {
+                        let failed = path.clone();
+                        from.push(Step::File {
+                            path,
+                            before,
+                            after,
+                        });
+                        Err(HistoryError {
+                            path: failed,
+                            source,
+                        })
+                    }
+                }
+            }
             Step::Terrain(edit) => match edit.write(direction == Direction::Undo) {
                 Ok(()) => {
                     let change = HistoryChange::Terrain {
@@ -286,6 +345,25 @@ mod tests {
     fn only_x(world: &mut World) -> f32 {
         let mut query = world.query::<&Transform>();
         query.iter(world).next().unwrap().0.translation.x
+    }
+
+    #[test]
+    fn file_steps_write_the_file_back_and_forth() {
+        let path =
+            std::env::temp_dir().join(format!("vge-history-file-{}.graph", std::process::id()));
+        std::fs::write(&path, b"after").unwrap();
+        let mut history = History::new();
+        history.record_file(path.clone(), b"same".to_vec(), b"same".to_vec());
+        assert!(!history.can_undo(), "no change, no step");
+        history.record_file(path.clone(), b"before".to_vec(), b"after".to_vec());
+        let mut world = World::new();
+        let mut selected = None;
+        let change = history.undo(&mut world, &mut selected).unwrap();
+        assert_eq!(change, Some(HistoryChange::File { path: path.clone() }));
+        assert_eq!(std::fs::read(&path).unwrap(), b"before");
+        history.redo(&mut world, &mut selected).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"after");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

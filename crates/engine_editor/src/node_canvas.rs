@@ -40,7 +40,41 @@ pub(crate) struct CanvasNode {
     pub(crate) accent: egui::Color32,
     /// Drawn with a warning edge: the node an error names.
     pub(crate) warning: bool,
+    /// Each input pin's colour (by what it carries); empty for the
+    /// canvas's own.
+    pub(crate) input_colors: Vec<egui::Color32>,
+    /// Each output pin's colour; empty for the canvas's own. Wires take
+    /// their output's colour.
+    pub(crate) output_colors: Vec<egui::Color32>,
+    /// Drawn with a green edge: it just ran (a game in the Scene View).
+    pub(crate) lit: bool,
 }
+
+/// A note drawn behind the nodes.
+#[derive(Debug, Clone)]
+pub(crate) struct CanvasComment {
+    /// Top-left corner, in graph space.
+    pub(crate) position: [f32; 2],
+    /// Width and height.
+    pub(crate) size: [f32; 2],
+    /// What it says, in its title strip.
+    pub(crate) text: String,
+}
+
+/// What the canvas shows: nodes, wires, comments and what is selected.
+#[derive(Clone, Copy)]
+pub(crate) struct CanvasContent<'a> {
+    pub(crate) nodes: &'a [CanvasNode],
+    pub(crate) wires: &'a [CanvasWire],
+    pub(crate) comments: &'a [CanvasComment],
+    pub(crate) selected: Option<u32>,
+    pub(crate) selected_comment: Option<usize>,
+}
+
+/// Height of a comment's title strip, which moves it.
+const COMMENT_HEADER: f32 = 26.0;
+/// The resize grip in a comment's bottom-right corner.
+const COMMENT_GRIP: f32 = 16.0;
 
 /// A wire from output `from_pin` of node `from` to input `to_pin` of node
 /// `to`.
@@ -65,6 +99,12 @@ pub(crate) enum CanvasEvent {
     Disconnected { to: u32, to_pin: u8 },
     /// Delete was pressed with `node` selected.
     Delete(u32),
+    /// Comment `index` was clicked.
+    CommentSelected(usize),
+    /// Comment `index` was dragged to `position`.
+    CommentMoved { index: usize, position: [f32; 2] },
+    /// Comment `index` was resized to `size`.
+    CommentResized { index: usize, size: [f32; 2] },
 }
 
 /// Where a wire drag started: an output pin, in graph space.
@@ -109,7 +149,14 @@ fn output_pin(node: &CanvasNode, rect: egui::Rect, pin: usize) -> egui::Pos2 {
 }
 
 fn wire_shape(from: egui::Pos2, to: egui::Pos2, color: egui::Color32) -> egui::Shape {
-    let bend = ((to.x - from.x).abs() * 0.5).max(40.0);
+    // Forward wires bend gently; backward ones loop out far enough to
+    // read as going back.
+    let gap = to.x - from.x;
+    let bend = if gap >= 0.0 {
+        (gap * 0.5).max(12.0)
+    } else {
+        (-gap * 0.5).max(40.0)
+    };
     egui::epaint::CubicBezierShape::from_points_stroke(
         [
             from,
@@ -145,11 +192,16 @@ pub(crate) fn show(
     ui: &mut egui::Ui,
     id: egui::Id,
     size: egui::Vec2,
-    nodes: &[CanvasNode],
-    wires: &[CanvasWire],
-    selected: Option<u32>,
+    content: &CanvasContent<'_>,
     add_menu: &mut dyn FnMut(&mut egui::Ui, [f32; 2]),
 ) -> Vec<CanvasEvent> {
+    let CanvasContent {
+        nodes,
+        wires,
+        comments,
+        selected,
+        selected_comment,
+    } = *content;
     let palette = theme::NIGHT;
     let pan_id = id.with("pan");
     let drag_id = id.with("wire_drag");
@@ -208,13 +260,94 @@ pub(crate) fn show(
     };
     let find = |id: u32| nodes.iter().find(|node| node.id == id);
 
+    for (index, comment) in comments.iter().enumerate() {
+        let area = egui::Rect::from_min_size(
+            origin + egui::vec2(comment.position[0], comment.position[1]),
+            egui::vec2(comment.size[0], comment.size[1]),
+        );
+        if !area.intersects(rect) {
+            continue;
+        }
+        let chosen = selected_comment == Some(index);
+        painter.rect_filled(
+            area,
+            egui::CornerRadius::same(10),
+            palette.panel.gamma_multiply(0.85),
+        );
+        let header = egui::Rect::from_min_size(area.min, egui::vec2(area.width(), COMMENT_HEADER));
+        painter.rect_filled(
+            header,
+            egui::CornerRadius {
+                nw: 10,
+                ne: 10,
+                sw: 0,
+                se: 0,
+            },
+            if chosen {
+                palette.accent_fill
+            } else {
+                palette.hover
+            },
+        );
+        painter.text(
+            header.left_center() + egui::vec2(10.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            &comment.text,
+            egui::FontId::proportional(12.5),
+            palette.muted,
+        );
+        let handle = ui.interact(
+            header.intersect(rect),
+            id.with(("comment", index)),
+            egui::Sense::click_and_drag(),
+        );
+        if handle.clicked() || handle.drag_started() {
+            events.push(CanvasEvent::CommentSelected(index));
+        }
+        if handle.dragged() && drag.is_none() {
+            let to = egui::vec2(comment.position[0], comment.position[1]) + handle.drag_delta();
+            events.push(CanvasEvent::CommentMoved {
+                index,
+                position: [to.x.round(), to.y.round()],
+            });
+        }
+        let grip = egui::Rect::from_min_size(
+            area.max - egui::Vec2::splat(COMMENT_GRIP),
+            egui::Vec2::splat(COMMENT_GRIP),
+        );
+        painter.line_segment(
+            [
+                grip.right_top() + egui::vec2(-3.0, 5.0),
+                grip.left_bottom() + egui::vec2(5.0, -3.0),
+            ],
+            egui::Stroke::new(1.5, palette.subtle),
+        );
+        let resize = ui.interact(
+            grip.intersect(rect),
+            id.with(("comment-size", index)),
+            egui::Sense::drag(),
+        );
+        if resize.dragged() {
+            let size = egui::vec2(comment.size[0], comment.size[1]) + resize.drag_delta();
+            events.push(CanvasEvent::CommentResized {
+                index,
+                size: [size.x.max(120.0).round(), size.y.max(60.0).round()],
+            });
+        }
+    }
+
     for wire in wires {
         let (Some(from), Some(to)) = (find(wire.from), find(wire.to)) else {
             continue;
         };
         let start = output_pin(from, rect_of(from), usize::from(wire.from_pin));
         let end = input_pin(to, rect_of(to), usize::from(wire.to_pin));
-        painter.add(wire_shape(start, end, palette.muted));
+        let color = from
+            .output_colors
+            .get(usize::from(wire.from_pin))
+            .copied()
+            .unwrap_or(palette.muted);
+        painter.add(wire_shape(start, end, color));
     }
 
     let pointer = ui.ctx().pointer_latest_pos();
@@ -248,11 +381,18 @@ pub(crate) fn show(
             palette.raised
         };
         painter.rect_filled(node_rect, egui::CornerRadius::same(8), fill);
-        if node.warning {
+        if node.warning || node.lit {
             painter.rect_stroke(
                 node_rect,
                 egui::CornerRadius::same(8),
-                egui::Stroke::new(1.5, palette.danger),
+                egui::Stroke::new(
+                    1.5,
+                    if node.warning {
+                        palette.danger
+                    } else {
+                        palette.success
+                    },
+                ),
                 egui::StrokeKind::Inside,
             );
         }
@@ -291,10 +431,11 @@ pub(crate) fn show(
             if near {
                 hovered_input = Some((node.id, pin as u8));
             }
-            let color = if wired {
-                palette.accent
-            } else {
-                palette.subtle
+            let color = match node.input_colors.get(pin) {
+                Some(color) if wired => *color,
+                Some(color) => color.gamma_multiply(0.5),
+                None if wired => palette.accent,
+                None => palette.subtle,
             };
             painter.circle_filled(at, PIN_RADIUS, if near { palette.text } else { color });
             painter.text(
@@ -328,11 +469,12 @@ pub(crate) fn show(
         for (pin, name) in node.outputs.iter().enumerate() {
             let at = output_pin(node, node_rect, pin);
             let near = pointer.is_some_and(|pointer| pointer.distance(at) <= PIN_REACH);
-            painter.circle_filled(
-                at,
-                PIN_RADIUS,
-                if near { palette.text } else { palette.accent },
-            );
+            let color = node
+                .output_colors
+                .get(pin)
+                .copied()
+                .unwrap_or(palette.accent);
+            painter.circle_filled(at, PIN_RADIUS, if near { palette.text } else { color });
             painter.text(
                 at - egui::vec2(12.0, 0.0),
                 egui::Align2::RIGHT_CENTER,
@@ -358,7 +500,12 @@ pub(crate) fn show(
         let released = ui.input(|input| input.pointer.any_released());
         if let (Some(from), Some(pointer)) = (find(active.from), pointer) {
             let start = output_pin(from, rect_of(from), usize::from(active.from_pin));
-            painter.add(wire_shape(start, pointer, palette.accent));
+            let color = from
+                .output_colors
+                .get(usize::from(active.from_pin))
+                .copied()
+                .unwrap_or(palette.accent);
+            painter.add(wire_shape(start, pointer, color));
         }
         if released {
             if let Some((to, to_pin)) = hovered_input
@@ -412,6 +559,9 @@ mod tests {
             outputs: vec!["Out".into(); outputs],
             accent: egui::Color32::WHITE,
             warning: false,
+            input_colors: Vec::new(),
+            output_colors: Vec::new(),
+            lit: false,
         }
     }
 
