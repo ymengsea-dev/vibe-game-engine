@@ -476,7 +476,7 @@ fn build_scene(
                 },
                 gain: 0.5,
             }],
-            start_state: None,
+            ..Default::default()
         },
         ..Default::default()
     }
