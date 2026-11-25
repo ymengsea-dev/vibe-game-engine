@@ -85,14 +85,20 @@ pub enum MenuCommand {
     CreateUiElement(engine_scene::UiKind),
     /// Create an editable water surface.
     CreateWater,
+    /// Create a road where the Scene View is looking.
+    CreateRoad,
     /// Create a positionable point light.
     CreatePointLight,
+    /// Create a spot light pointing straight down.
+    CreateSpotLight,
     /// Create a camera.
     CreateCamera,
     /// Create a sound emitter, to be pointed at a sound in the Inspector.
     CreateSound,
     /// Copy the selected objects next to themselves.
     DuplicateSelection,
+    /// Move the selected objects down until they rest on the surface below.
+    DropToGround,
     /// Keep the selected objects for pasting.
     CopySelection,
     /// Paste the copied objects.
@@ -250,6 +256,9 @@ impl MenuCommand {
                 state.select_only(entity);
                 state.mark_dirty();
             }
+            Self::CreateRoad => {
+                state.create_road();
+            }
             Self::CreateWater => {
                 let entity = state
                     .world
@@ -275,6 +284,24 @@ impl MenuCommand {
                     .insert(engine_scene::ScenePointLight(
                         engine_scene::PointLightData::default(),
                     ));
+                state.select_only(entity);
+                state.mark_dirty();
+            }
+            Self::CreateSpotLight => {
+                let entity = hierarchy::spawn_entity(
+                    &mut state.world,
+                    "Spot Light",
+                    Vec3::new(0.0, 3.0, 0.0),
+                );
+                let mut object = state.world.entity_mut(entity);
+                // A spot light shines along its object's -Z; turn that down.
+                if let Some(mut transform) = object.get_mut::<engine_ecs::components::Transform>() {
+                    transform.0.rotation =
+                        glam::Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+                }
+                object.insert(engine_scene::SceneSpotLight(
+                    engine_scene::SpotLightData::default(),
+                ));
                 state.select_only(entity);
                 state.mark_dirty();
             }
@@ -305,6 +332,9 @@ impl MenuCommand {
                 if state.duplicate_selection() {
                     state.mark_dirty();
                 }
+            }
+            Self::DropToGround => {
+                state.drop_selection_to_ground();
             }
             Self::CopySelection => {
                 if state.selection_len() > 0 {
@@ -774,6 +804,33 @@ mod water_tests {
         state.save_scene().unwrap();
         let saved = engine_scene::Scene::load_from_file(&state.scene_path).unwrap();
         assert!(saved.entities[0].point_light.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn create_spot_light_points_it_down_and_saves_it() {
+        let root = std::env::temp_dir().join(format!("vge-spot-menu-{}", uuid::Uuid::new_v4()));
+        let project = engine_project::Project::create(&root, "Spot").unwrap();
+        let mut state = EditorState::new(
+            project,
+            engine_ecs::prelude::World::new(),
+            Vec::new(),
+            crate::ConsoleLog::new(),
+        );
+
+        MenuCommand::CreateSpotLight.apply(&mut state);
+
+        let entity = state.selected_entity.expect("selected light");
+        let transform = state
+            .world
+            .get::<engine_ecs::components::Transform>(entity)
+            .expect("a transform")
+            .0;
+        let aim = transform.rotation * Vec3::NEG_Z;
+        assert!((aim - Vec3::NEG_Y).length() < 1e-5, "{aim:?}");
+        state.save_scene().unwrap();
+        let saved = engine_scene::Scene::load_from_file(&state.scene_path).unwrap();
+        assert!(saved.entities[0].spot_light.is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -1,4 +1,4 @@
-//! Directional and point lights, and their GPU-uniform representation.
+//! Directional, point and spot lights, and their GPU-uniform representation.
 //!
 //! Fixed-capacity arrays ([`MAX_DIRECTIONAL_LIGHTS`]/[`MAX_POINT_LIGHTS`])
 //! rather than a dynamically-sized storage buffer — simpler (a plain
@@ -15,6 +15,15 @@ pub const MAX_DIRECTIONAL_LIGHTS: usize = 2;
 /// [`LightSet::to_uniform_for_view`] keeps the ones that matter most to the
 /// camera. Must match `MAX_POINT_LIGHTS` in `shaders/pbr_shared.wgsl`.
 pub const MAX_POINT_LIGHTS: usize = 16;
+/// How many spot lights are uploaded per frame, chosen like point lights.
+/// Must match `MAX_SPOT_LIGHTS` in `shaders/pbr_shared.wgsl`.
+pub const MAX_SPOT_LIGHTS: usize = 8;
+/// How many point or spot lights cast shadows at once: the ones that
+/// matter most to the camera among those with `casts_shadows`. Must match
+/// `MAX_SHADOWED_LIGHTS` in `shaders/pbr_shared.wgsl`.
+pub const MAX_SHADOWED_LIGHTS: usize = 4;
+/// How far from the camera the sun casts shadows when a scene doesn't say.
+pub const DEFAULT_SHADOW_DISTANCE: f32 = 60.0;
 
 /// A light with parallel rays and no falloff (e.g. sunlight) — direction
 /// only, no position.
@@ -45,8 +54,10 @@ pub struct PointLight {
     /// Currently unused by the falloff calculation (plain inverse-square,
     /// no hard cutoff) — reserved for a future windowed-falloff model
     /// that fades to exactly zero at this distance instead of just
-    /// getting very dim.
+    /// getting very dim. Also how far its shadow reaches.
     pub range: f32,
+    /// Whether it may cast shadows (see [`MAX_SHADOWED_LIGHTS`]).
+    pub casts_shadows: bool,
 }
 
 impl PointLight {
@@ -54,9 +65,95 @@ impl PointLight {
     /// channel times intensity, with inverse-square falloff (softened so a
     /// light at the eye does not divide by zero).
     pub fn influence_at(&self, point: Vec3) -> f32 {
-        let brightness = self.intensity.max(0.0) * self.color.max_element().max(0.0);
-        brightness / (1.0 + self.position.distance_squared(point))
+        influence(self.position, self.color, self.intensity, point)
     }
+}
+
+/// A light shining a cone from a point (e.g. a torch or a stage light). Its
+/// brightness falls off with distance and fades out between the inner and
+/// outer angles, reaching zero at `range`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpotLight {
+    /// World-space position.
+    pub position: Vec3,
+    /// The direction the cone points.
+    pub direction: Vec3,
+    /// Light color, same convention as [`DirectionalLight::color`].
+    pub color: Vec3,
+    /// Brightness multiplier.
+    pub intensity: f32,
+    /// Distance at which the light has faded to nothing.
+    pub range: f32,
+    /// Half-angle of the fully lit inner cone, in radians.
+    pub inner_angle: f32,
+    /// Half-angle of the outer cone, in radians; dark beyond it.
+    pub outer_angle: f32,
+    /// Whether it may cast shadows (see [`MAX_SHADOWED_LIGHTS`]).
+    pub casts_shadows: bool,
+}
+
+impl SpotLight {
+    /// Approximate brightness this light adds at `point`, as
+    /// [`PointLight::influence_at`] (the cone is ignored).
+    pub fn influence_at(&self, point: Vec3) -> f32 {
+        influence(self.position, self.color, self.intensity, point)
+    }
+
+    /// How much of the light reaches `point`, in `[0, 1]`: the cone fade
+    /// times the windowed distance falloff (without the inverse square).
+    /// The CPU mirror of `spot_attenuation` in `pbr_shared.wgsl`.
+    pub fn cone_and_range_at(&self, point: Vec3) -> f32 {
+        let to_point = point - self.position;
+        let distance = to_point.length();
+        if distance <= f32::EPSILON {
+            return 1.0;
+        }
+        let cos_angle = (to_point / distance).dot(self.direction.normalize_or_zero());
+        let (cos_inner, cos_outer) = self.cone_cosines();
+        let cone = smoothstep(cos_outer, cos_inner, cos_angle);
+        cone * range_window(distance, self.range)
+    }
+
+    /// `(cos inner, cos outer)`, with the inner angle kept inside the outer.
+    fn cone_cosines(&self) -> (f32, f32) {
+        let outer = self
+            .outer_angle
+            .clamp(0.0, std::f32::consts::FRAC_PI_2 - 1e-3);
+        let inner = self.inner_angle.clamp(0.0, outer);
+        // A hair apart so the smoothstep never divides by zero.
+        (inner.cos(), outer.cos().min(inner.cos() - 1e-4))
+    }
+}
+
+fn influence(position: Vec3, color: Vec3, intensity: f32, point: Vec3) -> f32 {
+    let brightness = intensity.max(0.0) * color.max_element().max(0.0);
+    brightness / (1.0 + position.distance_squared(point))
+}
+
+/// `(1 - (d / range)^4)^2`, clamped: 1 near the light, 0 at `range`.
+fn range_window(distance: f32, range: f32) -> f32 {
+    if range <= 0.0 {
+        return 0.0;
+    }
+    let ratio = (distance / range).powi(4);
+    let window = (1.0 - ratio).clamp(0.0, 1.0);
+    window * window
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// A light chosen to cast shadows, by its index in [`LightSet::point`] or
+/// [`LightSet::spot`]. Its place in [`LightSet::shadowed_lights`] is its
+/// shadow slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowedLight {
+    /// `LightSet::point[index]`.
+    Point(usize),
+    /// `LightSet::spot[index]`.
+    Spot(usize),
 }
 
 /// Indirect light approximated as two hemispheres: one colour arriving
@@ -122,14 +219,31 @@ impl Default for AmbientLight {
 }
 
 /// The lights in a scene, ready to pack into a [`LightsUniform`].
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LightSet {
     /// Directional lights (e.g. one sun).
     pub directional: Vec<DirectionalLight>,
     /// Point lights.
     pub point: Vec<PointLight>,
+    /// Spot lights.
+    pub spot: Vec<SpotLight>,
     /// Indirect light. Defaults to [`AmbientLight::DAYLIGHT`].
     pub ambient: AmbientLight,
+    /// How far from the camera the first directional light casts shadows.
+    /// Defaults to [`DEFAULT_SHADOW_DISTANCE`].
+    pub shadow_distance: f32,
+}
+
+impl Default for LightSet {
+    fn default() -> Self {
+        Self {
+            directional: Vec::new(),
+            point: Vec::new(),
+            spot: Vec::new(),
+            ambient: AmbientLight::default(),
+            shadow_distance: DEFAULT_SHADOW_DISTANCE,
+        }
+    }
 }
 
 impl LightSet {
@@ -152,46 +266,109 @@ impl LightSet {
     /// first `MAX_*` are uploaded — the rest are silently dropped rather
     /// than erroring, since exceeding a soft rendering-resource cap isn't
     /// a correctness problem the way e.g. malformed asset data is.
+    ///
+    /// Shadow slots are chosen as [`Self::shadowed_lights`] would for a
+    /// camera at the origin.
     pub fn to_uniform(&self) -> LightsUniform {
-        self.pack(&self.point)
+        self.pack(None)
     }
 
     /// Packs this light set for a camera at `eye`. When there are more point
-    /// lights than [`MAX_POINT_LIGHTS`], the ones contributing most at the eye
-    /// (brightness over squared distance) are kept; ties keep authored order.
+    /// (or spot) lights than [`MAX_POINT_LIGHTS`] ([`MAX_SPOT_LIGHTS`]), the
+    /// ones contributing most at the eye (brightness over squared distance)
+    /// are kept; ties keep authored order. The shadow slots match
+    /// [`Self::shadowed_lights`] for the same `eye`.
     pub fn to_uniform_for_view(&self, eye: Vec3) -> LightsUniform {
-        if self.point.len() <= MAX_POINT_LIGHTS {
-            return self.to_uniform();
-        }
-        let mut ranked: Vec<PointLight> = self.point.clone();
-        ranked.sort_by(|a, b| b.influence_at(eye).total_cmp(&a.influence_at(eye)));
-        ranked.truncate(MAX_POINT_LIGHTS);
-        self.pack(&ranked)
+        self.pack(Some(eye))
     }
 
-    fn pack(&self, point: &[PointLight]) -> LightsUniform {
+    /// The lights that cast shadows for a camera at `eye`: up to
+    /// [`MAX_SHADOWED_LIGHTS`] of those with `casts_shadows`, the ones
+    /// contributing most at the eye first (ties keep authored order, points
+    /// before spots). A light's place in the list is its shadow slot.
+    pub fn shadowed_lights(&self, eye: Vec3) -> Vec<ShadowedLight> {
+        let mut candidates: Vec<(ShadowedLight, f32)> = self
+            .point
+            .iter()
+            .enumerate()
+            .filter(|(_, light)| light.casts_shadows)
+            .map(|(index, light)| (ShadowedLight::Point(index), light.influence_at(eye)))
+            .chain(
+                self.spot
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, light)| light.casts_shadows)
+                    .map(|(index, light)| (ShadowedLight::Spot(index), light.influence_at(eye))),
+            )
+            .collect();
+        candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+        candidates.truncate(MAX_SHADOWED_LIGHTS);
+        candidates.into_iter().map(|(light, _)| light).collect()
+    }
+
+    fn pack(&self, eye: Option<Vec3>) -> LightsUniform {
+        let shadowed = self.shadowed_lights(eye.unwrap_or(Vec3::ZERO));
+        let slot_of = |light: ShadowedLight| {
+            shadowed
+                .iter()
+                .position(|candidate| *candidate == light)
+                .map_or(-1, |slot| slot as i32)
+        };
+
         let mut directional_lights = [DirectionalLightUniform::ZERO; MAX_DIRECTIONAL_LIGHTS];
         for (slot, light) in directional_lights.iter_mut().zip(&self.directional) {
             *slot = DirectionalLightUniform::from(*light);
         }
 
+        let points = kept(self.point.len(), MAX_POINT_LIGHTS, eye, |index, eye| {
+            self.point[index].influence_at(eye)
+        });
         let mut point_lights = [PointLightUniform::ZERO; MAX_POINT_LIGHTS];
-        for (slot, light) in point_lights.iter_mut().zip(point) {
-            *slot = PointLightUniform::from(*light);
+        for (slot, &index) in point_lights.iter_mut().zip(&points) {
+            *slot = PointLightUniform::from(self.point[index])
+                .with_shadow_slot(slot_of(ShadowedLight::Point(index)));
+        }
+
+        let spots = kept(self.spot.len(), MAX_SPOT_LIGHTS, eye, |index, eye| {
+            self.spot[index].influence_at(eye)
+        });
+        let mut spot_lights = [SpotLightUniform::ZERO; MAX_SPOT_LIGHTS];
+        for (slot, &index) in spot_lights.iter_mut().zip(&spots) {
+            *slot = SpotLightUniform::from(self.spot[index])
+                .with_shadow_slot(slot_of(ShadowedLight::Spot(index)));
         }
 
         LightsUniform {
             directional_count: self.directional.len().min(MAX_DIRECTIONAL_LIGHTS) as u32,
-            point_count: point.len().min(MAX_POINT_LIGHTS) as u32,
+            point_count: points.len() as u32,
             _padding: [0; 2],
             directional_lights,
             point_lights,
             ambient_sky: self.ambient.sky_color.to_array(),
             ambient_intensity: self.ambient.intensity.max(0.0),
             ambient_ground: self.ambient.ground_color.to_array(),
-            _padding1: 0.0,
+            spot_count: spots.len() as u32,
+            spot_lights,
         }
     }
+}
+
+/// The indices of `len` lights to upload, at most `max`: authored order when
+/// they all fit (or there is no `eye`), else the most influential first.
+fn kept(
+    len: usize,
+    max: usize,
+    eye: Option<Vec3>,
+    influence: impl Fn(usize, Vec3) -> f32,
+) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..len).collect();
+    if let Some(eye) = eye
+        && len > max
+    {
+        indices.sort_by(|a, b| influence(*b, eye).total_cmp(&influence(*a, eye)));
+    }
+    indices.truncate(max);
+    indices
 }
 
 /// GPU-layout [`DirectionalLight`]. `_padding` keeps the struct
@@ -246,6 +423,10 @@ pub struct PointLightUniform {
     pub color: [f32; 3],
     /// See [`PointLight::intensity`].
     pub intensity: f32,
+    /// Its shadow slot (see [`LightSet::shadowed_lights`]), or `-1`.
+    pub shadow_slot: i32,
+    /// Padding only: WGSL rounds the struct up to 48 bytes.
+    pub _padding: [i32; 3],
 }
 
 impl PointLightUniform {
@@ -256,7 +437,16 @@ impl PointLightUniform {
         range: 0.0,
         color: [0.0, 0.0, 0.0],
         intensity: 0.0,
+        shadow_slot: -1,
+        _padding: [0; 3],
     };
+
+    fn with_shadow_slot(self, shadow_slot: i32) -> Self {
+        Self {
+            shadow_slot,
+            ..self
+        }
+    }
 }
 
 impl From<PointLight> for PointLightUniform {
@@ -266,6 +456,71 @@ impl From<PointLight> for PointLightUniform {
             range: light.range,
             color: light.color.to_array(),
             intensity: light.intensity,
+            shadow_slot: -1,
+            _padding: [0; 3],
+        }
+    }
+}
+
+/// GPU-layout [`SpotLight`], 64 bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SpotLightUniform {
+    /// See [`SpotLight::position`].
+    pub position: [f32; 3],
+    /// See [`SpotLight::range`].
+    pub range: f32,
+    /// See [`SpotLight::direction`], normalized.
+    pub direction: [f32; 3],
+    /// Cosine of [`SpotLight::outer_angle`].
+    pub cos_outer: f32,
+    /// See [`SpotLight::color`].
+    pub color: [f32; 3],
+    /// See [`SpotLight::intensity`].
+    pub intensity: f32,
+    /// Cosine of [`SpotLight::inner_angle`].
+    pub cos_inner: f32,
+    /// Its shadow slot (see [`LightSet::shadowed_lights`]), or `-1`.
+    pub shadow_slot: i32,
+    /// Padding only.
+    pub _padding: [f32; 2],
+}
+
+impl SpotLightUniform {
+    /// All zero (a light contributing nothing).
+    pub const ZERO: Self = Self {
+        position: [0.0; 3],
+        range: 0.0,
+        direction: [0.0; 3],
+        cos_outer: 1.0,
+        color: [0.0; 3],
+        intensity: 0.0,
+        cos_inner: 1.0,
+        shadow_slot: -1,
+        _padding: [0.0; 2],
+    };
+
+    fn with_shadow_slot(self, shadow_slot: i32) -> Self {
+        Self {
+            shadow_slot,
+            ..self
+        }
+    }
+}
+
+impl From<SpotLight> for SpotLightUniform {
+    fn from(light: SpotLight) -> Self {
+        let (cos_inner, cos_outer) = light.cone_cosines();
+        Self {
+            position: light.position.to_array(),
+            range: light.range.max(0.0),
+            direction: light.direction.normalize_or_zero().to_array(),
+            cos_outer,
+            color: light.color.to_array(),
+            intensity: light.intensity,
+            cos_inner,
+            shadow_slot: -1,
+            _padding: [0.0; 2],
         }
     }
 }
@@ -297,8 +552,11 @@ pub struct LightsUniform {
     pub ambient_intensity: f32,
     /// See [`AmbientLight::ground_color`].
     pub ambient_ground: [f32; 3],
-    /// Padding only — keeps the struct a multiple of 16 bytes.
-    pub _padding1: f32,
+    /// How many of `spot_lights`' entries are real. Sits where padding
+    /// used to, so every field above keeps its offset.
+    pub spot_count: u32,
+    /// Spot lights, `spot_count` real entries followed by zeroed filler.
+    pub spot_lights: [SpotLightUniform; MAX_SPOT_LIGHTS],
 }
 
 impl LightsUniform {
@@ -312,7 +570,8 @@ impl LightsUniform {
         ambient_sky: [0.0; 3],
         ambient_intensity: 0.0,
         ambient_ground: [0.0; 3],
-        _padding1: 0.0,
+        spot_count: 0,
+        spot_lights: [SpotLightUniform::ZERO; MAX_SPOT_LIGHTS],
     };
 }
 
@@ -372,6 +631,7 @@ mod tests {
             color: Vec3::new(0.2, 0.4, 0.6),
             intensity: 5.0,
             range: 10.0,
+            casts_shadows: false,
         });
 
         let uniform = lights.to_uniform();
@@ -418,6 +678,7 @@ mod tests {
             color: Vec3::ONE,
             intensity,
             range: 10.0,
+            casts_shadows: false,
         };
         let mut lights = LightSet::new();
         // Far, dim lights first in authored order, then the near ones.
@@ -566,5 +827,98 @@ mod tests {
             0,
             "a WGSL uniform struct must be a multiple of 16 bytes",
         );
+    }
+
+    fn spot(x: f32, casts_shadows: bool) -> SpotLight {
+        SpotLight {
+            position: Vec3::new(x, 0.0, 0.0),
+            direction: Vec3::NEG_Y,
+            color: Vec3::ONE,
+            intensity: 10.0,
+            range: 10.0,
+            inner_angle: 20f32.to_radians(),
+            outer_angle: 30f32.to_radians(),
+            casts_shadows,
+        }
+    }
+
+    #[test]
+    fn spot_light_is_bright_in_the_cone_and_dark_outside_and_past_its_range() {
+        let light = spot(0.0, false);
+        assert!(light.cone_and_range_at(Vec3::new(0.0, -2.0, 0.0)) > 0.9);
+        // 45° off the axis, beyond the 30° outer cone.
+        assert_eq!(light.cone_and_range_at(Vec3::new(2.0, -2.0, 0.0)), 0.0);
+        // Between inner and outer: partly lit.
+        let between = light.cone_and_range_at(Vec3::new(25f32.to_radians().tan() * 2.0, -2.0, 0.0));
+        assert!(between > 0.0 && between < 1.0, "{between}");
+        assert_eq!(light.cone_and_range_at(Vec3::new(0.0, -10.5, 0.0)), 0.0);
+    }
+
+    #[test]
+    fn spot_lights_pack_with_their_cone() {
+        let mut lights = LightSet::new();
+        lights.spot.push(spot(1.0, false));
+        let uniform = lights.to_uniform();
+        assert_eq!(uniform.spot_count, 1);
+        let packed = uniform.spot_lights[0];
+        assert_eq!(packed.position, [1.0, 0.0, 0.0]);
+        assert_eq!(packed.direction, [0.0, -1.0, 0.0]);
+        assert!((packed.cos_inner - 20f32.to_radians().cos()).abs() < 1e-5);
+        assert!(packed.cos_outer < packed.cos_inner);
+        assert_eq!(packed.shadow_slot, -1);
+    }
+
+    #[test]
+    fn the_nearest_shadow_casting_lights_get_the_shadow_slots() {
+        let point = |x: f32, casts_shadows: bool| PointLight {
+            position: Vec3::new(x, 0.0, 0.0),
+            color: Vec3::ONE,
+            intensity: 10.0,
+            range: 10.0,
+            casts_shadows,
+        };
+        let mut lights = LightSet::new();
+        lights.point.push(point(1.0, false));
+        for x in [50.0, 2.0, 40.0, 3.0] {
+            lights.point.push(point(x, true));
+        }
+        lights.spot.push(spot(4.0, true));
+        lights.spot.push(spot(500.0, true));
+        let shadowed = lights.shadowed_lights(Vec3::ZERO);
+        assert_eq!(
+            shadowed,
+            vec![
+                ShadowedLight::Point(2),
+                ShadowedLight::Point(4),
+                ShadowedLight::Spot(0),
+                ShadowedLight::Point(3),
+            ]
+        );
+        let uniform = lights.to_uniform_for_view(Vec3::ZERO);
+        assert_eq!(
+            uniform.point_lights[0].shadow_slot, -1,
+            "not a shadow caster"
+        );
+        assert_eq!(uniform.point_lights[1].shadow_slot, -1, "too far");
+        assert_eq!(uniform.point_lights[2].shadow_slot, 0);
+        assert_eq!(uniform.point_lights[4].shadow_slot, 1);
+        assert_eq!(uniform.spot_lights[0].shadow_slot, 2);
+        assert_eq!(uniform.spot_lights[1].shadow_slot, -1);
+    }
+
+    #[test]
+    fn shader_light_capacities_match_the_rust_constants() {
+        let shader = include_str!("shaders/pbr_shared.wgsl");
+        for (name, value) in [
+            ("MAX_SPOT_LIGHTS", MAX_SPOT_LIGHTS),
+            ("MAX_SHADOWED_LIGHTS", MAX_SHADOWED_LIGHTS),
+        ] {
+            assert!(
+                shader.contains(&format!("const {name}: u32 = {value}u;")),
+                "pbr_shared.wgsl must declare the same {name}"
+            );
+        }
+        assert_eq!(size_of::<PointLightUniform>(), 48);
+        assert_eq!(size_of::<SpotLightUniform>(), 64);
     }
 }

@@ -39,13 +39,14 @@ pub struct SceneIcon {
     pub position: Vec3,
 }
 
-/// Every enabled, unlocked, unhidden camera, point light and sound emitter, one icon each
-/// (a camera wins over a light, a light over a sound, if one object is several).
+/// Every enabled, unlocked, unhidden camera, point or spot light and sound emitter, one icon
+/// each (a camera wins over a light, a light over a sound, if one object is several).
 pub fn collect(world: &mut World) -> Vec<SceneIcon> {
     let mut query = world.query::<(
         Entity,
         Option<&Camera>,
         Option<&ScenePointLight>,
+        Option<&engine_scene::SceneSpotLight>,
         Option<&SceneAudioEmitter>,
         Option<&Disabled>,
         Option<&Lock>,
@@ -56,10 +57,10 @@ pub fn collect(world: &mut World) -> Vec<SceneIcon> {
         .filter(|(.., disabled, locked, hidden)| {
             disabled.is_none() && locked.is_none() && hidden.is_none()
         })
-        .filter_map(|(entity, camera, light, sound, ..)| {
+        .filter_map(|(entity, camera, light, spot, sound, ..)| {
             let kind = if camera.is_some() {
                 IconKind::Camera
-            } else if light.is_some() {
+            } else if light.is_some() || spot.is_some() {
                 IconKind::Light
             } else if sound.is_some() {
                 IconKind::Sound

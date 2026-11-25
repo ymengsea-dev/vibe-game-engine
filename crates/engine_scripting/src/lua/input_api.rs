@@ -229,6 +229,32 @@ pub(super) fn register(
             })
         })?,
     )?;
+    let (snapshot, pending, is_active) = (Rc::clone(input), Rc::clone(commands), Rc::clone(active));
+    engine.set(
+        "set_time_of_day",
+        lua.create_function(move |_, hours: f32| {
+            if !is_active.get() {
+                return Err(error("engine commands may only run in callbacks".into()));
+            }
+            if !(hours.is_finite() && (0.0..=24.0).contains(&hours)) {
+                return Err(error(format!(
+                    "time of day must be between 0 and 24 hours, got {hours}"
+                )));
+            }
+            let mut queue = pending.borrow_mut();
+            if queue.len() >= MAX_COMMANDS {
+                return Err(error("Lua command limit exceeded".into()));
+            }
+            queue.push(GameCommand::SetTimeOfDay { hours });
+            snapshot.borrow_mut().time_of_day = Some(hours.rem_euclid(24.0));
+            Ok(())
+        })?,
+    )?;
+    let snapshot = Rc::clone(input);
+    engine.set(
+        "get_time_of_day",
+        lua.create_function(move |_, ()| Ok(snapshot.borrow().time_of_day))?,
+    )?;
     let (snapshot, pending, active) = (Rc::clone(input), Rc::clone(commands), Rc::clone(active));
     engine.set(
         "set_mouse_locked",

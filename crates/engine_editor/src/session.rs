@@ -59,6 +59,9 @@ pub struct EditorSession {
     /// session loads with them all off.
     #[serde(default)]
     pub overlays: OverlayToggles,
+    /// Scene View snapping steps and toggles. Additive.
+    #[serde(default)]
+    pub snap: crate::snap::SnapSettings,
     /// Hierarchy rows the user unfolded, by stable object id. Everything
     /// else starts folded. Additive.
     #[serde(default)]
@@ -89,6 +92,7 @@ impl Default for EditorSession {
             preview_open: true,
             configuration_index: 0,
             overlays: OverlayToggles::default(),
+            snap: crate::snap::SnapSettings::default(),
             hierarchy_open: BTreeSet::new(),
             hierarchy_hidden: BTreeSet::new(),
             asset_folders_open: BTreeSet::new(),

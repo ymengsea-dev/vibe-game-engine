@@ -1687,3 +1687,30 @@ fn animators_fall_back_to_shared_variables() {
         Some("move".into())
     );
 }
+
+#[test]
+fn the_clock_runs_through_a_day_and_wraps() {
+    let mut runtime = GameplayRuntime::new(Scene::default(), None);
+    assert_eq!(runtime.time_of_day(), None);
+    // A scene with a two-minute day that starts at 23:00.
+    runtime.time_of_day = Some(23.0);
+    runtime.day_minutes = 2.0;
+    // A whole day is 120 s, so 10 s is two hours.
+    runtime.advance_clock(10.0);
+    let hours = runtime.time_of_day().expect("clock");
+    assert!((hours - 1.0).abs() < 1e-4, "{hours}");
+}
+
+#[test]
+fn a_still_clock_holds_and_a_game_can_set_it() {
+    let mut runtime = GameplayRuntime::new(Scene::default(), None);
+    runtime.advance_clock(100.0);
+    assert_eq!(runtime.time_of_day(), None);
+    // Setting the time turns it on, standing still.
+    runtime.set_time_of_day(30.0);
+    assert_eq!(runtime.time_of_day(), Some(6.0));
+    runtime.advance_clock(100.0);
+    assert_eq!(runtime.time_of_day(), Some(6.0));
+    runtime.set_time_of_day(f32::NAN);
+    assert_eq!(runtime.time_of_day(), Some(6.0));
+}

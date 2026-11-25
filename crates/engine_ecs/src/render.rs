@@ -6,12 +6,13 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::query::Has;
 use bevy_ecs::world::World;
 use engine_renderer::{
-    Aabb, CameraBinding, DebugLinePipeline, DebugLineVertex, DistanceQuality, Drawable, Frustum,
-    GpuContext, HdrTarget, InstanceBuffer, InstanceRaw, InstancedDrawable, InstancedPipeline,
-    LightsBinding, Mesh, ModelUniform, ParticleFrame, Pipeline, PostProcessStack, RenderAssets,
-    RenderTarget, RendererError, ShadowMap, ShadowPipeline, SkinnedDrawable, SkinnedPipeline,
-    SkyboxBinding, SkyboxPipeline, SpriteAtlasBinding, SpriteBatch, SpriteFrame, SpriteInstance,
-    SpritePipeline, TerrainDrawable, VegetationPipeline, WindBinding,
+    Aabb, CameraBinding, CullVolume, DebugLinePipeline, DebugLineVertex, DistanceQuality, Drawable,
+    Frustum, GpuContext, HdrTarget, InstanceBuffer, InstanceRaw, InstancedDrawable,
+    InstancedPipeline, LightsBinding, Mesh, ModelUniform, ParticleFrame, Pipeline,
+    PostProcessStack, RenderAssets, RenderTarget, RendererError, ShadowDrawable, ShadowMap,
+    ShadowPipeline, SkinnedDrawable, SkinnedPipeline, SkyboxBinding, SkyboxPipeline,
+    SpriteAtlasBinding, SpriteBatch, SpriteFrame, SpriteInstance, SpritePipeline, TerrainDrawable,
+    VegetationPipeline, WindBinding,
 };
 use glam::Mat4;
 use std::sync::atomic::Ordering;
@@ -87,10 +88,14 @@ pub struct RenderStats {
     /// sprite pipeline/atlas, and `0` means the sprite draw was skipped
     /// entirely — no instance buffer, no pipeline switch.
     pub sprites_drawn: u32,
-    /// Casters inside the directional light's frustum this frame.
+    /// Casters inside at least one shadow view this frame.
     pub shadow_casters_visible: u32,
-    /// Submitted depth draw calls, after shadow batching.
+    /// Submitted depth draw calls over every shadow view, after shadow
+    /// batching.
     pub shadow_draws: u32,
+    /// Shadow maps rendered this frame: the sun's cascades plus each
+    /// shadowed spot light (one) and point light (six).
+    pub shadow_views: u32,
     /// Submitted scene-pass draw calls, after batching.
     pub main_draws: u32,
 }
@@ -108,15 +113,16 @@ impl RenderStats {
 }
 
 /// Whether a mesh whose object-space extent is `local_bounds`, positioned
-/// by `world_from_local`, falls inside `frustum` and should be drawn.
+/// by `world_from_local`, falls inside `frustum` (a camera's view, or every
+/// shadow view together) and should be drawn.
 ///
 /// The single place camera-frustum culling happens for `MeshRenderer`
 /// entities: transform the mesh's bounds into world space
 /// ([`Aabb::transformed`]) and run the conservative plane test
 /// ([`Frustum::intersects_aabb`]) — which never reports a visible mesh as
 /// outside.
-fn is_visible(frustum: &Frustum, local_bounds: &Aabb, world_from_local: &Mat4) -> bool {
-    frustum.intersects_aabb(&local_bounds.transformed(world_from_local))
+fn is_visible(frustum: &impl CullVolume, local_bounds: &Aabb, world_from_local: &Mat4) -> bool {
+    frustum.sees(&local_bounds.transformed(world_from_local))
 }
 
 /// Tier boundaries for a mesh with no [`MeshLod`]; matches
@@ -234,7 +240,7 @@ struct TieredInstances {
 /// foliage only crosses a boundary when the camera does. Without `view`
 /// every instance is the full mesh, fully drawn.
 fn tiered_instances(
-    frustum: &Frustum,
+    frustum: &impl CullVolume,
     local_bounds: &Aabb,
     instances: &[engine_utils::Transform],
     view: Option<DistanceQuality>,
@@ -345,11 +351,11 @@ fn plan_auto_batches(keys: &[(engine_utils::AssetId, engine_utils::AssetId)]) ->
     plan
 }
 
-/// Plans shadow draws from light-frustum-visible opaque casters. The
+/// Plans shadow draws from opaque casters some shadow view sees. The
 /// returned indices refer to `casters`, not to camera-visible meshes, so a
 /// mesh outside the camera can still cast into its view.
 fn plan_shadow_batches(
-    light_frustum: &Frustum,
+    light_frustum: &impl CullVolume,
     casters: &[((engine_utils::AssetId, engine_utils::AssetId), Aabb, Mat4)],
 ) -> BatchPlan {
     let visible: Vec<_> = casters
@@ -783,18 +789,22 @@ pub fn extract_and_render_to(
             )
         })
         .collect();
-    let shadow_plan = plan_shadow_batches(shadow_map.light_frustum(), &shadow_keys);
-    let mut shadow_casters: Vec<Drawable<'_>> = Vec::with_capacity(shadow_plan.individuals.len());
+    let shadow_plan = plan_shadow_batches(shadow_map, &shadow_keys);
+    let mut shadow_casters: Vec<ShadowDrawable<'_>> =
+        Vec::with_capacity(shadow_plan.individuals.len());
     for &index in &shadow_plan.individuals {
         let mesh = &shadow_meshes[index];
         gpu.write_uniform_buffer(
             &mesh.model.buffer,
             &ModelUniform::faded(mesh.world.to_cols_array_2d(), mesh.fade),
         );
-        shadow_casters.push(Drawable {
-            model: mesh.model,
-            material: mesh.material,
-            mesh: mesh.mesh,
+        shadow_casters.push(ShadowDrawable {
+            drawable: Drawable {
+                model: mesh.model,
+                material: mesh.material,
+                mesh: mesh.mesh,
+            },
+            views: shadow_map.views_seeing(&mesh.mesh.local_bounds.transformed(&mesh.world)),
         });
     }
     // Terrain: one tier per chunk by camera distance (full detail when the
@@ -826,15 +836,16 @@ pub fn extract_and_render_to(
                     )
                 });
                 let mesh = chunk.tiers.get(tier).unwrap_or(full);
-                if is_visible(
-                    shadow_map.light_frustum(),
-                    &mesh.local_bounds,
-                    &world_from_local,
-                ) {
-                    shadow_casters.push(Drawable {
-                        model: &terrain.model,
-                        material: &terrain.shadow_material,
-                        mesh,
+                let views =
+                    shadow_map.views_seeing(&mesh.local_bounds.transformed(&world_from_local));
+                if views != 0 {
+                    shadow_casters.push(ShadowDrawable {
+                        drawable: Drawable {
+                            model: &terrain.model,
+                            material: &terrain.shadow_material,
+                            mesh,
+                        },
+                        views,
                     });
                 }
                 if is_visible(frustum, &mesh.local_bounds, &world_from_local) {
@@ -894,7 +905,7 @@ pub fn extract_and_render_to(
         let tier_mesh = |tier: usize| assets.meshes.get(instanced.tier_mesh(tier)).unwrap_or(mesh);
         if material.casts_shadow {
             let shadow = tiered_instances(
-                shadow_map.light_frustum(),
+                shadow_map,
                 &mesh.local_bounds,
                 &instanced.instances,
                 distance,
@@ -1102,7 +1113,13 @@ pub fn extract_and_render_to(
                 .iter()
                 .map(|drawable| drawable.instance_count as usize)
                 .sum::<usize>()) as u32,
-        shadow_draws: (shadow_casters.len() + instanced_shadow_casters.len()) as u32,
+        shadow_draws: (shadow_casters
+            .iter()
+            .map(|caster| caster.views.count_ones() as usize)
+            .sum::<usize>()
+            + instanced_shadow_casters.len() * shadow_map.views().len())
+            as u32,
+        shadow_views: shadow_map.views().len() as u32,
         main_draws: (drawables.len()
             + terrain_drawables.len()
             + transparent.len()

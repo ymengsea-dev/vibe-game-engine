@@ -70,6 +70,7 @@ pub fn apply_world_commands(
             | GameCommand::UiSetText { .. }
             | GameCommand::SetMouseLocked { .. }
             | GameCommand::SetQuality { .. }
+            | GameCommand::SetTimeOfDay { .. }
             | GameCommand::EmitEvent { .. }
             | GameCommand::SetVelocity { .. }
             | GameCommand::AddForce { .. }

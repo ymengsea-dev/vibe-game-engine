@@ -190,9 +190,21 @@ impl Camera {
     /// This camera's view-projection matrix and world-space position,
     /// packed for GPU upload.
     pub fn to_uniform(&self) -> CameraUniform {
+        self.to_uniform_with_fog(&crate::Fog::NONE)
+    }
+
+    /// [`Camera::to_uniform`] with `fog` for the lit shaders to apply.
+    pub fn to_uniform_with_fog(&self, fog: &crate::Fog) -> CameraUniform {
         CameraUniform {
             view_projection: self.view_projection_matrix().to_cols_array_2d(),
             view_position: [self.eye.x, self.eye.y, self.eye.z, 1.0],
+            fog_color_density: fog.color.extend(fog.density.max(0.0)).to_array(),
+            fog_height: [
+                fog.start.max(0.0),
+                fog.height_density.max(0.0),
+                fog.height,
+                fog.height_falloff.max(1e-4),
+            ],
         }
     }
 }
@@ -219,6 +231,10 @@ pub struct CameraUniform {
     /// World-space camera position (`xyz`; `w` unused, always `1.0`) —
     /// the BRDF's view vector is derived from this per-fragment.
     pub view_position: [f32; 4],
+    /// Fog colour (`xyz`) and distance density (`w`); see [`crate::Fog`].
+    pub fog_color_density: [f32; 4],
+    /// Fog start distance, height density, height and height falloff.
+    pub fog_height: [f32; 4],
 }
 
 impl CameraUniform {
@@ -232,6 +248,8 @@ impl CameraUniform {
             [0.0, 0.0, 0.0, 1.0],
         ],
         view_position: [0.0, 0.0, 0.0, 1.0],
+        fog_color_density: [0.0; 4],
+        fog_height: [0.0, 0.0, 0.0, 1.0],
     };
 }
 
@@ -368,8 +386,8 @@ mod tests {
     }
 
     #[test]
-    fn uniform_bytes_are_80_bytes_matching_wgsl_mat4x4_plus_vec4() {
+    fn uniform_bytes_are_112_bytes_matching_wgsl_mat4x4_plus_three_vec4s() {
         let uniform = CameraUniform::IDENTITY;
-        assert_eq!(bytemuck::bytes_of(&uniform).len(), 80);
+        assert_eq!(bytemuck::bytes_of(&uniform).len(), 112);
     }
 }

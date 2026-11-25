@@ -231,6 +231,18 @@ pub fn pick_hit<'a>(
     mesh_geometry: impl Fn(&MeshSource) -> Option<(&'a [Vertex], &'a [u32])>,
     locked: LockedObjects,
 ) -> Option<PickHit> {
+    pick_hit_except(world, ray, mesh_geometry, locked, &[])
+}
+
+/// [`pick_hit`] that never hits the objects in `skip`, such as the ones
+/// being dropped onto whatever is below them.
+pub fn pick_hit_except<'a>(
+    world: &mut World,
+    ray: Ray,
+    mesh_geometry: impl Fn(&MeshSource) -> Option<(&'a [Vertex], &'a [u32])>,
+    locked: LockedObjects,
+    skip: &[Entity],
+) -> Option<PickHit> {
     let mut query = world.query::<(
         Entity,
         Option<&MeshSource>,
@@ -239,13 +251,16 @@ pub fn pick_hit<'a>(
         Option<&Disabled>,
         Option<&Lock>,
         Option<&engine_ecs::components::Hidden>,
+        Option<&engine_scene::SceneRoad>,
     )>();
     let mut best: Option<(Entity, f32)> = None;
     let mut candidates: Vec<(Entity, Option<MeshSource>, Option<[f32; 2]>)> = Vec::new();
-    for (entity, mesh, sprite, foliage, disabled, lock, hidden) in query.iter(world) {
+    let mut roads: Vec<(Entity, engine_scene::RoadData)> = Vec::new();
+    for (entity, mesh, sprite, foliage, disabled, lock, hidden, road) in query.iter(world) {
         if disabled.is_some()
             || hidden.is_some()
             || (lock.is_some() && locked == LockedObjects::Skip)
+            || skip.contains(&entity)
         {
             continue;
         }
@@ -257,6 +272,27 @@ pub fn pick_hit<'a>(
             }
         } else if mesh.is_some() || sprite.is_some() {
             candidates.push((entity, mesh.cloned(), sprite.map(|s| s.size)));
+        } else if let Some(road) = road {
+            roads.push((entity, road.0.clone()));
+        }
+    }
+    // A road is clicked on its strip, drawn or not.
+    for (entity, road) in roads {
+        let road = engine_scene::RoadData {
+            surface: true,
+            ..road
+        };
+        let Some((vertices, indices)) = road.ribbon() else {
+            continue;
+        };
+        let inverse = world_transform(world, entity).to_matrix().inverse();
+        if !inverse.is_finite() {
+            continue;
+        }
+        if let Some(t) = hit_mesh(ray.transformed(inverse), &vertices, &indices)
+            && best.is_none_or(|(_, nearest)| t < nearest)
+        {
+            best = Some((entity, t));
         }
     }
     for (entity, mesh, sprite) in candidates {

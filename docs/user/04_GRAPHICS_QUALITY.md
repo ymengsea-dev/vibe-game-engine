@@ -10,9 +10,11 @@ Open **File → Settings…** (or press **⌘,**) and choose **Project**.
 
 | Level | What changes |
 | --- | --- |
-| **Low** | Softer shadows, simpler models sooner, objects drawn less far (60%) |
-| **Medium** | The default |
-| **High** | Sharper shadows, detailed models for longer, objects drawn further (150%) |
+| **Low** | Softer shadows (sun shadows in 2 steps, small lamp shadows), simpler models sooner, objects drawn less far (60%) |
+| **Medium** | The default: sun shadows in 3 sharp steps |
+| **High** | Sun shadows in 4 sharp steps and sharper lamp shadows, detailed models for longer, objects drawn further (150%) |
+
+The sun's shadows are cut into steps from the camera out to the scene's **Shadow distance** (Environment menu): the nearest step is the sharpest. The Scene View shows shadows at the project's quality, as the game does.
 
 The setting is saved with the project, and the game starts at it, in Play and in an exported game.
 
@@ -59,4 +61,3 @@ With **Overlays → Cull from game camera** also on, distances are measured from
 - Animated characters always draw in full detail and at any distance.
 - Plants don't keep the simpler mesh a little longer when the camera hovers at the switch distance, as single models do.
 - Terrain draws far-away ground with fewer triangles on its own; the quality level's detail setting moves those distances too. Set it per terrain with **Detail** in the Inspector.
-- The Scene View's shadows do not follow the quality setting; only the game's do.

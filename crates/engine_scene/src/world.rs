@@ -41,6 +41,33 @@ pub fn point_lights_from_world(world: &mut World) -> Vec<engine_renderer::PointL
             color: glam::Vec3::from_array(light.0.color),
             intensity: light.0.intensity,
             range: light.0.range,
+            casts_shadows: light.0.casts_shadows,
+        })
+        .collect()
+}
+
+/// Resolves authored spot lights against current parent-relative
+/// transforms. Each cone points along its object's −Z.
+pub fn spot_lights_from_world(world: &mut World) -> Vec<engine_renderer::SpotLight> {
+    engine_ecs::propagate_transforms(world);
+    let mut query = world.query_filtered::<(
+        &engine_ecs::components::GlobalTransform,
+        &crate::format::SceneSpotLight,
+    ), (
+        bevy_ecs::prelude::Without<Disabled>,
+        bevy_ecs::prelude::Without<engine_ecs::components::Hidden>,
+    )>();
+    query
+        .iter(world)
+        .map(|(transform, light)| engine_renderer::SpotLight {
+            position: transform.0.translation,
+            direction: transform.0.rotation * glam::Vec3::NEG_Z,
+            color: glam::Vec3::from_array(light.0.color),
+            intensity: light.0.intensity,
+            range: light.0.range,
+            inner_angle: light.0.inner_angle_degrees.to_radians(),
+            outer_angle: light.0.outer_angle_degrees.to_radians(),
+            casts_shadows: light.0.casts_shadows,
         })
         .collect()
 }
@@ -313,11 +340,20 @@ impl Scene {
             scene_entity.stream_area = world
                 .get::<crate::stream_area::SceneStreamArea>(*entity)
                 .map(|carrier| carrier.0.clone());
+            scene_entity.painted = world
+                .get::<crate::painted::ScenePaintedGroup>(*entity)
+                .map(|carrier| carrier.0.clone());
+            scene_entity.road = world
+                .get::<crate::road::SceneRoad>(*entity)
+                .map(|carrier| carrier.0.clone());
             scene_entity.water = world
                 .get::<engine_ecs::components::WaterVolume>(*entity)
                 .map(|volume| volume.surface.into());
             scene_entity.point_light = world
                 .get::<crate::format::ScenePointLight>(*entity)
+                .map(|light| light.0);
+            scene_entity.spot_light = world
+                .get::<crate::format::SceneSpotLight>(*entity)
                 .map(|light| light.0);
             scene_entity.ui = world
                 .get::<crate::format::SceneUi>(*entity)
@@ -1300,6 +1336,7 @@ mod tests {
             sun_color: [0.5, 0.6, 1.0],
             sun_intensity: 1.5,
             ambient_intensity: 0.2,
+            shadow_distance: 80.0,
         };
         let scene = Scene {
             lighting: Some(lighting),
@@ -1345,6 +1382,7 @@ mod tests {
             color: [0.2, 0.4, 0.8],
             intensity: 5.0,
             range: 7.0,
+            casts_shadows: true,
         };
         let mut world = World::new();
         world.spawn((
@@ -1385,6 +1423,7 @@ mod tests {
                 color: [0.2, 0.4, 0.8],
                 intensity: 5.0,
                 range: 7.0,
+                casts_shadows: false,
             }),
         ));
         world.spawn((

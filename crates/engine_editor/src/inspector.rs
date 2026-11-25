@@ -33,6 +33,9 @@ mod ai;
 mod animator_graph;
 mod behaviour_tree_graph;
 mod graph;
+mod lights;
+mod road;
+pub(crate) use road::take_apply_request as take_road_apply_request;
 mod stream_area;
 
 #[cfg(test)]
@@ -2106,12 +2109,30 @@ const REGISTRY: &[ComponentUi] = &[
             ] {
                 changed |= property_row(ui, label, |ui| slider(ui, value, range));
             }
+            let casts_shadows = data.casts_shadows;
+            lights::shadow_row(ui, world, &mut data.casts_shadows);
+            changed |= data.casts_shadows != casts_shadows;
             if changed && let Ok(mut entity_mut) = world.get_entity_mut(entity) {
                 entity_mut.insert(ScenePointLight(data));
             }
             changed
         },
         copy_to: copy_component::<ScenePointLight>,
+    },
+    ComponentUi {
+        name: "Spot Light",
+        type_name: "SceneSpotLight",
+        present: has::<engine_scene::SceneSpotLight>,
+        insert_default: |world, entity| {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(engine_scene::SceneSpotLight(
+                    engine_scene::SpotLightData::default(),
+                ));
+            }
+        },
+        remove: strip::<engine_scene::SceneSpotLight>,
+        inspect: |world, entity, ui, _| lights::spot(world, entity, ui),
+        copy_to: copy_component::<engine_scene::SceneSpotLight>,
     },
     ComponentUi {
         name: "Water",
@@ -2262,6 +2283,22 @@ const REGISTRY: &[ComponentUi] = &[
         remove: strip::<engine_scene::SceneStreamArea>,
         inspect: |world, entity, ui, _| stream_area::inspect(world, entity, ui),
         copy_to: copy_component::<engine_scene::SceneStreamArea>,
+    },
+    ComponentUi {
+        name: "Road",
+        type_name: "SceneRoad",
+        present: has::<engine_scene::SceneRoad>,
+        insert_default: |world, entity| {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(engine_scene::SceneRoad(engine_scene::RoadData {
+                    points: vec![[0.0, 0.0, -5.0], [0.0, 0.0, 5.0]],
+                    ..engine_scene::RoadData::default()
+                }));
+            }
+        },
+        remove: strip::<engine_scene::SceneRoad>,
+        inspect: |world, entity, ui, assets| road::inspect(world, entity, ui, assets),
+        copy_to: copy_component::<engine_scene::SceneRoad>,
     },
     ComponentUi {
         name: "Audio Emitter",
@@ -5354,6 +5391,31 @@ mod tests {
             .expect("point light component");
         assert!(light.0.intensity > 0.0);
         assert!(light.0.range > 0.0);
+    }
+
+    #[test]
+    fn spot_light_component_can_be_added_and_inspected() {
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        let light_ui = REGISTRY
+            .iter()
+            .find(|component| component.name == "Spot Light")
+            .expect("spot light registry entry");
+        (light_ui.insert_default)(&mut world, entity);
+        let light = world
+            .get::<engine_scene::SceneSpotLight>(entity)
+            .expect("spot light component")
+            .0;
+        assert!(light.validate().is_ok());
+        assert!(!light.casts_shadows);
+        egui::__run_test_ui(|ui| {
+            assert!(!(light_ui.inspect)(
+                &mut world,
+                entity,
+                ui,
+                &AssetIndex::new()
+            ));
+        });
     }
 
     #[test]

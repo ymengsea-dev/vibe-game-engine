@@ -99,6 +99,9 @@ pub struct SavedEntity {
     /// Authored point-light settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub point_light: Option<PointLightData>,
+    /// Authored spot-light settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spot_light: Option<crate::SpotLightData>,
 }
 
 /// Every entity in a world, captured for saving.
@@ -177,6 +180,7 @@ impl WorldSnapshot {
             Option<&WaterVolume>,
             Option<&crate::ScenePointLight>,
             Option<&crate::SceneFoliage>,
+            Option<&crate::SceneSpotLight>,
         )>();
 
         let collected: Vec<(Entity, SavedEntity)> = query
@@ -192,6 +196,7 @@ impl WorldSnapshot {
                     water,
                     light,
                     foliage,
+                    spot,
                 )| {
                     // Something must be worth saving, or this is
                     // bookkeeping rather than game state.
@@ -201,6 +206,7 @@ impl WorldSnapshot {
                         && water.is_none()
                         && light.is_none()
                         && foliage.is_none()
+                        && spot.is_none()
                     {
                         return None;
                     }
@@ -219,6 +225,7 @@ impl WorldSnapshot {
                             disabled: disabled.is_some(),
                             water: water.map(|volume| volume.surface.into()),
                             point_light: light.map(|light| light.0),
+                            spot_light: spot.map(|light| light.0),
                         },
                     ))
                 },
@@ -347,8 +354,12 @@ impl SavedEntity {
             // Like AI: the scene that spawned the object already made it an
             // area.
             stream_area: None,
+            // Roads are part of the level, not of what a save restores.
+            road: None,
+            painted: None,
             water: self.water,
             point_light: self.point_light,
+            spot_light: self.spot_light,
             ui: None,
             rules: Vec::new(),
         }
@@ -595,6 +606,7 @@ mod tests {
             color: [0.4, 0.6, 0.9],
             intensity: 4.0,
             range: 9.0,
+            casts_shadows: false,
         };
         world.spawn((Name::new("Lamp"), crate::ScenePointLight(settings)));
         let save = SaveGame::capture(&mut world, ());

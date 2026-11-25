@@ -81,7 +81,8 @@ impl ImportOutcome {
 }
 
 /// The file extensions [`AssetKind`] recognises, for the dialog's filter.
-pub const IMPORTABLE_EXTENSIONS: [&str; 6] = ["gltf", "glb", "png", "jpg", "jpeg", "wav"];
+pub const IMPORTABLE_EXTENSIONS: [&str; 8] =
+    ["gltf", "glb", "png", "jpg", "jpeg", "hdr", "exr", "wav"];
 
 /// Whether `path` names a file kind the engine can import.
 ///

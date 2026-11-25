@@ -10,6 +10,10 @@ struct CameraUniform {
     view_proj: mat4x4<f32>,
     // xyz = world-space eye position; w unused.
     view_position: vec4<f32>,
+    // xyz = fog colour, w = distance fog density.
+    fog_color_density: vec4<f32>,
+    // fog start distance, height density, height, height falloff.
+    fog_height: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -32,10 +36,28 @@ struct PointLight {
     range: f32,
     color: vec3<f32>,
     intensity: f32,
+    // Shadow slot (see `MAX_SHADOWED_LIGHTS`), or -1 for none.
+    shadow_slot: i32,
+};
+
+struct SpotLight {
+    position: vec3<f32>,
+    range: f32,
+    direction: vec3<f32>,
+    cos_outer: f32,
+    color: vec3<f32>,
+    intensity: f32,
+    cos_inner: f32,
+    shadow_slot: i32,
 };
 
 const MAX_DIRECTIONAL_LIGHTS: u32 = 2u;
 const MAX_POINT_LIGHTS: u32 = 16u;
+const MAX_SPOT_LIGHTS: u32 = 8u;
+const MAX_SHADOWED_LIGHTS: u32 = 4u;
+const MAX_CASCADES: u32 = 4u;
+// Shadow-map layers per shadowed light: six faces for a point light.
+const LAYERS_PER_LIGHT: u32 = 6u;
 
 struct LightsUniform {
     directional_count: u32,
@@ -47,26 +69,35 @@ struct LightsUniform {
     ambient_sky: vec3<f32>,
     ambient_intensity: f32,
     ambient_ground: vec3<f32>,
-    _padding1: f32,
+    spot_count: u32,
+    spot_lights: array<SpotLight, MAX_SPOT_LIGHTS>,
 };
 
 @group(3) @binding(0)
 var<uniform> lights: LightsUniform;
 
-// Shadow map for the scene's first directional light only (index 0) —
-// other lights are unshadowed. Multiple shadow-casting lights would need
-// one map (and one sampling pass) each; future work.
+// The sun's (first directional light's) cascade maps, one array layer per
+// cascade, nearest first. Other directional lights are unshadowed.
 @group(3) @binding(1)
-var shadow_map: texture_depth_2d;
+var shadow_map: texture_depth_2d_array;
 @group(3) @binding(2)
 var shadow_sampler: sampler_comparison;
 
-struct ShadowUniform {
-    light_space_matrix: mat4x4<f32>,
+struct ShadowsUniform {
+    cascade_matrices: array<mat4x4<f32>, MAX_CASCADES>,
+    // Point and spot light maps, layer `slot * LAYERS_PER_LIGHT + face`.
+    local_matrices: array<mat4x4<f32>, 24>,
+    // Where each cascade ends, measured from the camera.
+    cascade_splits: vec4<f32>,
+    cascade_count: u32,
 };
 
 @group(3) @binding(3)
-var<uniform> shadow: ShadowUniform;
+var<uniform> shadow: ShadowsUniform;
+
+// Point and spot light maps.
+@group(3) @binding(4)
+var local_shadow_map: texture_depth_2d_array;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -158,40 +189,100 @@ fn shade_light(
     return (diffuse + specular) * radiance * n_dot_l;
 }
 
-// How lit `world_position` is by the shadow-casting light, in [0, 1]
-// (`0` = fully shadowed, `1` = fully lit). Points outside the light's
-// orthographic frustum are treated as unshadowed rather than clamped to
-// the map's edge texel, which would otherwise smear the nearest edge
-// shadow across everything past the frustum bounds.
-fn shadow_factor(world_position: vec3<f32>) -> f32 {
-    let light_clip = shadow.light_space_matrix * vec4<f32>(world_position, 1.0);
-    let light_ndc = light_clip.xyz / light_clip.w;
-
-    if light_ndc.x < -1.0 || light_ndc.x > 1.0 || light_ndc.y < -1.0 || light_ndc.y > 1.0
-        || light_ndc.z < 0.0 || light_ndc.z > 1.0 {
-        return 1.0;
-    }
-
+// Where `world_position` lands in a shadow map whose matrix is `matrix`:
+// xy = texture uv, z = depth. Outside the map when any part leaves [0, 1].
+fn shadow_coords(matrix: mat4x4<f32>, world_position: vec3<f32>) -> vec3<f32> {
+    let clip = matrix * vec4<f32>(world_position, 1.0);
+    let ndc = clip.xyz / clip.w;
     // wgpu texture space is [0,1] with v=0 at the top; NDC y=+1 is also
     // "up", so v needs the sign flip x doesn't.
-    let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, light_ndc.y * -0.5 + 0.5);
-    let current_depth = light_ndc.z;
+    return vec3<f32>(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5, ndc.z);
+}
 
-    // 3x3 PCF: average 9 taps around the sample point to soften the hard
-    // shadow-map edge into a smoother penumbra-like falloff.
-    let texel = 1.0 / vec2<f32>(textureDimensions(shadow_map));
+fn inside_map(coords: vec3<f32>) -> bool {
+    return all(coords >= vec3<f32>(0.0)) && all(coords <= vec3<f32>(1.0));
+}
+
+// 3x3 PCF: average 9 taps around `coords` to soften the hard shadow-map
+// edge into a smoother penumbra-like falloff. `textureSampleCompareLevel`
+// rather than `textureSampleCompare`: which layer is sampled varies per
+// pixel, which the derivative-taking form doesn't allow.
+fn pcf(map: texture_depth_2d_array, layer: u32, coords: vec3<f32>) -> f32 {
+    let texel = 1.0 / vec2<f32>(textureDimensions(map));
     var lit = 0.0;
     for (var dx = -1; dx <= 1; dx++) {
         for (var dy = -1; dy <= 1; dy++) {
             let offset = vec2<f32>(f32(dx), f32(dy)) * texel;
-            lit += textureSampleCompare(shadow_map, shadow_sampler, shadow_uv + offset, current_depth);
+            lit += textureSampleCompareLevel(map, shadow_sampler, coords.xy + offset, layer, coords.z);
         }
     }
     return lit / 9.0;
 }
 
-// Direct light from every scene light (the first directional light
-// shadowed) plus hemisphere ambient scaled by `occlusion`, for a surface
+// How lit `world_position` is by the sun, in [0, 1] (`0` = fully
+// shadowed). Uses the nearest cascade whose map covers the point; past the
+// last one there is no shadow, faded in over the last tenth of the shadow
+// distance so the edge doesn't show as a line.
+fn sun_shadow(world_position: vec3<f32>) -> f32 {
+    let count = min(shadow.cascade_count, MAX_CASCADES);
+    if count == 0u {
+        return 1.0;
+    }
+    let distance = length(world_position - camera.view_position.xyz);
+    let reach = shadow.cascade_splits[count - 1u];
+    if distance > reach {
+        return 1.0;
+    }
+    for (var cascade = 0u; cascade < count; cascade++) {
+        let coords = shadow_coords(shadow.cascade_matrices[cascade], world_position);
+        if inside_map(coords) {
+            let lit = pcf(shadow_map, cascade, coords);
+            let fade = smoothstep(reach * 0.9, reach, distance);
+            return mix(lit, 1.0, fade);
+        }
+    }
+    return 1.0;
+}
+
+// How lit `world_position` is by the point or spot light in shadow `slot`
+// whose map layer is `layer`. Unshadowed outside that map.
+fn local_shadow(layer: u32, world_position: vec3<f32>) -> f32 {
+    let coords = shadow_coords(shadow.local_matrices[layer], world_position);
+    if !inside_map(coords) {
+        return 1.0;
+    }
+    return pcf(local_shadow_map, layer, coords);
+}
+
+// The point light's face for the direction `away` from it: the largest
+// axis, positive before negative, as `POINT_SHADOW_FACES` in `shadow.rs`.
+fn point_face(away: vec3<f32>) -> u32 {
+    let a = abs(away);
+    if a.x >= a.y && a.x >= a.z {
+        return select(1u, 0u, away.x >= 0.0);
+    }
+    if a.y >= a.z {
+        return select(3u, 2u, away.y >= 0.0);
+    }
+    return select(5u, 4u, away.z >= 0.0);
+}
+
+// A spot light's cone fade times its windowed distance falloff, in [0, 1].
+// Mirrored on the CPU by `SpotLight::cone_and_range_at` in `light.rs`.
+fn spot_attenuation(light: SpotLight, l: vec3<f32>, distance: f32) -> f32 {
+    let cos_angle = dot(-l, light.direction);
+    let cone = smoothstep(light.cos_outer, light.cos_inner, cos_angle);
+    if light.range <= 0.0 {
+        return 0.0;
+    }
+    let ratio = pow(distance / light.range, 4.0);
+    let window = clamp(1.0 - ratio, 0.0, 1.0);
+    return cone * window * window;
+}
+
+// Direct light from every scene light (the sun and up to
+// `MAX_SHADOWED_LIGHTS` point/spot lights shadowed) plus hemisphere ambient
+// scaled by `occlusion`, for a surface
 // with this `albedo`, `metallic`/`roughness` and unit normal `n`.
 fn shade_surface(
     albedo: vec3<f32>,
@@ -216,7 +307,7 @@ fn shade_surface(
         let radiance = light.color * light.intensity;
         var contribution = shade_light(l, radiance, n, v, albedo, metallic, roughness, f0);
         if i == 0u {
-            contribution *= shadow_factor(world_position);
+            contribution *= sun_shadow(world_position);
         }
         direct_light += contribution;
     }
@@ -227,7 +318,24 @@ fn shade_surface(
         let distance = max(length(to_light), 0.0001);
         let l = to_light / distance;
         let attenuation = 1.0 / (distance * distance);
-        let radiance = light.color * light.intensity * attenuation;
+        var radiance = light.color * light.intensity * attenuation;
+        if light.shadow_slot >= 0 {
+            let layer = u32(light.shadow_slot) * LAYERS_PER_LIGHT + point_face(-to_light);
+            radiance *= local_shadow(layer, world_position);
+        }
+        direct_light += shade_light(l, radiance, n, v, albedo, metallic, roughness, f0);
+    }
+
+    for (var i = 0u; i < lights.spot_count; i++) {
+        let light = lights.spot_lights[i];
+        let to_light = light.position - world_position;
+        let distance = max(length(to_light), 0.0001);
+        let l = to_light / distance;
+        let attenuation = spot_attenuation(light, l, distance) / (distance * distance);
+        var radiance = light.color * light.intensity * attenuation;
+        if light.shadow_slot >= 0 && attenuation > 0.0 {
+            radiance *= local_shadow(u32(light.shadow_slot) * LAYERS_PER_LIGHT, world_position);
+        }
         direct_light += shade_light(l, radiance, n, v, albedo, metallic, roughness, f0);
     }
 
@@ -245,4 +353,32 @@ fn shade_surface(
     // its own shadowing and would double-darken.
     let ambient = albedo * ambient_color * lights.ambient_intensity * occlusion;
     return ambient + direct_light;
+}
+
+// How much of the colour at `world_position` is fog, in [0, 1]: distance
+// fog past the start distance plus height fog integrated along the view
+// ray. Mirrored on the CPU by `Fog::amount` in `sky.rs` (and copied into
+// `water.wgsl`); keep them in step.
+fn fog_amount(world_position: vec3<f32>) -> f32 {
+    let eye = camera.view_position.xyz;
+    let distance = length(world_position - eye);
+    let past_start = max(distance - camera.fog_height.x, 0.0);
+    var optical = camera.fog_color_density.w * past_start;
+    let height_density = camera.fog_height.y;
+    if height_density > 0.0 && distance > 0.0 {
+        let falloff = max(camera.fog_height.w, 0.0001);
+        let start_density = exp(clamp(-falloff * (eye.y - camera.fog_height.z), -20.0, 20.0));
+        let rise = falloff * (world_position.y - eye.y);
+        var spread = 1.0;
+        if abs(rise) >= 0.0001 {
+            spread = (1.0 - exp(clamp(-rise, -20.0, 20.0))) / rise;
+        }
+        optical += height_density * start_density * spread * past_start;
+    }
+    return clamp(1.0 - exp(-optical), 0.0, 1.0);
+}
+
+// `color` seen through the fog at `world_position`.
+fn apply_fog(color: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
+    return mix(color, camera.fog_color_density.rgb, fog_amount(world_position));
 }

@@ -63,5 +63,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let n = normalize(in.world_normal);
     let lit = shade_surface(albedo, 0.0, clamp(terrain.roughness, 0.045, 1.0), n, in.world_position, 1.0);
-    return vec4<f32>(lit, 1.0);
+    return vec4<f32>(apply_fog(lit, in.world_position), 1.0);
 }

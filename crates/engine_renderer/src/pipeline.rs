@@ -11,7 +11,10 @@ use crate::light::LightsUniform;
 use crate::material::MaterialUniform;
 use crate::mesh::{Mesh, Vertex};
 use crate::model::ModelUniform;
-use crate::shadow::{SHADOW_MAP_SIZE, ShadowUniform};
+use crate::shadow::{
+    LOCAL_SHADOW_LAYERS, MAX_CASCADES, MAX_SHADOW_VIEWS, SHADOW_MAP_SIZE, ShadowFrame,
+    ShadowUniform,
+};
 use crate::skybox::SkyboxUniform;
 use crate::texture::Texture;
 
@@ -301,32 +304,104 @@ impl ShadowPipeline {
     }
 }
 
-/// A directional light's shadow depth texture plus the resources needed
-/// to both render it (with a [`ShadowPipeline`]) and sample it back in
-/// [`Pipeline`]'s main color pass.
+/// How big and how many shadow maps a [`ShadowMap`] holds (a quality
+/// setting; see [`crate::QualityPreset`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShadowSettings {
+    /// Sun cascades, 1 to [`MAX_CASCADES`].
+    pub cascades: u32,
+    /// Width and height of each sun cascade's map, in texels.
+    pub cascade_size: u32,
+    /// Width and height of each point/spot light map, in texels.
+    pub local_size: u32,
+}
+
+impl ShadowSettings {
+    /// One sun map of `size` texels and small light maps: the single-map
+    /// shadows from before cascades.
+    pub fn single(size: u32) -> Self {
+        Self {
+            cascades: 1,
+            cascade_size: size,
+            local_size: 256,
+        }
+    }
+}
+
+/// One shadow view rendered this frame: a layer of a [`ShadowMap`] and the
+/// volume its casters are culled against.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowView {
+    /// `0..MAX_CASCADES` for sun cascades, then `MAX_CASCADES + layer` for
+    /// point/spot light layers.
+    pub index: usize,
+    /// What this view's map sees.
+    pub frustum: Frustum,
+}
+
+/// Every shadow depth map — the sun's cascades and the point/spot light
+/// layers, as two depth texture arrays — plus what is needed to render
+/// them (with a [`ShadowPipeline`]) and sample them in [`Pipeline`]'s main
+/// color pass.
 pub struct ShadowMap {
-    view: wgpu::TextureView,
+    sun_array: wgpu::TextureView,
+    local_array: wgpu::TextureView,
+    /// One render target per view index (see [`ShadowView::index`]);
+    /// `None` for cascades this quality doesn't use.
+    layer_views: Vec<Option<wgpu::TextureView>>,
     sampler: wgpu::Sampler,
-    /// The GPU buffer backing the light-space matrix uniform. Kept around
-    /// so callers can update it (e.g. if the shadow-casting light moves)
-    /// via [`GpuContext::write_uniform_buffer`].
+    /// The GPU buffer backing the scene-pass [`crate::ShadowsUniform`].
     pub buffer: wgpu::Buffer,
-    light_bind_group: wgpu::BindGroup,
-    light_frustum: Frustum,
-    size: u32,
+    /// Per view index: the light matrix its depth pass renders with.
+    view_buffers: Vec<wgpu::Buffer>,
+    view_bind_groups: Vec<wgpu::BindGroup>,
+    views: Vec<ShadowView>,
+    settings: ShadowSettings,
 }
 
 impl ShadowMap {
-    /// Width and height of the depth texture, in texels.
+    /// Width and height of each sun cascade's map, in texels.
     pub fn size(&self) -> u32 {
-        self.size
+        self.settings.cascade_size
     }
 
-    /// Directional-light volume matching the matrix currently bound to the
-    /// shadow pass. ECS uses it to cull casters independently of the camera.
-    pub fn light_frustum(&self) -> &Frustum {
-        &self.light_frustum
+    /// The sizes and counts this map was built with.
+    pub fn settings(&self) -> ShadowSettings {
+        self.settings
     }
+
+    /// The views rendered this frame, set by [`GpuContext::update_shadows`].
+    pub fn views(&self) -> &[ShadowView] {
+        &self.views
+    }
+
+    /// Which of [`Self::views`] see the world-space box `bounds`, as a bit
+    /// per view (bit `i` for `views()[i]`).
+    pub fn views_seeing(&self, bounds: &crate::Aabb) -> u32 {
+        self.views
+            .iter()
+            .enumerate()
+            .filter(|(_, view)| view.frustum.intersects_aabb(bounds))
+            .fold(0, |mask, (bit, _)| mask | (1 << bit))
+    }
+}
+
+impl crate::CullVolume for ShadowMap {
+    fn sees(&self, bounds: &crate::Aabb) -> bool {
+        self.views
+            .iter()
+            .any(|view| view.frustum.intersects_aabb(bounds))
+    }
+}
+
+/// An opaque object drawn into some of a frame's shadow views: bit `i` of
+/// `views` for [`ShadowMap::views`]`()[i]`.
+#[derive(Clone, Copy)]
+pub struct ShadowDrawable<'a> {
+    /// What to draw.
+    pub drawable: Drawable<'a>,
+    /// Which views it falls in.
+    pub views: u32,
 }
 
 /// A pipeline that draws a procedural sky as a full-screen triangle, no
@@ -345,6 +420,10 @@ pub struct SkyboxBinding {
     /// depends on aspect ratio) via [`GpuContext::write_uniform_buffer`].
     pub buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// The sky image the bind group samples: a 1x1 stand-in when there is
+    /// none (the shader only reads it in image mode).
+    image: wgpu::TextureView,
+    sampler: wgpu::Sampler,
 }
 
 /// The main color pass's off-screen HDR render target: a floating-point
@@ -600,14 +679,14 @@ impl GpuContext {
                         },
                         count: None,
                     },
-                    // Shadow map for the first directional light — see
-                    // `pbr.wgsl`'s `shadow_factor`.
+                    // The sun's cascade maps — see `pbr_shared.wgsl`'s
+                    // `sun_shadow`.
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Depth,
-                            view_dimension: wgpu::TextureViewDimension::D2,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
                             multisampled: false,
                         },
                         count: None,
@@ -625,6 +704,17 @@ impl GpuContext {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // Point and spot light maps — see `local_shadow`.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
                         },
                         count: None,
                     },
@@ -729,8 +819,10 @@ impl GpuContext {
             lights_bind_group_layout,
             neutral: NeutralMaps {
                 // Tangent-space "no perturbation": (0, 0, 1) encoded into
-                // the 0..1 texture range.
-                normal: self.create_texture_from_rgba(
+                // the 0..1 texture range. Uploaded as data, not colour: an
+                // sRGB decode would turn 128 into 0.22 and tilt every
+                // mesh's normal.
+                normal: self.create_data_texture_from_rgba(
                     "neutral normal",
                     1,
                     1,
@@ -856,8 +948,8 @@ impl GpuContext {
     }
 
     /// Creates a uniform buffer + bind group exposing `uniform` (the
-    /// scene's lights) and `shadow_map` (the first directional light's
-    /// shadow map) to `pipeline`'s shader.
+    /// scene's lights) and `shadow_map` (every shadow map and its matrices)
+    /// to `pipeline`'s shader.
     pub fn create_lights_binding(
         &self,
         pipeline: &Pipeline,
@@ -875,7 +967,7 @@ impl GpuContext {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&shadow_map.view),
+                    resource: wgpu::BindingResource::TextureView(&shadow_map.sun_array),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -884,6 +976,10 @@ impl GpuContext {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: shadow_map.buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&shadow_map.local_array),
                 },
             ],
         });
@@ -1024,9 +1120,8 @@ impl GpuContext {
         }
     }
 
-    /// Creates a [`ShadowMap`]: a [`crate::shadow::SHADOW_MAP_SIZE`]-square
-    /// depth texture plus the light-space matrix uniform buffer and bind
-    /// group `shadow_pipeline` needs to render into it.
+    /// Creates a [`ShadowMap`] with one [`crate::shadow::SHADOW_MAP_SIZE`]
+    /// sun map rendered with `light_space_matrix`.
     pub fn create_shadow_map(
         &self,
         shadow_pipeline: &ShadowPipeline,
@@ -1035,32 +1130,80 @@ impl GpuContext {
         self.create_shadow_map_sized(shadow_pipeline, light_space_matrix, SHADOW_MAP_SIZE)
     }
 
-    /// [`GpuContext::create_shadow_map`] with a `size`-square depth texture
-    /// (a quality setting), kept between 256 and the device's texture limit.
+    /// [`GpuContext::create_shadow_map`] with a `size`-square sun map.
     pub fn create_shadow_map_sized(
         &self,
         shadow_pipeline: &ShadowPipeline,
         light_space_matrix: Mat4,
         size: u32,
     ) -> ShadowMap {
-        let device = self.device();
-        let size = size.clamp(256, device.limits().max_texture_dimension_2d.max(256));
+        let mut shadow_map = self.create_shadow_maps(shadow_pipeline, ShadowSettings::single(size));
+        self.update_shadow_map(&mut shadow_map, light_space_matrix);
+        shadow_map
+    }
 
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow map"),
-            size: wgpu::Extent3d {
-                width: size,
-                height: size,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: SHADOW_DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    /// Creates a [`ShadowMap`] with `settings.cascades` sun maps and room
+    /// for [`crate::MAX_SHADOWED_LIGHTS`] point/spot lights. Sizes are kept
+    /// between 256 and the device's texture limit. Nothing casts a shadow
+    /// until [`GpuContext::update_shadows`] sets this frame's views.
+    pub fn create_shadow_maps(
+        &self,
+        shadow_pipeline: &ShadowPipeline,
+        settings: ShadowSettings,
+    ) -> ShadowMap {
+        let device = self.device();
+        let limit = device.limits().max_texture_dimension_2d.max(256);
+        let settings = ShadowSettings {
+            cascades: settings.cascades.clamp(1, MAX_CASCADES as u32),
+            cascade_size: settings.cascade_size.clamp(256, limit),
+            local_size: settings.local_size.clamp(256, limit),
+        };
+        let depth_array = |label: &str, size: u32, layers: u32| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: layers,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SHADOW_DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let sun = depth_array("sun shadow maps", settings.cascade_size, settings.cascades);
+        let local = depth_array(
+            "light shadow maps",
+            settings.local_size,
+            LOCAL_SHADOW_LAYERS as u32,
+        );
+        let array_view = |texture: &wgpu::Texture| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            })
+        };
+        let layer_view = |texture: &wgpu::Texture, layer: u32| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        };
+        let layer_views = (0..MAX_SHADOW_VIEWS)
+            .map(|index| {
+                if index < MAX_CASCADES {
+                    (index < settings.cascades as usize).then(|| layer_view(&sun, index as u32))
+                } else {
+                    Some(layer_view(&local, (index - MAX_CASCADES) as u32))
+                }
+            })
+            .collect();
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow map sampler"),
@@ -1072,33 +1215,83 @@ impl GpuContext {
             ..Default::default()
         });
 
-        let buffer = self.create_uniform_buffer(
-            "shadow light-space uniform",
-            &ShadowUniform::from(light_space_matrix),
-        );
-        let light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shadow light bind group"),
-            layout: &shadow_pipeline.light_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-        });
+        let buffer =
+            self.create_uniform_buffer("shadows uniform", &crate::ShadowsUniform::default());
+        let view_buffers: Vec<wgpu::Buffer> = (0..MAX_SHADOW_VIEWS)
+            .map(|_| self.create_uniform_buffer("shadow view uniform", &ShadowUniform::IDENTITY))
+            .collect();
+        let view_bind_groups = view_buffers
+            .iter()
+            .map(|buffer| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("shadow view bind group"),
+                    layout: &shadow_pipeline.light_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                })
+            })
+            .collect();
 
         ShadowMap {
-            view,
+            sun_array: array_view(&sun),
+            local_array: array_view(&local),
+            layer_views,
             sampler,
             buffer,
-            light_bind_group,
-            light_frustum: Frustum::from_view_projection(&light_space_matrix),
-            size,
+            view_buffers,
+            view_bind_groups,
+            views: Vec::new(),
+            settings,
         }
     }
 
-    /// Updates the shadow matrix and its CPU culling volume together.
+    /// Sets one sun map covering everything with `light_space_matrix` and
+    /// no point/spot light shadows.
     pub fn update_shadow_map(&self, shadow_map: &mut ShadowMap, light_space_matrix: Mat4) {
-        self.write_uniform_buffer(&shadow_map.buffer, &ShadowUniform::from(light_space_matrix));
-        shadow_map.light_frustum = Frustum::from_view_projection(&light_space_matrix);
+        self.update_shadows(
+            shadow_map,
+            &ShadowFrame {
+                cascades: vec![light_space_matrix],
+                cascade_splits: [f32::MAX; MAX_CASCADES],
+                local: Vec::new(),
+            },
+        );
+    }
+
+    /// Uploads this frame's shadow matrices and sets the views the next
+    /// frame's depth passes render. Cascades past what `shadow_map` was
+    /// built with are dropped.
+    pub fn update_shadows(&self, shadow_map: &mut ShadowMap, frame: &ShadowFrame) {
+        let mut frame = frame.clone();
+        frame
+            .cascades
+            .truncate(shadow_map.settings.cascades as usize);
+        self.write_uniform_buffer(&shadow_map.buffer, &frame.uniform());
+        shadow_map.views.clear();
+        let views = frame
+            .cascades
+            .iter()
+            .enumerate()
+            .map(|(cascade, matrix)| (cascade, *matrix))
+            .chain(
+                frame
+                    .local
+                    .iter()
+                    .filter(|(layer, _)| *layer < LOCAL_SHADOW_LAYERS)
+                    .map(|(layer, matrix)| (MAX_CASCADES + layer, *matrix)),
+            );
+        for (index, matrix) in views {
+            self.write_uniform_buffer(
+                &shadow_map.view_buffers[index],
+                &ShadowUniform::from(matrix),
+            );
+            shadow_map.views.push(ShadowView {
+                index,
+                frustum: Frustum::from_view_projection(&matrix),
+            });
+        }
     }
 
     /// Compiles `skybox.wgsl` into a [`SkyboxPipeline`] targeting this
@@ -1114,16 +1307,35 @@ impl GpuContext {
         let uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("skybox bind group layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    // The sky image (equirectangular, half-float).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
             });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1181,15 +1393,103 @@ impl GpuContext {
         uniform: &SkyboxUniform,
     ) -> SkyboxBinding {
         let buffer = self.create_uniform_buffer("skybox uniform", uniform);
-        let bind_group = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
+        let image = self.sky_image_view(None);
+        let sampler = self.device().create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sky image sampler"),
+            // Around the panorama wraps; top and bottom stop at the poles.
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_group = self.skybox_bind_group(pipeline, &buffer, &image, &sampler);
+        SkyboxBinding {
+            buffer,
+            bind_group,
+            image,
+            sampler,
+        }
+    }
+
+    /// Shows `image` as the sky (with [`crate::Atmosphere::image`] set), or
+    /// goes back to the stand-in with `None`.
+    pub fn set_sky_image(
+        &self,
+        pipeline: &SkyboxPipeline,
+        binding: &mut SkyboxBinding,
+        image: Option<&crate::SkyImage>,
+    ) {
+        binding.image = self.sky_image_view(image);
+        binding.bind_group =
+            self.skybox_bind_group(pipeline, &binding.buffer, &binding.image, &binding.sampler);
+    }
+
+    /// Uploads a sky image as a half-float texture, or a 1x1 stand-in.
+    fn sky_image_view(&self, image: Option<&crate::SkyImage>) -> wgpu::TextureView {
+        let stand_in = crate::SkyImage {
+            width: 1,
+            height: 1,
+            rgba16f: [0.0f32, 0.0, 0.0, 1.0].map(crate::f32_to_f16).to_vec(),
+            ambient: crate::AmbientLight::NONE,
+        };
+        let limit = self.device().limits().max_texture_dimension_2d;
+        let image = image
+            .filter(|image| {
+                image.width > 0
+                    && image.height > 0
+                    && image.width <= limit
+                    && image.height <= limit
+                    && image.rgba16f.len() == (image.width * image.height * 4) as usize
+            })
+            .unwrap_or(&stand_in);
+        let texture = self.device().create_texture_with_data(
+            self.queue(),
+            &wgpu::TextureDescriptor {
+                label: Some("sky image"),
+                size: wgpu::Extent3d {
+                    width: image.width,
+                    height: image.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(&image.rgba16f),
+        );
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    fn skybox_bind_group(
+        &self,
+        pipeline: &SkyboxPipeline,
+        buffer: &wgpu::Buffer,
+        image: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        self.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("skybox bind group"),
             layout: &pipeline.uniform_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-        });
-        SkyboxBinding { buffer, bind_group }
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(image),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        })
     }
 
     /// Creates a [`HdrTarget`] sized `width` by `height` (the window's
@@ -1389,7 +1689,7 @@ impl GpuContext {
         lights: &LightsBinding,
         drawables: &[Drawable<'_>],
         terrain: &[crate::TerrainDrawable<'_>],
-        shadow_casters: &[Drawable<'_>],
+        shadow_casters: &[ShadowDrawable<'_>],
         instanced_shadow_casters: &[crate::InstancedDrawable<'_>],
         transparent: &[Drawable<'_>],
         skinned_pipeline: &crate::SkinnedPipeline,
@@ -1479,7 +1779,7 @@ impl GpuContext {
         lights: &LightsBinding,
         drawables: &[Drawable<'_>],
         terrain: &[crate::TerrainDrawable<'_>],
-        shadow_casters: &[Drawable<'_>],
+        shadow_casters: &[ShadowDrawable<'_>],
         instanced_shadow_casters: &[crate::InstancedDrawable<'_>],
         transparent: &[Drawable<'_>],
         skinned_pipeline: &crate::SkinnedPipeline,
@@ -1545,36 +1845,46 @@ impl GpuContext {
         let mut graph = crate::RenderGraph::new();
 
         graph.add_pass("shadow", &[], &["shadow_map"], |encoder| {
-            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("VGE shadow pass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &shadow_map.view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
+            // One depth pass per view: each sun cascade, then each point or
+            // spot light layer. A plain caster is drawn only into the views
+            // it falls in; instanced casters were culled against all views
+            // together and are drawn into each (the GPU clips the rest).
+            for (bit, view) in shadow_map.views.iter().enumerate() {
+                let Some(Some(target)) = shadow_map.layer_views.get(view.index) else {
+                    continue;
+                };
+                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("VGE shadow pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: target,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
                     }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
 
-            shadow_pass.set_bind_group(0, &shadow_map.light_bind_group, &[]);
-            for drawable in shadow_casters {
-                shadow_pass.set_pipeline(shadow_pipeline.plain_for(drawable.material));
-                shadow_pass.set_bind_group(1, &drawable.material.bind_group, &[]);
-                shadow_pass.set_bind_group(2, &drawable.model.bind_group, &[]);
-                shadow_pass.set_vertex_buffer(0, drawable.mesh.vertex_buffer.slice(..));
-                shadow_pass.set_index_buffer(
-                    drawable.mesh.index_buffer.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                shadow_pass.draw_indexed(0..drawable.mesh.index_count, 0, 0..1);
-            }
-            if !instanced_shadow_casters.is_empty() {
-                shadow_pass.set_bind_group(0, &shadow_map.light_bind_group, &[]);
+                shadow_pass.set_bind_group(0, &shadow_map.view_bind_groups[view.index], &[]);
+                for caster in shadow_casters {
+                    if caster.views & (1 << bit) == 0 {
+                        continue;
+                    }
+                    let drawable = &caster.drawable;
+                    shadow_pass.set_pipeline(shadow_pipeline.plain_for(drawable.material));
+                    shadow_pass.set_bind_group(1, &drawable.material.bind_group, &[]);
+                    shadow_pass.set_bind_group(2, &drawable.model.bind_group, &[]);
+                    shadow_pass.set_vertex_buffer(0, drawable.mesh.vertex_buffer.slice(..));
+                    shadow_pass.set_index_buffer(
+                        drawable.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    shadow_pass.draw_indexed(0..drawable.mesh.index_count, 0, 0..1);
+                }
                 for drawable in instanced_shadow_casters {
                     shadow_pass.set_pipeline(shadow_pipeline.instanced_for(drawable.material));
                     shadow_pass.set_bind_group(1, &drawable.material.bind_group, &[]);

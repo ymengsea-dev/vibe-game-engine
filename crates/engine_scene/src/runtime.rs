@@ -490,6 +490,42 @@ pub fn attach_lod_tiers(
     Ok(())
 }
 
+/// The drawn strip of `road`, with `image` repeated along it. `Ok(None)`
+/// for a road without a surface or with fewer than two points. Shared by the
+/// game's resolver and Studio's.
+///
+/// # Errors
+///
+/// [`SceneError::Resolve`] if the strip can't be uploaded.
+pub fn build_road_renderer(
+    gpu: &GpuContext,
+    pipeline: &Pipeline,
+    assets: &mut RenderAssets,
+    road: &crate::road::RoadData,
+    image: Option<&engine_asset::ImportedTexture>,
+) -> Result<Option<MeshRenderer>, SceneError> {
+    let Some((vertices, indices)) = road.ribbon() else {
+        return Ok(None);
+    };
+    let material = Material {
+        base_color_factor: road.color,
+        roughness_factor: 0.9,
+        metallic_factor: 0.0,
+        // Seen from below (a road over a bridge gap) it still shows.
+        double_sided: true,
+        ..Material::DEFAULT
+    };
+    let base_color = image.and_then(|image| {
+        let base = image.mip_levels.first()?;
+        Some((image.width, image.height, base.as_slice()))
+    });
+    MeshRenderer::from_geometry(
+        gpu, pipeline, assets, &vertices, &indices, base_color, material,
+    )
+    .map(Some)
+    .map_err(|err| SceneError::Resolve(err.to_string()))
+}
+
 impl<'a> RuntimeResolver<'a> {
     /// A resolver reading from `library` and uploading into `assets`.
     pub fn new(
@@ -705,6 +741,23 @@ impl SceneResolver for RuntimeResolver<'_> {
             &mesh.id,
             material_override,
         )
+    }
+
+    fn resolve_road(
+        &mut self,
+        road: &crate::road::RoadData,
+    ) -> Result<Option<MeshRenderer>, SceneError> {
+        let image = match &road.texture {
+            Some(texture) => match self.library.read(&texture.id)? {
+                Some(bytes) => Some(
+                    import_texture_bytes(&bytes)
+                        .map_err(|err| SceneError::Resolve(format!("road image: {err}")))?,
+                ),
+                None => None,
+            },
+            None => None,
+        };
+        build_road_renderer(self.gpu, self.pipeline, self.assets, road, image.as_ref())
     }
 
     fn resolve_terrain(

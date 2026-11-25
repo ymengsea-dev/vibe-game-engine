@@ -1703,7 +1703,17 @@ pub struct LightingData {
     pub sun_intensity: f32,
     /// Brightness of the renderer's daylight sky/ground ambient colors.
     pub ambient_intensity: f32,
+    /// How far from the camera the sun casts shadows, in world units.
+    #[serde(default = "default_shadow_distance")]
+    pub shadow_distance: f32,
 }
+
+fn default_shadow_distance() -> f32 {
+    engine_renderer::DEFAULT_SHADOW_DISTANCE
+}
+
+/// The shortest and longest sun shadow distance a scene may set.
+pub const SHADOW_DISTANCE_RANGE: std::ops::RangeInclusive<f32> = 5.0..=1000.0;
 
 impl Default for LightingData {
     fn default() -> Self {
@@ -1712,6 +1722,7 @@ impl Default for LightingData {
             sun_color: [1.0, 0.98, 0.92],
             sun_intensity: 3.0,
             ambient_intensity: 1.0,
+            shadow_distance: default_shadow_distance(),
         }
     }
 }
@@ -1726,6 +1737,7 @@ impl LightingData {
             intensity: self.sun_intensity,
         });
         lights.ambient.intensity = self.ambient_intensity;
+        lights.shadow_distance = self.shadow_distance;
         lights
     }
 
@@ -1751,6 +1763,11 @@ impl LightingData {
         {
             return Err("ambient_intensity must be finite and in [0, 1000]".into());
         }
+        if !(self.shadow_distance.is_finite()
+            && SHADOW_DISTANCE_RANGE.contains(&self.shadow_distance))
+        {
+            return Err("shadow_distance must be finite and in [5, 1000]".into());
+        }
         Ok(())
     }
 }
@@ -1766,6 +1783,19 @@ pub struct EnvironmentData {
     /// State the game starts in; `None` means the default, playing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_state: Option<crate::GameStateName>,
+    /// Fog over the whole scene.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fog: Option<FogData>,
+    /// A drifting cloud layer in the sky.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clouds: Option<CloudData>,
+    /// A clock that moves the sun and colours the sky.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_of_day: Option<TimeOfDayData>,
+    /// An image (an `.hdr`, `.exr`, `.png` or `.jpg` panorama) shown as the
+    /// sky instead of the colour gradient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sky_image: Option<AssetRef>,
 }
 
 impl EnvironmentData {
@@ -1774,7 +1804,150 @@ impl EnvironmentData {
 
     /// Whether nothing is set, so the scene file can omit the section.
     pub fn is_empty(&self) -> bool {
-        self.ambient_sounds.is_empty() && self.start_state.is_none()
+        self.ambient_sounds.is_empty()
+            && self.start_state.is_none()
+            && self.fog.is_none()
+            && self.clouds.is_none()
+            && self.time_of_day.is_none()
+            && self.sky_image.is_none()
+    }
+
+    /// The sky, clouds and fog this environment draws, with `lights`
+    /// changed to match: lit by the clock at `hour` when the scene has time
+    /// of day (`hour` falls back to its start hour), else ambient-tinted by
+    /// `image_ambient`, the loaded sky image's colours, if any.
+    ///
+    /// Cloud time starts at 0; whoever animates the clouds sets it.
+    pub fn sky(
+        &self,
+        hour: Option<f32>,
+        image_ambient: Option<engine_renderer::AmbientLight>,
+        lights: &mut engine_renderer::LightSet,
+    ) -> engine_renderer::Atmosphere {
+        let mut atmosphere = engine_renderer::Atmosphere {
+            clouds: self.clouds.map(|clouds| clouds.to_clouds()),
+            fog: self
+                .fog
+                .map_or(engine_renderer::Fog::NONE, |fog| fog.to_fog()),
+            image: self.sky_image.is_some(),
+            ..engine_renderer::Atmosphere::default()
+        };
+        if let Some(time) = self.time_of_day {
+            let day = engine_renderer::time_of_day(hour.unwrap_or(time.start_hour));
+            day.apply(lights);
+            atmosphere.sky = day.sky;
+        } else if let Some(ambient) = image_ambient {
+            lights.ambient.sky_color = ambient.sky_color;
+            lights.ambient.ground_color = ambient.ground_color;
+        }
+        atmosphere
+    }
+}
+
+/// Scene fog: distance fog that thickens past `start`, plus optional height
+/// fog lying low over the ground.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FogData {
+    /// Linear RGB fog colour.
+    pub color: [f32; 3],
+    /// How quickly fog thickens with distance, per metre (0 to 1).
+    pub density: f32,
+    /// Distance from the camera where fog begins, in metres.
+    #[serde(default)]
+    pub start: f32,
+    /// How thick the low-lying fog is at `height` (0 is none), per metre.
+    #[serde(default)]
+    pub height_density: f32,
+    /// World height of the low-lying fog, in metres.
+    #[serde(default)]
+    pub height: f32,
+    /// How quickly the low-lying fog thins going up, per metre.
+    #[serde(default = "default_height_falloff")]
+    pub height_falloff: f32,
+}
+
+fn default_height_falloff() -> f32 {
+    0.3
+}
+
+impl Default for FogData {
+    fn default() -> Self {
+        Self {
+            color: [0.7, 0.75, 0.8],
+            density: 0.01,
+            start: 10.0,
+            height_density: 0.0,
+            height: 0.0,
+            height_falloff: default_height_falloff(),
+        }
+    }
+}
+
+impl FogData {
+    /// The renderer's fog.
+    pub fn to_fog(self) -> engine_renderer::Fog {
+        engine_renderer::Fog {
+            color: glam::Vec3::from_array(self.color),
+            density: self.density,
+            start: self.start,
+            height_density: self.height_density,
+            height: self.height,
+            height_falloff: self.height_falloff,
+        }
+    }
+}
+
+/// A cloud layer.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CloudData {
+    /// How much of the sky is covered, 0 (clear) to 1 (overcast).
+    pub coverage: f32,
+    /// How fast they drift (0 holds them still).
+    pub speed: f32,
+    /// Linear RGB colour of their lit side.
+    pub color: [f32; 3],
+}
+
+impl Default for CloudData {
+    fn default() -> Self {
+        Self {
+            coverage: 0.5,
+            speed: 1.0,
+            color: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+impl CloudData {
+    /// The renderer's clouds.
+    pub fn to_clouds(self) -> engine_renderer::Clouds {
+        engine_renderer::Clouds {
+            coverage: self.coverage,
+            speed: self.speed,
+            color: glam::Vec3::from_array(self.color),
+        }
+    }
+}
+
+/// A clock for the scene's sun and sky.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TimeOfDayData {
+    /// The hour the scene starts at, 0 to 24 (12 is noon).
+    pub start_hour: f32,
+    /// Real minutes a whole day takes while playing; 0 holds the time.
+    #[serde(default)]
+    pub day_minutes: f32,
+}
+
+/// The longest day a scene may set, in real minutes (a real day).
+pub const MAX_DAY_MINUTES: f32 = 1440.0;
+
+impl Default for TimeOfDayData {
+    fn default() -> Self {
+        Self {
+            start_hour: 12.0,
+            day_minutes: 0.0,
+        }
     }
 }
 
@@ -1803,8 +1976,11 @@ pub struct PointLightData {
     pub color: [f32; 3],
     /// Brightness multiplier.
     pub intensity: f32,
-    /// Editor reach indicator and future falloff distance.
+    /// Editor reach indicator and how far its shadow reaches.
     pub range: f32,
+    /// Whether it casts shadows (the few that matter most to the camera do).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub casts_shadows: bool,
 }
 
 impl Default for PointLightData {
@@ -1813,6 +1989,7 @@ impl Default for PointLightData {
             color: [1.0, 0.9, 0.7],
             intensity: 10.0,
             range: 8.0,
+            casts_shadows: false,
         }
     }
 }
@@ -1820,6 +1997,80 @@ impl Default for PointLightData {
 /// ECS carrier for a scene entity's authored point light.
 #[derive(bevy_ecs::prelude::Component, Debug, Clone, Copy, PartialEq)]
 pub struct ScenePointLight(pub PointLightData);
+
+/// Editable spot light properties; position comes from the entity transform
+/// and the cone points along the object's −Z (the way a camera looks).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SpotLightData {
+    /// Linear RGB color.
+    pub color: [f32; 3],
+    /// Brightness multiplier.
+    pub intensity: f32,
+    /// Distance at which the light has faded to nothing.
+    pub range: f32,
+    /// Half-angle of the fully lit middle of the cone, in degrees.
+    pub inner_angle_degrees: f32,
+    /// Half-angle of the whole cone, in degrees; no light outside it.
+    pub outer_angle_degrees: f32,
+    /// Whether it casts shadows (the few that matter most to the camera do).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub casts_shadows: bool,
+}
+
+/// The widest a spot light's cone may be, as a half-angle in degrees.
+pub const MAX_SPOT_ANGLE_DEGREES: f32 = 85.0;
+
+impl Default for SpotLightData {
+    fn default() -> Self {
+        Self {
+            color: [1.0, 0.92, 0.8],
+            intensity: 20.0,
+            range: 12.0,
+            inner_angle_degrees: 20.0,
+            outer_angle_degrees: 30.0,
+            casts_shadows: false,
+        }
+    }
+}
+
+impl SpotLightData {
+    /// Checks the colour, brightness, range and cone angles.
+    ///
+    /// # Errors
+    ///
+    /// A short reason when a value is out of range.
+    pub fn validate(self) -> Result<(), String> {
+        if !self
+            .color
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
+        {
+            return Err("color must contain finite values in [0, 100]".into());
+        }
+        if !(self.intensity.is_finite() && (0.0..=1000.0).contains(&self.intensity)) {
+            return Err("intensity must be finite and in [0, 1000]".into());
+        }
+        if !(self.range.is_finite() && self.range > 0.0 && self.range <= 10_000.0) {
+            return Err("range must be finite and in (0, 10000]".into());
+        }
+        let angles = 0.0..=MAX_SPOT_ANGLE_DEGREES;
+        if !(angles.contains(&self.inner_angle_degrees)
+            && angles.contains(&self.outer_angle_degrees))
+        {
+            return Err(format!(
+                "cone angles must be in [0, {MAX_SPOT_ANGLE_DEGREES}]"
+            ));
+        }
+        if self.inner_angle_degrees > self.outer_angle_degrees {
+            return Err("the inner angle must not be wider than the outer angle".into());
+        }
+        Ok(())
+    }
+}
+
+/// ECS carrier for a scene entity's authored spot light.
+#[derive(bevy_ecs::prelude::Component, Debug, Clone, Copy, PartialEq)]
+pub struct SceneSpotLight(pub SpotLightData);
 
 /// Serializable water settings; the live surface is validated on load.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1969,6 +2220,9 @@ pub struct SceneEntity {
     /// Authored point light; its position is the entity's transform.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub point_light: Option<PointLightData>,
+    /// Spot light properties; position and aim come from the transform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spot_light: Option<SpotLightData>,
     /// Authored screen-space UI label or button.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<UiElementData>,
@@ -1992,6 +2246,13 @@ pub struct SceneEntity {
     /// while the camera is near.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_area: Option<crate::stream_area::StreamAreaData>,
+    /// The road or path this object draws, if it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub road: Option<crate::road::RoadData>,
+    /// What this group's children were painted with, if Studio's object
+    /// brush made it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub painted: Option<crate::painted::PaintedGroupData>,
     /// In Studio with several scenes open, the scene file this object is
     /// saved to, when it isn't the main one. Never written to a file: the file
     /// an object is in says this already.
@@ -2511,6 +2772,7 @@ mod tests {
                 sun_color: [1.0, 0.8, 0.6],
                 sun_intensity: 2.5,
                 ambient_intensity: 0.4,
+                shadow_distance: 120.0,
             }),
             ..Scene::default()
         };
@@ -2538,6 +2800,180 @@ mod tests {
             serialized.contains("point_light"),
             "light settings were lost"
         );
+    }
+
+    #[test]
+    fn an_older_point_light_loads_without_shadows_and_lighting_gets_a_shadow_distance() {
+        let text = r#"(version: 5, lighting: Some((sun_direction: (0.0, -1.0, 0.0),
+            sun_color: (1.0, 1.0, 1.0), sun_intensity: 3.0, ambient_intensity: 1.0)),
+            entities: [(
+            name: Some("Lamp"),
+            point_light: Some((color: (1.0, 0.5, 0.25), intensity: 3.0, range: 5.0)),
+        )])"#;
+        let parsed = Scene::from_ron_str(text).expect("older scene");
+        let light = parsed.entities[0].point_light.expect("light");
+        assert!(!light.casts_shadows);
+        let lighting = parsed.lighting.expect("lighting");
+        assert_eq!(
+            lighting.shadow_distance,
+            engine_renderer::DEFAULT_SHADOW_DISTANCE
+        );
+        assert_eq!(
+            lighting.to_light_set().shadow_distance,
+            engine_renderer::DEFAULT_SHADOW_DISTANCE
+        );
+        // An unshadowed light writes no `casts_shadows`, so older SDKs open it.
+        assert!(
+            !parsed
+                .to_ron_string()
+                .expect("save")
+                .contains("casts_shadows")
+        );
+    }
+
+    #[test]
+    fn the_clock_lights_the_scene_and_a_sky_image_tints_the_ambient() {
+        let sun = engine_renderer::DirectionalLight {
+            direction: glam::Vec3::NEG_Y,
+            color: glam::Vec3::ONE,
+            intensity: 4.0,
+        };
+        let lights = || engine_renderer::LightSet {
+            directional: vec![sun],
+            ..engine_renderer::LightSet::default()
+        };
+        let tint = engine_renderer::AmbientLight {
+            sky_color: glam::Vec3::new(0.1, 0.2, 0.9),
+            ground_color: glam::Vec3::new(0.3, 0.2, 0.1),
+            intensity: 1.0,
+        };
+
+        // Nothing set: today's sky, lights untouched.
+        let mut plain = lights();
+        let atmosphere = EnvironmentData::default().sky(None, None, &mut plain);
+        assert_eq!(atmosphere, engine_renderer::Atmosphere::default());
+        assert_eq!(plain, lights());
+
+        // At midnight the sun is out and the night sky is darker.
+        let clock = EnvironmentData {
+            time_of_day: Some(TimeOfDayData::default()),
+            fog: Some(FogData::default()),
+            ..EnvironmentData::default()
+        };
+        let mut night = lights();
+        let atmosphere = clock.sky(Some(0.0), Some(tint), &mut night);
+        assert_eq!(night.directional[0].intensity, 0.0);
+        assert!(atmosphere.fog.is_on());
+        assert!(
+            atmosphere.sky.zenith.length() < engine_renderer::SkyColors::DEFAULT.zenith.length()
+        );
+        // Without an hour it uses the start hour, noon.
+        let mut noon = lights();
+        clock.sky(None, None, &mut noon);
+        assert!(noon.directional[0].intensity > 3.0);
+        assert!(noon.directional[0].direction.y < 0.0);
+
+        // A sky image without a clock tints the ambient light only.
+        let image = EnvironmentData {
+            sky_image: Some(AssetRef {
+                id: "00000000-0000-4000-8000-000000000001".into(),
+            }),
+            ..EnvironmentData::default()
+        };
+        let mut tinted = lights();
+        assert!(image.sky(None, Some(tint), &mut tinted).image);
+        assert_eq!(tinted.ambient.sky_color, tint.sky_color);
+        assert_eq!(tinted.directional, lights().directional);
+    }
+
+    #[test]
+    fn sky_fog_clouds_and_time_survive_a_round_trip_and_bad_values_are_refused() {
+        let environment = EnvironmentData {
+            fog: Some(FogData {
+                height_density: 0.05,
+                ..FogData::default()
+            }),
+            clouds: Some(CloudData::default()),
+            time_of_day: Some(TimeOfDayData {
+                start_hour: 18.5,
+                day_minutes: 20.0,
+            }),
+            sky_image: Some(AssetRef {
+                id: "00000000-0000-4000-8000-0000000051c1".into(),
+            }),
+            ..EnvironmentData::default()
+        };
+        assert!(!environment.is_empty());
+        let scene = Scene {
+            environment: environment.clone(),
+            ..Scene::default()
+        };
+        let back = Scene::from_ron_str(&scene.to_ron_string().expect("save")).expect("load");
+        assert_eq!(back.environment, environment);
+        assert!(back.validate().is_ok());
+
+        // An older scene has none of them and writes none of them.
+        let old = Scene::from_ron_str("(version: 5, entities: [])").expect("old scene");
+        assert!(old.environment.is_empty());
+        assert!(!old.to_ron_string().expect("save").contains("environment"));
+
+        let mut bad = scene.clone();
+        bad.environment.time_of_day = Some(TimeOfDayData {
+            start_hour: 25.0,
+            day_minutes: 0.0,
+        });
+        assert!(bad.validate().is_err());
+        let mut bad = scene.clone();
+        bad.environment.clouds = Some(CloudData {
+            coverage: 1.5,
+            ..CloudData::default()
+        });
+        assert!(bad.validate().is_err());
+        let mut bad = scene;
+        bad.environment.fog = Some(FogData {
+            density: f32::NAN,
+            ..FogData::default()
+        });
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn a_spot_light_survives_a_round_trip_and_bad_cones_are_refused() {
+        let light = SpotLightData {
+            casts_shadows: true,
+            ..SpotLightData::default()
+        };
+        let scene = Scene {
+            entities: vec![SceneEntity {
+                name: Some("Torch".into()),
+                spot_light: Some(light),
+                ..SceneEntity::default()
+            }],
+            ..Scene::default()
+        };
+        let text = scene.to_ron_string().expect("save");
+        let back = Scene::from_ron_str(&text).expect("load");
+        assert_eq!(back.entities[0].spot_light, Some(light));
+        assert!(back.validate().is_ok());
+
+        assert!(SpotLightData::default().validate().is_ok());
+        let wider_inside = SpotLightData {
+            inner_angle_degrees: 40.0,
+            outer_angle_degrees: 30.0,
+            ..SpotLightData::default()
+        };
+        assert!(wider_inside.validate().is_err());
+        let bad_range = SpotLightData {
+            range: f32::NAN,
+            ..SpotLightData::default()
+        };
+        assert!(bad_range.validate().is_err());
+        let mut scene = back;
+        scene.lighting = Some(LightingData {
+            shadow_distance: 1.0,
+            ..LightingData::default()
+        });
+        assert!(scene.validate().is_err(), "shadow distance under 5 m");
     }
 
     #[test]

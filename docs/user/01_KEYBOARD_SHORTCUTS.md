@@ -38,14 +38,18 @@ Shortcuts don't work while you type in a text box.
 | Drag a ring | Turn the object |
 | Drag a small square | Stretch the object |
 | Drag the white centre square | Make the whole object bigger or smaller |
+| Hold ⌥ while dragging a handle | Flip snapping for this drag: move, turn and scale in steps when **Snap** is off, freely when it is on |
+| ⌘↓ or End | Drop the selected objects onto the ground or object below them |
 | V | Select tool |
 | H, or hold Space | Hand tool (drag moves the view) |
 | ⌫ or Delete | Delete the selected objects |
 | ⌘G | Group the selected objects |
 | ⇧⌘G | Ungroup |
-| Drag on the selected terrain (Terrain menu set to Sculpt, Paint or Foliage) | Sculpt, paint, or add plants under the blue brush ring. Clicks don't select while the brush is on; set the menu to Off |
-| ⇧-drag on the selected terrain (Terrain menu set to Foliage) | Erase plants under the brush ring |
-| Drag a file from Project Assets | Add it to the scene where the marker shows: on the object under the cursor, else on the ground, else in front of the camera. In the 2D view, at the cursor |
+| Drag on the selected terrain (Terrain menu set to Sculpt, Paint, Foliage or Objects) | Sculpt, paint, add plants or add objects under the blue brush ring. Clicks don't select while the brush is on; set the menu to Off |
+| ⇧-drag on the selected terrain (Terrain menu set to Foliage or Objects) | Erase plants or painted objects under the brush ring |
+| Drag a dot on the selected road | Move that point of the road over the ground |
+| ⌥ + click the ground with a road selected | Add a point to the road: between two points if you click beside the road, else at the nearer end |
+| Drag a file from Project Assets | Add it to the scene where the marker shows: on the object under the cursor, else on the ground, else in front of the camera. A model stands on its bottom there (Snap → **Dropped models stand on the surface**). In the 2D view, at the cursor |
 
 ## Hierarchy
 
@@ -69,7 +73,7 @@ Shortcuts don't work while you type in a text box.
 | ⌘C / ⌘V | Copy the selected objects / paste them next to the selected object, or at the scene root if nothing is selected. Works between scenes of a project |
 | Drag a selected row | Move all the selected objects together. Locked ones stay behind |
 | Click the eye at the end of a row | Hide the object and what is under it in the Scene View, or show it again. On a selected row, it does this for the whole selection |
-| Right-click a row → Create | Add an empty object, camera, point light, sound, sprite or Game UI element inside that object. A Game UI element made inside another one sits inside it |
+| Right-click a row → Create | Add an empty object, camera, point light, spot light, sound, road, sprite or Game UI element inside that object. A Game UI element made inside another one sits inside it |
 | Right-click below the rows | Add a new object at the scene root, or paste |
 | Right-click a top-level row → Move to Scene | With several scenes open, send the object to another one |
 | F2, Delete or Backspace on a locked object | Nothing. Unlock it first |
@@ -80,11 +84,12 @@ The icon at the start of a row shows what the object is:
 | Icon | Object |
 | --- | --- |
 | Camera | A camera |
-| Sun with rays | A point light |
+| Sun with rays | A point or spot light |
 | Speaker | A sound |
 | Rounded button | A Game UI element, such as a label, button, bar or text field |
 | Grid | A tilemap |
 | Waves | Water |
+| Road running away | A road or path |
 | Picture | A sprite |
 | Ridge | Terrain |
 | Leaf | A foliage group |

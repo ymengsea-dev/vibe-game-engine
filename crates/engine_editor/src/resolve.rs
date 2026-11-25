@@ -197,6 +197,21 @@ impl SceneResolver for EditorResolver<'_> {
         Ok(Some(renderer))
     }
 
+    fn resolve_road(
+        &mut self,
+        road: &engine_scene::RoadData,
+    ) -> Result<Option<MeshRenderer>, SceneError> {
+        let image = match &road.texture {
+            Some(texture) => match self.importer.get(asset_id(texture)?) {
+                Some(ImportedAsset::Texture(image)) => Some(image.as_ref()),
+                // Still importing, or not an image: draw it plain.
+                _ => None,
+            },
+            None => None,
+        };
+        engine_scene::build_road_renderer(self.gpu, self.pipeline, self.assets, road, image)
+    }
+
     fn resolve_mesh_lods(
         &mut self,
         mesh: &AssetRef,
@@ -422,6 +437,10 @@ pub fn resolve_pending(
     report.pending += foliage_report.pending;
     report.failed += foliage_report.failed;
 
+    let road_report = sync_roads(world, &mut resolver);
+    report.resolved += road_report.resolved;
+    report.failed += road_report.failed;
+
     if report.resolved > 0 {
         tracing::info!(
             resolved = report.resolved,
@@ -431,6 +450,72 @@ pub fn resolve_pending(
         );
     }
 
+    report
+}
+
+/// The road data a road's drawn strip was last built from, so the strip is
+/// rebuilt only when the road changes, and whether its image was still
+/// missing then (it is rebuilt once the image has imported).
+#[derive(bevy_ecs::component::Component, Debug, Clone, PartialEq)]
+pub struct BuiltRoad(pub engine_scene::RoadData, pub bool);
+
+/// Builds or rebuilds the strip of every road whose data changed since its
+/// strip was built (new, edited, undone), and drops the strip of a road
+/// that lost its surface.
+fn sync_roads(world: &mut World, resolver: &mut EditorResolver<'_>) -> ResolveReport {
+    let importer = resolver.importer;
+    let has_image = |road: &engine_scene::RoadData| {
+        road.texture
+            .as_ref()
+            .and_then(|texture| asset_id(texture).ok())
+            .is_some_and(|id| matches!(importer.get(id), Some(ImportedAsset::Texture(_))))
+    };
+    let stale: Vec<(Entity, engine_scene::RoadData)> = world
+        .query::<(Entity, &engine_scene::SceneRoad, Option<&BuiltRoad>)>()
+        .iter(world)
+        .filter(|(_, road, built)| {
+            built.is_none_or(|built| built.0 != road.0 || (built.1 && has_image(&road.0)))
+        })
+        .map(|(entity, road, _)| (entity, road.0.clone()))
+        .collect();
+    // A road that is no longer a road keeps no strip.
+    let orphaned: Vec<Entity> = world
+        .query_filtered::<Entity, (
+            bevy_ecs::query::With<BuiltRoad>,
+            Without<engine_scene::SceneRoad>,
+        )>()
+        .iter(world)
+        .collect();
+    let mut report = ResolveReport::default();
+    for entity in orphaned {
+        if let Some(previous) = world.get::<MeshRenderer>(entity) {
+            previous.release(resolver.assets);
+        }
+        world
+            .entity_mut(entity)
+            .remove::<(MeshRenderer, BuiltRoad)>();
+    }
+    for (entity, road) in stale {
+        if let Some(previous) = world.get::<MeshRenderer>(entity) {
+            previous.release(resolver.assets);
+        }
+        world.entity_mut(entity).remove::<MeshRenderer>();
+        match resolver.resolve_road(&road) {
+            Ok(Some(renderer)) => {
+                world.entity_mut(entity).insert(renderer);
+                report.resolved += 1;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                report.failed += 1;
+                tracing::warn!(error = %err, "could not build a road's surface");
+            }
+        }
+        let missing_image = road.texture.is_some() && !has_image(&road);
+        world
+            .entity_mut(entity)
+            .insert(BuiltRoad(road, missing_image));
+    }
     report
 }
 

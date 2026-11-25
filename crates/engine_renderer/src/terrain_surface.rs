@@ -782,6 +782,86 @@ impl TerrainSurface {
         dirty
     }
 
+    /// Every node inside the terrain-local XZ rectangle `min..max`, as
+    /// `(row, col, position)`.
+    fn nodes_in(&self, min: Vec2, max: Vec2) -> Vec<(i64, i64, Vec2)> {
+        if !min.is_finite() || !max.is_finite() {
+            return Vec::new();
+        }
+        let center = (min + max) * 0.5;
+        let radius = ((max - min) * 0.5).max_element().max(self.cell_size());
+        let brush = Brush {
+            center,
+            radius,
+            strength: 1.0,
+            falloff: crate::terrain::BrushFalloff::Constant,
+        };
+        let Some(rect) = self.brush_rect(&brush) else {
+            return Vec::new();
+        };
+        let mut nodes = Vec::new();
+        for row in rect.row_min..=rect.row_max {
+            for col in rect.col_min..=rect.col_max {
+                if self.copies(row, col).next().is_some() {
+                    nodes.push((row, col, self.node_position(row, col)));
+                }
+            }
+        }
+        nodes
+    }
+
+    /// Shapes the ground inside the terrain-local rectangle `min..max` by
+    /// `influence`, which gives each node's target height and how strongly
+    /// (0–1) it moves there, or `None` to leave it. With `paint`, also paints
+    /// that layer by the same weight times the given strength. Returns the
+    /// nodes whose heights changed and the texels whose paint changed.
+    pub fn shape_along(
+        &mut self,
+        min: Vec2,
+        max: Vec2,
+        influence: impl Fn(Vec2) -> Option<(f32, f32)>,
+        paint: Option<(usize, f32)>,
+    ) -> (Option<DirtyRect>, Option<DirtyRect>) {
+        let nodes: Vec<(i64, i64, f32, f32)> = self
+            .nodes_in(min, max)
+            .into_iter()
+            .filter_map(|(row, col, at)| {
+                let (target, weight) = influence(at)?;
+                (target.is_finite() && weight.is_finite() && weight > 0.0).then_some((
+                    row,
+                    col,
+                    target,
+                    weight.min(1.0),
+                ))
+            })
+            .collect();
+        let heights = nodes
+            .iter()
+            .filter_map(|&(row, col, target, weight)| {
+                let here = self.node_height(row, col)?;
+                Some((row, col, here + (target - here) * weight))
+            })
+            .collect();
+        let height_dirty = self.apply_heights(heights);
+        let mut paint_dirty = None;
+        if let Some((layer, strength)) = paint
+            && layer < MAX_TERRAIN_LAYERS
+            && strength.is_finite()
+        {
+            for &(row, col, _, weight) in &nodes {
+                let Some(before) = self.node_weights(row, col) else {
+                    continue;
+                };
+                let after = blend_toward(before, layer, weight * strength.clamp(0.0, 1.0));
+                if after != before {
+                    self.set_weights(row, col, after);
+                    paint_dirty = union_dirty(paint_dirty, Some(DirtyRect::point(row, col)));
+                }
+            }
+        }
+        (height_dirty, paint_dirty)
+    }
+
     /// The local `(row, col)` range of a tile that a global rectangle
     /// covers, or `None` if it misses the tile.
     pub fn tile_local_rect(&self, coord: TileCoord, rect: DirtyRect) -> Option<DirtyRect> {
@@ -857,6 +937,29 @@ mod tests {
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         ((*seed >> 33) as f32) / (1u64 << 31) as f32
+    }
+
+    #[test]
+    fn shaping_along_a_band_moves_only_the_band_and_keeps_tile_edges_shared() {
+        let (res, size) = (9u32, 8.0f32);
+        let mut tiles = surface(&[(0, 0), (1, 0)], res, size);
+        // A band 2 m either side of z = 0, across both tiles, raised to 3 m.
+        let (heights, paint) = tiles.shape_along(
+            Vec2::new(-4.0, -4.0),
+            Vec2::new(12.0, 4.0),
+            |at| (at.y.abs() <= 2.0).then_some((3.0, 1.0)),
+            Some((1, 1.0)),
+        );
+        assert!(heights.is_some() && paint.is_some());
+        assert_eq!(tiles.height_at(0.0, 0.0), Some(3.0));
+        assert_eq!(tiles.height_at(4.0, 1.0), Some(3.0), "on the shared edge");
+        assert_eq!(tiles.height_at(10.0, 0.0), Some(3.0));
+        assert_eq!(tiles.height_at(0.0, 3.5), Some(0.0), "outside the band");
+        let edge_left = tiles.tiles.get(&(0, 0)).unwrap().heights.node_height(4, 8);
+        let edge_right = tiles.tiles.get(&(1, 0)).unwrap().heights.node_height(4, 0);
+        assert_eq!(edge_left, edge_right);
+        let (row, col) = (4, 4);
+        assert_eq!(tiles.node_weights(row, col).map(|w| w[1]), Some(255));
     }
 
     #[test]

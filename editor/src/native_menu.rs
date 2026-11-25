@@ -41,6 +41,7 @@ fn command_for_id(id: &str, recent: &[PathBuf]) -> Option<MenuCommand> {
         "create_sprite" => MenuCommand::CreateSprite,
         "create_tilemap" => MenuCommand::CreateTilemap,
         "create_water" => MenuCommand::CreateWater,
+        "create_road" => MenuCommand::CreateRoad,
         "create_point_light" => MenuCommand::CreatePointLight,
         "create_ui_label" => MenuCommand::CreateUiLabel,
         "create_ui_button" => MenuCommand::CreateUiButton,
@@ -56,6 +57,7 @@ fn command_for_id(id: &str, recent: &[PathBuf]) -> Option<MenuCommand> {
         "create_camera" => MenuCommand::CreateCamera,
         "create_sound" => MenuCommand::CreateSound,
         "duplicate_selection" => MenuCommand::DuplicateSelection,
+        "drop_to_ground" => MenuCommand::DropToGround,
         "copy_selection" => MenuCommand::CopySelection,
         "paste_objects" => MenuCommand::Paste,
         "delete_selected" => MenuCommand::DeleteSelected,
@@ -209,6 +211,7 @@ impl NativeMenu {
             "Create Tilemap from Selected Image",
         )?;
         add_item(&gameobject, &mut items, "create_water", "Create Water")?;
+        add_item(&gameobject, &mut items, "create_road", "Create Road")?;
         add_item(
             &gameobject,
             &mut items,
@@ -245,6 +248,12 @@ impl NativeMenu {
             &mut items,
             "duplicate_selection",
             "Duplicate (⌘D)",
+        )?;
+        add_item(
+            &gameobject,
+            &mut items,
+            "drop_to_ground",
+            "Drop to Ground (⌘↓)",
         )?;
         add_item(
             &gameobject,

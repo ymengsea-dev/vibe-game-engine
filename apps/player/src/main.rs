@@ -386,7 +386,13 @@ impl Player {
             return Ok(());
         };
         lua.set_fixed_step(ctx.fixed_step_seconds());
-        update_lua_input(lua, ctx.input(), ctx.mouse_locked(), ctx.quality().name());
+        update_lua_input(
+            lua,
+            ctx.input(),
+            ctx.mouse_locked(),
+            ctx.quality().name(),
+            self.gameplay.time_of_day(),
+        );
         sync_lua_scene(lua, ctx.world(), ctx.physics());
         lua.set_ui_texts(self.gameplay.ui_texts(ctx));
         lua.set_active_camera(self.gameplay.active_camera_id(ctx.world()));
@@ -535,6 +541,7 @@ fn update_lua_input(
     input: &engine::platform::InputState,
     mouse_locked: bool,
     quality: &str,
+    time_of_day: Option<f32>,
 ) {
     use engine::platform::MouseButton;
     use engine::scripting::{
@@ -546,6 +553,7 @@ fn update_lua_input(
         wheel: input.scroll_delta(),
         mouse_locked,
         quality: quality.to_owned(),
+        time_of_day,
         ..InputSnapshot::default()
     };
     for key in ScriptKey::ALL {
@@ -1052,7 +1060,7 @@ mod tests {
             "return { update = function() engine.log(tostring(engine.gamepad_axis('left_x'))) end }",
         )
         .expect("script");
-        super::update_lua_input(&mut lua, &input, false, "medium");
+        super::update_lua_input(&mut lua, &input, false, "medium", None);
         match lua.update(0.1).expect("update").as_slice() {
             [super::GameCommand::Log(text)] => text.clone(),
             other => panic!("unexpected {other:?}"),
@@ -1311,6 +1319,7 @@ mod tests {
             sun_color: [0.2, 0.4, 0.8],
             sun_intensity: 2.0,
             ambient_intensity: 0.1,
+            shadow_distance: engine::scene::LightingData::default().shadow_distance,
         });
         let result = engine::gameplay::scene_lights(&scene, &mut world, &defaults);
         assert_eq!(result.directional[0].color.to_array(), [0.2, 0.4, 0.8]);
@@ -1597,13 +1606,13 @@ mod tests {
             pressed: true,
             repeat: false,
         });
-        update_lua_input(&mut lua, &input, false, "medium");
+        update_lua_input(&mut lua, &input, false, "medium", None);
         assert_eq!(
             lua.update(0.1).expect("update"),
             vec![GameCommand::Log("true,true".into())]
         );
         input.end_frame();
-        update_lua_input(&mut lua, &input, false, "medium");
+        update_lua_input(&mut lua, &input, false, "medium", None);
         assert_eq!(
             lua.update(0.1).expect("update"),
             vec![GameCommand::Log("true,false".into())]
@@ -1725,7 +1734,7 @@ mod tests {
             delta_x: 3.0,
             delta_y: -4.0,
         });
-        update_lua_input(&mut lua, &input, true, "medium");
+        update_lua_input(&mut lua, &input, true, "medium", None);
         assert_eq!(
             lua.update(0.1).expect("update"),
             vec![GameCommand::Log("true true 3.0 -4.0 true".into())]

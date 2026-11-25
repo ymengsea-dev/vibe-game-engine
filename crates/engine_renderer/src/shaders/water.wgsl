@@ -1,4 +1,4 @@
-struct Camera { view_projection: mat4x4<f32>, view_position: vec4<f32> };
+struct Camera { view_projection: mat4x4<f32>, view_position: vec4<f32>, fog_color_density: vec4<f32>, fog_height: vec4<f32> };
 struct Model { model: mat4x4<f32> };
 struct Water { center_height: vec4<f32>, extent_wave: vec4<f32>, direction_time: vec4<f32>, shallow: vec4<f32>, deep: vec4<f32> };
 struct Impulse { position_radius: vec4<f32>, strength_age: vec4<f32> };
@@ -47,5 +47,26 @@ fn ripple(world_xz: vec2<f32>) -> f32 {
   let view = normalize(camera.view_position.xyz - input.world);
   let fresnel = pow(1.0 - max(dot(input.normal, view), 0.0), 4.0);
   let foam = smoothstep(0.92, 1.0, 1.0 - input.edge_depth);
-  return vec4<f32>(base_color + fresnel * 0.2 + foam * 0.12, 1.0);
+  let color = base_color + fresnel * 0.2 + foam * 0.12;
+  return vec4<f32>(mix(color, camera.fog_color_density.rgb, fog_amount(input.world)), 1.0);
+}
+
+// A copy of `fog_amount` in `pbr_shared.wgsl` (water doesn't include it).
+fn fog_amount(world_position: vec3<f32>) -> f32 {
+  let eye = camera.view_position.xyz;
+  let distance = length(world_position - eye);
+  let past_start = max(distance - camera.fog_height.x, 0.0);
+  var optical = camera.fog_color_density.w * past_start;
+  let height_density = camera.fog_height.y;
+  if height_density > 0.0 && distance > 0.0 {
+    let falloff = max(camera.fog_height.w, 0.0001);
+    let start_density = exp(clamp(-falloff * (eye.y - camera.fog_height.z), -20.0, 20.0));
+    let rise = falloff * (world_position.y - eye.y);
+    var spread = 1.0;
+    if abs(rise) >= 0.0001 {
+      spread = (1.0 - exp(clamp(-rise, -20.0, 20.0))) / rise;
+    }
+    optical += height_density * start_density * spread * past_start;
+  }
+  return clamp(1.0 - exp(-optical), 0.0, 1.0);
 }

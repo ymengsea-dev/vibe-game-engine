@@ -190,6 +190,23 @@ pub trait SceneResolver {
         Ok(None)
     }
 
+    /// Builds the drawn strip of a road. `Ok(None)` means "not drawn by
+    /// this resolver" (or the road has no surface).
+    ///
+    /// Defaulted to `Ok(None)`, so a resolver that knows nothing about
+    /// roads still loads the scene with the road's data.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError::Resolve`] if the strip or its image can't be uploaded.
+    fn resolve_road(
+        &mut self,
+        road: &crate::road::RoadData,
+    ) -> Result<Option<MeshRenderer>, SceneError> {
+        let _ = road;
+        Ok(None)
+    }
+
     /// Resolves an atlas reference plus a named region into the UV
     /// rectangle that region occupies.
     ///
@@ -397,6 +414,24 @@ pub(crate) fn insert_components(
     if let Some(area) = &data.stream_area {
         entity_mut.insert(crate::stream_area::SceneStreamArea(area.clone()));
     }
+    if let Some(painted) = &data.painted {
+        entity_mut.insert(crate::painted::ScenePaintedGroup(painted.clone()));
+    }
+    if let Some(road) = &data.road {
+        // The carrier always goes on, like `MeshSource`; the strip is drawn
+        // only by resolvers that build it.
+        entity_mut.insert(crate::road::SceneRoad(road.clone()));
+        match resolver.resolve_road(road) {
+            Ok(Some(renderer)) => {
+                entity_mut.insert(renderer);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                *unresolved += 1;
+                tracing::warn!(error = %err, "skipped unresolvable road surface");
+            }
+        }
+    }
     if let Some(emitter) = &data.audio_emitter {
         // The carrier always goes on, resolved or not — same rule as
         // `MeshSource`: it is the only place the authored values survive
@@ -441,6 +476,9 @@ pub(crate) fn insert_components(
     }
     if let Some(light) = data.point_light {
         entity_mut.insert(crate::format::ScenePointLight(light));
+    }
+    if let Some(light) = data.spot_light {
+        entity_mut.insert(crate::format::SceneSpotLight(light));
     }
     if let Some(ui) = &data.ui {
         entity_mut.insert(crate::format::SceneUi(ui.clone()));

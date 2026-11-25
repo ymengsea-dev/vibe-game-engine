@@ -572,6 +572,15 @@ impl SceneEntity {
             area.validate()
                 .map_err(|reason| format!("stream_area: {reason}"))?;
         }
+        if let Some(road) = &self.road {
+            road.validate()
+                .map_err(|reason| format!("road: {reason}"))?;
+        }
+        if let Some(painted) = &self.painted {
+            painted
+                .validate()
+                .map_err(|reason| format!("painted: {reason}"))?;
+        }
         if let Some(water) = self.water {
             engine_physics::WaterSurface::try_from(water)
                 .map_err(|error| format!("water: {error}"))?;
@@ -588,6 +597,11 @@ impl SceneEntity {
                 || light.range == 0.0)
         {
             return Err("point_light: color, intensity, or range is invalid".into());
+        }
+        if let Some(light) = self.spot_light {
+            light
+                .validate()
+                .map_err(|reason| format!("spot_light: {reason}"))?;
         }
         if let Some(ui) = &self.ui {
             ui.validate().map_err(|reason| format!("ui: {reason}"))?;
@@ -861,6 +875,40 @@ impl crate::format::EnvironmentData {
             if !ambient.gain.is_finite() || !(0.0..=4.0).contains(&ambient.gain) {
                 return Err(format!("ambient sound {index}: gain must be in [0, 4]"));
             }
+        }
+        let within = |value: f32, range: std::ops::RangeInclusive<f32>| {
+            value.is_finite() && range.contains(&value)
+        };
+        let colour = |rgb: [f32; 3]| rgb.iter().all(|value| within(*value, 0.0..=100.0));
+        if let Some(fog) = self.fog
+            && !(colour(fog.color)
+                && within(fog.density, 0.0..=1.0)
+                && within(fog.start, 0.0..=100_000.0)
+                && within(fog.height_density, 0.0..=1.0)
+                && within(fog.height, -100_000.0..=100_000.0)
+                && within(fog.height_falloff, 0.0001..=10.0))
+        {
+            return Err("fog: a colour, density, distance or height is out of range".into());
+        }
+        if let Some(clouds) = self.clouds
+            && !(colour(clouds.color)
+                && within(clouds.coverage, 0.0..=1.0)
+                && within(clouds.speed, 0.0..=100.0))
+        {
+            return Err("clouds: coverage must be in [0, 1] and speed in [0, 100]".into());
+        }
+        if let Some(time) = self.time_of_day
+            && !(within(time.start_hour, 0.0..=24.0)
+                && within(time.day_minutes, 0.0..=crate::format::MAX_DAY_MINUTES))
+        {
+            return Err(
+                "time_of_day: the hour must be in [0, 24] and the day at most 1440 minutes".into(),
+            );
+        }
+        if let Some(image) = &self.sky_image {
+            image
+                .validate()
+                .map_err(|reason| format!("sky_image: {reason}"))?;
         }
         Ok(())
     }

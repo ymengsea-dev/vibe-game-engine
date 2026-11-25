@@ -3,6 +3,7 @@
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
+use crate::pipeline::ShadowSettings;
 use crate::shadow::SHADOW_MAP_SIZE;
 
 /// A game's graphics quality. Saved in the project and switchable while
@@ -42,17 +43,29 @@ impl QualityLevel {
     pub fn preset(self) -> QualityPreset {
         match self {
             Self::Low => QualityPreset {
-                shadow_map_size: SHADOW_MAP_SIZE / 2,
+                shadows: ShadowSettings {
+                    cascades: 2,
+                    cascade_size: SHADOW_MAP_SIZE,
+                    local_size: 256,
+                },
                 lod_bias: 1.5,
                 draw_distance_scale: 0.6,
             },
             Self::Medium => QualityPreset {
-                shadow_map_size: SHADOW_MAP_SIZE,
+                shadows: ShadowSettings {
+                    cascades: 3,
+                    cascade_size: SHADOW_MAP_SIZE * 2,
+                    local_size: 512,
+                },
                 lod_bias: 1.0,
                 draw_distance_scale: 1.0,
             },
             Self::High => QualityPreset {
-                shadow_map_size: SHADOW_MAP_SIZE * 2,
+                shadows: ShadowSettings {
+                    cascades: 4,
+                    cascade_size: SHADOW_MAP_SIZE * 2,
+                    local_size: 512,
+                },
                 lod_bias: 0.75,
                 draw_distance_scale: 1.5,
             },
@@ -63,8 +76,8 @@ impl QualityLevel {
 /// The settings one [`QualityLevel`] stands for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QualityPreset {
-    /// Width and height of the sun's shadow map, in texels.
-    pub shadow_map_size: u32,
+    /// How many sun shadow cascades, and how big each shadow map is.
+    pub shadows: ShadowSettings,
     /// Multiplies camera distance before picking a mesh's detail tier:
     /// above 1 switches to simpler meshes sooner.
     pub lod_bias: f32,
@@ -119,7 +132,7 @@ mod tests {
     #[test]
     fn medium_keeps_todays_look() {
         let medium = QualityLevel::default().preset();
-        assert_eq!(medium.shadow_map_size, SHADOW_MAP_SIZE);
+        assert_eq!(medium.shadows.cascades, 3);
         assert_eq!(medium.lod_bias, 1.0);
         assert_eq!(medium.draw_distance_scale, 1.0);
     }
@@ -127,8 +140,10 @@ mod tests {
     #[test]
     fn higher_levels_draw_more() {
         let [low, medium, high] = QualityLevel::ALL.map(QualityLevel::preset);
-        assert!(low.shadow_map_size < medium.shadow_map_size);
-        assert!(medium.shadow_map_size < high.shadow_map_size);
+        assert!(low.shadows.cascades < medium.shadows.cascades);
+        assert!(medium.shadows.cascades < high.shadows.cascades);
+        assert!(low.shadows.cascade_size < medium.shadows.cascade_size);
+        assert!(low.shadows.local_size < high.shadows.local_size);
         assert!(low.lod_bias > high.lod_bias);
         assert!(low.draw_distance_scale < high.draw_distance_scale);
     }

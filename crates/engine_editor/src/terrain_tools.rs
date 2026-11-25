@@ -121,7 +121,9 @@ pub struct TerrainToolState {
     pub paint: bool,
     /// Paint foliage instead of sculpting or painting layers.
     pub foliage: bool,
-    /// The foliage brush removes plants instead of adding them.
+    /// Paint copies of a model or prefab instead of sculpting or painting.
+    pub objects: bool,
+    /// The foliage or object brush removes instead of adding.
     pub foliage_erase: bool,
     /// Active sculpt operation.
     pub brush_mode: TerrainBrushMode,
@@ -141,6 +143,14 @@ pub struct TerrainToolState {
     pub scatter_density: f32,
     /// Scatter spacing in world units.
     pub scatter_spacing: f32,
+    /// Object brush: roughly the distance between objects, in world units.
+    pub object_spacing: f32,
+    /// Object brush: share of grid cells that get an object, `[0, 1]`.
+    pub object_density: f32,
+    /// Object brush seed, stable across strokes.
+    pub object_seed: u64,
+    /// Object brush: how each object turns, sizes and leans.
+    pub object_style: crate::props::PropStyle,
 }
 
 impl Default for TerrainToolState {
@@ -148,6 +158,7 @@ impl Default for TerrainToolState {
         Self {
             paint: false,
             foliage: false,
+            objects: false,
             foliage_erase: false,
             brush_mode: TerrainBrushMode::Raise,
             paint_layer: 0,
@@ -158,6 +169,10 @@ impl Default for TerrainToolState {
             scatter_seed: 1,
             scatter_density: 1.0,
             scatter_spacing: 2.0,
+            object_spacing: 4.0,
+            object_density: 0.5,
+            object_seed: 1,
+            object_style: crate::props::PropStyle::default(),
         }
     }
 }
@@ -185,6 +200,28 @@ impl TerrainToolState {
         self.scatter_density = self.scatter_density.clamp(0.0, 1.0);
         self.scatter_spacing = self.scatter_spacing.clamp(0.01, 10_000.0);
         self.paint_layer = self.paint_layer.min(MAX_TERRAIN_LAYERS - 1);
+        if !self.object_spacing.is_finite() {
+            self.object_spacing = 4.0;
+        }
+        if !self.object_density.is_finite() {
+            self.object_density = 0.5;
+        }
+        self.object_spacing = self.object_spacing.clamp(0.1, 10_000.0);
+        self.object_density = self.object_density.clamp(0.0, 1.0);
+        let style = &mut self.object_style;
+        if !style.turn_degrees.is_finite() {
+            style.turn_degrees = 360.0;
+        }
+        style.turn_degrees = style.turn_degrees.clamp(0.0, 360.0);
+        for size in [&mut style.size_min, &mut style.size_max] {
+            if !size.is_finite() {
+                *size = 1.0;
+            }
+            *size = size.clamp(0.01, 100.0);
+        }
+        if style.size_max < style.size_min {
+            style.size_max = style.size_min;
+        }
     }
 
     /// The scatter controls saved with a tile.
@@ -199,7 +236,7 @@ impl TerrainToolState {
     /// Applies one brush dab at terrain-local `center`. Returns the nodes
     /// it changed, or `None` if nothing changed.
     pub fn apply_brush(&self, surface: &mut TerrainSurface, center: Vec2) -> Option<DirtyRect> {
-        if self.foliage {
+        if self.foliage || self.objects {
             return None;
         }
         let mut state = self.clone();
@@ -564,25 +601,30 @@ pub fn show_controls(
     crate::widgets::segmented(&NIGHT).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            for (label, on, paint, foliage) in [
-                ("Off", false, false, false),
-                ("Sculpt", true, false, false),
-                ("Paint", true, true, false),
-                ("Foliage", true, false, true),
+            for (label, on, paint, foliage, objects) in [
+                ("Off", false, false, false, false),
+                ("Sculpt", true, false, false, false),
+                ("Paint", true, true, false, false),
+                ("Foliage", true, false, true, false),
+                ("Objects", true, false, false, true),
             ] {
-                let selected =
-                    *active == on && (!on || (state.paint == paint && state.foliage == foliage));
+                let selected = *active == on
+                    && (!on
+                        || (state.paint == paint
+                            && state.foliage == foliage
+                            && state.objects == objects));
                 if crate::widgets::segment_label(ui, &NIGHT, selected, label).clicked() && !selected
                 {
                     *active = on;
                     state.paint = paint;
                     state.foliage = foliage;
+                    state.objects = objects;
                     response.mode_changed = true;
                 }
             }
         });
     });
-    if state.foliage {
+    if state.foliage || state.objects {
         crate::widgets::segmented(&NIGHT).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
@@ -594,10 +636,12 @@ pub fn show_controls(
                 }
             });
         });
-        ui.label(
-            egui::RichText::new("Paints the model selected in Project Assets. Shift-drag erases.")
-                .color(NIGHT.subtle),
-        );
+        let hint = if state.objects {
+            "Paints the model or prefab selected in Project Assets. Shift-drag erases."
+        } else {
+            "Paints the model selected in Project Assets. Shift-drag erases."
+        };
+        ui.label(egui::RichText::new(hint).color(NIGHT.subtle));
     } else if state.paint {
         match terrain {
             Some(terrain) => {
@@ -625,8 +669,8 @@ pub fn show_controls(
         });
     }
     ui.add(egui::Slider::new(&mut state.radius, 0.01..=100.0).text("Radius"));
-    if state.foliage {
-        // The foliage brush has no strength: Density sets how full it fills.
+    if state.foliage || state.objects {
+        // These brushes have no strength: Density sets how full they fill.
     } else if state.paint {
         ui.add(egui::Slider::new(&mut state.strength, 0.0..=1.0).text("Strength"));
     } else {
@@ -634,6 +678,37 @@ pub fn show_controls(
         if state.brush_mode == TerrainBrushMode::Flatten {
             ui.add(egui::DragValue::new(&mut state.flatten_target).prefix("Target "));
         }
+    }
+    if state.objects {
+        ui.separator();
+        ui.label(egui::RichText::new("Objects").color(NIGHT.muted));
+        ui.add(egui::Slider::new(&mut state.object_density, 0.0..=1.0).text("Density"));
+        ui.add(
+            egui::DragValue::new(&mut state.object_spacing)
+                .prefix("Spacing ")
+                .suffix(" m")
+                .speed(0.05)
+                .range(0.1..=10000.0),
+        );
+        let style = &mut state.object_style;
+        ui.add(egui::Slider::new(&mut style.turn_degrees, 0.0..=360.0).text("Random turn °"));
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::DragValue::new(&mut style.size_min)
+                    .prefix("Size ")
+                    .speed(0.01)
+                    .range(0.01..=100.0),
+            );
+            ui.add(
+                egui::DragValue::new(&mut style.size_max)
+                    .prefix("to ")
+                    .speed(0.01)
+                    .range(0.01..=100.0),
+            );
+        });
+        ui.checkbox(&mut style.lean, "Lean with the slope");
+        ui.add(egui::DragValue::new(&mut state.object_seed).prefix("Seed "));
+        return response;
     }
     ui.separator();
     ui.label(egui::RichText::new("Foliage").color(NIGHT.muted));

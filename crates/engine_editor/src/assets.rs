@@ -68,7 +68,7 @@ impl AssetKind {
     fn from_extension(extension: &str) -> Self {
         match extension.to_ascii_lowercase().as_str() {
             "gltf" | "glb" => Self::Mesh,
-            "png" | "jpg" | "jpeg" => Self::Texture,
+            "png" | "jpg" | "jpeg" | "hdr" | "exr" => Self::Texture,
             "wav" => Self::Audio,
             "ron" => Self::Scene,
             "prefab" => Self::Prefab,
@@ -1851,6 +1851,13 @@ mod scene_folder_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hdr_and_exr_sky_images_are_textures() {
+        for name in ["sky.hdr", "SKY.EXR", "sky.png"] {
+            assert_eq!(AssetKind::from_path(Path::new(name)), AssetKind::Texture);
+        }
+    }
 
     /// Unfolds the assets root, every listed folder and every folder that
     /// holds one of `entries`, as if the user had opened them all. For

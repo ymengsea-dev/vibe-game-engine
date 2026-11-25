@@ -56,7 +56,7 @@ pub struct HistoryError {
 }
 
 enum Step {
-    World(Snapshot),
+    World(Box<Snapshot>),
     Terrain(TerrainEdit),
 }
 
@@ -162,7 +162,7 @@ impl History {
         };
         let current = Snapshot::capture(world, selected);
         if current.scene != pending.scene {
-            self.push_new(Step::World(pending));
+            self.push_new(Step::World(Box::new(pending)));
             true
         } else {
             false
@@ -238,7 +238,7 @@ impl History {
         };
         match step {
             Step::World(snapshot) => {
-                to.push(Step::World(Snapshot::capture(world, *selected)));
+                to.push(Step::World(Box::new(Snapshot::capture(world, *selected))));
                 snapshot.restore(world, selected);
                 self.pending = None;
                 Ok(Some(HistoryChange::World))

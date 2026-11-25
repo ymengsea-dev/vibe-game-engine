@@ -103,8 +103,7 @@ use engine_renderer::{
     Pipeline, PostProcessStack, PostSettings, RenderAssets, RendererError, ShadowMap,
     ShadowPipeline, SkinnedMesh, SkinnedPipeline, SkyboxBinding, SkyboxPipeline, Texture,
     VegetationPipeline, Vertex, WaterBinding, WaterDraw, WaterFrame, WaterGpuUniform, WaterImpulse,
-    WaterImpulseQueue, WaterPipeline, Wind, WindBinding, directional_light_view_projection,
-    skybox_uniform,
+    WaterImpulseQueue, WaterPipeline, Wind, WindBinding, skybox_uniform,
 };
 use engine_utils::{AssetHandle, Transform};
 use glam::{Mat4, Quat, Vec3};
@@ -547,6 +546,12 @@ struct Runtime {
 
     camera: Camera,
     lights: LightSet,
+    /// Sky colours, clouds and fog, set each frame by the game.
+    atmosphere: engine_renderer::Atmosphere,
+    /// Seconds of cloud drift, wrapped at [`engine_renderer::Atmosphere::TIME_WRAP`].
+    sky_time: f32,
+    /// The sky image shown, by asset id, and the ambient light it gives.
+    sky_image: Option<(String, engine_renderer::AmbientLight)>,
 }
 
 impl Runtime {
@@ -1253,6 +1258,65 @@ impl GameContext<'_> {
     /// drives the shadow map and skybox sun.
     pub fn lights_mut(&mut self) -> &mut LightSet {
         &mut self.runtime.lights
+    }
+
+    /// The sky colours, clouds and fog drawn from the next frame. Defaults
+    /// to the plain blue sky with no clouds or fog. (Whether the sky image
+    /// shows is decided by [`Self::set_sky_image`].)
+    pub fn atmosphere_mut(&mut self) -> &mut engine_renderer::Atmosphere {
+        &mut self.runtime.atmosphere
+    }
+
+    /// The ambient light the sky image shown gives, if one is shown.
+    pub fn sky_image_ambient(&self) -> Option<engine_renderer::AmbientLight> {
+        self.runtime.sky_image.as_ref().map(|(_, ambient)| *ambient)
+    }
+
+    /// Shows the image asset `image` as the sky, read from `library`, or
+    /// goes back to the colour sky with `None`. Loading the image already
+    /// shown does nothing. Returns the ambient light the image gives (its
+    /// average sky and ground colours), or `None` without an image or when
+    /// it can't be read (a warning is logged and the colour sky stays).
+    pub fn set_sky_image(
+        &mut self,
+        image: Option<&engine_scene::AssetRef>,
+        library: &engine_scene::AssetLibrary,
+    ) -> Option<engine_renderer::AmbientLight> {
+        let Some(image) = image else {
+            if self.runtime.sky_image.take().is_some() {
+                let runtime = &mut *self.runtime;
+                runtime
+                    .gpu
+                    .set_sky_image(&runtime.skybox_pipeline, &mut runtime.skybox, None);
+            }
+            return None;
+        };
+        if let Some((id, ambient)) = &self.runtime.sky_image
+            && *id == image.id
+        {
+            return Some(*ambient);
+        }
+        let decoded = match library.read(&image.id) {
+            Ok(Some(bytes)) => engine_renderer::decode_sky_image(&bytes),
+            Ok(None) => Err("the file is missing".to_owned()),
+            Err(error) => Err(error.to_string()),
+        };
+        match decoded {
+            Ok(sky) => {
+                let runtime = &mut *self.runtime;
+                runtime.gpu.set_sky_image(
+                    &runtime.skybox_pipeline,
+                    &mut runtime.skybox,
+                    Some(&sky),
+                );
+                runtime.sky_image = Some((image.id.clone(), sky.ambient));
+                Some(sky.ambient)
+            }
+            Err(error) => {
+                tracing::warn!(asset_id = %image.id, %error, "sky image could not be loaded");
+                self.set_sky_image(None, library)
+            }
+        }
     }
 
     /// The GPU context, for creating meshes/textures/materials.
@@ -2110,19 +2174,25 @@ fn build_runtime_with(
         .map(|light| (light.direction, light.color))
         .unwrap_or((Vec3::NEG_Y, Vec3::ONE));
 
-    let light_space_matrix =
-        directional_light_view_projection(sun_direction, camera.target, SHADOW_RADIUS);
-    let shadow_map = gpu.create_shadow_map_sized(
-        &shadow_pipeline,
-        light_space_matrix,
-        config.quality.preset().shadow_map_size,
+    let mut shadow_map = gpu.create_shadow_maps(&shadow_pipeline, config.quality.preset().shadows);
+    let shadow_frame = engine_renderer::ShadowFrame::build(
+        &camera,
+        &lights,
+        shadow_map.settings().cascades,
+        shadow_map.size(),
     );
+    gpu.update_shadows(&mut shadow_map, &shadow_frame);
 
     let camera_binding = gpu.create_camera_binding(&pipeline, &camera.to_uniform());
     let lights_binding = gpu.create_lights_binding(&pipeline, &lights.to_uniform(), &shadow_map);
     let skybox = gpu.create_skybox_binding(
         &skybox_pipeline,
-        &skybox_uniform(&camera, sun_direction, sun_color),
+        &skybox_uniform(
+            &camera,
+            sun_direction,
+            sun_color,
+            &engine_renderer::Atmosphere::default(),
+        ),
     );
 
     let hdr_target = gpu.create_hdr_target(width, height);
@@ -2217,6 +2287,9 @@ fn build_runtime_with(
         render_stats: engine_ecs::RenderStats::default(),
         camera,
         lights,
+        atmosphere: engine_renderer::Atmosphere::default(),
+        sky_time: 0.0,
+        sky_image: None,
     })
 }
 
@@ -2224,34 +2297,17 @@ fn build_runtime_with(
 /// skybox / particle-camera / wind GPU bindings from the game's current
 /// state, then renders the world (opaque meshes, skinned, instanced,
 /// wind-animated vegetation, and particles).
-/// How far around the camera's focus the shadow map covers, in world
-/// units.
-///
-/// One map fitted to the camera rather than the world origin: before
-/// this, shadows were fitted to a fixed 8-unit ball at `Vec3::ZERO`, so
-/// walking away from the origin lost them entirely. Cascades would give
-/// crisp near shadows *and* long range; this is the single-map 80%.
-const SHADOW_RADIUS: f32 = 40.0;
-
-/// Switches `runtime` to `level`, rebuilding the shadow map (and the
-/// lights binding that samples it) only when its size changes.
+/// Switches `runtime` to `level`, rebuilding the shadow maps (and the
+/// lights binding that samples them) only when their sizes change.
 fn apply_quality(runtime: &mut Runtime, level: engine_renderer::QualityLevel) {
     if runtime.quality == level {
         return;
     }
     runtime.quality = level;
-    let size = level.preset().shadow_map_size;
-    if size == runtime.shadow_map.size() {
-        return;
-    }
-    let (sun_direction, _) = runtime.sun();
-    let light_space =
-        directional_light_view_projection(sun_direction, runtime.camera.target, SHADOW_RADIUS);
-    let shadow_map =
-        runtime
-            .gpu
-            .create_shadow_map_sized(&runtime.shadow_pipeline, light_space, size);
-    if shadow_map.size() == runtime.shadow_map.size() {
+    let mut shadow_map = runtime
+        .gpu
+        .create_shadow_maps(&runtime.shadow_pipeline, level.preset().shadows);
+    if shadow_map.settings() == runtime.shadow_map.settings() {
         return;
     }
     runtime.lights_binding = runtime.gpu.create_lights_binding(
@@ -2259,20 +2315,23 @@ fn apply_quality(runtime: &mut Runtime, level: engine_renderer::QualityLevel) {
         &runtime.lights.to_uniform(),
         &shadow_map,
     );
-    runtime.shadow_map = shadow_map;
+    std::mem::swap(&mut runtime.shadow_map, &mut shadow_map);
+    update_shadow_fit(runtime);
 }
 
-/// Re-fits the shadow projection around wherever the camera is looking.
+/// Re-fits the sun's cascades to the camera's view and re-aims the shadows
+/// of the point and spot lights that matter most to it.
 ///
-/// Cheap — one 4x4 matrix and a uniform write per frame — and it is what
-/// keeps shadows present as the player moves.
+/// Cheap — a few 4x4 matrices and uniform writes per frame — and it is
+/// what keeps shadows present as the player moves.
 fn update_shadow_fit(runtime: &mut Runtime) {
-    let (sun_direction, _) = runtime.sun();
-    let light_space =
-        directional_light_view_projection(sun_direction, runtime.camera.target, SHADOW_RADIUS);
-    runtime
-        .gpu
-        .update_shadow_map(&mut runtime.shadow_map, light_space);
+    let frame = engine_renderer::ShadowFrame::build(
+        &runtime.camera,
+        &runtime.lights,
+        runtime.shadow_map.settings().cascades,
+        runtime.shadow_map.size(),
+    );
+    runtime.gpu.update_shadows(&mut runtime.shadow_map, &frame);
 }
 
 fn update_audio(runtime: &mut Runtime) {
@@ -2432,9 +2491,16 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
         .gpu
         .write_wind(&runtime.wind_binding, &runtime.wind, runtime.wind_time);
 
-    runtime
-        .gpu
-        .write_uniform_buffer(&runtime.camera_binding.buffer, &runtime.camera.to_uniform());
+    runtime.sky_time =
+        (runtime.sky_time + sim_dt.max(0.0)) % engine_renderer::Atmosphere::TIME_WRAP;
+    let mut atmosphere = runtime.atmosphere;
+    atmosphere.time = runtime.sky_time;
+    atmosphere.image = runtime.sky_image.is_some();
+
+    runtime.gpu.write_uniform_buffer(
+        &runtime.camera_binding.buffer,
+        &runtime.camera.to_uniform_with_fog(&atmosphere.fog),
+    );
     runtime.gpu.write_uniform_buffer(
         &runtime.lights_binding.buffer,
         &runtime.lights.to_uniform_for_view(runtime.camera.eye),
@@ -2442,7 +2508,7 @@ fn render_frame(runtime: &mut Runtime, dt: f32) {
     let (sun_direction, sun_color) = runtime.sun();
     runtime.gpu.write_uniform_buffer(
         &runtime.skybox.buffer,
-        &skybox_uniform(&runtime.camera, sun_direction, sun_color),
+        &skybox_uniform(&runtime.camera, sun_direction, sun_color, &atmosphere),
     );
     runtime
         .gpu
@@ -2904,11 +2970,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let project = engine_project::Project::create(&root, "Streaming").expect("project");
         let mut main = engine_scene::Scene::default();
-        let mut camera = CameraData::from(engine_renderer::Camera::new(
-            Vec3::ZERO,
-            Vec3::NEG_Z,
-            1.0,
-        ));
+        let mut camera =
+            CameraData::from(engine_renderer::Camera::new(Vec3::ZERO, Vec3::NEG_Z, 1.0));
         camera.pose_from_transform = true;
         camera.active = true;
         main.entities.push(SceneEntity {
@@ -2941,7 +3004,8 @@ mod tests {
         });
         let scenes = root.join("scenes");
         std::fs::create_dir_all(&scenes).expect("scenes folder");
-        main.save_to_file(&scenes.join("main.ron")).expect("main scene");
+        main.save_to_file(&scenes.join("main.ron"))
+            .expect("main scene");
         forest
             .save_to_file(&scenes.join("forest.ron"))
             .expect("forest scene");
@@ -3068,8 +3132,8 @@ mod tests {
         assert!(runner.error_slot.take().is_none());
         assert_eq!(runtime.quality, engine_renderer::QualityLevel::High);
         assert_eq!(
-            runtime.shadow_map.size(),
-            engine_renderer::QualityLevel::High.preset().shadow_map_size
+            runtime.shadow_map.settings(),
+            engine_renderer::QualityLevel::High.preset().shadows
         );
         assert_eq!(runtime.render_stats.meshes_total, 4);
         assert_eq!(
@@ -3502,6 +3566,274 @@ mod tests {
         // Without its terrain the shape is skipped, not a panic.
         assert!(build_collider(&collider, None, &transform, &library, None).is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The sun's cascades and a shadowed spot and point light each get their
+    /// own depth view, the casters reach them, and the frame renders without
+    /// a GPU validation error. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn cascades_and_light_shadows_render_on_a_headless_gpu() {
+        use engine_ecs::components::{GlobalTransform, MeshRenderer, Transform};
+
+        struct LitGame;
+        impl Game for LitGame {
+            fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+                let parts = ctx.scene_parts();
+                let cube = engine_renderer::cube();
+                for (position, scale) in [
+                    (Vec3::new(0.0, -0.5, 0.0), Vec3::new(20.0, 1.0, 20.0)),
+                    (Vec3::new(0.0, 1.0, 0.0), Vec3::ONE),
+                ] {
+                    let renderer = MeshRenderer::from_geometry(
+                        parts.gpu,
+                        parts.pipeline,
+                        parts.assets,
+                        &cube.0,
+                        &cube.1,
+                        None,
+                        engine_renderer::Material::DEFAULT,
+                    )
+                    .expect("cube");
+                    let transform = engine_utils::Transform {
+                        translation: position,
+                        scale,
+                        ..engine_utils::Transform::IDENTITY
+                    };
+                    parts.world.spawn((
+                        renderer,
+                        Transform::from(transform),
+                        GlobalTransform::from(transform),
+                    ));
+                }
+                let camera = ctx.camera_mut();
+                camera.eye = Vec3::new(0.0, 6.0, 8.0);
+                camera.target = Vec3::ZERO;
+                Ok(())
+            }
+            fn update(&mut self, _ctx: &mut GameContext<'_>, _dt: f32) {}
+        }
+
+        let mut config = GameConfig::new("lights", 64, 64);
+        config.lights.directional = vec![DirectionalLight {
+            direction: Vec3::new(-0.4, -1.0, -0.3),
+            color: Vec3::ONE,
+            intensity: 3.0,
+        }];
+        config.lights.point.push(engine_renderer::PointLight {
+            position: Vec3::new(2.0, 2.0, 0.0),
+            color: Vec3::ONE,
+            intensity: 20.0,
+            range: 10.0,
+            casts_shadows: true,
+        });
+        config.lights.spot.push(engine_renderer::SpotLight {
+            position: Vec3::new(0.0, 5.0, 0.0),
+            direction: Vec3::NEG_Y,
+            color: Vec3::ONE,
+            intensity: 40.0,
+            range: 12.0,
+            inner_angle: 0.3,
+            outer_angle: 0.5,
+            casts_shadows: true,
+        });
+        let gpu = GpuContext::headless(256, 256).expect("headless GPU");
+        let mut runner = GameRunner::new(config, LitGame, Rc::new(Cell::new(None)));
+        runner.start_with_gpu(gpu, 256, 256);
+        for _ in 0..3 {
+            runner.on_event(PlatformEvent::RedrawRequested);
+        }
+        assert!(runner.error_slot.take().is_none());
+        let runtime = runner.runtime.as_ref().expect("runtime");
+        let frame = runtime.gpu.wait_for_frame().expect("a frame");
+        // For a look: `VGE_SNAPSHOT_DIR=<dir>` writes the frame as a PPM.
+        if let Some(dir) = std::env::var_os("VGE_SNAPSHOT_DIR") {
+            let mut ppm = format!("P6 {} {} 255\n", frame.width, frame.height).into_bytes();
+            for pixel in frame.rgba.as_chunks::<4>().0 {
+                ppm.extend_from_slice(&pixel[..3]);
+            }
+            let path = std::path::Path::new(&dir).join("light-shadows.ppm");
+            std::fs::write(path, ppm).expect("write the frame");
+        }
+        let stats = runtime.render_stats;
+        let cascades = engine_renderer::QualityLevel::default()
+            .preset()
+            .shadows
+            .cascades;
+        assert_eq!(stats.shadow_views, cascades + 1 + 6, "{stats:?}");
+        assert!(stats.shadow_casters_visible >= 2, "{stats:?}");
+        assert!(
+            stats.shadow_draws > stats.shadow_casters_visible,
+            "{stats:?}"
+        );
+    }
+
+    /// Draws ground and a few boxes under fog, clouds, an evening clock and
+    /// a sky image on a headless GPU: the sky and fog shaders must compile
+    /// and run, and dense red fog must turn the ground red.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn sky_fog_and_clouds_render_on_a_headless_gpu() {
+        use engine_ecs::components::{GlobalTransform, MeshRenderer, Transform};
+
+        struct SkyGame {
+            dense_red_fog: bool,
+        }
+        impl Game for SkyGame {
+            fn setup(&mut self, ctx: &mut GameContext<'_>) -> Result<(), GameError> {
+                let parts = ctx.scene_parts();
+                let cube = engine_renderer::cube();
+                for (position, scale) in [
+                    (Vec3::new(0.0, -0.5, -40.0), Vec3::new(200.0, 1.0, 200.0)),
+                    (Vec3::new(-3.0, 1.0, -10.0), Vec3::splat(2.0)),
+                    (Vec3::new(4.0, 2.0, -40.0), Vec3::splat(4.0)),
+                ] {
+                    let renderer = MeshRenderer::from_geometry(
+                        parts.gpu,
+                        parts.pipeline,
+                        parts.assets,
+                        &cube.0,
+                        &cube.1,
+                        None,
+                        engine_renderer::Material::DEFAULT,
+                    )
+                    .expect("cube");
+                    let transform = engine_utils::Transform {
+                        translation: position,
+                        scale,
+                        ..engine_utils::Transform::IDENTITY
+                    };
+                    parts.world.spawn((
+                        renderer,
+                        Transform::from(transform),
+                        GlobalTransform::from(transform),
+                    ));
+                }
+                let camera = ctx.camera_mut();
+                camera.eye = Vec3::new(0.0, 3.0, 6.0);
+                camera.target = Vec3::new(0.0, 1.5, -30.0);
+                if self.dense_red_fog {
+                    ctx.atmosphere_mut().fog = engine_renderer::Fog {
+                        color: Vec3::new(1.0, 0.0, 0.0),
+                        density: 1.0,
+                        ..engine_renderer::Fog::NONE
+                    };
+                    return Ok(());
+                }
+                let evening = engine_renderer::time_of_day(17.5);
+                evening.apply(ctx.lights_mut());
+                *ctx.atmosphere_mut() = engine_renderer::Atmosphere {
+                    sky: evening.sky,
+                    clouds: Some(engine_renderer::Clouds {
+                        coverage: 0.6,
+                        speed: 2.0,
+                        color: Vec3::ONE,
+                    }),
+                    fog: engine_renderer::Fog {
+                        color: Vec3::new(0.7, 0.6, 0.55),
+                        density: 0.01,
+                        start: 5.0,
+                        height_density: 0.02,
+                        height: 0.0,
+                        height_falloff: 0.5,
+                    },
+                    ..engine_renderer::Atmosphere::default()
+                };
+                Ok(())
+            }
+            fn update(&mut self, _ctx: &mut GameContext<'_>, _dt: f32) {}
+        }
+
+        let render = |game: SkyGame, image: bool, name: &str| {
+            let mut config = GameConfig::new("sky", 64, 64);
+            config.lights.directional = vec![DirectionalLight {
+                direction: Vec3::new(-0.4, -1.0, -0.3),
+                color: Vec3::ONE,
+                intensity: 3.0,
+            }];
+            let gpu = GpuContext::headless(128, 128).expect("headless GPU");
+            let mut runner = GameRunner::new(config, game, Rc::new(Cell::new(None)));
+            runner.start_with_gpu(gpu, 128, 128);
+            if image {
+                // A small panorama: bright blue above, brown below.
+                let (width, height) = (16_u32, 8_u32);
+                let rgba16f = (0..height)
+                    .flat_map(|row| {
+                        let colour = if row < height / 2 {
+                            [0.4, 0.6, 2.0, 1.0]
+                        } else {
+                            [0.3, 0.2, 0.1, 1.0]
+                        };
+                        (0..width).flat_map(move |_| colour.map(engine_renderer::f32_to_f16))
+                    })
+                    .collect();
+                let sky = engine_renderer::SkyImage {
+                    width,
+                    height,
+                    rgba16f,
+                    ambient: engine_renderer::AmbientLight::DAYLIGHT,
+                };
+                let runtime = runner.runtime.as_mut().expect("runtime");
+                runtime.gpu.set_sky_image(
+                    &runtime.skybox_pipeline,
+                    &mut runtime.skybox,
+                    Some(&sky),
+                );
+                runtime.sky_image = Some(("test".to_owned(), sky.ambient));
+            }
+            for _ in 0..3 {
+                runner.on_event(PlatformEvent::RedrawRequested);
+            }
+            assert!(runner.error_slot.take().is_none());
+            let runtime = runner.runtime.as_ref().expect("runtime");
+            let frame = runtime.gpu.wait_for_frame().expect("a frame");
+            // For a look: `VGE_SNAPSHOT_DIR=<dir>` writes the frame as a PPM.
+            if let Some(dir) = std::env::var_os("VGE_SNAPSHOT_DIR") {
+                let mut ppm = format!("P6 {} {} 255\n", frame.width, frame.height).into_bytes();
+                for pixel in frame.rgba.as_chunks::<4>().0 {
+                    ppm.extend_from_slice(&pixel[..3]);
+                }
+                let path = std::path::Path::new(&dir).join(format!("{name}.ppm"));
+                std::fs::write(path, ppm).expect("write the frame");
+            }
+            frame
+        };
+
+        let fogged = render(
+            SkyGame {
+                dense_red_fog: true,
+            },
+            false,
+            "sky-red-fog",
+        );
+        // The ground in the bottom middle of the frame.
+        let at = |x: u32, y: u32| {
+            let index = ((y * fogged.width + x) * 4) as usize;
+            [
+                fogged.rgba[index],
+                fogged.rgba[index + 1],
+                fogged.rgba[index + 2],
+            ]
+        };
+        let ground = at(fogged.width / 2, fogged.height * 7 / 8);
+        assert!(
+            u32::from(ground[0]) > 2 * u32::from(ground[1]).max(10),
+            "fogged ground {ground:?}"
+        );
+        render(
+            SkyGame {
+                dense_red_fog: false,
+            },
+            false,
+            "sky-evening",
+        );
+        render(
+            SkyGame {
+                dense_red_fog: false,
+            },
+            true,
+            "sky-image",
+        );
     }
 
     /// Builds a two-tile terrain and draws it through the real frame path on

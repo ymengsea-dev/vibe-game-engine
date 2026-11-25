@@ -38,6 +38,51 @@ use crate::profiler::FrameProfiler;
 use crate::session::{EditorSession, SESSION_VERSION};
 use crate::terrain_tools::{TerrainStroke, TerrainToolState};
 
+/// How far above an object's top the ray that drops it to the ground
+/// starts, so a surface just touching it still counts.
+const DROP_START_ABOVE: f32 = 0.05;
+
+/// Where a drop looks down from when nothing is below the object, so an
+/// object sunk inside a terrain hill comes back out on top of it.
+const DROP_FROM_HEIGHT: f32 = 100_000.0;
+
+/// Where a new road point at `at` goes in `points`: between the pair whose
+/// stretch it is within `width` of (the nearest such), else at whichever end
+/// is nearer.
+pub(crate) fn road_insert_index(points: &[[f32; 3]], at: Vec3, width: f32) -> usize {
+    let flat = |p: [f32; 3]| Vec2::new(p[0], p[2]);
+    let target = Vec2::new(at.x, at.z);
+    let mut best: Option<(f32, usize)> = None;
+    for (index, pair) in points.windows(2).enumerate() {
+        let (a, b) = (flat(pair[0]), flat(pair[1]));
+        let along = b - a;
+        let t = if along.length_squared() > 1e-12 {
+            ((target - a).dot(along) / along.length_squared()).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // Only inside the stretch: past an end, the end itself is nearer.
+        if t <= 0.0 || t >= 1.0 {
+            continue;
+        }
+        let distance = target.distance(a + along * t);
+        if distance <= width && best.is_none_or(|(nearest, _)| distance < nearest) {
+            best = Some((distance, index + 1));
+        }
+    }
+    if let Some((_, index)) = best {
+        return index;
+    }
+    match (points.first(), points.last()) {
+        (Some(first), Some(last))
+            if points.len() > 1 && target.distance(flat(*first)) < target.distance(flat(*last)) =>
+        {
+            0
+        }
+        _ => points.len(),
+    }
+}
+
 /// Where the editor's "Save Scene" / "Open Scene" actions read and write,
 /// relative to the editor's working directory.
 pub const DEFAULT_SCENE_PATH: &str = "scene.ron";
@@ -111,6 +156,14 @@ pub struct EditorState {
     /// The gizmo handle (move arrow, rotation ring or scale square) being
     /// dragged, if a drag is in progress — `None` the rest of the time.
     pub dragging_handle: Option<GizmoHandle>,
+    /// The handle drag in progress with the objects' start transforms, so
+    /// snapping can round the total change rather than each frame's.
+    pub gizmo_drag: Option<crate::snap::GizmoDrag>,
+    /// The road and point index being dragged in the Scene View, if any.
+    pub road_drag: Option<(Entity, usize)>,
+    /// Scene View snapping steps and toggles. Persisted per project in the
+    /// session.
+    pub snap: crate::snap::SnapSettings,
     /// Where [`EditorState::save_scene`]/[`EditorState::load_scene`] read
     /// and write. Defaults to [`DEFAULT_SCENE_PATH`].
     pub scene_path: PathBuf,
@@ -532,6 +585,9 @@ impl EditorState {
             diagnostics: Diagnostics::new(),
             output: OutputLog::new(),
             dragging_handle: None,
+            gizmo_drag: None,
+            road_drag: None,
+            snap: crate::snap::SnapSettings::default(),
             scene_path,
             history: History::new(),
             profiler: FrameProfiler::new(),
@@ -718,6 +774,8 @@ impl EditorState {
             Ok(Some(crate::HistoryChange::World)) => {
                 self.secondary_selection.clear();
                 self.dragging_handle = None;
+                self.gizmo_drag = None;
+                self.road_drag = None;
                 // Undoing back to the saved state makes the scene clean.
                 self.sync_scene_dirty();
             }
@@ -734,12 +792,18 @@ impl EditorState {
     /// files now hold it, after undoing or redoing a terrain edit. The
     /// change is folded into that edit rather than becoming its own step.
     fn foliage_follow_all_terrains(&mut self) {
-        let linked: std::collections::HashSet<String> = self
+        let mut linked: std::collections::HashSet<String> = self
             .world
             .query::<&engine_scene::SceneFoliage>()
             .iter(&self.world)
             .filter_map(|group| group.0.terrain.clone())
             .collect();
+        linked.extend(
+            self.world
+                .query::<&engine_scene::ScenePaintedGroup>()
+                .iter(&self.world)
+                .map(|group| group.0.terrain.clone()),
+        );
         let terrains: Vec<Entity> = self
             .world
             .query::<(
@@ -760,6 +824,7 @@ impl EditorState {
                 changed |=
                     crate::foliage::follow_ground(&mut self.world, terrain, &live.surface, None);
             }
+            changed |= self.painted_follow_ground(terrain, None);
         }
         if changed {
             self.history.absorb(&mut self.world, self.selected_entity);
@@ -1291,6 +1356,8 @@ impl EditorState {
     /// until the next save, with nothing to compare them against until then.
     fn after_scene_set_changed(&mut self) {
         self.dragging_handle = None;
+        self.gizmo_drag = None;
+        self.road_drag = None;
         self.history = History::new();
         self.prefab_status_cache = None;
         self.saved_scene = if self.dirty.scene() {
@@ -1417,6 +1484,8 @@ impl EditorState {
             return Err(err);
         }
         self.dragging_handle = None;
+        self.gizmo_drag = None;
+        self.road_drag = None;
         self.tile_paint_active = false;
         self.history = History::new();
         self.prefab_status_cache = None;
@@ -1512,6 +1581,8 @@ impl EditorState {
         self.world = World::new();
         self.clear_selection();
         self.dragging_handle = None;
+        self.gizmo_drag = None;
+        self.road_drag = None;
         self.terrain_stroke = None;
         self.terrains.clear();
         self.terrain_sculpt_active = false;
@@ -1586,6 +1657,7 @@ impl EditorState {
         self.asset_browser.view = session.asset_view;
         self.asset_browser.preview_open = session.preview_open;
         self.overlays = session.overlays;
+        self.snap = session.snap.sanitized();
         self.hierarchy.open = session.hierarchy_open;
         self.hierarchy.hidden = session.hierarchy_hidden;
         self.asset_browser.open_folders = session.asset_folders_open;
@@ -1646,6 +1718,7 @@ impl EditorState {
             preview_open: self.asset_browser.preview_open,
             configuration_index: self.configuration_index,
             overlays: self.overlays,
+            snap: self.snap,
             hierarchy_open: self.hierarchy.open.clone(),
             hierarchy_hidden: self.hierarchy.hidden.clone(),
             asset_folders_open: self.asset_browser.open_folders.clone(),
@@ -2325,9 +2398,152 @@ impl EditorState {
         if let Some(parent) = parent {
             hierarchy::adopt_new_object(&mut self.world, entity, parent);
         }
+        // Rest the model's bottom, not its centre, on the drop point.
+        if position.is_some() && self.snap.drop_on_surface && !self.dimension.is_2d() {
+            let offset = self.ground_offset(entity);
+            if offset != 0.0 {
+                let mut world = hierarchy::world_transform(&self.world, entity);
+                world.translation.y += offset;
+                hierarchy::set_world_transform(&mut self.world, entity, world);
+            }
+        }
         self.select_only(entity);
         self.mark_dirty();
         Some(entity)
+    }
+
+    /// The lowest and highest corners of `entity`'s mesh in its own space,
+    /// from the imported model (its first mesh, as clicking uses). `None`
+    /// for an object without a loaded mesh.
+    pub fn mesh_local_bounds(&self, entity: Entity) -> Option<(Vec3, Vec3)> {
+        let source = self
+            .world
+            .get::<engine_ecs::components::MeshSource>(entity)?;
+        let id = uuid::Uuid::parse_str(&source.mesh).ok()?;
+        let crate::ImportedAsset::Mesh(gltf) =
+            self.importer.get(engine_asset::AssetId::from_uuid(id))?
+        else {
+            return None;
+        };
+        let mesh = gltf.meshes.first()?;
+        let mut points = mesh
+            .vertices
+            .iter()
+            .map(|vertex| Vec3::from(vertex.position));
+        let first = points.next()?;
+        let (min, max) = points.fold((first, first), |(min, max), point| {
+            (min.min(point), max.max(point))
+        });
+        Some((min, max))
+    }
+
+    /// How far above the surface `entity`'s origin must sit for the bottom
+    /// of its mesh to touch it, at its current turn and size. Zero for an
+    /// object without a loaded mesh.
+    pub fn ground_offset(&self, entity: Entity) -> f32 {
+        let transform = hierarchy::world_transform(&self.world, entity);
+        self.mesh_local_bounds(entity)
+            .map(|(min, max)| crate::snap::ground_offset(&transform, min, max))
+            .unwrap_or(0.0)
+    }
+
+    /// The highest surface (terrain or object) straight below `point`,
+    /// ignoring the objects in `skip`; a terrain anywhere below counts even
+    /// if `point` is under it.
+    pub fn ground_below(&mut self, point: Vec3, skip: &[Entity]) -> Option<Vec3> {
+        let down = crate::scene_pick::Ray {
+            origin: point,
+            direction: Vec3::NEG_Y,
+        };
+        let importer = &self.importer;
+        let mesh = crate::scene_pick::pick_hit_except(
+            &mut self.world,
+            down,
+            |source| {
+                let id = uuid::Uuid::parse_str(&source.mesh).ok()?;
+                match importer.get(engine_asset::AssetId::from_uuid(id))? {
+                    crate::ImportedAsset::Mesh(gltf) => gltf
+                        .meshes
+                        .first()
+                        .map(|mesh| (mesh.vertices.as_slice(), mesh.indices.as_slice())),
+                    _ => None,
+                }
+            },
+            crate::scene_pick::LockedObjects::Include,
+            skip,
+        )
+        .map(|hit| hit.point);
+        let terrain = |origin: Vec3| {
+            crate::terrain_edit::pick_terrain(
+                &self.world,
+                &self.terrains,
+                crate::scene_pick::Ray {
+                    origin,
+                    direction: Vec3::NEG_Y,
+                },
+                true,
+            )
+            .filter(|hit| !skip.contains(&hit.entity))
+            .map(|hit| hit.point)
+        };
+        // A terrain above the object (it sank into a hill) still catches it.
+        let terrain =
+            terrain(point).or_else(|| terrain(Vec3::new(point.x, DROP_FROM_HEIGHT, point.z)));
+        match (mesh, terrain) {
+            (Some(mesh), Some(terrain)) => Some(if mesh.y >= terrain.y { mesh } else { terrain }),
+            (mesh, terrain) => mesh.or(terrain),
+        }
+    }
+
+    /// Moves every selected, unlocked object straight down (or up, out of a
+    /// hill) until the bottom of its mesh rests on the surface below.
+    /// Objects with nothing below stay where they are. Returns how many
+    /// moved.
+    pub fn drop_selection_to_ground(&mut self) -> usize {
+        let selection = self.selection();
+        let unlocked: Vec<Entity> = selection
+            .iter()
+            .copied()
+            .filter(|&entity| {
+                self.world
+                    .get::<engine_ecs::components::Lock>(entity)
+                    .is_none()
+            })
+            .filter(|&entity| inspector::transform_of(&self.world, entity).is_some())
+            .collect();
+        let targets = hierarchy::without_descendants(&self.world, &unlocked);
+        let mut skip = Vec::new();
+        for &target in &targets {
+            skip.push(target);
+            skip.extend(hierarchy::descendants(&self.world, target));
+        }
+        let mut moved = 0;
+        for target in targets {
+            let mut transform = hierarchy::world_transform(&self.world, target);
+            let offset = self.ground_offset(target);
+            let top = self
+                .mesh_local_bounds(target)
+                .map(|(min, max)| {
+                    let height = ((max - min) * transform.scale.abs()).length();
+                    transform.translation.y + height
+                })
+                .unwrap_or(transform.translation.y)
+                + DROP_START_ABOVE;
+            let from = Vec3::new(transform.translation.x, top, transform.translation.z);
+            let Some(ground) = self.ground_below(from, &skip) else {
+                continue;
+            };
+            let y = ground.y + offset;
+            if (transform.translation.y - y).abs() > f32::EPSILON {
+                transform.translation.y = y;
+                hierarchy::set_world_transform(&mut self.world, target, transform);
+                moved += 1;
+            }
+        }
+        if moved > 0 {
+            self.mark_dirty();
+        }
+        moved
     }
 
     /// Re-points every [`AssetSource`] in the world at the current path
@@ -2619,6 +2835,10 @@ impl EditorState {
             self.apply_foliage_stroke();
             return;
         }
+        if self.terrain_tools.objects {
+            self.apply_object_stroke();
+            return;
+        }
         let Some(stroke) = self.terrain_stroke.as_mut() else {
             return;
         };
@@ -2653,8 +2873,13 @@ impl EditorState {
                     live.surface.node_position(rect.row_min, rect.col_min) - cell,
                     live.surface.node_position(rect.row_max, rect.col_max) + cell,
                 );
-                if crate::foliage::follow_ground(&mut self.world, entity, &live.surface, Some(area))
-                {
+                let plants = crate::foliage::follow_ground(
+                    &mut self.world,
+                    entity,
+                    &live.surface,
+                    Some(area),
+                );
+                if plants | self.painted_follow_ground(entity, Some(area)) {
                     self.mark_dirty();
                 }
             }
@@ -2794,6 +3019,260 @@ impl EditorState {
         }
     }
 
+    /// The model or prefab selected in Project Assets, as `(path under
+    /// assets/, asset id, display name)`, for the object brush.
+    fn selected_object_source(&self) -> Result<(PathBuf, String, String), String> {
+        let path = self
+            .selected_asset
+            .clone()
+            .ok_or("Select a model or prefab in Project Assets first")?;
+        let is_prefab = path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("prefab"));
+        if !is_prefab
+            && crate::assets::AssetKind::from_path(&path) != crate::assets::AssetKind::Mesh
+        {
+            return Err("Select a glTF or GLB model, or a prefab, in Project Assets".into());
+        }
+        let id = self
+            .asset_index
+            .id_for(&path)
+            .ok_or("The selected file has not been imported yet")?;
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Object")
+            .to_owned();
+        Ok((path, id.to_string(), name))
+    }
+
+    /// Painted groups on the terrain with object id `terrain_id`, only those
+    /// of `source` when given.
+    fn painted_groups(&mut self, terrain_id: &str, source: Option<&str>) -> Vec<Entity> {
+        self.world
+            .query::<(Entity, &engine_scene::ScenePaintedGroup)>()
+            .iter(&self.world)
+            .filter(|(_, group)| {
+                group.0.terrain == terrain_id && source.is_none_or(|id| group.0.source.id == id)
+            })
+            .map(|(entity, _)| entity)
+            .collect()
+    }
+
+    /// The painted group of `source` on `terrain`, made (empty) if there is
+    /// none.
+    fn painted_group(&mut self, terrain: Entity, source: &(PathBuf, String, String)) -> Entity {
+        let terrain_id = crate::foliage::ensure_object_id(&mut self.world, terrain);
+        if let Some(group) = self.painted_groups(&terrain_id, Some(&source.1)).first() {
+            return *group;
+        }
+        let group =
+            hierarchy::spawn_entity(&mut self.world, format!("Painted {}", source.2), Vec3::ZERO);
+        self.world
+            .entity_mut(group)
+            .insert(engine_scene::ScenePaintedGroup(
+                engine_scene::PaintedGroupData {
+                    terrain: terrain_id,
+                    source: engine_scene::AssetRef {
+                        id: source.1.clone(),
+                    },
+                },
+            ));
+        group
+    }
+
+    /// Where `child` stands, terrain-local XZ.
+    fn terrain_local_xz(&self, child: Entity, world_to_terrain: &glam::Mat4) -> Vec2 {
+        let at = world_to_terrain
+            .transform_point3(hierarchy::world_transform(&self.world, child).translation);
+        Vec2::new(at.x, at.z)
+    }
+
+    /// Applies the object brush's new dabs: adds copies of the selected
+    /// model or prefab inside each circle, each its own object in that
+    /// model's painted group, or erases them.
+    fn apply_object_stroke(&mut self) {
+        let Some(stroke) = self.terrain_stroke.as_mut() else {
+            return;
+        };
+        let terrain = stroke.entity;
+        let centers = stroke.centers[stroke.applied..].to_vec();
+        stroke.applied = stroke.centers.len();
+        let erase = stroke.erase || self.terrain_tools.foliage_erase;
+        if centers.is_empty() {
+            return;
+        }
+        let mut tools = self.terrain_tools.clone();
+        tools.sanitize();
+        let source = self.selected_object_source();
+        let terrain_world = hierarchy::world_transform(&self.world, terrain);
+        let world_to_terrain = terrain_world.to_matrix().inverse();
+        if !world_to_terrain.is_finite() {
+            return;
+        }
+        let terrain_id = crate::foliage::ensure_object_id(&mut self.world, terrain);
+        if erase {
+            let groups =
+                self.painted_groups(&terrain_id, source.as_ref().ok().map(|s| s.1.as_str()));
+            let mut removed = false;
+            for group in groups {
+                for child in hierarchy::children_of(&self.world, group) {
+                    let at = self.terrain_local_xz(child, &world_to_terrain);
+                    if centers
+                        .iter()
+                        .any(|center| at.distance_squared(*center) <= tools.radius * tools.radius)
+                    {
+                        hierarchy::despawn_entity(&mut self.world, child);
+                        removed = true;
+                    }
+                }
+            }
+            if removed {
+                self.mark_dirty();
+            }
+            return;
+        }
+        let source = match source {
+            Ok(source) => source,
+            Err(error) => {
+                self.asset_browser.operation_error = Some(error);
+                return;
+            }
+        };
+        let group = self.painted_group(terrain, &source);
+        let placement = crate::foliage::Placement {
+            spacing: tools.object_spacing,
+            density: tools.object_density,
+            seed: tools.object_seed,
+        };
+        let children = hierarchy::children_of(&self.world, group);
+        let mut count = children.len();
+        let mut occupied = crate::props::occupied(
+            children
+                .iter()
+                .map(|&child| self.terrain_local_xz(child, &world_to_terrain)),
+            tools.object_spacing,
+        );
+        let mut placed = Vec::new();
+        {
+            let Some(live) = self.terrains.get(terrain) else {
+                return;
+            };
+            for &center in &centers {
+                match crate::props::props(
+                    &live.surface,
+                    center,
+                    tools.radius,
+                    placement,
+                    tools.object_style,
+                ) {
+                    Ok(props) => placed.extend(props),
+                    Err(error) => {
+                        self.asset_browser.operation_error = Some(error.to_string());
+                        return;
+                    }
+                }
+            }
+        }
+        let is_prefab = source
+            .0
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("prefab"));
+        let mut added = false;
+        for prop in placed {
+            if !occupied.insert(prop.cell) {
+                continue;
+            }
+            if count >= crate::props::MAX_PAINTED {
+                self.asset_browser.operation_error = Some(format!(
+                    "This painted group is full ({} objects); paint another model or erase some",
+                    crate::props::MAX_PAINTED
+                ));
+                break;
+            }
+            let child = if is_prefab {
+                match self.spawn_prefab(&source.0) {
+                    Ok(child) => child,
+                    Err(error) => {
+                        self.asset_browser.operation_error = Some(error.to_string());
+                        break;
+                    }
+                }
+            } else {
+                self.spawn_asset_entity(&source.0)
+            };
+            hierarchy::adopt_new_object(&mut self.world, child, group);
+            let mut world = terrain_world.mul_transform(&engine_utils::Transform {
+                translation: prop.position,
+                rotation: prop.rotation,
+                scale: Vec3::splat(prop.scale),
+            });
+            hierarchy::set_world_transform(&mut self.world, child, world);
+            // Stand it on its bottom, not its middle.
+            let offset = self.ground_offset(child);
+            if offset != 0.0 {
+                world.translation.y += offset;
+                hierarchy::set_world_transform(&mut self.world, child, world);
+            }
+            count += 1;
+            added = true;
+        }
+        if added {
+            self.mark_dirty();
+        }
+    }
+
+    /// Moves every painted object linked to `terrain` inside `area`
+    /// (terrain-local XZ min/max, or everywhere for `None`) onto the ground
+    /// as `terrain` now is, keeping how far its origin sat above its bottom.
+    /// Returns whether any moved.
+    fn painted_follow_ground(&mut self, terrain: Entity, area: Option<(Vec2, Vec2)>) -> bool {
+        let Some(terrain_id) = self
+            .world
+            .get::<engine_scene::SceneObjectId>(terrain)
+            .map(|id| id.0.clone())
+        else {
+            return false;
+        };
+        let terrain_world = hierarchy::world_transform(&self.world, terrain);
+        let to_terrain = terrain_world.to_matrix().inverse();
+        if !to_terrain.is_finite() {
+            return false;
+        }
+        let mut moves = Vec::new();
+        for group in self.painted_groups(&terrain_id, None) {
+            for child in hierarchy::children_of(&self.world, group) {
+                let at = self.terrain_local_xz(child, &to_terrain);
+                if area.is_some_and(|(min, max)| {
+                    at.x < min.x || at.y < min.y || at.x > max.x || at.y > max.y
+                }) {
+                    continue;
+                }
+                let Some(height) = self
+                    .terrains
+                    .get(terrain)
+                    .and_then(|live| live.surface.height_at(at.x, at.y))
+                else {
+                    continue;
+                };
+                let ground = terrain_world
+                    .to_matrix()
+                    .transform_point3(Vec3::new(at.x, height, at.y));
+                moves.push((child, ground.y + self.ground_offset(child)));
+            }
+        }
+        let mut moved = false;
+        for (child, y) in moves {
+            let mut world = hierarchy::world_transform(&self.world, child);
+            if (world.translation.y - y).abs() > 1e-5 {
+                world.translation.y = y;
+                hierarchy::set_world_transform(&mut self.world, child, world);
+                moved = true;
+            }
+        }
+        moved
+    }
+
     /// Ends the stroke: saves the tiles it changed and records one undo
     /// step for them.
     pub fn finish_terrain_stroke(&mut self) {
@@ -2852,6 +3331,218 @@ impl EditorState {
                     Some(format!("Could not save terrain: {error}"));
             }
         }
+    }
+
+    /// Adds a road where the Scene View is looking: two points 12 m apart
+    /// along the view, each on the surface below it, pressed into the
+    /// terrain under its middle if there is one. Selects it.
+    pub fn create_road(&mut self) -> Entity {
+        let camera = *self.scene_cameras.active(false);
+        let toward = Vec3::new(-camera.yaw.sin(), 0.0, -camera.yaw.cos());
+        let toward = toward.try_normalize().unwrap_or(Vec3::NEG_Z);
+        let ground = |state: &mut Self, at: Vec3| {
+            state
+                .ground_below(Vec3::new(at.x, DROP_FROM_HEIGHT, at.z), &[])
+                .map_or(at.y, |hit| hit.y)
+        };
+        let middle = Vec3::new(camera.focus.x, 0.0, camera.focus.z);
+        let middle = Vec3::new(middle.x, ground(self, middle), middle.z);
+        let ends = [middle - toward * 6.0, middle + toward * 6.0]
+            .map(|end| Vec3::new(end.x, ground(self, end), end.z) - middle);
+        let terrain = crate::terrain_edit::pick_terrain(
+            &self.world,
+            &self.terrains,
+            crate::scene_pick::Ray {
+                origin: Vec3::new(middle.x, DROP_FROM_HEIGHT, middle.z),
+                direction: Vec3::NEG_Y,
+            },
+            true,
+        )
+        .map(|hit| hit.entity);
+        let terrain =
+            terrain.map(|terrain| crate::foliage::ensure_object_id(&mut self.world, terrain));
+        let entity = hierarchy::spawn_entity(&mut self.world, "Road", middle);
+        self.world
+            .entity_mut(entity)
+            .insert(engine_scene::SceneRoad(engine_scene::RoadData {
+                points: ends.map(|end| end.to_array()).to_vec(),
+                terrain,
+                ..engine_scene::RoadData::default()
+            }));
+        self.overlays.roads = true;
+        self.select_only(entity);
+        self.mark_dirty();
+        entity
+    }
+
+    /// Moves point `index` of `road` to the world position `at`. Returns
+    /// whether it moved.
+    pub fn move_road_point(&mut self, road: Entity, index: usize, at: Vec3) -> bool {
+        let to_local = hierarchy::world_transform(&self.world, road)
+            .to_matrix()
+            .inverse();
+        if !to_local.is_finite() {
+            return false;
+        }
+        let local = to_local.transform_point3(at).to_array();
+        let Some(mut data) = self.world.get_mut::<engine_scene::SceneRoad>(road) else {
+            return false;
+        };
+        match data.0.points.get_mut(index) {
+            Some(point) if *point != local => {
+                *point = local;
+                self.mark_dirty();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Adds a point to `road` at the world position `at`: between the two
+    /// points whose stretch it is nearest when it is within the road's
+    /// width of it, else before the start or after the end, whichever is
+    /// nearer. Returns the new point's index.
+    pub fn add_road_point(&mut self, road: Entity, at: Vec3) -> Option<usize> {
+        let to_local = hierarchy::world_transform(&self.world, road)
+            .to_matrix()
+            .inverse();
+        if !to_local.is_finite() {
+            return None;
+        }
+        let local = to_local.transform_point3(at);
+        let mut data = self.world.get_mut::<engine_scene::SceneRoad>(road)?;
+        if data.0.points.len() >= engine_scene::MAX_ROAD_POINTS {
+            return None;
+        }
+        let index = road_insert_index(&data.0.points, local, data.0.width);
+        data.0.points.insert(index, local.to_array());
+        self.mark_dirty();
+        Some(index)
+    }
+
+    /// The terrain object whose object id is `id`.
+    fn terrain_by_object_id(&mut self, id: &str) -> Option<Entity> {
+        self.world
+            .query_filtered::<(Entity, &engine_scene::SceneObjectId), bevy_ecs::query::With<engine_scene::SceneTerrain>>()
+            .iter(&self.world)
+            .find(|(_, object)| object.0 == id)
+            .map(|(entity, _)| entity)
+    }
+
+    /// Levels `road`'s terrain along the road (flat across its width,
+    /// blending back over its soft edge) and paints its layer there, as one
+    /// undo step that also carries plants that moved with the ground.
+    /// Returns whether the ground changed.
+    ///
+    /// # Errors
+    ///
+    /// A message when the object isn't a road, has no terrain or fewer than
+    /// two points, or the tiles can't be saved.
+    pub fn apply_road_to_terrain(&mut self, road: Entity) -> Result<bool, String> {
+        let data = self
+            .world
+            .get::<engine_scene::SceneRoad>(road)
+            .map(|road| road.0.clone())
+            .ok_or("This object is not a road")?;
+        let terrain_id = data
+            .terrain
+            .clone()
+            .ok_or("Pick the terrain to press the road into")?;
+        let terrain = self
+            .terrain_by_object_id(&terrain_id)
+            .ok_or("The road's terrain is no longer in the scene")?;
+        if self
+            .world
+            .get::<engine_ecs::components::Lock>(terrain)
+            .is_some()
+        {
+            return Err("The terrain is locked".into());
+        }
+        let road_to_terrain = hierarchy::world_transform(&self.world, terrain)
+            .to_matrix()
+            .inverse()
+            * hierarchy::world_transform(&self.world, road).to_matrix();
+        if !road_to_terrain.is_finite() {
+            return Err("The terrain's size can't be zero".into());
+        }
+        let points: Vec<Vec3> = data
+            .samples()
+            .iter()
+            .map(|sample| road_to_terrain.transform_point3(sample.position))
+            .collect();
+        if points.len() < 2 {
+            return Err("A road needs at least two points".into());
+        }
+        let layer_count = self
+            .world
+            .get::<engine_scene::SceneTerrain>(terrain)
+            .map_or(0, |terrain| terrain.0.layers.len());
+        let paint = data
+            .paint_layer
+            .map(|layer| layer as usize)
+            .filter(|&layer| layer < layer_count)
+            .map(|layer| (layer, data.paint_strength));
+        let shape = engine_scene::RoadShape::new(points, data.width * 0.5, data.edge);
+        let (min, max) = shape.bounds().ok_or("A road needs at least two points")?;
+
+        let live = self.live_terrain(terrain)?;
+        let cell = Vec2::splat(live.surface.cell_size() * 2.0);
+        let mut before = std::collections::BTreeMap::new();
+        for (coord, tile) in live.surface.tiles() {
+            let half = Vec2::splat(live.surface.size() * 0.5);
+            let center = live.surface.tile_center(*coord);
+            let (lo, hi) = (center - half - cell, center + half + cell);
+            if lo.x <= max.x && hi.x >= min.x && lo.y <= max.y && hi.y >= min.y {
+                before.insert(*coord, tile.clone());
+            }
+        }
+        let (heights, painted) =
+            live.surface
+                .shape_along(min, max, |at| shape.influence(at), paint);
+        if heights.is_none() && painted.is_none() {
+            return Ok(false);
+        }
+        let tools = live.tools.clone();
+        let mut tiles = Vec::new();
+        for (coord, before) in before {
+            let (Some(after), Some(path)) = (live.surface.tile(coord), live.tile_paths.get(&coord))
+            else {
+                continue;
+            };
+            if *after != before {
+                tiles.push(crate::terrain_tools::TileEdit {
+                    path: path.clone(),
+                    before,
+                    after: after.clone(),
+                    tools: tools.clone(),
+                });
+            }
+        }
+        if let Some(rect) = heights {
+            self.terrains.mark_changed(terrain, rect, false);
+        }
+        if let Some(rect) = painted {
+            self.terrains.mark_changed(terrain, rect, true);
+        }
+        let plants_moved = heights.is_some()
+            && (self.terrains.get(terrain).is_some_and(|live| {
+                crate::foliage::follow_ground(
+                    &mut self.world,
+                    terrain,
+                    &live.surface,
+                    Some((min, max)),
+                )
+            }) | self.painted_follow_ground(terrain, Some((min, max))));
+        let edit = crate::terrain_tools::TerrainEdit { tiles };
+        edit.write(false)
+            .map_err(|error| format!("Could not save terrain: {error}"))?;
+        self.history.record_terrain(edit);
+        // Plants that moved with the ground are part of this step.
+        self.history.absorb(&mut self.world, self.selected_entity);
+        if plants_moved {
+            self.mark_dirty();
+        }
+        Ok(true)
     }
 
     /// Bakes the scene's walkable area into its nav grid with the settings
@@ -3693,6 +4384,177 @@ mod tests {
         stroke.erase = erase;
         state.terrain_stroke = Some(stroke);
         state.finish_terrain_stroke();
+    }
+
+    #[test]
+    fn a_new_road_point_goes_between_its_neighbours_or_at_the_nearer_end() {
+        let points = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [20.0, 0.0, 0.0]];
+        assert_eq!(road_insert_index(&points, Vec3::new(5.0, 0.0, 1.0), 4.0), 1);
+        assert_eq!(
+            road_insert_index(&points, Vec3::new(15.0, 0.0, -1.0), 4.0),
+            2
+        );
+        assert_eq!(
+            road_insert_index(&points, Vec3::new(30.0, 0.0, 0.0), 4.0),
+            3
+        );
+        assert_eq!(
+            road_insert_index(&points, Vec3::new(-8.0, 0.0, 0.0), 4.0),
+            0
+        );
+        assert_eq!(road_insert_index(&points, Vec3::new(5.0, 0.0, 9.0), 4.0), 0);
+        assert_eq!(road_insert_index(&[], Vec3::ZERO, 4.0), 0);
+    }
+
+    #[test]
+    fn a_road_presses_its_terrain_flat_and_undo_restores_it() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let terrain = new_terrain(&project, &mut state);
+        // A hill in the middle, then a road straight over it at height 0.
+        state.terrain_tools.radius = 8.0;
+        state.terrain_tools.strength = 3.0;
+        stroke_at(&mut state, glam::Vec2::ZERO, false);
+        let hill = state
+            .terrains
+            .get(terrain)
+            .and_then(|live| live.surface.height_at(0.0, 0.0))
+            .unwrap();
+        assert!(hill > 1.0);
+
+        let road = state.create_road();
+        {
+            let mut data = state
+                .world
+                .get_mut::<engine_scene::SceneRoad>(road)
+                .unwrap();
+            data.0.points = vec![[-20.0, 0.0, 0.0], [20.0, 0.0, 0.0]];
+        }
+        // The road was put on the hill top; cut it through at height 0.
+        hierarchy::set_world_transform(&mut state.world, road, engine_utils::Transform::IDENTITY);
+        let road_y = 0.0;
+        assert!(
+            state
+                .world
+                .get::<engine_scene::SceneRoad>(road)
+                .unwrap()
+                .0
+                .terrain
+                .is_some(),
+            "the new road found the terrain under it"
+        );
+        assert!(state.apply_road_to_terrain(road).unwrap());
+        let flat = state
+            .terrains
+            .get(terrain)
+            .and_then(|live| live.surface.height_at(0.0, 0.0))
+            .unwrap();
+        assert!((flat - road_y).abs() < 1e-3, "{flat} vs road at {road_y}");
+        let beside = state
+            .terrains
+            .get(terrain)
+            .and_then(|live| live.surface.height_at(0.0, 5.0))
+            .unwrap();
+        assert!(
+            beside > flat + 0.3,
+            "the hill stays beyond the soft edge: {beside}"
+        );
+
+        state.undo();
+        let restored = state.terrain_tile_heightmaps(terrain);
+        let original = restored[0].0.surface_height_at(0.0, 0.0);
+        assert!(
+            (original - hill).abs() < 1e-3,
+            "undo brings the hill back: {original}"
+        );
+    }
+
+    #[test]
+    fn drop_to_ground_lands_on_a_sculpted_terrain_from_above_and_below() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        let terrain = new_terrain(&project, &mut state);
+        state.terrain_tools.radius = 6.0;
+        state.terrain_tools.strength = 2.0;
+        stroke_at(&mut state, glam::Vec2::ZERO, false);
+        let ground = state
+            .terrains
+            .get(terrain)
+            .and_then(|live| live.surface.height_at(0.0, 0.0))
+            .unwrap();
+        assert!(ground > 0.5, "the stroke raised the middle: {ground}");
+
+        for start in [20.0, -5.0] {
+            let rock =
+                hierarchy::spawn_entity(&mut state.world, "Rock", Vec3::new(0.0, start, 0.0));
+            state.select_only(rock);
+            assert_eq!(state.drop_selection_to_ground(), 1);
+            let y = hierarchy::world_transform(&state.world, rock).translation.y;
+            assert!((y - ground).abs() < 1e-3, "from {start}: {y} vs {ground}");
+        }
+
+        // Nothing below: it stays put.
+        let far = hierarchy::spawn_entity(&mut state.world, "Far", Vec3::new(500.0, 3.0, 0.0));
+        state.select_only(far);
+        assert_eq!(state.drop_selection_to_ground(), 0);
+    }
+
+    fn painted_children(state: &mut EditorState) -> Vec<Entity> {
+        let groups: Vec<Entity> = state
+            .world
+            .query_filtered::<Entity, bevy_ecs::query::With<engine_scene::ScenePaintedGroup>>()
+            .iter(&state.world)
+            .collect();
+        groups
+            .into_iter()
+            .flat_map(|group| hierarchy::children_of(&state.world, group))
+            .collect()
+    }
+
+    #[test]
+    fn the_object_brush_paints_separate_objects_once_and_erases_them() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        terrain_with_grass(&project, &mut state);
+        state.terrain_tools.objects = true;
+        state.terrain_tools.radius = 6.0;
+        state.terrain_tools.object_spacing = 2.0;
+        state.terrain_tools.object_density = 1.0;
+        state.terrain_tools.object_style.size_min = 0.5;
+        state.terrain_tools.object_style.size_max = 2.0;
+
+        stroke_at(&mut state, glam::Vec2::ZERO, false);
+        let first = painted_children(&mut state);
+        assert!(first.len() > 5, "painted {}", first.len());
+        let sizes: Vec<f32> = first
+            .iter()
+            .map(|&child| hierarchy::world_transform(&state.world, child).scale.x)
+            .collect();
+        assert!(sizes.iter().all(|size| (0.5..=2.0).contains(size)));
+        assert!(
+            sizes.iter().any(|&size| (size - sizes[0]).abs() > 1e-3),
+            "sizes vary"
+        );
+        assert!(state.dirty.scene());
+
+        // The same ground again adds nothing.
+        stroke_at(&mut state, glam::Vec2::ZERO, false);
+        assert_eq!(painted_children(&mut state).len(), first.len());
+
+        // Sculpting carries them up with the ground.
+        state.terrain_tools.objects = false;
+        state.terrain_tools.strength = 2.0;
+        stroke_at(&mut state, glam::Vec2::ZERO, false);
+        assert!(painted_children(&mut state).iter().any(|&child| {
+            hierarchy::world_transform(&state.world, child)
+                .translation
+                .y
+                > 0.5
+        }));
+
+        state.terrain_tools.objects = true;
+        stroke_at(&mut state, glam::Vec2::ZERO, true);
+        assert!(painted_children(&mut state).is_empty());
     }
 
     #[test]
@@ -5436,6 +6298,31 @@ mod tests {
         state.world.get_mut::<Name>(cube).unwrap().0 = "Cube".into();
         state.sync_scene_dirty();
         assert!(!state.has_unsaved_changes(), "back to the saved scene");
+    }
+
+    #[test]
+    fn sky_and_fog_edits_undo() {
+        let project = temp_project();
+        let mut state = editor_state(&project);
+        state
+            .history
+            .begin_frame(&mut state.world, state.selected_entity);
+        state.set_environment(engine_scene::EnvironmentData {
+            fog: Some(engine_scene::FogData::default()),
+            time_of_day: Some(engine_scene::TimeOfDayData::default()),
+            ..engine_scene::EnvironmentData::default()
+        });
+        assert!(
+            state
+                .history
+                .settle(&mut state.world, state.selected_entity)
+        );
+        assert!(state.environment().fog.is_some());
+        state.undo();
+        assert_eq!(
+            state.environment(),
+            engine_scene::EnvironmentData::default()
+        );
     }
 
     #[test]

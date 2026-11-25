@@ -41,6 +41,13 @@ const SELECTION_COLOR: [f32; 4] = [0.88, 0.69, 0.41, 1.0];
 const MAX_OUTLINED: usize = 4_096;
 /// Colour of camera frusta.
 const CAMERA_COLOR: [f32; 4] = [0.45, 0.7, 1.0, 1.0];
+/// Colour of a road's centre line: `theme::NIGHT.danger` (#F7768E), the one
+/// palette hue no other overlay uses.
+pub(crate) const ROAD_COLOR: [f32; 4] = [0.969, 0.463, 0.557, 1.0];
+/// Colour of a road's edges.
+const ROAD_EDGE_COLOR: [f32; 4] = [0.969, 0.463, 0.557, 0.6];
+/// Colour of where a road's soft edge ends.
+const ROAD_SOFT_COLOR: [f32; 4] = [0.969, 0.463, 0.557, 0.25];
 /// Colour of light markers.
 const LIGHT_COLOR: [f32; 4] = [1.0, 0.85, 0.35, 1.0];
 /// Colour of the ground grid — dim, so it reads as a floor rather than
@@ -128,6 +135,9 @@ pub struct OverlayToggles {
     /// loading. A selected area is always drawn.
     #[serde(default)]
     pub stream_areas: bool,
+    /// Every road's line and edges. A selected road is always drawn.
+    #[serde(default)]
+    pub roads: bool,
 }
 
 impl OverlayToggles {
@@ -141,6 +151,7 @@ impl OverlayToggles {
             || self.audio
             || self.nav
             || self.stream_areas
+            || self.roads
     }
 }
 
@@ -179,6 +190,7 @@ pub fn build(
     draw_selection_bounds(world, &selected, &mesh_bounds, draw);
     draw_ai(world, selection, draw);
     draw_stream_areas(world, selection, toggles.stream_areas, draw);
+    draw_roads(world, selection, toggles.roads, draw);
     draw_colliders(world, draw, &selected, toggles.all_colliders);
     if let Some(sun) = sun {
         draw_sun(lights, sun, draw);
@@ -225,6 +237,46 @@ fn draw_stream_areas(world: &mut World, selection: &[Entity], all: bool, draw: &
         draw.wire_box(centre, half, AREA_COLOR);
         if area.0.load_distance > 0.0 {
             draw.wire_box(centre, grown, AREA_LOAD_COLOR);
+        }
+    }
+}
+
+/// Roads: the selected ones, or all of them when `all`. Each gets its
+/// centre line, its two edges and, fainter, where its soft edge ends.
+fn draw_roads(world: &mut World, selection: &[Entity], all: bool, draw: &mut DebugDraw) {
+    let roads: Vec<Entity> = if all {
+        world
+            .query_filtered::<Entity, bevy_ecs::query::With<engine_scene::SceneRoad>>()
+            .iter(world)
+            .collect()
+    } else {
+        selection.to_vec()
+    };
+    for entity in roads {
+        let Some(road) = world.get::<engine_scene::SceneRoad>(entity) else {
+            continue;
+        };
+        let matrix = world_matrix(world, entity);
+        let samples = road.0.samples();
+        let lift = Vec3::Y * (engine_scene::ROAD_LIFT * 2.0);
+        let line = |offset: f32| -> Vec<Vec3> {
+            samples
+                .iter()
+                .map(|sample| {
+                    let side = Vec3::new(sample.forward.z, 0.0, -sample.forward.x);
+                    matrix.transform_point3(sample.position + side * offset) + lift
+                })
+                .collect()
+        };
+        draw.polyline(&line(0.0), ROAD_COLOR);
+        let half = road.0.width * 0.5;
+        for offset in [-half, half] {
+            draw.polyline(&line(offset), ROAD_EDGE_COLOR);
+        }
+        if road.0.edge > 0.0 {
+            for offset in [-half - road.0.edge, half + road.0.edge] {
+                draw.polyline(&line(offset), ROAD_SOFT_COLOR);
+            }
         }
     }
 }
@@ -625,6 +677,39 @@ fn draw_lights(lights: &LightSet, draw: &mut DebugDraw) {
             draw.wire_sphere(position, light.range, LIGHT_COLOR);
         }
     }
+    for light in &lights.spot {
+        draw.cross(light.position, LIGHT_MARKER_SIZE, LIGHT_COLOR);
+        draw_spot_cone(light, draw);
+    }
+}
+
+/// Segments in a spot light's end ring.
+const SPOT_RING_SEGMENTS: usize = 32;
+
+/// A spot light's reach: a ring where its outer cone meets its range, and
+/// four lines from the light out to it.
+fn draw_spot_cone(light: &engine_renderer::SpotLight, draw: &mut DebugDraw) {
+    let Some(forward) = light.direction.try_normalize() else {
+        return;
+    };
+    if light.range <= 0.0 {
+        return;
+    }
+    let side = forward.any_orthonormal_vector();
+    let up = forward.cross(side);
+    let angle = light.outer_angle.clamp(0.0, 89f32.to_radians());
+    let centre = light.position + forward * light.range * angle.cos();
+    let radius = light.range * angle.sin();
+    let ring: Vec<Vec3> = (0..=SPOT_RING_SEGMENTS)
+        .map(|step| {
+            let turn = step as f32 / SPOT_RING_SEGMENTS as f32 * std::f32::consts::TAU;
+            centre + (side * turn.cos() + up * turn.sin()) * radius
+        })
+        .collect();
+    draw.polyline(&ring, LIGHT_COLOR);
+    for edge in [side, -side, up, -up] {
+        draw.line(light.position, centre + edge * radius, LIGHT_COLOR);
+    }
 }
 
 #[cfg(test)]
@@ -667,6 +752,7 @@ mod tests {
                 color: Vec3::ONE,
                 intensity: 1.0,
                 range: 5.0,
+                casts_shadows: false,
             }],
             ..LightSet::default()
         }
@@ -1257,5 +1343,56 @@ mod tests {
         let mut all = DebugDraw::new();
         draw_stream_areas(&mut world, &[], true, &mut all);
         assert_eq!(all.vertices().len(), draw.vertices().len());
+    }
+
+    #[test]
+    fn a_selected_road_draws_its_line_and_edges() {
+        let mut world = World::new();
+        let road = world
+            .spawn((
+                Transform::from(engine_utils::Transform::IDENTITY),
+                engine_scene::SceneRoad(engine_scene::RoadData {
+                    points: vec![[0.0, 0.0, 0.0], [0.0, 0.0, 10.0]],
+                    ..engine_scene::RoadData::default()
+                }),
+            ))
+            .id();
+        let mut draw = DebugDraw::new();
+        draw_roads(&mut world, &[], false, &mut draw);
+        assert!(draw.vertices().is_empty(), "nothing selected, overlay off");
+        draw_roads(&mut world, &[road], false, &mut draw);
+        assert!(!draw.vertices().is_empty());
+        let mut all = DebugDraw::new();
+        draw_roads(&mut world, &[], true, &mut all);
+        assert_eq!(all.vertices().len(), draw.vertices().len());
+    }
+
+    #[test]
+    fn a_spot_light_draws_its_cone() {
+        let mut lights = LightSet::default();
+        let mut draw = DebugDraw::new();
+        draw_lights(&lights, &mut draw);
+        assert!(draw.vertices().is_empty());
+        lights.spot.push(engine_renderer::SpotLight {
+            position: Vec3::new(0.0, 3.0, 0.0),
+            direction: Vec3::NEG_Y,
+            color: Vec3::ONE,
+            intensity: 10.0,
+            range: 6.0,
+            inner_angle: 0.3,
+            outer_angle: 0.5,
+            casts_shadows: false,
+        });
+        draw_lights(&lights, &mut draw);
+        // The marker, the ring and four edges.
+        assert!(draw.vertices().len() >= 2 * (3 + SPOT_RING_SEGMENTS + 4));
+        // Every point of the cone sits within the light's range.
+        assert!(
+            draw.vertices()
+                .iter()
+                .all(
+                    |vertex| Vec3::from(vertex.position).distance(Vec3::new(0.0, 3.0, 0.0)) <= 6.01
+                )
+        );
     }
 }

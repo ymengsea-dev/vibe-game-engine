@@ -203,6 +203,18 @@ pub fn children_of(world: &World, entity: Entity) -> Vec<Entity> {
     children
 }
 
+/// Every object below `entity` (children, their children, …), in no set
+/// order.
+pub fn descendants(world: &World, entity: Entity) -> Vec<Entity> {
+    let mut found = Vec::new();
+    let mut open = children_of(world, entity);
+    while let Some(next) = open.pop() {
+        open.extend(children_of(world, next));
+        found.push(next);
+    }
+    found
+}
+
 fn sort_siblings(world: &World, siblings: &mut [Entity]) {
     siblings.sort_by_key(|&entity| {
         let order = world.get::<SiblingOrder>(entity);
@@ -703,7 +715,9 @@ fn create_menu_items(ui: &mut egui::Ui, state: &mut HierarchyState, parent: Opti
         ("Empty", Command::CreateEmpty),
         ("Camera", Command::CreateCamera),
         ("Point Light", Command::CreatePointLight),
+        ("Spot Light", Command::CreateSpotLight),
         ("Sound", Command::CreateSound),
+        ("Road", Command::CreateRoad),
     ] {
         if ui.button(label).clicked() {
             state.create_request = Some((command, parent));
@@ -1829,6 +1843,8 @@ enum RowIcon {
     Ui,
     Tilemap,
     Water,
+    /// A road or path.
+    Road,
     Sprite,
     Terrain,
     /// A foliage group: many copies of one model on a terrain.
@@ -1860,7 +1876,9 @@ fn row_icon(world: &World, entity: Entity) -> RowIcon {
     };
     if object.contains::<Camera>() {
         RowIcon::Camera
-    } else if object.contains::<engine_scene::ScenePointLight>() {
+    } else if object.contains::<engine_scene::ScenePointLight>()
+        || object.contains::<engine_scene::SceneSpotLight>()
+    {
         RowIcon::Light
     } else if object.contains::<engine_scene::SceneAudioEmitter>() {
         RowIcon::Sound
@@ -1870,6 +1888,8 @@ fn row_icon(world: &World, entity: Entity) -> RowIcon {
         RowIcon::Tilemap
     } else if object.contains::<WaterVolume>() {
         RowIcon::Water
+    } else if object.contains::<engine_scene::SceneRoad>() {
+        RowIcon::Road
     } else if object.contains::<Sprite>() || object.contains::<SpriteSource>() {
         RowIcon::Sprite
     } else if object.contains::<engine_scene::SceneTerrain>()
@@ -1980,6 +2000,14 @@ fn paint_entity_icon(ui: &mut egui::Ui, icon: RowIcon, linked: bool) {
                     (13.0, y),
                 ]);
             }
+        }
+        RowIcon::Road => {
+            // A road running away: two edges closing in, a dashed middle.
+            line(&[(1.5, 13.0), (5.5, 1.0)]);
+            line(&[(12.5, 13.0), (8.5, 1.0)]);
+            line(&[(7.0, 12.5), (7.0, 10.0)]);
+            line(&[(7.0, 7.5), (7.0, 5.5)]);
+            line(&[(7.0, 3.5), (7.0, 2.0)]);
         }
         RowIcon::Sprite => {
             line(&[
@@ -2834,6 +2862,10 @@ mod tests {
         world.entity_mut(water).insert(WaterVolume {
             surface: engine_physics::WaterSurface::default(),
         });
+        let road = spawn_entity(world, "Forest Path", Vec3::ZERO);
+        world
+            .entity_mut(road)
+            .insert(engine_scene::SceneRoad(engine_scene::RoadData::default()));
         let sprite = spawn_entity(world, "Player Sprite", Vec3::ZERO);
         world.entity_mut(sprite).insert(SpriteSource {
             atlas: String::new(),
@@ -2868,6 +2900,7 @@ mod tests {
             (ui, RowIcon::Ui),
             (tilemap, RowIcon::Tilemap),
             (water, RowIcon::Water),
+            (road, RowIcon::Road),
             (sprite, RowIcon::Sprite),
             (terrain, RowIcon::Terrain),
             (foliage, RowIcon::Foliage),

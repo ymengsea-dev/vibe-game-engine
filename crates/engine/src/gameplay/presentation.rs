@@ -6,7 +6,8 @@ use engine_ecs::prelude::{Entity, World};
 use engine_renderer::{Camera, LightSet};
 use engine_scene::Scene;
 
-/// The scene's lighting override (or `defaults`) plus every authored point light.
+/// The scene's lighting override (or `defaults`) plus every authored point
+/// and spot light.
 pub fn scene_lights(scene: &Scene, world: &mut World, defaults: &LightSet) -> LightSet {
     let mut lights = scene
         .lighting
@@ -15,6 +16,9 @@ pub fn scene_lights(scene: &Scene, world: &mut World, defaults: &LightSet) -> Li
     lights
         .point
         .extend(engine_scene::point_lights_from_world(world));
+    lights
+        .spot
+        .extend(engine_scene::spot_lights_from_world(world));
     lights
 }
 

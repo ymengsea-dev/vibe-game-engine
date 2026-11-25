@@ -212,6 +212,10 @@ pub struct GameplayRuntime {
     ai_events: Vec<AiEvent>,
     /// Random source for behaviour-tree chance nodes, seeded once per game.
     ai_rng: engine_utils::Rng,
+    /// The scene's clock in hours, while it has time of day.
+    time_of_day: Option<f32>,
+    /// Real minutes a whole day takes; 0 holds the clock.
+    day_minutes: f32,
 }
 
 impl GameplayRuntime {
@@ -258,6 +262,8 @@ impl GameplayRuntime {
             noises: Vec::new(),
             ai_events: Vec::new(),
             ai_rng: engine_utils::Rng::new(AI_SEED),
+            time_of_day: None,
+            day_minutes: 0.0,
         }
     }
 
@@ -389,6 +395,12 @@ impl GameplayRuntime {
                 entity.parent = entity.parent.map(|parent| parent + offset);
                 entity
             }));
+        let clock = self.scene.environment.time_of_day;
+        self.time_of_day = clock.map(|clock| clock.start_hour);
+        self.day_minutes = clock.map_or(0.0, |clock| clock.day_minutes);
+        if let Some(library) = &self.assets {
+            ctx.set_sky_image(self.scene.environment.sky_image.as_ref(), library);
+        }
         self.refresh_lights(ctx);
         self.ui_nodes = self.scene.mount_ui(ctx.ui_mut());
         if let Some(library) = &self.assets {
@@ -458,7 +470,34 @@ impl GameplayRuntime {
             }
         }
         self.apply_scene_loads(ctx);
+        if !ctx.simulation_paused() {
+            self.advance_clock(ctx.time().delta);
+        }
         self.refresh_lights(ctx);
+    }
+
+    /// The scene's clock in hours, 0 to 24, or `None` when the scene has no
+    /// time of day.
+    pub fn time_of_day(&self) -> Option<f32> {
+        self.time_of_day
+    }
+
+    /// Sets the scene's clock to `hours` (wrapped into 0 to 24). In a scene
+    /// without time of day this turns it on, standing still. Lights follow
+    /// at the next [`Self::refresh_lights`].
+    pub fn set_time_of_day(&mut self, hours: f32) {
+        if hours.is_finite() {
+            self.time_of_day = Some(hours.rem_euclid(24.0));
+        }
+    }
+
+    /// Moves the clock on by `seconds` of play.
+    fn advance_clock(&mut self, seconds: f32) {
+        if let Some(hours) = &mut self.time_of_day
+            && self.day_minutes > 0.0
+        {
+            *hours = (*hours + seconds * 24.0 / (self.day_minutes * 60.0)).rem_euclid(24.0);
+        }
     }
 
     /// Puts up the loading screen, the Game UI of [`engine_project::LOADING_SCENE`],
@@ -658,11 +697,23 @@ impl GameplayRuntime {
         }
     }
 
-    /// Re-applies scene lighting plus the current positions of point lights.
+    /// Re-applies scene lighting plus the current positions of point lights,
+    /// and the sky, clouds and fog (lit by the clock with time of day).
     pub fn refresh_lights(&mut self, ctx: &mut GameContext<'_>) {
         if let Some(defaults) = &self.default_lights {
-            let lights = scene_lights(&self.scene, ctx.world_mut(), defaults);
+            let mut lights = scene_lights(&self.scene, ctx.world_mut(), defaults);
+            let image_ambient = ctx.sky_image_ambient();
+            let environment = match (self.time_of_day, self.scene.environment.time_of_day) {
+                // A game that set the clock in a scene without one.
+                (Some(_), None) => std::borrow::Cow::Owned(engine_scene::EnvironmentData {
+                    time_of_day: Some(engine_scene::TimeOfDayData::default()),
+                    ..self.scene.environment.clone()
+                }),
+                _ => std::borrow::Cow::Borrowed(&self.scene.environment),
+            };
+            let atmosphere = environment.sky(self.time_of_day, image_ambient, &mut lights);
             *ctx.lights_mut() = lights;
+            *ctx.atmosphere_mut() = atmosphere;
         }
     }
 
@@ -680,6 +731,9 @@ impl GameplayRuntime {
         for command in &commands {
             if let GameCommand::SetMouseLocked { locked } = command {
                 ctx.set_mouse_locked(*locked);
+            }
+            if let GameCommand::SetTimeOfDay { hours } = command {
+                self.set_time_of_day(*hours);
             }
             if let GameCommand::SetQuality { level } = command {
                 match engine_renderer::QualityLevel::from_name(level) {

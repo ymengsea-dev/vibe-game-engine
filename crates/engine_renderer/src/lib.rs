@@ -167,6 +167,7 @@ mod render_graph;
 mod scatter;
 mod shadow;
 mod skinning;
+mod sky;
 mod skybox;
 mod sprite;
 mod terrain;
@@ -181,7 +182,7 @@ mod ui_pass;
 mod vegetation;
 mod water;
 
-pub use bounds::{Aabb, Frustum, Plane};
+pub use bounds::{Aabb, CullVolume, Frustum, Plane};
 pub use camera::{Camera, CameraUniform, Projection};
 pub use camera_rig::CameraRig;
 pub use config::{
@@ -192,8 +193,9 @@ pub use error::RendererError;
 pub use gpu::{GpuContext, REQUESTED_MSAA_SAMPLE_COUNT};
 pub use instancing::{InstanceBuffer, InstanceRaw, InstancedDrawable, InstancedPipeline};
 pub use light::{
-    AmbientLight, DirectionalLight, DirectionalLightUniform, LightSet, LightsUniform,
-    MAX_DIRECTIONAL_LIGHTS, MAX_POINT_LIGHTS, PointLight, PointLightUniform,
+    AmbientLight, DEFAULT_SHADOW_DISTANCE, DirectionalLight, DirectionalLightUniform, LightSet,
+    LightsUniform, MAX_DIRECTIONAL_LIGHTS, MAX_POINT_LIGHTS, MAX_SHADOWED_LIGHTS, MAX_SPOT_LIGHTS,
+    PointLight, PointLightUniform, ShadowedLight, SpotLight, SpotLightUniform,
 };
 pub use lod::{
     LOD_HYSTERESIS, LodLevel, LodSelector, LodSet, StreamQueue, distance_fade, select_lod_tier,
@@ -208,8 +210,9 @@ pub use particle::{
 };
 pub use pipeline::{
     CameraBinding, DEPTH_FORMAT, DebugLinePipeline, DebugLineVertex, Drawable, HdrTarget,
-    LightsBinding, MaterialBinding, MaterialMaps, ModelBinding, Pipeline, RenderTarget, ShadowMap,
-    ShadowPipeline, SkyboxBinding, SkyboxPipeline,
+    LightsBinding, MaterialBinding, MaterialMaps, ModelBinding, Pipeline, RenderTarget,
+    ShadowDrawable, ShadowMap, ShadowPipeline, ShadowSettings, ShadowView, SkyboxBinding,
+    SkyboxPipeline,
 };
 pub use post::{
     BloomSettings, BlurUniform, ColorGrade, CompositeUniform, DEFAULT_EXPOSURE, OutlineSettings,
@@ -219,10 +222,18 @@ pub use quality::{DistanceQuality, QualityLevel, QualityPreset};
 pub use render_assets::RenderAssets;
 pub use render_graph::RenderGraph;
 pub use scatter::{ScatterArea, ScatterConfig, ScatterError, scatter};
-pub use shadow::{SHADOW_MAP_SIZE, ShadowUniform, directional_light_view_projection};
+pub use shadow::{
+    LAYERS_PER_LIGHT, LOCAL_SHADOW_LAYERS, MAX_CASCADES, MAX_SHADOW_VIEWS, POINT_SHADOW_FACES,
+    SHADOW_MAP_SIZE, ShadowFrame, ShadowUniform, ShadowsUniform, cascade_matrix, cascade_splits,
+    directional_light_view_projection, point_light_matrices, shadow_ndc, spot_light_matrix,
+};
 pub use skinning::{
     JointMatricesUniform, MAX_JOINTS, SkinnedBinding, SkinnedDrawable, SkinnedMesh,
     SkinnedPipeline, SkinnedVertex,
+};
+pub use sky::{
+    Atmosphere, Clouds, DayLight, Fog, MAX_SKY_IMAGE_WIDTH, SkyColors, SkyImage, decode_sky_image,
+    f32_to_f16, time_of_day,
 };
 pub use skybox::{SkyboxUniform, skybox_uniform};
 pub use sprite::{

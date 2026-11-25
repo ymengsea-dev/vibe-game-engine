@@ -208,6 +208,20 @@ impl Frustum {
     }
 }
 
+/// Something objects can be culled against: a camera's [`Frustum`], or a
+/// [`crate::ShadowMap`] whose views together decide what casts shadows.
+pub trait CullVolume {
+    /// Whether the world-space box `bounds` may be seen (conservative: it
+    /// never says no for a box that is seen).
+    fn sees(&self, bounds: &Aabb) -> bool;
+}
+
+impl CullVolume for Frustum {
+    fn sees(&self, bounds: &Aabb) -> bool {
+        self.intersects_aabb(bounds)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

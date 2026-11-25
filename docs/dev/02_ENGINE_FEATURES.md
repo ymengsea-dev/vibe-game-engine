@@ -41,7 +41,8 @@ Primary sources: `crates/engine_ecs/src/components.rs`, `render.rs`, `animation.
 - Perspective and orthographic cameras, view frusta, conservative AABB culling, and a smoothed third-person orbit/follow rig.
 - Indexed meshes, dynamic vertex updates, GPU instancing, GPU skeletal skinning (up to 64 joints), and bounded LOD/streaming selection helpers.
 - Metallic-roughness PBR with base-color, normal, occlusion, and emissive maps; ambient, directional, and point lights; and alpha modes.
-- A shadow map for the first directional light with 3×3 PCF, camera-following shadow fit, and a procedural gradient/sun sky.
+- Cascaded shadow maps for the first directional light (2–4 cascades by quality, sphere-fitted and texel-snapped, 3×3 PCF, out to a per-scene shadow distance), shadows for up to 4 point/spot lights (one perspective map per spot, six per point, in a depth texture array), spot lights with cone and range falloff, and a procedural gradient/sun sky.
+- Sky, fog and clouds (`engine_renderer::sky`): the sky gradient takes colours from an `Atmosphere`; an fbm value-noise cloud layer projected on a plane (coverage, speed, colour; time wraps at 3600 s); equirectangular sky images decoded to Rgba16Float (≤ 4096 wide) with the mean upper/lower colours as ambient; exponential distance fog past a start distance plus analytic height fog, applied in the PBR, terrain and water fragment shaders through `CameraUniform` (sprites/particles unfogged) and as a horizon veil on the sky; `time_of_day(hour)` gives sun direction/colour/strength, sky and ambient colours (sunrise +X at 6:00, 60° at noon). Scene data: `EnvironmentData.fog/clouds/time_of_day/sky_image`; `GameplayRuntime` runs the clock and applies it in `refresh_lights`.
 - HDR rendering, adapter-dependent 4× MSAA, ACES tonemapping, bloom, color grading, and luminance-based toon outlines.
 - A dependency-ordered render graph for shadow, scene, and post-processing passes.
 - Atlas-based batched sprites, screen-space UI quads, and a built-in 5×7 bitmap glyph atlas.
@@ -51,7 +52,7 @@ Primary sources: `crates/engine_ecs/src/components.rs`, `render.rs`, `animation.
 - Dedicated analytic water surfaces with per-surface wave settings, shallow/deep colour, foam, and capped splash/ripple uploads. Water writes depth after opaque terrain and before transparent particles.
 - Immediate debug lines for boxes, spheres, capsules, frusta, grids, axes, arrows, and other overlays.
 
-Current limits: only the first directional light casts shadows; there are no point-light shadows or HDRI cubemaps. Toon outlines use scene luminance rather than depth/normals. Particles are untextured and CPU simulated. Water has no reflection/refraction, terrain-depth shoreline foam, caustics, fluid simulation, voxel water, arbitrary shores, or replication. Runtime UI images currently render as tinted rectangles until an image asset registry is connected.
+Current limits: only the first directional light casts sun shadows, and at most 4 point/spot lights cast shadows; skinned meshes and vegetation cast none; there are no HDRI cubemaps. Toon outlines use scene luminance rather than depth/normals. Particles are untextured and CPU simulated. Water has no reflection/refraction, terrain-depth shoreline foam, caustics, fluid simulation, voxel water, arbitrary shores, or replication. Runtime UI images currently render as tinted rectangles until an image asset registry is connected.
 
 Primary sources: `crates/engine_renderer/src/` and `crates/engine_renderer/src/shaders/`.
 

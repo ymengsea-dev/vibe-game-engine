@@ -12,6 +12,8 @@ struct CameraUniform {
     // aren't lit), kept only so this struct's layout matches the shared
     // `CameraUniform` buffer `pbr.wgsl`'s camera binding also uses.
     view_position: vec4<f32>,
+    fog_color_density: vec4<f32>,
+    fog_height: vec4<f32>,
 };
 
 @group(0) @binding(0)

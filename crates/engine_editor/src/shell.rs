@@ -1633,12 +1633,15 @@ fn handle_scene_view_input(
         Vec2::new(image_response.rect.width(), image_response.rect.height()),
     );
     if camera_gesture.is_none() {
-        handle_scene_interaction(viewport, state, image_response);
-        select_clicked_object(ui, viewport, state, image_response, &icons);
+        let road_took_it = handle_scene_interaction(viewport, state, image_response);
+        if !road_took_it {
+            select_clicked_object(ui, viewport, state, image_response, &icons);
+        }
         focus_double_clicked_point(ui, viewport, state, image_response);
     }
     paint_scene_icons(ui, state, image_response.rect, &icons);
     let gizmo_hover = paint_gizmo(ui, viewport, state, image_response);
+    paint_road_points(ui, viewport, state, image_response);
     handle_asset_drop(ui, viewport, state, image_response);
     let cursor = match camera_gesture {
         Some(CameraGesture::Pan) => egui::CursorIcon::AllScroll,
@@ -2114,11 +2117,12 @@ fn paint_scene_ui_preview(ui: &egui::Ui, state: &mut EditorState, screen: egui::
     }
 }
 
+/// Returns whether a road took the pointer, so a click doesn't also select.
 fn handle_scene_interaction(
     viewport: &Viewport,
     state: &mut EditorState,
     image_response: &egui::Response,
-) {
+) -> bool {
     if state.tile_paint_active
         && state.dimension.is_2d()
         && state.selected_entity.is_some_and(|entity| {
@@ -2133,8 +2137,156 @@ fn handle_scene_interaction(
     } else if state.terrain_sculpt_active {
         state.dragging_handle = None;
         handle_terrain_interaction(viewport, state, image_response);
+    } else if handle_road_interaction(viewport, state, image_response) {
+        state.dragging_handle = None;
+        return true;
     } else {
         handle_gizmo_interaction(viewport, state, image_response);
+    }
+    false
+}
+
+/// How near (in pixels) the pointer must be to a road point to grab it.
+const ROAD_POINT_GRAB: f32 = 9.0;
+
+/// The selected road's points on screen, as `(index, pixel position)`, in
+/// the 3D Scene View with the Select tool.
+fn road_points_on_screen(
+    viewport: &Viewport,
+    state: &EditorState,
+    rect: egui::Rect,
+) -> Option<(engine_ecs::prelude::Entity, Vec<(usize, Vec2)>)> {
+    if state.dimension.is_2d() || state.active_view_tool() != ViewTool::Select {
+        return None;
+    }
+    let road = state.selected_entity?;
+    let data = state.world.get::<engine_scene::SceneRoad>(road)?;
+    let model = hierarchy::world_transform(&state.world, road).to_matrix();
+    let size = Vec2::new(rect.width(), rect.height());
+    let points = data
+        .0
+        .points
+        .iter()
+        .enumerate()
+        .filter_map(|(index, point)| {
+            let world = model.transform_point3(glam::Vec3::from(*point));
+            gizmo::project_to_screen(viewport.view_projection_matrix(), world, size)
+                .map(|screen| (index, screen))
+        })
+        .collect();
+    Some((road, points))
+}
+
+/// Editing the selected road's points in the Scene View: drag a dot to move
+/// that point over the surface below the pointer, ⌥-click the ground to add
+/// a point. Returns whether the road took the pointer this frame.
+fn handle_road_interaction(
+    viewport: &Viewport,
+    state: &mut EditorState,
+    response: &egui::Response,
+) -> bool {
+    let rect = response.rect;
+    let local = |pointer: egui::Pos2| Vec2::new(pointer.x - rect.min.x, pointer.y - rect.min.y);
+    if response.drag_started()
+        && let Some(pointer) = drag_start_point(response)
+        && let Some((road, points)) = road_points_on_screen(viewport, state, rect)
+    {
+        let at = local(pointer);
+        state.road_drag = points
+            .iter()
+            .filter(|(_, screen)| screen.distance(at) <= ROAD_POINT_GRAB)
+            .min_by(|a, b| a.1.distance(at).total_cmp(&b.1.distance(at)))
+            .map(|(index, _)| (road, *index));
+    }
+    if let Some((road, index)) = state.road_drag {
+        if response.dragged()
+            && let Some(pointer) = response.interact_pointer_pos()
+            && let Some(at) = road_ground_point(viewport, state, rect, local(pointer), road)
+        {
+            state.move_road_point(road, index, at);
+        }
+        if response.drag_stopped() || !response.dragged() {
+            state.road_drag = None;
+        }
+        return true;
+    }
+    let alt = response.ctx.input(|input| input.modifiers.alt);
+    if alt
+        && response.clicked()
+        && let Some(pointer) = response.interact_pointer_pos()
+        && let Some((road, _)) = road_points_on_screen(viewport, state, rect)
+    {
+        if let Some(at) = road_ground_point(viewport, state, rect, local(pointer), road) {
+            state.add_road_point(road, at);
+        }
+        return true;
+    }
+    false
+}
+
+/// The surface point under `local` (pixels in the Scene View): an object or
+/// terrain, else the ground plane.
+fn road_ground_point(
+    viewport: &Viewport,
+    state: &mut EditorState,
+    rect: egui::Rect,
+    local: Vec2,
+    road: engine_ecs::prelude::Entity,
+) -> Option<glam::Vec3> {
+    let view_proj = viewport.view_projection_matrix();
+    let ndc = Vec2::new(
+        local.x / rect.width().max(1.0) * 2.0 - 1.0,
+        1.0 - local.y / rect.height().max(1.0) * 2.0,
+    );
+    let ray = crate::scene_pick::ray_from_screen(view_proj, ndc)?;
+    // Not the road's own strip, or each drag would lift the point.
+    let hit = pick_scene_except(
+        state,
+        view_proj,
+        rect,
+        local,
+        crate::scene_pick::LockedObjects::Include,
+        &[road],
+    );
+    let distance = state.scene_cameras.active(false).distance;
+    Some(crate::scene_pick::placement_point(
+        hit.map(|hit| hit.point),
+        ray,
+        distance,
+    ))
+}
+
+/// The selected road's points as dots over the Scene View: the one being
+/// dragged or under the pointer brighter.
+fn paint_road_points(
+    ui: &egui::Ui,
+    viewport: &Viewport,
+    state: &EditorState,
+    response: &egui::Response,
+) {
+    let rect = response.rect;
+    let Some((road, points)) = road_points_on_screen(viewport, state, rect) else {
+        return;
+    };
+    let palette = crate::theme::NIGHT;
+    let pointer = response
+        .hover_pos()
+        .map(|pointer| Vec2::new(pointer.x - rect.min.x, pointer.y - rect.min.y));
+    let painter = ui.painter_at(rect);
+    for (index, screen) in points {
+        let active = state.road_drag == Some((road, index))
+            || pointer.is_some_and(|pointer| pointer.distance(screen) <= ROAD_POINT_GRAB);
+        let at = rect.min + egui::vec2(screen.x, screen.y);
+        painter.circle_filled(at, if active { 6.5 } else { 5.0 }, palette.shell);
+        painter.circle_filled(
+            at,
+            if active { 5.0 } else { 3.5 },
+            if active {
+                palette.highlight
+            } else {
+                palette.danger
+            },
+        );
     }
 }
 
@@ -2305,6 +2457,18 @@ fn pick_scene(
     local: Vec2,
     locked: crate::scene_pick::LockedObjects,
 ) -> Option<crate::scene_pick::PickHit> {
+    pick_scene_except(state, view_proj, rect, local, locked, &[])
+}
+
+/// [`pick_scene`] that never hits the objects in `skip`.
+fn pick_scene_except(
+    state: &mut EditorState,
+    view_proj: glam::Mat4,
+    rect: egui::Rect,
+    local: Vec2,
+    locked: crate::scene_pick::LockedObjects,
+    skip: &[engine_ecs::prelude::Entity],
+) -> Option<crate::scene_pick::PickHit> {
     let ndc = Vec2::new(
         local.x / rect.width().max(1.0) * 2.0 - 1.0,
         1.0 - local.y / rect.height().max(1.0) * 2.0,
@@ -2315,9 +2479,10 @@ fn pick_scene(
         &state.terrains,
         ray,
         locked == crate::scene_pick::LockedObjects::Include,
-    );
+    )
+    .filter(|hit| !skip.contains(&hit.entity));
     let importer = &state.importer;
-    let mesh = crate::scene_pick::pick_hit(
+    let mesh = crate::scene_pick::pick_hit_except(
         &mut state.world,
         ray,
         |source| {
@@ -2331,6 +2496,7 @@ fn pick_scene(
             }
         },
         locked,
+        skip,
     );
     // Whichever is nearer the camera.
     let distance = |hit: &crate::scene_pick::PickHit| (hit.point - ray.origin).length();
@@ -2645,24 +2811,44 @@ impl GizmoEdit {
     }
 }
 
-/// Applies one frame of a gizmo drag to every selected, unlocked object.
-/// The gizmo's axes are world axes, so each edit is made to the object's
-/// world transform and stored back relative to its parent. An object whose
-/// group is also selected moves with the group, not twice.
-fn apply_gizmo_edit(
-    world: &mut engine_ecs::prelude::World,
+/// The selected, unlocked objects a gizmo drag moves, with their world
+/// transforms now. An object whose group is also selected moves with the
+/// group, not twice.
+fn gizmo_drag_targets(
+    world: &engine_ecs::prelude::World,
     selection: &[engine_ecs::prelude::Entity],
-    edit: GizmoEdit,
-) {
+) -> Vec<(engine_ecs::prelude::Entity, engine_utils::Transform)> {
     let unlocked: Vec<_> = selection
         .iter()
         .copied()
         .filter(|&entity| world.get::<engine_ecs::components::Lock>(entity).is_none())
         .filter(|&entity| inspector::transform_of(world, entity).is_some())
         .collect();
-    for target in hierarchy::without_descendants(world, &unlocked) {
-        let current = hierarchy::world_transform(world, target);
-        hierarchy::set_world_transform(world, target, edit.apply(current));
+    hierarchy::without_descendants(world, &unlocked)
+        .into_iter()
+        .map(|target| (target, hierarchy::world_transform(world, target)))
+        .collect()
+}
+
+/// Applies a gizmo drag's change since the press to every object it moves.
+/// The gizmo's axes are world axes, so each edit is made to the object's
+/// world transform at the press and stored back relative to its parent.
+fn apply_gizmo_drag(
+    world: &mut engine_ecs::prelude::World,
+    drag: &crate::snap::GizmoDrag,
+    snap: Option<&crate::snap::SnapSettings>,
+) {
+    let amount = drag.applied(snap);
+    let edit = match drag.handle {
+        GizmoHandle::Move(axis) => GizmoEdit::Move(axis, amount),
+        GizmoHandle::Rotate(axis) => GizmoEdit::Rotate(axis, amount),
+        GizmoHandle::ScaleAxis(axis) => GizmoEdit::ScaleAxis(axis, amount),
+        GizmoHandle::Scale => GizmoEdit::Scale(amount),
+    };
+    for (target, start) in &drag.start {
+        if world.get_entity(*target).is_ok() {
+            hierarchy::set_world_transform(world, *target, edit.apply(*start));
+        }
     }
 }
 
@@ -2699,6 +2885,10 @@ fn handle_gizmo_interaction(
         let at = local(pointer);
         let rings = gizmo::rings_revealed(&layout, Some(at), None);
         state.dragging_handle = gizmo::pick(&layout, at, rings);
+        state.gizmo_drag = state.dragging_handle.map(|handle| {
+            let selection = state.selection();
+            crate::snap::GizmoDrag::new(handle, gizmo_drag_targets(&state.world, &selection))
+        });
     }
 
     if image_response.dragged()
@@ -2742,14 +2932,24 @@ fn handle_gizmo_interaction(
                 }),
             GizmoHandle::Scale => Some(GizmoEdit::Scale(gizmo::drag_scale_factor(drag))),
         };
-        if let Some(edit) = edit {
-            let selection = state.selection();
-            apply_gizmo_edit(&mut state.world, &selection, edit);
+        let alt_held = image_response.ctx.input(|input| input.modifiers.alt);
+        let snap = state.snap.active(alt_held).then_some(state.snap);
+        if let Some(edit) = edit
+            && let Some(drag) = state.gizmo_drag.as_mut()
+        {
+            drag.accumulate(match edit {
+                GizmoEdit::Move(_, change)
+                | GizmoEdit::Rotate(_, change)
+                | GizmoEdit::ScaleAxis(_, change)
+                | GizmoEdit::Scale(change) => change,
+            });
+            apply_gizmo_drag(&mut state.world, drag, snap.as_ref());
         }
     }
 
     if image_response.drag_stopped() {
         state.dragging_handle = None;
+        state.gizmo_drag = None;
     }
 }
 
@@ -3058,7 +3258,8 @@ fn is_paste_key(
     command && is_v && event.state.is_pressed() && !event.repeat
 }
 
-/// Cmd+D duplicates the selected objects, Cmd+C copies them and Cmd+V pastes.
+/// Cmd+D duplicates the selected objects, Cmd+C copies them and Cmd+V pastes;
+/// Cmd+Down (or End) drops them onto the surface below.
 /// egui-winit turns Cmd+C into `Event::Copy`, and swallows Cmd+V when the
 /// system clipboard holds no text, so the paste key comes from
 /// [`EditorShell::handle_window_event`] as `paste_key`.
@@ -3066,17 +3267,22 @@ fn object_shortcuts(ctx: &egui::Context, state: &mut EditorState, paste_key: boo
     if state.play.is_playing() || ctx.text_edit_focused() || terminal_has_keyboard(ctx, state) {
         return;
     }
-    let (duplicate, copy) = ctx.input(|input| {
+    let (duplicate, copy, drop) = ctx.input(|input| {
         (
             input.modifiers.command && input.key_pressed(egui::Key::D),
             input
                 .events
                 .iter()
                 .any(|event| matches!(event, egui::Event::Copy)),
+            (input.modifiers.command && input.key_pressed(egui::Key::ArrowDown))
+                || input.key_pressed(egui::Key::End),
         )
     });
     if duplicate {
         MenuCommand::DuplicateSelection.apply(state);
+    }
+    if drop {
+        MenuCommand::DropToGround.apply(state);
     }
     if copy {
         MenuCommand::CopySelection.apply(state);
@@ -3317,8 +3523,16 @@ fn menu_gameobject(ui: &mut egui::Ui, state: &mut EditorState) {
             MenuCommand::CreateWater.apply(state);
             ui.close();
         }
+        if ui.button("Create Road").clicked() {
+            MenuCommand::CreateRoad.apply(state);
+            ui.close();
+        }
         if ui.button("Create Point Light").clicked() {
             MenuCommand::CreatePointLight.apply(state);
+            ui.close();
+        }
+        if ui.button("Create Spot Light").clicked() {
+            MenuCommand::CreateSpotLight.apply(state);
             ui.close();
         }
         ui.menu_button("Create Game UI", |ui| {
@@ -3343,6 +3557,14 @@ fn menu_gameobject(ui: &mut egui::Ui, state: &mut EditorState) {
             .clicked()
         {
             MenuCommand::DuplicateSelection.apply(state);
+            ui.close();
+        }
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Drop to Ground   ⌘↓"))
+            .on_hover_text("Move the selection down until it rests on the surface below")
+            .clicked()
+        {
+            MenuCommand::DropToGround.apply(state);
             ui.close();
         }
         if ui
@@ -4095,6 +4317,11 @@ fn inspector_tabs_panel(ui: &mut egui::Ui, state: &mut EditorState) {
                         &state.asset_index,
                         &mut state.open_script_request,
                     );
+                    if let Some(road) = inspector::take_road_apply_request(ui.ctx())
+                        && let Err(error) = state.apply_road_to_terrain(road)
+                    {
+                        state.asset_browser.operation_error = Some(error);
+                    }
                 });
             ui.advance_cursor_after_rect(rect);
         });
@@ -4536,6 +4763,8 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
             ui.checkbox(&mut state.overlays.nav, "Nav grid");
             ui.checkbox(&mut state.overlays.stream_areas, "World areas")
                 .on_hover_text("Show every world area and where it starts loading");
+            ui.checkbox(&mut state.overlays.roads, "Roads")
+                .on_hover_text("Show every road's line and edges");
             ui.checkbox(&mut state.overlays.distance_detail, "Distance detail")
                 .on_hover_text("Show simpler meshes and draw distances as the game would");
             ui.checkbox(
@@ -4544,6 +4773,27 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
             )
             .on_hover_text("Skip objects the game camera can't see, while you look around freely");
         });
+        ui.menu_button(
+            if state.snap.enabled {
+                "Snap: On"
+            } else {
+                "Snap"
+            },
+            |ui| {
+                crate::snap::show_controls(ui, &mut state.snap);
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        state.selection_len() > 0,
+                        egui::Button::new("Drop selection to ground   ⌘↓"),
+                    )
+                    .clicked()
+                {
+                    MenuCommand::DropToGround.apply(state);
+                    ui.close();
+                }
+            },
+        );
         ui.menu_button("Terrain", |ui| {
             if ui.button("Create terrain").clicked() {
                 state.create_terrain_request = true;
@@ -4551,6 +4801,14 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
             }
             if ui.button("Create water").clicked() {
                 MenuCommand::CreateWater.apply(state);
+                ui.close();
+            }
+            if ui
+                .button("Create road")
+                .on_hover_text("A road where you are looking, pressed into the terrain below")
+                .clicked()
+            {
+                MenuCommand::CreateRoad.apply(state);
                 ui.close();
             }
             terrain_menu_controls(ui, state);
@@ -4651,9 +4909,14 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
                 MenuCommand::CreatePointLight.apply(state);
                 ui.close();
             }
+            if ui.button("Create spot light").clicked() {
+                MenuCommand::CreateSpotLight.apply(state);
+                ui.close();
+            }
             ui.weak(format!(
-                "Up to {} point lights nearest the camera light the scene",
-                engine_renderer::MAX_POINT_LIGHTS
+                "Up to {} point and {} spot lights nearest the camera light the scene",
+                engine_renderer::MAX_POINT_LIGHTS,
+                engine_renderer::MAX_SPOT_LIGHTS
             ));
             let current = state
                 .world
@@ -4680,11 +4943,16 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
                     .map(|value| value.0)
                     .unwrap_or_default();
                 let mut changed = false;
-                ui.label("Sun direction");
-                for (axis, component) in ["X", "Y", "Z"].into_iter().zip(&mut data.sun_direction) {
-                    changed |= ui
-                        .add(egui::Slider::new(component, -1.0..=1.0).text(axis))
-                        .changed();
+                // With time of day the clock aims the sun.
+                if state.environment().time_of_day.is_none() {
+                    ui.label("Sun direction");
+                    for (axis, component) in
+                        ["X", "Y", "Z"].into_iter().zip(&mut data.sun_direction)
+                    {
+                        changed |= ui
+                            .add(egui::Slider::new(component, -1.0..=1.0).text(axis))
+                            .changed();
+                    }
                 }
                 changed |= ui
                     .add(
@@ -4696,6 +4964,17 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
                     .changed();
                 ui.label("Sun color");
                 changed |= ui.color_edit_button_rgb(&mut data.sun_color).changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(
+                            &mut data.shadow_distance,
+                            engine_scene::SHADOW_DISTANCE_RANGE,
+                        )
+                        .text("Shadow distance")
+                        .suffix(" m"),
+                    )
+                    .on_hover_text("How far from the camera the sun casts shadows")
+                    .changed();
                 if data
                     .sun_direction
                     .iter()
@@ -4711,8 +4990,152 @@ fn scene_view_footer(ui: &mut egui::Ui, state: &mut EditorState) {
                     state.mark_dirty();
                 }
             }
+            ui.separator();
+            environment_sky_ui(ui, state);
         });
     });
+}
+
+/// Fog, clouds, time of day and the sky image.
+fn environment_sky_ui(ui: &mut egui::Ui, state: &mut EditorState) {
+    ui.label("Sky and fog");
+    let mut environment = state.environment();
+    let before = environment.clone();
+
+    let mut fog_on = environment.fog.is_some();
+    if ui
+        .checkbox(&mut fog_on, "Fog")
+        .on_hover_text("Far things fade into a colour")
+        .changed()
+    {
+        environment.fog = fog_on.then(engine_scene::FogData::default);
+    }
+    if let Some(fog) = &mut environment.fog {
+        ui.horizontal(|ui| {
+            ui.label("Fog color");
+            ui.color_edit_button_rgb(&mut fog.color);
+        });
+        ui.add(
+            egui::Slider::new(&mut fog.density, 0.0..=0.2)
+                .logarithmic(true)
+                .text("Thickness"),
+        );
+        ui.add(
+            egui::Slider::new(&mut fog.start, 0.0..=500.0)
+                .text("Starts at")
+                .suffix(" m"),
+        )
+        .on_hover_text("No fog nearer the camera than this");
+        ui.add(egui::Slider::new(&mut fog.height_density, 0.0..=0.5).text("Ground fog"))
+            .on_hover_text("Extra fog lying low, thinning as it rises");
+        if fog.height_density > 0.0 {
+            ui.add(
+                egui::Slider::new(&mut fog.height, -100.0..=100.0)
+                    .text("Ground fog height")
+                    .suffix(" m"),
+            );
+            ui.add(
+                egui::Slider::new(&mut fog.height_falloff, 0.01..=2.0)
+                    .logarithmic(true)
+                    .text("Ground fog fade"),
+            )
+            .on_hover_text("How quickly the ground fog thins going up");
+        }
+    }
+
+    let mut clouds_on = environment.clouds.is_some();
+    if ui.checkbox(&mut clouds_on, "Clouds").changed() {
+        environment.clouds = clouds_on.then(engine_scene::CloudData::default);
+    }
+    if let Some(clouds) = &mut environment.clouds {
+        ui.add(egui::Slider::new(&mut clouds.coverage, 0.0..=1.0).text("Cover"))
+            .on_hover_text("0 is a clear sky, 1 is overcast");
+        ui.add(egui::Slider::new(&mut clouds.speed, 0.0..=20.0).text("Drift"))
+            .on_hover_text("How fast they move while playing. They stand still in the Scene View");
+        ui.horizontal(|ui| {
+            ui.label("Cloud color");
+            ui.color_edit_button_rgb(&mut clouds.color);
+        });
+    }
+
+    let mut clock_on = environment.time_of_day.is_some();
+    if ui
+        .checkbox(&mut clock_on, "Time of day")
+        .on_hover_text("The clock moves the sun and colours the sky")
+        .changed()
+    {
+        environment.time_of_day = clock_on.then(engine_scene::TimeOfDayData::default);
+    }
+    if let Some(clock) = &mut environment.time_of_day {
+        ui.add(
+            egui::Slider::new(&mut clock.start_hour, 0.0..=24.0)
+                .text("Start time")
+                .custom_formatter(|hours, _| clock_label(hours as f32)),
+        )
+        .on_hover_text("The time when the scene begins. The Scene View shows this time");
+        ui.add(
+            egui::Slider::new(&mut clock.day_minutes, 0.0..=engine_scene::MAX_DAY_MINUTES)
+                .logarithmic(true)
+                .text("Day length")
+                .suffix(" min"),
+        )
+        .on_hover_text("Real minutes a whole day takes while playing");
+        if clock.day_minutes <= 0.0 {
+            ui.weak("Day length 0 keeps the time still.");
+        }
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Sky image");
+        let name = environment
+            .sky_image
+            .as_ref()
+            .map(|image| {
+                asset_file_name(state, &image.id).unwrap_or_else(|| "Missing image".into())
+            })
+            .unwrap_or_else(|| "None".to_owned());
+        ui.weak(name);
+    });
+    ui.horizontal(|ui| {
+        let selected = state
+            .selected_texture_asset()
+            .and_then(|path| state.asset_index.id_for(path));
+        if ui
+            .add_enabled(selected.is_some(), egui::Button::new("Use selected image"))
+            .on_hover_text("A panorama, best as .hdr or .exr, wraps around the scene as its sky")
+            .on_disabled_hover_text("Select an image in Project Assets first")
+            .clicked()
+            && let Some(id) = selected
+        {
+            environment.sky_image = Some(engine_scene::AssetRef { id: id.to_string() });
+        }
+        if ui
+            .add_enabled(environment.sky_image.is_some(), egui::Button::new("Clear"))
+            .clicked()
+        {
+            environment.sky_image = None;
+        }
+    });
+
+    if environment != before {
+        state.set_environment(environment);
+    }
+}
+
+/// `hours` as a clock time, such as `6:30`.
+fn clock_label(hours: f32) -> String {
+    let minutes = (hours.rem_euclid(24.0) * 60.0).round() as u32 % (24 * 60);
+    format!("{}:{:02}", minutes / 60, minutes % 60)
+}
+
+/// The file name of the asset with `id`, if the project has it.
+fn asset_file_name(state: &EditorState, id: &str) -> Option<String> {
+    let id = uuid::Uuid::parse_str(id).ok()?;
+    let path = state
+        .asset_index
+        .path_for(engine_asset::AssetId::from_uuid(id))?;
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 /// Writes the scene's start state. "Playing" is the default, so it is
@@ -5841,19 +6264,69 @@ mod ui_tests {
         );
     }
 
+    /// One whole handle drag of `change` (frames added together) on
+    /// `selection`, snapped when `snap` is given.
+    fn apply_gizmo_edit(
+        world: &mut engine_ecs::prelude::World,
+        selection: &[engine_ecs::prelude::Entity],
+        edit: super::GizmoEdit,
+    ) {
+        drag_with(world, selection, edit, None);
+    }
+
+    fn drag_with(
+        world: &mut engine_ecs::prelude::World,
+        selection: &[engine_ecs::prelude::Entity],
+        edit: super::GizmoEdit,
+        snap: Option<&crate::snap::SnapSettings>,
+    ) {
+        use super::GizmoEdit;
+        use crate::gizmo::GizmoHandle;
+        let (handle, change) = match edit {
+            GizmoEdit::Move(axis, change) => (GizmoHandle::Move(axis), change),
+            GizmoEdit::Rotate(axis, change) => (GizmoHandle::Rotate(axis), change),
+            GizmoEdit::ScaleAxis(axis, change) => (GizmoHandle::ScaleAxis(axis), change),
+            GizmoEdit::Scale(change) => (GizmoHandle::Scale, change),
+        };
+        let mut drag =
+            crate::snap::GizmoDrag::new(handle, super::gizmo_drag_targets(world, selection));
+        drag.accumulate(change);
+        super::apply_gizmo_drag(world, &drag, snap);
+    }
+
+    #[test]
+    fn snapped_moves_land_on_the_grid() {
+        use crate::gizmo::Axis;
+        let mut world = engine_ecs::prelude::World::new();
+        let cube = world
+            .spawn(engine_ecs::components::Transform::from(
+                engine_utils::Transform::from_translation(glam::Vec3::new(0.3, 0.0, 0.0)),
+            ))
+            .id();
+        let snap = crate::snap::SnapSettings::default();
+        drag_with(
+            &mut world,
+            &[cube],
+            super::GizmoEdit::Move(Axis::X, 1.0),
+            Some(&snap),
+        );
+        let at = crate::hierarchy::world_transform(&world, cube).translation;
+        assert!((at.x - 1.5).abs() < 1e-5, "{at}");
+    }
+
     #[test]
     fn gizmo_drags_follow_world_axes_inside_a_turned_scaled_group() {
         use crate::gizmo::Axis;
         let (mut world, group, trunk) = tree_in_a_group();
         let before = crate::hierarchy::world_transform(&world, trunk);
-        super::apply_gizmo_edit(&mut world, &[trunk], super::GizmoEdit::Move(Axis::X, 3.0));
+        apply_gizmo_edit(&mut world, &[trunk], super::GizmoEdit::Move(Axis::X, 3.0));
         let after = crate::hierarchy::world_transform(&world, trunk);
         assert!(
             (after.translation - before.translation - glam::Vec3::new(3.0, 0.0, 0.0)).length()
                 < 1e-4,
             "moved exactly 3 along world X: {before:?} → {after:?}"
         );
-        super::apply_gizmo_edit(&mut world, &[trunk], super::GizmoEdit::Rotate(Axis::Y, 0.5));
+        apply_gizmo_edit(&mut world, &[trunk], super::GizmoEdit::Rotate(Axis::Y, 0.5));
         let turned = crate::hierarchy::world_transform(&world, trunk);
         assert!(
             (turned.translation - after.translation).length() < 1e-4,
@@ -5862,7 +6335,7 @@ mod ui_tests {
 
         // Group and trunk both selected: the trunk moves once, with the group.
         let trunk_before = crate::hierarchy::world_transform(&world, trunk).translation;
-        super::apply_gizmo_edit(
+        apply_gizmo_edit(
             &mut world,
             &[group, trunk],
             super::GizmoEdit::Move(Axis::Y, 1.0),
@@ -6353,6 +6826,46 @@ mod ui_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Writes `environment-sky.png`: the Environment menu's Sky and fog
+    /// block with every part on. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_environment_sky() {
+        let (root, mut state) = menu_test_state();
+        state.set_environment(engine_scene::EnvironmentData {
+            fog: Some(engine_scene::FogData {
+                height_density: 0.05,
+                ..engine_scene::FogData::default()
+            }),
+            clouds: Some(engine_scene::CloudData::default()),
+            time_of_day: Some(engine_scene::TimeOfDayData {
+                start_hour: 6.5,
+                day_minutes: 20.0,
+            }),
+            ..engine_scene::EnvironmentData::default()
+        });
+        let path = crate::ui_snapshot::snapshot_dir().join("environment-sky.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(360.0, 560.0), 2.0, |ui| {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(crate::theme::NIGHT.raised)
+                        .inner_margin(egui::Margin::same(10)),
+                )
+                .show(ui, |ui| super::environment_sky_ui(ui, &mut state));
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clock_labels_read_as_times() {
+        assert_eq!(super::clock_label(6.5), "6:30");
+        assert_eq!(super::clock_label(0.0), "0:00");
+        assert_eq!(super::clock_label(24.0), "0:00");
+        assert_eq!(super::clock_label(23.999), "0:00");
+    }
+
     /// Writes `terrain-menu.png`: the Scene View's Terrain menu in Paint
     /// mode with a terrain selected. Needs a GPU adapter.
     #[test]
@@ -6396,6 +6909,54 @@ mod ui_tests {
         })
         .expect("snapshot");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `terrain-menu-objects.png`: the Terrain menu with the object
+    /// brush on. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_terrain_menu_objects() {
+        let (root, mut state) = terrain_test_state();
+        state.terrain_sculpt_active = true;
+        state.terrain_tools.objects = true;
+        let path = crate::ui_snapshot::snapshot_dir().join("terrain-menu-objects.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(380.0, 520.0), 2.0, |ui| {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(crate::theme::NIGHT.raised)
+                        .inner_margin(egui::Margin::same(10)),
+                )
+                .show(ui, |ui| super::terrain_menu_controls(ui, &mut state));
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `snap-menu.png`: the Scene View's Snap menu with snapping on.
+    /// Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_snap_menu() {
+        let mut snap = crate::snap::SnapSettings {
+            enabled: true,
+            ..crate::snap::SnapSettings::default()
+        };
+        let path = crate::ui_snapshot::snapshot_dir().join("snap-menu.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(300.0, 200.0), 2.0, |ui| {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::NONE
+                        .fill(crate::theme::NIGHT.raised)
+                        .inner_margin(egui::Margin::same(10)),
+                )
+                .show(ui, |ui| {
+                    crate::snap::show_controls(ui, &mut snap);
+                    ui.separator();
+                    let _ = ui.button("Drop selection to ground   ⌘↓");
+                });
+        })
+        .expect("snapshot");
     }
 
     /// Writes `inspector-foliage.png`: a foliage group standing on a
@@ -6727,6 +7288,47 @@ mod ui_tests {
         }
     }
 
+    /// Writes `inspector-spot-light.png`: a shadow-casting spot light, with
+    /// the note shown once more lights cast shadows than can at a time.
+    /// Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_spot_light() {
+        let (root, mut state) = menu_test_state();
+        let shadowed = engine_scene::SpotLightData {
+            casts_shadows: true,
+            ..engine_scene::SpotLightData::default()
+        };
+        for index in 0..engine_renderer::MAX_SHADOWED_LIGHTS {
+            state.world.spawn((
+                engine_ecs::components::Name::new(format!("Lamp {index}")),
+                engine_scene::SceneSpotLight(shadowed),
+            ));
+        }
+        let lamp = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Stage light"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                engine_scene::SceneSpotLight(shadowed),
+            ))
+            .id();
+        state.select_only(lamp);
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-spot-light.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 760.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Writes `inspector-stream-area.png`: a world area that loads the
     /// forest scene. Needs a GPU adapter.
     #[test]
@@ -6750,6 +7352,43 @@ mod ui_tests {
         state.select_only(area);
         let path = crate::ui_snapshot::snapshot_dir().join("inspector-stream-area.png");
         crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 620.0), 2.0, |ui| {
+            egui::Panel::right("snapshot_inspector")
+                .exact_size(420.0)
+                .frame(super::studio_panel_frame())
+                .show_separator_line(false)
+                .show(ui, |ui| super::inspector_tabs_panel(ui, &mut state));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(crate::theme::NIGHT.shell))
+                .show(ui, |_| {});
+        })
+        .expect("snapshot");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Writes `inspector-road.png`: a three-point road pressed into a
+    /// terrain with a paint layer. Needs a GPU adapter.
+    #[test]
+    #[ignore = "needs a GPU adapter; writes a PNG for a visual check"]
+    fn snapshot_inspector_road() {
+        let (root, mut state) = terrain_test_state();
+        let terrain = state.selected_entity.expect("terrain selected");
+        let terrain_id = crate::foliage::ensure_object_id(&mut state.world, terrain);
+        let road = state
+            .world
+            .spawn((
+                engine_ecs::components::Name::new("Forest Path"),
+                engine_ecs::components::Transform::from(engine_utils::Transform::IDENTITY),
+                engine_scene::SceneRoad(engine_scene::RoadData {
+                    points: vec![[-10.0, 0.0, 0.0], [0.0, 0.5, 6.0], [10.0, 1.0, 0.0]],
+                    terrain: Some(terrain_id),
+                    paint_layer: Some(0),
+                    ..engine_scene::RoadData::default()
+                }),
+            ))
+            .id();
+        state.select_only(road);
+        let path = crate::ui_snapshot::snapshot_dir().join("inspector-road.png");
+        crate::ui_snapshot::render_png(&path, egui::vec2(440.0, 820.0), 2.0, |ui| {
             egui::Panel::right("snapshot_inspector")
                 .exact_size(420.0)
                 .frame(super::studio_panel_frame())

@@ -38,11 +38,15 @@ Empty objects (like groups) show nothing. Select them in the Hierarchy.
 | Small square on an arrow | Stretch along that line |
 | White square in the centre | Make the whole object bigger or smaller |
 
+With **Snap** on (bottom bar), a move puts the object's position on a grid of the move step, a turn goes in whole turn steps and a resize in scale steps. Holding ⌥ while you drag flips this for that drag. With several objects selected, the first one lands on the grid and the others move by the same amount.
+
 In 2D you get two arrows and one ring.
 
 ## Locked objects
 
-When you drag a file from Project Assets over the Scene View, a ring with the file's name shows where it will land: on the object under the cursor (locked ones count, so a locked terrain works), else on the ground, else in front of the camera. In the 2D view it lands at the cursor. The object's own centre goes on that point, so a model whose centre is in its middle sits partly in the ground until you move it up. If a prefab can't be loaded, the Problems tab says why.
+When you drag a file from Project Assets over the Scene View, a ring with the file's name shows where it will land: on the object under the cursor (locked ones count, so a locked terrain works), else on the ground, else in front of the camera. In the 2D view it lands at the cursor. A model stands on its bottom on that point, as worked out from its mesh (Snap → **Dropped models stand on the surface**; untick it to put the model's own centre there instead). Prefabs and objects without a mesh go by their centre.
+
+**Drop to Ground** (⌘↓ or End, also in the Snap menu and GameObject menu) moves each selected object straight down until the bottom of its mesh rests on the terrain, a road or an object below it. An object sunk inside a terrain hill comes up onto it. An object with nothing below it stays where it is. Objects inside a selected group move with the group, judged by the group's own mesh (or its centre). If a prefab can't be loaded, the Problems tab says why.
 
 The eye at the end of a Hierarchy row hides an object in the Scene View: it isn't drawn and can't be clicked, and its children go with it. This only affects the editor. It isn't saved in the scene, doesn't count as a change, and the game still shows the object. A hidden point light still lights the scene. Studio remembers what you hid the next time you open the project.
 
@@ -160,6 +164,7 @@ To see it while you work, select it or something inside it in the Hierarchy, and
 | **3D** | Normal 3D view |
 | **2D** | Flat view for sprites and tiles. Tile painting works only here. |
 | **Global / Local** | Only **Global** works for now |
+| **Snap** | **Snap handles to steps**, with the **Move** (metres), **Turn** (degrees) and **Scale** steps; **Dropped models stand on the surface**; **Drop selection to ground**. The menu title reads **Snap: On** while snapping is on |
 
 3D and 2D each remember where you were looking. Studio also remembers your view for each project.
 
@@ -170,12 +175,13 @@ Helper drawings. The game never shows them.
 | Overlay | Shows |
 | --- | --- |
 | **All colliders** | Physics shapes: green, the selected one yellow, triggers purple |
-| **Lights** | Each lamp and how far its light reaches |
+| **Lights** | Each lamp and how far its light reaches; a spot light shows its cone |
 | **Cameras** | What each game camera sees |
 | **Ground grid** | 1 m squares on the floor |
 | **Audio emitters** | Each sound and how far it can be heard |
 | **Nav grid** | The walkable area: where characters can walk, lying on the ground (red cross = blocked). Big areas draw every few cells |
 | **World areas** | Every world area's box, and fainter, the box where its scene starts loading |
+| **Roads** | Every road's centre line, its edges and, fainter, where its soft edge ends. A selected road always shows them |
 | **Distance detail** | Draws models as the game will from the Scene View camera: simpler versions far away, and nothing past each object's draw distance, at the project's graphics quality. Off shows every model in full |
 | **Cull from game camera** | Skips what the game camera can't see, while you keep moving the Scene View camera freely. The game camera's view is outlined in light blue, and each skipped model gets a faint red box. A badge in the top-left corner counts models drawn, skipped and too far away, plus plants and terrain pieces drawn out of the total. Distance detail and terrain detail are measured from the game camera too. The game camera is the one ticked **Active camera** (or the first camera) |
 
@@ -220,10 +226,12 @@ Limits: a following camera can't be inside another object. Things moved by anima
 | --- | --- |
 | **Create terrain** | Adds a flat 64 × 64 m piece of ground with a collider, so characters and physics stand on it in the game |
 | **Create water** | Adds water. Change waves in the Inspector. |
-| **Off / Sculpt / Paint / Foliage** | **Sculpt**: drag on the selected terrain to shape it with **Raise**, **Lower**, **Smooth** or **Flatten**. **Paint**: drag to paint the chosen layer. **Foliage**: drag to add plants of the model selected in Project Assets; choose **Erase**, or hold Shift, to remove them (with no model selected, Erase removes every kind). A blue ring shows the brush. **Off** gives the mouse back to selecting and moving. |
-| **Radius**, **Strength** | Brush size in metres, and how much one pass changes (the Foliage brush has no Strength) |
+| **Create road** | Adds a road where you are looking, linked to the terrain under it. See [Roads](#roads) |
+| **Off / Sculpt / Paint / Foliage / Objects** | **Sculpt**: drag on the selected terrain to shape it with **Raise**, **Lower**, **Smooth** or **Flatten**. **Paint**: drag to paint the chosen layer. **Foliage**: drag to add plants of the model selected in Project Assets; choose **Erase**, or hold Shift, to remove them (with no model selected, Erase removes every kind). **Objects**: drag to add copies of the model or prefab selected in Project Assets as separate objects; **Erase** or Shift removes them the same way. A blue ring shows the brush. **Off** gives the mouse back to selecting and moving. |
+| **Radius**, **Strength** | Brush size in metres, and how much one pass changes (the Foliage and Objects brushes have no Strength) |
 | **Layers** (Paint) | The selected terrain's ground textures, up to 8. Click a name to paint it. Pick a built-in texture or any image in the project, a tint, and how many metres one copy covers. **Add layer**, **Remove** |
 | **Density**, **Spacing**, **Seed** | How the Foliage brush and **Scatter** place plants: Spacing is roughly the metres between them, Density the share of spots that get one, and Seed picks a different pattern. Painting the same spot again adds nothing, and erased plants come back the same when painted again |
+| **Objects: Density**, **Spacing**, **Random turn**, **Size … to …**, **Lean with the slope**, **Seed** (Objects) | How the object brush places copies: Spacing is roughly the metres between them and Density the share of spots that get one. Each copy turns by up to **Random turn** degrees (360 = any way) and is sized between the two **Size** numbers. **Lean with the slope** tilts it to the ground. Painting the same spot again adds nothing |
 | **Scatter selected model on terrain** | Fills the whole selected terrain with copies of the model selected in Project Assets. They join that model's foliage group on this terrain, if it has one |
 | **Tiles: North / East / South / West** | Adds a tile beside the one under the pointer (or the first tile). Its edge joins the ground next to it, and hills fade out across it. Brushes work across tile edges |
 | **Remove tile** | Takes the tile out of the terrain. Its file stays in the project, and ⌘Z puts it back |
@@ -236,7 +244,28 @@ Terrains made by older versions of Studio are converted when the scene opens. St
 
 Each model gets one **foliage group** per terrain, shown in the Hierarchy with a leaf. Click any of its plants to select the group. Plants stay on the ground while you sculpt, and ⌘Z puts the ground and the plants back together. Its Inspector shows how many plants it has, its terrain, **See-through** (cut away the clear parts of leaf images), **Two-sided** (see flat leaves from behind) and **Level of detail**, where plants switch to simpler meshes and fade out past 150 m by default (see `04_GRAPHICS_QUALITY.md`).
 
+Painted objects go into one **Painted <name>** group per model or prefab per terrain. Each copy is an ordinary object: click it, move it, give it a collider or a script. Each stands on the bottom of its mesh, and copies move with the ground when you sculpt, as plants do. A group holds at most 2,000 objects.
+
 Limits: textures blend smoothly, not by height. Sculpting while the game plays doesn't change its collision. Moving or rotating a terrain doesn't move its plants. A foliage group holds at most 20,000 plants. Plants have no wind, and grow upright rather than leaning with the slope.
+
+## Roads
+
+A road is an object with a smooth line through its points. Create one with Terrain → **Create road**, GameObject → **Create Road**, or the Hierarchy's Create menu; it starts with two points 12 m apart where you are looking.
+
+With the road selected, its points show as dots in the Scene View. Drag a dot to move that point over the ground. ⌥-click the ground to add a point: between two points when you click beside the road, otherwise at the nearer end. The Inspector's **Road** section has every point's position, **Remove** to take one out, and **Add point** to add one past the end.
+
+| Option | What it does |
+| --- | --- |
+| **Width**, **Soft edge** | How wide the flat road is, and how far beside it the ground blends back to its own height |
+| **Loop** | Joins the last point back to the first |
+| **Press into** | The terrain the road levels |
+| **Paint**, **Strength** | A layer of that terrain to paint along the road, and how strongly |
+| **Apply to terrain** | Levels the ground along the road to the road's height, blending out over the soft edge, and paints the layer. Plants and painted objects there move with the ground. One ⌘Z step undoes it |
+| **Show**, **Color**, **Image**, **Repeat** | Draws the road's own surface in the scene and the game, with a colour and an optional image repeated every **Repeat** metres along it |
+
+Moving points doesn't change the ground until you press **Apply to terrain** again. Click the road's surface to select it.
+
+Limits: roads don't join at crossings. The road's surface has no collider (characters walk on the levelled terrain under it). A road on a turned or resized object gets its width from the road settings, not from the object's size. Applying again over an earlier result levels from the ground as it is now, so moving a road away leaves the old cut.
 
 ## Navigation
 
@@ -297,8 +326,53 @@ Settings for the whole scene.
 | --- | --- |
 | **Ambient sounds** | Sounds heard everywhere, like wind or music (up to 8) |
 | **Add selected sound** | Adds the WAV file picked in Project Assets |
-| **Create point light** | Adds a lamp |
-| **Override scene lighting** | Set your own sun: **Sun direction**, **Sun strength**, **Sun color**, **Ambient** (shadow brightness) |
+| **Create point light** | Adds a lamp that shines all around |
+| **Create spot light** | Adds a light that shines a cone, pointing down |
+| **Override scene lighting** | Set your own sun: **Sun direction**, **Sun strength**, **Sun color**, **Ambient** (shadow brightness), and **Shadow distance**: how far from the camera the sun casts shadows (60 m unless you change it). With **Time of day** on, the clock aims the sun, so Sun direction is hidden |
 | **Start state** | How the game starts: **Playing**, **Menu**, **Paused** or **Game over**. Only the first scene's choice counts. |
+| **Fog** | Far things fade into the **Fog color**. **Thickness** is how fast it thickens, **Starts at** how far from the camera it begins. **Ground fog** adds fog lying low, at **Ground fog height**, thinning upwards by **Ground fog fade** |
+| **Clouds** | A cloud layer in the sky: **Cover** (0 clear, 1 overcast), **Drift** (how fast it moves while playing) and **Cloud color** |
+| **Time of day** | A clock moves the sun and colours the sky and the ambient light: sunrise at 6:00, noon at 12:00, sunset at 18:00. **Start time** is when the scene begins; **Day length** is how many real minutes a whole day takes while playing (0 keeps the time still) |
+| **Sky image** | **Use selected image** puts the image picked in Project Assets around the scene as its sky. Use a panorama (2:1), best as `.hdr` or `.exr`. Its average colours above and below the horizon tint the ambient light. **Clear** goes back to the colour sky |
 
 A sound that comes from one thing (footsteps, a waterfall) goes on that object instead: Add component → **Audio Emitter**.
+
+### Sky, fog and time of day
+
+The Scene View shows the sky, fog and clouds as the game will, at the scene's **Start time**. While playing, the clock runs and the clouds drift.
+
+Lua and Rust games can read and set the clock:
+
+```lua
+engine.set_time_of_day(18.5)          -- 0 to 24; 18.5 is half past six in the evening
+local hours = engine.get_time_of_day() -- nil when the scene has no time of day
+```
+
+Rust games call `set_time_of_day(hours)` and `time_of_day()` on the gameplay runtime, or send `GameCommand::SetTimeOfDay`. Setting the time in a scene without time of day turns it on, standing still.
+
+Limits:
+
+- Sprites, particles and 2D scenes aren't fogged.
+- Clouds don't move in the Scene View, only while playing.
+- One cloud layer. Clouds cast no shadows.
+- The sky image doesn't show in reflections, and its lighting is only an average colour.
+- With a sky image, the clouds and time-of-day sky colours are hidden; the clock still moves the sun.
+
+## Lights and shadows
+
+The sun always casts shadows. They are sharp near the camera and softer farther away, out to the **Shadow distance**. The project's graphics quality decides how sharp, in the Scene View too (see the Graphics Quality guide).
+
+| Light | Settings |
+| --- | --- |
+| **Point Light** | **Color**, **Intensity**, **Range**, **Shadows** |
+| **Spot Light** | **Color**, **Intensity**, **Range** (it fades to nothing there), **Cone angle** (half the beam's width, in degrees), **Soft edge** (how many of those degrees the edge takes to fade), **Shadows** |
+
+A spot light shines the way its object faces; turn the object to aim it. Add either from Add component, the Hierarchy's Create menu, or the Environment menu.
+
+Tick **Shadows** on the lamps that need them. Only the 4 shadow-casting lights nearest the camera cast shadows at a time, and each costs time every frame (a point light the most, since it looks all six ways).
+
+Limits:
+
+- Animated characters and plants don't cast shadows.
+- Up to 16 point lights and 8 spot lights light the scene at a time: the ones nearest the camera.
+- Other suns (a second directional light) don't cast shadows.

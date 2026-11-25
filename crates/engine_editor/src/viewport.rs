@@ -41,8 +41,7 @@ use engine_renderer::{
     HdrTarget, InstancedPipeline, LightSet, LightsBinding, Pipeline, PostProcessStack,
     PostSettings, RenderAssets, RenderTarget, ShadowMap, ShadowPipeline, SkinnedPipeline,
     SkyboxBinding, SkyboxPipeline, SpriteAtlasBinding, SpritePipeline, TextureAtlas, WaterBinding,
-    WaterDraw, WaterFrame, WaterGpuUniform, WaterPipeline, directional_light_view_projection,
-    skybox_uniform,
+    WaterDraw, WaterFrame, WaterGpuUniform, WaterPipeline, skybox_uniform,
 };
 use engine_utils::AssetHandle;
 use glam::{Mat4, Quat, Vec3};
@@ -188,6 +187,9 @@ pub struct Viewport {
     water_bindings: HashMap<Entity, WaterBinding>,
     skybox_pipeline: SkyboxPipeline,
     skybox: SkyboxBinding,
+    /// The sky image shown, by asset id, with the ambient light it gives
+    /// (`None` for an image that failed to load).
+    sky_image: Option<(String, Option<engine_renderer::AmbientLight>)>,
     debug_line_pipeline: DebugLinePipeline,
     /// The frame's debug geometry, rebuilt every frame and kept between
     /// them for its allocation.
@@ -213,8 +215,8 @@ fn default_editor_lights() -> LightSet {
             color: Vec3::ONE,
             intensity: 3.0,
         }],
-        point: Vec::new(),
         ambient: engine_renderer::AmbientLight::DAYLIGHT,
+        ..LightSet::default()
     }
 }
 
@@ -226,6 +228,9 @@ fn editor_lights(world: &mut World) -> LightSet {
     lights
         .point
         .extend(engine_scene::point_lights_from_world(world));
+    lights
+        .spot
+        .extend(engine_scene::spot_lights_from_world(world));
     lights
 }
 
@@ -271,14 +276,22 @@ impl Viewport {
             .map(|light| (light.direction, light.color))
             .unwrap_or((Vec3::NEG_Y, Vec3::ONE));
 
-        let light_space = directional_light_view_projection(sun_direction, Vec3::ZERO, 16.0);
-        let shadow_map = gpu.create_shadow_map(&shadow_pipeline, light_space);
+        // Rebuilt at the project's quality on the first frame.
+        let shadow_map = gpu.create_shadow_maps(
+            &shadow_pipeline,
+            engine_renderer::QualityLevel::default().preset().shadows,
+        );
         let camera_binding = gpu.create_camera_binding(&pipeline, &camera.to_uniform());
         let lights_binding =
             gpu.create_lights_binding(&pipeline, &lights.to_uniform(), &shadow_map);
         let skybox = gpu.create_skybox_binding(
             &skybox_pipeline,
-            &skybox_uniform(&camera, sun_direction, sun_color),
+            &skybox_uniform(
+                &camera,
+                sun_direction,
+                sun_color,
+                &engine_renderer::Atmosphere::default(),
+            ),
         );
 
         let hdr_target = gpu.create_hdr_target(width, height);
@@ -314,6 +327,7 @@ impl Viewport {
             water_bindings: HashMap::new(),
             skybox_pipeline,
             skybox,
+            sky_image: None,
             debug_line_pipeline,
             debug_draw: engine_renderer::DebugDraw::new(),
             brush_ring: Vec::new(),
@@ -394,6 +408,49 @@ impl Viewport {
     /// The egui texture handle this viewport's panel displays.
     pub fn texture_id(&self) -> egui::TextureId {
         self.texture_id
+    }
+
+    /// Loads the scene's sky image when it changes, reading the file
+    /// `resolve` finds for it. Returns an error to show when it can't be
+    /// read; the colour sky then stays.
+    pub fn sync_sky_image(
+        &mut self,
+        gpu: &GpuContext,
+        world: &World,
+        resolve: &dyn Fn(&engine_scene::AssetRef) -> Option<std::path::PathBuf>,
+    ) -> Option<String> {
+        let wanted = world
+            .get_resource::<engine_scene::SceneEnvironment>()
+            .and_then(|environment| environment.0.sky_image.clone());
+        let Some(image) = wanted else {
+            if self.sky_image.take().is_some() {
+                gpu.set_sky_image(&self.skybox_pipeline, &mut self.skybox, None);
+            }
+            return None;
+        };
+        if self
+            .sky_image
+            .as_ref()
+            .is_some_and(|(id, _)| *id == image.id)
+        {
+            return None;
+        }
+        let loaded = resolve(&image)
+            .ok_or_else(|| "the file isn't in the project".to_owned())
+            .and_then(|path| std::fs::read(path).map_err(|error| error.to_string()))
+            .and_then(|bytes| engine_renderer::decode_sky_image(&bytes));
+        match loaded {
+            Ok(sky) => {
+                gpu.set_sky_image(&self.skybox_pipeline, &mut self.skybox, Some(&sky));
+                self.sky_image = Some((image.id, Some(sky.ambient)));
+                None
+            }
+            Err(error) => {
+                gpu.set_sky_image(&self.skybox_pipeline, &mut self.skybox, None);
+                self.sky_image = Some((image.id, None));
+                Some(format!("The sky image could not be loaded: {error}"))
+            }
+        }
     }
 
     /// Builds, rebuilds and patches the GPU side of every terrain from
@@ -605,17 +662,38 @@ impl Viewport {
         self.update_water(gpu, world);
         self.tick_animation_previews(gpu, world);
         self.lights = editor_lights(world);
-        let sun_direction = self
-            .lights
-            .directional
-            .first()
-            .map(|sun| sun.direction)
-            .unwrap_or(Vec3::NEG_Y);
-        gpu.update_shadow_map(
-            &mut self.shadow_map,
-            directional_light_view_projection(sun_direction, self.camera.target, 40.0),
+        // The Scene View shows a scene with time of day at its start hour,
+        // with clouds standing still so an idle view doesn't redraw.
+        let image_ambient = self.sky_image.as_ref().and_then(|(_, ambient)| *ambient);
+        let atmosphere = world
+            .get_resource::<engine_scene::SceneEnvironment>()
+            .map(|environment| environment.0.sky(None, image_ambient, &mut self.lights))
+            .unwrap_or_default();
+        let atmosphere = engine_renderer::Atmosphere {
+            image: atmosphere.image && image_ambient.is_some(),
+            ..atmosphere
+        };
+        // Shadows follow the project's quality, as in the game.
+        let shadows = quality.preset().shadows;
+        if self.shadow_map.settings() != shadows {
+            self.shadow_map = gpu.create_shadow_maps(&self.shadow_pipeline, shadows);
+            self.lights_binding = gpu.create_lights_binding(
+                &self.pipeline,
+                &self.lights.to_uniform(),
+                &self.shadow_map,
+            );
+        }
+        let shadow_frame = engine_renderer::ShadowFrame::build(
+            &self.camera,
+            &self.lights,
+            self.shadow_map.settings().cascades,
+            self.shadow_map.size(),
         );
-        gpu.write_uniform_buffer(&self.camera_binding.buffer, &self.camera.to_uniform());
+        gpu.update_shadows(&mut self.shadow_map, &shadow_frame);
+        gpu.write_uniform_buffer(
+            &self.camera_binding.buffer,
+            &self.camera.to_uniform_with_fog(&atmosphere.fog),
+        );
         gpu.write_uniform_buffer(
             &self.lights_binding.buffer,
             &self.lights.to_uniform_for_view(self.camera.eye),
@@ -628,7 +706,7 @@ impl Viewport {
             .unwrap_or((Vec3::NEG_Y, Vec3::ONE));
         gpu.write_uniform_buffer(
             &self.skybox.buffer,
-            &skybox_uniform(&self.camera, sun_direction, sun_color),
+            &skybox_uniform(&self.camera, sun_direction, sun_color, &atmosphere),
         );
 
         let placeholders = placeholder_positions(world);

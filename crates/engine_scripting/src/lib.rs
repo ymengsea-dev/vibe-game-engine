@@ -1210,6 +1210,37 @@ mod input_tests {
     }
 
     #[test]
+    fn set_time_of_day_queues_command_and_reads_back() {
+        let mut rt = runtime(
+            "engine.log(tostring(engine.get_time_of_day())) engine.set_time_of_day(18.5) \
+             engine.log(tostring(engine.get_time_of_day()))",
+        );
+        assert_eq!(
+            rt.update(0.1).expect("update"),
+            vec![
+                GameCommand::Log("nil".into()),
+                GameCommand::SetTimeOfDay { hours: 18.5 },
+                GameCommand::Log("18.5".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn set_time_of_day_rejects_hours_outside_a_day() {
+        for script in [
+            "engine.set_time_of_day(25)",
+            "engine.set_time_of_day(-1)",
+            "engine.set_time_of_day(0/0)",
+        ] {
+            let message = runtime(script)
+                .update(0.1)
+                .expect_err("out of range")
+                .to_string();
+            assert!(message.contains("between 0 and 24"), "{message}");
+        }
+    }
+
+    #[test]
     fn set_quality_rejects_unknown_levels() {
         let message = runtime("engine.set_quality('ultra')")
             .update(0.1)

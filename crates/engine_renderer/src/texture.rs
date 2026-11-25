@@ -124,6 +124,25 @@ impl GpuContext {
         self.create_texture_from_rgba_with_wrap(label, width, height, rgba, Wrap::Tile)
     }
 
+    /// Uploads RGBA8 data that isn't a colour (a normal map, say) as-is,
+    /// without the sRGB decode colour textures get.
+    pub fn create_data_texture_from_rgba(
+        &self,
+        label: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Texture {
+        self.upload_rgba(
+            label,
+            width,
+            height,
+            rgba,
+            Wrap::Clamp,
+            wgpu::TextureFormat::Rgba8Unorm,
+        )
+    }
+
     fn create_texture_from_rgba_with_wrap(
         &self,
         label: &str,
@@ -131,6 +150,25 @@ impl GpuContext {
         height: u32,
         rgba: &[u8],
         wrap: Wrap,
+    ) -> Texture {
+        self.upload_rgba(
+            label,
+            width,
+            height,
+            rgba,
+            wrap,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        )
+    }
+
+    fn upload_rgba(
+        &self,
+        label: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        wrap: Wrap,
+        format: wgpu::TextureFormat,
     ) -> Texture {
         let size = wgpu::Extent3d {
             width,
@@ -146,7 +184,7 @@ impl GpuContext {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },

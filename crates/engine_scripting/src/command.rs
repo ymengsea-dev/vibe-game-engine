@@ -156,6 +156,12 @@ pub enum GameCommand {
         /// One of [`QUALITY_LEVELS`].
         level: String,
     },
+    /// Set the scene's clock (sun and sky), in hours from 0 to 24. Turns
+    /// time of day on, standing still, in a scene without it.
+    SetTimeOfDay {
+        /// Hours, 0 to 24 (12 is noon).
+        hours: f32,
+    },
     /// Ask the host to lock (and hide) or release the mouse cursor.
     SetMouseLocked {
         /// Whether the game wants the cursor locked.

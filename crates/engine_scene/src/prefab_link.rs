@@ -53,8 +53,12 @@ const FIELDS: &[Field] = &[
     field!(audio_emitter),
     field!(terrain),
     field!(ai),
+    field!(stream_area),
+    field!(road),
+    field!(painted),
     field!(water),
     field!(point_light),
+    field!(spot_light),
     field!(ui),
     field!(rules),
     field!(tags),
@@ -71,6 +75,12 @@ pub fn remap_object_references(entity: &mut SceneEntity, map: &HashMap<String, S
     };
     if let Some(follow) = &mut entity.camera_follow {
         remap(&mut follow.target);
+    }
+    if let Some(terrain) = entity.road.as_mut().and_then(|road| road.terrain.as_mut()) {
+        remap(terrain);
+    }
+    if let Some(painted) = &mut entity.painted {
+        remap(&mut painted.terrain);
     }
     for rule in &mut entity.rules {
         match &mut rule.action {

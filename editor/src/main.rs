@@ -791,6 +791,9 @@ fn sync_terrains(
     if let Some(error) = errors.into_iter().next() {
         state.asset_browser.operation_error = Some(error);
     }
+    if let Some(error) = viewport.sync_sky_image(gpu, world, &resolve) {
+        state.asset_browser.operation_error = Some(error);
+    }
     let ring = state
         .terrain_hover
         .filter(|_| state.terrain_sculpt_active)

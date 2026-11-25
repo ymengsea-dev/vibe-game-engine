@@ -52,8 +52,9 @@ var occlusion_map: texture_2d<f32>;
 // pairs.
 fn apply_normal_map(n: vec3<f32>, world_position: vec3<f32>, uv: vec2<f32>, scale: f32) -> vec3<f32> {
     let sampled = textureSample(normal_map, base_color_sampler, uv).xyz * 2.0 - 1.0;
-    // A neutral map samples to (0, 0, 1), so this is a no-op for it.
-    if scale <= 0.0 || (abs(sampled.x) < 0.001 && abs(sampled.y) < 0.001) {
+    // A neutral map samples to about (0.004, 0.004, 1) (128 / 255 is a
+    // hair over a half), so this is a no-op for it.
+    if scale <= 0.0 || (abs(sampled.x) < 0.01 && abs(sampled.y) < 0.01) {
         return n;
     }
 
@@ -125,5 +126,5 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     if material.alpha_mode == 2u {
         out_alpha = base_color.a;
     }
-    return vec4<f32>(lit + emissive, out_alpha);
+    return vec4<f32>(apply_fog(lit + emissive, in.world_position), out_alpha);
 }

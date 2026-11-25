@@ -91,7 +91,7 @@ fn unit(state: &mut u64) -> f32 {
 }
 
 /// The grid cell holding terrain-local `point`.
-fn cell_of(point: Vec2, spacing: f32) -> IVec2 {
+pub(crate) fn cell_of(point: Vec2, spacing: f32) -> IVec2 {
     (point / spacing).floor().as_ivec2()
 }
 
@@ -104,6 +104,16 @@ fn plant_in_cell(cell: IVec2, placement: Placement) -> Option<Vec2> {
     let keep = unit(&mut state);
     (keep < placement.density)
         .then(|| (cell.as_vec2() + Vec2::splat(0.5) + jitter) * placement.spacing)
+}
+
+/// Another fixed dice roll in `[0, 1)` for `cell`, one per `salt`, for
+/// choices beyond a plant's place and turn (such as its size).
+pub(crate) fn dice_in_cell(cell: IVec2, seed: u64, salt: u64) -> f32 {
+    let mut state = seed.rotate_left(17)
+        ^ salt.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        ^ (cell.x as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (cell.y as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    unit(&mut state)
 }
 
 fn yaw_in_cell(cell: IVec2, seed: u64) -> f32 {

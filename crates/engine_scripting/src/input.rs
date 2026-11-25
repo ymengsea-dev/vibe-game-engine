@@ -255,4 +255,7 @@ pub struct InputSnapshot {
     /// The graphics quality the game is drawing at, one of
     /// [`crate::QUALITY_LEVELS`]. Empty reads as `"medium"`.
     pub quality: String,
+    /// The scene's clock in hours, 0 to 24, or `None` when the scene has no
+    /// time of day.
+    pub time_of_day: Option<f32>,
 }

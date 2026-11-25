@@ -35,9 +35,11 @@ mod format;
 mod game_state;
 mod io;
 mod migration;
+mod painted;
 mod prefab;
 mod prefab_link;
 mod resolve;
+mod road;
 mod rules;
 mod runtime;
 mod save;
@@ -82,6 +84,8 @@ pub use format::{
     RuleMatch, RuleTrigger, Scene, SceneAudioEmitter, SceneCollider, SceneEntity, SceneEnvironment,
     SceneFileOwner, SceneFoliage, SceneLighting, SceneMaterialOverride, SceneModelAnimation,
     SceneNavGrid, SceneObjectId, ScenePointLight, ScenePrefabLink, SceneRules,
+    SceneSpotLight, SpotLightData, MAX_SPOT_ANGLE_DEGREES, SHADOW_DISTANCE_RANGE, FogData, CloudData,
+    TimeOfDayData, MAX_DAY_MINUTES,
     SceneSpriteAnimation, SceneSpriteClips, SceneTags, SceneTilemap, SceneUi, SiblingOrder,
     SpawnAt, SpriteAnimationData, SpriteClipData, SpriteClipPlayback, SpriteData, TilemapData,
     TransformData, UiAnchor, UiElementData, UiKind, UiLayoutDirection, WaterData,
@@ -104,10 +108,15 @@ pub use rules::{
 };
 pub use runtime::{
     AssetLibrary, BUNDLE_FILE, EXPORT_SCENE_FILE, ExportContent, ImportCache, LoadedSkinnedMesh,
+    build_road_renderer,
     LodCache,
     MeshGeometry, RuntimeResolver, attach_lod_tiers, base_mesh, executable_dir, load_mesh_geometry,
     load_skinned_mesh, lod_tier_geometry, material_from_imported, open_export, skinned_parts,
     upload_skinned_model,
+};
+pub use painted::{PaintedGroupData, ScenePaintedGroup};
+pub use road::{
+    MAX_ROAD_POINTS, MAX_ROAD_WIDTH, ROAD_LIFT, RoadData, RoadSample, RoadShape, SceneRoad,
 };
 pub use stream_area::{
     MAX_AREA_DISTANCE, PlacedArea, SceneStreamArea, StreamAreaData, StreamPlan, distance_to_area,
@@ -121,5 +130,5 @@ pub use sprite_atlas::{
 pub use ui::{
     UiMountItem, authored_ui_text, mount_ui_elements, set_authored_ui_text, sync_ui_variables,
 };
-pub use world::point_lights_from_world;
+pub use world::{point_lights_from_world, spot_lights_from_world};
 pub use world::saved_camera_pose;
